@@ -88,7 +88,7 @@ These answer the plan review (`.superpowers/sdd/2026-10-23-management-tier/plan-
   - `proof.events` are epoch events the recorded log lacks.
   The registry stores only `authoritativeLog({ did, loaded: join(recorded, proof), seen: recorded, context }).log` (spec ingestion contract; kokuin `history.d.ts`). A throw (`LOG_FORKED`, `LOG_NOT_AUTHORITATIVE`, `LOG_UNFOLDABLE`, the signature limit) refuses the entry, and the prior log is kept. Ingestion returns the `FoldResult`s of the recorded and merged logs (`applied` lives on `FoldResult`, `fold.d.ts:80`); effect checks read their `head` `KeyState`s. `seen` is always a value this same function produced, because the registry is a pure fold of the ledger (`foldControl`), so kokuin's "trusted stored copies" rule holds.
 - **D2 Genesis seeding (round 2: separate from `log`).** A lifecycle `createGroup` requires `options.controllerLog` (the author's own authoritative copy) for every creator, root- or member-rooted (no legacy compat; 0.11 fixtures migrate). It signs a `seed` entry, not a `log` entry: issuer the creator (`anchor.creatorDID`), subject the controller, `proof: pruneLog(controller, controllerLog)`. The seed is the ledger's first entry (the head extension is `extendHead(genesisHead(groupID), [entryID])`), and joiners recompute that head from `invite.ledgerEntries` as today (`group-welcome.ts:134`).
-  - One `registryApply` step installs everything atomically: the recorded log (`authoritativeLog` with `seen: undefined`), `genFloor` = the head generation, a revoked device record for every DID denial in the head and a `removedMembers` tombstone for every removed incarnation. Each record's `proofRef` comes from `claimsFor(controller, undefined, log, 0)`.
+  - One `registryApply` step installs everything atomically: the recorded log (`authoritativeLog` with `seen: undefined`), `genFloor` = the head generation, a revoked device record for every DID denial in the head and a `removedMembers` tombstone for every removed incarnation. Each record's `proofRef` comes from `claimsFor(controller, undefined, log, 0)`. A denial that a reset snapshot introduced gets `{ snapshot }` (D19).
   - The creator leaf is then judged against `registryForLog(controller, controllerLog)`, which is exactly that seed's fold.
   - A `seed` anywhere but ledger position 0, or into a projection that already holds a recorded log, is refused. D4 does not apply to it, because nothing was recorded to have effects against.
 - **D3 Settlement and reset transport.** A settlement without a revoke is a `log` entry whose chain suffix is a same-generation `rot`. A reset stays `op: 'reset'` (full chain from `icp`).
@@ -98,7 +98,7 @@ These answer the plan review (`.superpowers/sdd/2026-10-23-management-tier/plan-
 - **D6 Effect descriptor.** A `revoke` entry's subject is the controller. It declares `effects: Array<EffectClaim>`, which must equal `effectDelta(before, after)` exactly, in canonical order. Each claim names the event or chain index that proves it (`ref: ProofRef`), and `effectOf` checks that the ref proves that claim and nothing weaker. One proof entry per commit stays (`lifecycle.ts:396`).
   - Losing a managing device is `rmv` only (user decision, round 2). A member never `rev`s a member's DID: kokuin refuses it (`MEMBER_REVOKES_MEMBER`, "members leave through remove", `epoch.js:157-170`, removed members included).
   - `rmv` ends the incarnation's log authority, every grant rooted in it, and its membership leaf through the cascade. Grants other members issued *to* that DID stay valid until they expire. Root denies the DID at its next settle (a chain `deny` claim).
-  - A removal ref may name an `rmv` in a superseded epoch: `ProofRef = { chainIndex } | { event; epoch? }` (D17).
+  - A removal ref may name an `rmv` in a superseded epoch: `ProofRef = { chainIndex } | { snapshot } | { event; epoch? }` (D17, D19).
 - **D7 Removed member roots are not denied DIDs.** A `remove` claim tombstones the incarnation in `ControllerProjection.removedMembers` (keyed by add digest). Its cascade removes leaves from the tree but writes no device record, so a cascaded device may return under another effective member's grant or a new incarnation. A `deny` claim, or a denial a `seed` installs (D2), writes revoked device records as today (`registry.ts:187-200`).
 - **D8 Member-root status.** `memberRootStatus` answers `'root' | 'effective' | 'removed' | 'unavailable'`.
   - `removed`: the incarnation is tombstoned, kokuin reports it removed or denied, or `mbr.g` names another generation.
@@ -122,7 +122,8 @@ These answer the plan review (`.superpowers/sdd/2026-10-23-management-tier/plan-
 - **D14 Recovery keeps known lifecycle knowledge (round 2, user decision).** Recovery never adopts a registry that discards known lifecycle effects, and never patches an off-ledger projection into the ledger fold.
   - `assertRetainsKnownEffects(controller, known, candidate)` compares the stale handle's registry (`known`) with the one folded from the reply's authenticated ledger (`candidate`).
   - It refuses a candidate that lacks any of these: a known non-reset-only revoked device record; a known `removedMembers` tombstone; a known applied event of the candidate's own current epoch; a known attestation, or a floor above the candidate's.
-  - A valid root supersession accounts for an omission: the candidate's chain extends the known one with a settlement (which ends that epoch, N4), or with a reset whose `genFloor` exceeds the omitted item's generation.
+  - Root supersession is specific to the omitted effect (round 3). A settlement extending the known chain excuses only omitted controller epoch events of the epoch it ends (N4). A reset whose `genFloor` exceeds an omitted tombstone's or epoch event's generation excuses that item.
+  - Nothing excuses MLS time. `candidate.timeFloor ≥ known.timeFloor` and `candidate.genFloor ≥ known.genFloor` always hold. For every pinned key effective in the candidate head, `candidate.attestations[key] ≥ known.attestations[key] ?? 0`. Otherwise the candidate is refused (`'floor'` / `'attestation'`): a controller settlement carries no MLS clock state.
   - A `LOG_FORKED` chain is refused. Since the candidate then holds everything known, signer eligibility, the replacement gate and the survivor tree are all judged against `candidate` alone, and the adopted handle keeps the knowledge through adoption and restore.
   - `knownRecoveryRegistry` and the merged projection are deleted.
 - **D15 Scope (user decision, 2026-10-23: lifecycle groups only).** Member-rooted credentials are supported in lifecycle groups (anchor names a controller). Standard groups refuse them and keep root-only `manage` capabilities.
@@ -131,7 +132,20 @@ These answer the plan review (`.superpowers/sdd/2026-10-23-management-tier/plan-
   - Such a removal keeps its epoch proof: `{ event, epoch }`, with `epoch` the chain digest anchoring that epoch.
   - `effectOf` verifies it on an authenticated pre-settlement view: fold the chain through the anchor plus the entry's own `proof.events`.
   - The ledger entry retains those events (history counts them), so the tombstone's `proofRef` never upgrades to a chain index. Only removals `memberDropIndices` finds do.
+  - Producer contract (round 3). After a settlement neither `pruneLog` nor `authoritativeLog(...).log` keeps the `rmv` (`log.js:249`), so the evidence is captured before the settle.
+    - `removalEvidence(controller: string, log: ControllerLog, rmv: string): RemovalEvidence | undefined`, with `RemovalEvidence = { controller: string; epoch: string; closure: ControllerLog }`. It is `closureOf(controller, log, [rmv])`, plus the anchoring chain state's digest, on the pre-settlement log.
+    - The host keeps it beside its kokuin store, never inside it, until the removal has landed in every group; the stored kokuin log stays the authoritative projection only.
+    - `revokeWithProof(group, { log, remove, evidence?: Array<RemovalEvidence> })`. When `claimsFor` cannot prove a requested removal from `log`, it uses the matching evidence: `proof.events` gains `closure.events`, and the claim's ref is `{ event: rmv, epoch }`. With no evidence the result is `not-provable` / `no-rev`.
+    - Receivers store only `ingestControllerLog`'s authoritative output. The old-epoch events stay in the signed ledger entry, which is what Welcome and restore refold.
 - **D18 Preservation over candidate state (round 2).** A preservation clock compares `attestedTreeTime(preTree, preRegistry)` with `attestedTreeTime(candidateTree, candidateRegistry)`. The candidate registry is the fold without the clock. Adding an effective key, or removing an attestor, can lower the quorum with the tree unchanged.
+  - Round 3: preservation is centralised in `commitWithEntries`, which every producer reaches, `commitInvite` included.
+    - After folding `enacted`, it builds the proposed tree with `proposedTree(state, proposals)`: Adds push the key-package leaf, Updates replace the sender's leaf, Removes clear the target, from `commitState` or `group.state`.
+    - It calls `preservationClock(group, proposedTree, fold.registry)`, appends the clock token to `enacted` when one is needed (at most one clock per commit, as today), refolds, and only then builds proposals and the commit.
+    - The per-caller `clockEntries` calls in `group-lifecycle.ts` (`:67`, `:183`, `:215`, `:377`) are deleted.
+- **D19 Snapshot references (round 3).** `deviceRevokeIndices` returns only same-generation rotates (`device-revoke.js:27-38`), so a denial a reset's snapshot `d` introduces has no chain-index proof.
+  - `{ snapshot: i }` proves a deny claim when all of these hold: `foldControllerLog` over the chain succeeds (signatures); `chain[i].event.t === 'rot'` and `states[i].gen > states[i-1].gen` (a reset); `states[i].gen ≥ genFloor` (generation); `states[i].deny` contains the canonical DID (target).
+  - It is used only by `seed` claims and by `reset` entries' declared denial effects. Ordinary `revoke` chain refs stay `{ chainIndex }` through `revokeIndices`, unchanged.
+  - A denial a reset carries forward from an earlier generation's snapshot is introduced at that reset, so its ref is the reset's index.
 
 ## Interface table
 
@@ -151,6 +165,9 @@ These answer the plan review (`.superpowers/sdd/2026-10-23-management-tier/plan-
 | `epochEventCount`, `settleAdvisory`, `GroupHandle.settleAdvisory()` | `history.ts`, `group-handle.ts` | 10 | 15 |
 | `RevokeWithProofParams` (ControllerLog form), `Revocation.proofRef` | `group-lifecycle.ts`, `registry.ts` | 11 (deny), 12 (remove, survivors) | `mls-rpc/src/revoke.ts`, 15 |
 | `survivorTargets`, `memberRemoved` event | `group-lifecycle.ts`, `group-handle.ts` | 12 | 15 |
+| `RemovalEvidence`, `removalEvidence` (D17 producer contract) | `group-lifecycle.ts` | 12 | hosts, 15 |
+| `proposedTree`, central preservation hook in `commitWithEntries` (D18) | `group-commit.ts` | 8 (rule switched in 13) | every commit producer |
+| `DeviceRecord.proofRef` (beside transitional `logPosition`) | `registry.ts` | 3 (`logPosition` removed in 11) | 4, 11, 12, 14 |
 | `attestedTreeTime`, `preservationClock`, `attestTreeTime`, `registryAt` | `lifecycle.ts`, `group-lifecycle.ts`, `group-handle.ts` | 13 | 14 |
 | `assertRetainsKnownEffects` | `registry.ts` | 14 | `mls-rpc/src/recovery.ts` |
 
@@ -200,7 +217,7 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `ControllerBinding = { id: string; prefix: Array<SignedEvent>; capability?: string; holderGrant?: string; member?: { add: string; g: number }; iat?: number }`. The parser enforces exactly one of `capability` and `member`. `iat` must be present with `member`, and `holderGrant` only with `capability`. `member` must have the shape kokuin's `isMemberClaim` accepts: exactly `add` (non-empty) and `g` (a non-negative safe integer). Kokuin does not export it, so kumiai checks the shape locally.
   - `MemberRoot = { kind: 'root'; controller: string } | { kind: 'member'; did: string; add: string; gen: number }`.
   - `EvidenceSlot = 'capability' | 'parent' | 'holder' | 'membership' | 'survivor'`.
-  - Shared wire types, produced here so Task 3's persisted shape typechecks (round 2): `ProofRef = { chainIndex: number } | { event: string; epoch?: string }` (D17), `EffectClaim = { kind: 'deny'; did: string; ref: ProofRef } | { kind: 'remove'; member: { did: string; add: string }; ref: ProofRef }`, `RemovedMember = { did: string; gen: number; proofRef: ProofRef }` and `RemovedEffect = { did: string; cascadedFrom: string }`, where `cascadedFrom` is an add digest.
+  - Shared wire types, produced here so Task 3's persisted shape typechecks (round 2): `ProofRef = { chainIndex: number } | { snapshot: number } | { event: string; epoch?: string }` (D17, D19), `EffectClaim = { kind: 'deny'; did: string; ref: ProofRef } | { kind: 'remove'; member: { did: string; add: string }; ref: ProofRef }`, `RemovedMember = { did: string; gen: number; proofRef: ProofRef }` and `RemovedEffect = { did: string; cascadedFrom: string }`, where `cascadedFrom` is an add digest.
   - `memberRootsOf(binding: ControllerBinding, leafDID: string): Array<{ slot: EvidenceSlot; root: MemberRoot }>`. It lists the primary slot first: `capability` for a direct capability, `parent` for a chained one, `membership` for a membership binding (`{ did: leafDID, add, gen: g }`). A `holder` slot follows when a holder grant rides. A token with `mbr` yields a member root with `did: iss`; any other yields `{ kind: 'root' }`. Decode-only: callers authenticate.
   - `bindingIssuedAt(binding: ControllerBinding): number`.
   - `mintLeafCapability` / `mintTrustedGrant` take `member?: { add: string; g: number }`. With it they write `mbr` and skip `assertControllerGrant`'s `iss === sub` check, and `self-issued` stays refused.
@@ -222,7 +239,10 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
 **Files:**
 - Modify: `packages/mls/src/registry.ts` (projection shape, `DeviceOp` gains `'log'` and `'seed'`, `isDeviceValue`, `isLifecycleDeviceValue` (replay acceptance in `foldControl`; the live gate is Task 8), `registryApply`, `recordedLogOf`, `registryForLog`)
 - Create: `packages/mls/src/controller-ingest.ts`
-- Modify: `packages/mls/src/lifecycle-proof.ts` (`authenticateLifecycleProof` gains the `log` and `seed` arms). The `revoke`/`reset` array-form branches stay until Task 11, so that today's producers (`proofFor`, `revokeWithProof`) and their fixtures keep typechecking.
+- Modify: `packages/mls/src/lifecycle-proof.ts` (`authenticateLifecycleProof` gains the `log` and `seed` arms). The `revoke`/`reset` array-form wire branches stay until Task 11, but they now read and write the `ControllerLog` projection. `recorded` is `previous?.recordedLog?.chain ?? []` (`:50`, `:84-91`). The result is stored through `ingestControllerLog(controller, recorded, { chain: proof, events: [] })`; D1's chain rules equal today's suffix and reset rules. `LifecycleProofEffects.recordedLog` and `AuthenticatedProof.recordedLog` become `ControllerLog`, and the clock arm (`:233`) returns the projection's log.
+- Modify: `packages/mls/src/group-lifecycle.ts` (`proofFor`, `:263-275`): it reads `projection?.recordedLog?.chain ?? []` for `recorded.length`, `foldChain` and `recordedHead`. The full rewrite is in Task 11.
+- Modify: `packages/mls/src/registry.ts` (`registryApply`, `:181-200`): it stores `effect.recordedLog` as a `ControllerLog`. `DeviceRecord.proofRef?: ProofRef` is introduced beside the transitional `logPosition`: array-form proofs write both, `{ chainIndex: logPosition }`, and `revocationOf` keeps returning `logPosition`. Task 11 removes `logPosition`.
+- Check that no other consumer remains: `grep -rn "recordedLog" packages/mls/src packages/mls-rpc/src` lists only the files above (`mls-rpc/src/recovery.ts` spreads the projection without reading the field).
 - Modify: `packages/mls/src/history.ts` (`proofSize`; count every ControllerLog proof copy)
 - Modify: `packages/mls/src/errors.ts` (`RevokeProofReason` gains `'not-endorsed'`)
 - Test: `packages/mls/test/registry-log.test.ts` (new), `packages/mls/test/history-size.test.ts`, `packages/mls/test/fixtures/controller-epoch.ts` (new: `buildEpoch({ members, renewEvery, until, revokes })`, `saturatedLog()`)
@@ -281,7 +301,8 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
     - An `event` ref must be in the fold's `applied`, of type `rev` with `normalizeDID(x) === did`, or of type `rmv` with `add === member.add`, where `member.did` matches that incarnation canonically.
     - With `epoch` (D17), the fold is the pre-settlement view: the chain through the state whose digest is `epoch`, plus the entry's `proof.events`.
     - A `chainIndex` ref must be in `revokeIndices` (deny) or `memberDropIndices` (remove), at generation ≥ `genFloor`.
-  - `claimsFor(controller: string, recorded: ControllerLog | undefined, merged: ControllerLog, genFloor: number): Array<EffectClaim>`. It is the producer's derivation and canonical order: denies by DID, then removals by add digest. It prefers event refs and falls back to the first chain index ≥ `genFloor`.
+    - A `snapshot` ref follows D19 (deny only).
+  - `claimsFor(controller: string, recorded: ControllerLog | undefined, merged: ControllerLog, genFloor: number): Array<EffectClaim>`. It is the producer's derivation and canonical order: denies by DID, then removals by add digest. It prefers event refs and falls back to the first chain index ≥ `genFloor`, then to a `{ snapshot }` ref for a reset-introduced denial.
   - `MemberRootStatus = { status: 'root' } | { status: 'effective'; key: Uint8Array; lease: number } | { status: 'removed' } | { status: 'unavailable'; why: 'no-log' | 'saturated' | 'unknown-incarnation' | 'prefix' }`, and `memberRootStatus(registry: DeviceRegistry, controller: string, root: MemberRoot): MemberRootStatus` (D8).
   - `LeafRef = { did: string; binding: ControllerBinding; leafKey: Uint8Array }`, and `effectiveAuthorityOf(leaf: LeafRef, registry: DeviceRegistry, controller: string): { root: MemberRoot; slot: EvidenceSlot } | { status: 'removed' } | { status: 'unavailable' }` (D10). A substitute counts only when its `aud` is the leaf DID and its `cnf` the leaf key.
   - `cascadeOf(leaves: ReadonlyArray<LeafRef & { leafIndex: number }>, claims: ReadonlyArray<EffectClaim>, before: DeviceRegistry, after: DeviceRegistry, controller: string): { revoked: Array<RevokedEffect>; removed: Array<RemovedEffect>; removeLeafIndices: Array<number> }`.
@@ -296,6 +317,7 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `settled rmv is proved by chain index`: A sits in a prior snapshot and the settlement drops it. `memberDropIndices` finds it, and `effectOf` accepts `{ chainIndex }`.
   - `settled rmv of a never-snapshotted incarnation keeps its epoch proof` (re-review finding 5). The sequence is `icp → add A → rmv A → rot(snapshotOf(head))`: `memberDropIndices` returns `[]`, `effectOf` accepts `{ event: rmv, epoch: icp digest }` with the old-epoch closure, and refuses it without the closure.
   - `member rev of a member DID is never applied`. Kokuin refuses B's `rev(A.did)` (`MEMBER_REVOKES_MEMBER`), before and after B's `rmv(A)`. A deny claim citing it fails `effectOf` with `effects-mismatch` (re-review finding 8).
+  - `seed from [icp, reset(snapshot with a denial)] installs the denial with a snapshot ref` (round 3). `deviceRevokeIndices` returns `[]`, the record's `proofRef` is `{ snapshot: 1 }` and the creator is effective. `effectOf` refuses `{ snapshot: 1 }` for an undenied DID, below `genFloor`, or with a tampered reset signature.
   - `genesis seed with an effective creator and a prior denial installs both atomically` (re-review finding 3). One `registryApply` gives the creator's incarnation effective, a revoked device record for the denied DID with a `proofRef`, and `denySetOf` containing it. A Welcome joiner's fold of the same ledger matches.
   - `re-revoke after reset is proved at gen 2` (Review Focus 3).
   - `claimsFor output passes effectOf for every claim`: the producer and the verifier agree.
@@ -445,7 +467,7 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - The registry check runs through `authenticateLifecycleProof`, and the size accounting through `proofSize`.
 - Modify: `packages/mls/src/group-handle.ts`. `#prepareCommitPipeline` exposes `candidateRegistry`, and the ts-mls `validateCredential` callback (`group-handle.ts:1912-1940`) judges with it instead of the pre-commit `this.registry`.
 - Modify: `packages/mls/src/group-commit.ts`.
-  - `commitWithEntries` folds the entries first. It then passes `{ registry: fold.registry, stage: 'full', mode: 'admit' }` to its direct `validateEntry` of each Add (`group-commit.ts:331`), including the expiry check, and scopes the authoring authService to `fold.registry` while ts-mls builds the commit (re-review finding 4).
+  - `commitWithEntries` folds the entries first, then centralises preservation (D18: `proposedTree`, `preservationClock`, refold). Task 8 adds the hook with today's time rule; Task 13 switches it to `attestedTreeTime` over the candidate registry. It then passes `{ registry: fold.registry, stage: 'full', mode: 'admit' }` to its direct `validateEntry` of each Add (`group-commit.ts:331`), including the expiry check, and scopes the authoring authService to `fold.registry` while ts-mls builds the commit (re-review finding 4).
   - `CreateInviteParams.controllerLog?` appends a signed `log` entry carrying the delta, which `commitInvite` enacts before the Add.
 - Modify: `packages/mls/src/group-context.ts` (`withJudging(context, judging, fn)`, the scoped holder override)
 - Modify: `packages/mls/src/group-lifecycle.ts` (`publishControllerLog`, `controllerLogDelta`; `renewLeaf(group, binding, options?: { controllerLog?: ControllerLog })`). `renewLeaf` builds and folds its bundled `log` entry before it validates: its `validateEntry` (`group-lifecycle.ts:176`) and the expiry check get `{ registry: candidate, stage: 'full', mode: 'admit' }`.
@@ -544,13 +566,14 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
 **Files:**
 - Modify: `packages/mls/src/registry.ts`
   - `revoke` value: `{ op: 'revoke', proof: ControllerLog, effects: Array<EffectClaim>, revoked: Array<RevokedEffect>, removed: Array<RemovedEffect>, survivors?: Array<string> }`, subject = controller.
-  - `DeviceRecord.proofRef?: ProofRef` replaces `logPosition`, and `Revocation = { controller; proofRef; reason?; cascadedFrom? }`.
+  - The transitional `DeviceRecord.logPosition` (Task 3) is removed; `proofRef` stays, and `Revocation = { controller; proofRef; reason?; cascadedFrom? }`.
+  - A `reset` entry declares the denials its snapshot introduces as `deny` claims with `{ snapshot }` refs (D19), and they write revoked device records as today.
   - The transitional `Array<SignedEvent>` arm of `DeviceValue.proof` (Task 3) is deleted, along with its branches in `lifecycle-proof.ts`, `history.ts` and the fixtures.
   - `registryApply` upgrades an `{ event }` ref to `{ chainIndex }` when an ingested chain carries the same denial (`revokeIndices`).
 - Modify: `packages/mls/src/lifecycle-proof.ts`. `authenticateLifecycleProof` handles `revoke`/`reset` through `ingestControllerLog`, `effectDelta` equal to the declared `effects`, and `effectOf` for each claim. `verifyLifecycleProof` derives through `cascadeOf`.
 - Modify: `packages/mls/src/group-lifecycle.ts`
   - `proofFor` becomes `controllerLogDelta` plus `claimsFor`.
-  - `revokeWithProof(group, params: { log: ControllerLog; deny: Array<string> } | { reset: true; log: ControllerLog })`. `claimsFor` may add authentic extra effects the delta carries, and the result reports them.
+  - `revokeWithProof(group, params: { log: ControllerLog; deny: Array<string> } | { reset: true; log: ControllerLog })`. Task 12 adds `remove` and `evidence`. `claimsFor` may add authentic extra effects the delta carries, and the result reports them.
   - `isFullyRevoked` becomes `alreadyApplied(group, claims)`.
 - Modify: `packages/mls/src/controller-log.ts` (delete `revokesSubject`), `packages/mls/src/group-handle.ts` (`emitControlEvents` reads `effects`), `packages/mls-rpc/src/revoke.ts` (types)
 - Test: `packages/mls/test/lifecycle-proof.test.ts`, `packages/mls/test/device-proof.test.ts`, `packages/mls/test/group-lifecycle.test.ts`, `packages/mls/test/device-attacks.test.ts`, `packages/mls/test/reset-readmission.test.ts`
@@ -558,6 +581,7 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
 - [ ] **Step 1: Write failing tests**
   - `member rev of an edge DID is a valid deny proof`: `ref` is `{ event }`.
   - `root-rotate deny is proved by chain index`.
+  - `reset carrying a new denial in its snapshot is ingested with a snapshot ref` (round 3). The reset's own `revoked` gives prior-generation leaves reason `reset`, and the denied DID gets a permanent record with `proofRef` `{ snapshot }`. A reset declaring that claim with `{ chainIndex }` is refused.
   - `deny claim whose ref names an unrelated applied event is refused` (review finding 9).
   - `undeclared effect in the delta is refused`: a closure carrying a second `rev` declared as one claim gives `effects-mismatch`, and `revokeWithProof` declares both.
   - `revoke from a removed member's concurrent rev is refused`: `not-endorsed`.
@@ -585,7 +609,8 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
 - Modify: `packages/mls/src/lifecycle.ts` (`checkSurvivors` refuses `effectiveAuthorityOf` = `removed`; `leafExpiry` covers the substituted case, D10: `min(own expiry, substitute exp)`, and for a substituted membership leaf the survivor grant's `exp` alone)
 - Modify: `packages/mls/src/member-root.ts` (`effectiveAuthorityOf` returns `expiry` with a substitute)
 - Modify: `packages/mls/src/group-lifecycle.ts`
-  - `RevokeWithProofParams` gains `remove?: Array<{ did: string; add: string }>` and `survivors?: Array<string>`.
+  - `RevokeWithProofParams` gains `remove?: Array<{ did: string; add: string }>`, `survivors?: Array<string>` and `evidence?: Array<RemovalEvidence>` (D17).
+  - `removalEvidence` (D17), exported.
   - `survivorTargets(group: GroupHandle, add: string): Array<{ did: string; leafKey: Uint8Array }>`.
 - Modify: `packages/mls/src/group-handle.ts`: `GroupHandleEvents.memberRemoved: Array<{ controller: string; member: { did: string; add: string }; removedLeaves: Array<string> }>`.
 - Test: `packages/mls/test/cascade-exemption.test.ts`, `packages/mls/test/member-removal.test.ts` (new), `packages/mls/test/lifecycle-invite.test.ts`
@@ -594,6 +619,13 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `rmv cascades a direct mbr leaf`, `rmv cascades a leaf whose parent came from the removed member` and `rmv cascades the member's own membership leaf`.
   - `rmv keeps a leaf whose holder grant came from another effective member`.
   - `settled rmv proved by chain index removes the same leaves`, and `settled rmv of a never-snapshotted incarnation lands with its epoch proof` (D17). The registry saw `add A`; root settles after `rmv A`. The settlement `log` is refused as effectful. A `revoke` entry with a remove claim `{ event, epoch }` carrying the old-epoch closure lands. After a further settlement, `removedMembers` still holds the epoch ref.
+  - `revokeWithProof with retained removal evidence lands after a settle, and Welcome and restore agree` (round 3). The sequence:
+    1. capture `removalEvidence` before the settle;
+    2. the host log settles, so `pruneLog` holds no `rmv`;
+    3. `revokeWithProof({ log: settled, remove: [A], evidence })` builds;
+    4. a member processes the commit;
+    5. a new joiner's `processWelcome` and a `restoreGroup` from the persisted ledger give the same tombstone and `proofRef` `{ event, epoch }`.
+    The same call without `evidence` gives `not-provable` / `no-rev`.
   - `losing a managing device is rmv only`. After B's `rmv(A)`, A's membership leaf is cascaded and A's DID is not denied. A grant B issued to A's DID earlier still authenticates A's re-admission until it expires (re-review finding 8).
   - `removed member's earlier-signed leaf arriving after the removal is refused` (Review Focus 1).
   - `removed member's concurrent log entry is refused` (Review Focus 1, `not-endorsed`).
@@ -622,7 +654,7 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `assertRecoveryBinding` and `assertSenderNotLapsed` call it, the latter with `registryAt`.
 - Modify: `packages/mls/src/lifecycle-proof.ts` (`clock` arm, both kinds; the leaves map drops `attested`)
 - Modify: `packages/mls/src/registry.ts` (`clock` with `attest: true` folds `attestations[key] = max`; the key is the issuer's member pin from the recorded head)
-- Modify: `packages/mls/src/group-lifecycle.ts`: `clockEntries(group, tree)` becomes `preservationClock(group, candidateTree, candidateRegistry)` (D18). Every caller passes its candidate fold without the clock: `commitSelfRemovals` (`:67`), `renewLeaf` (`:183`), `removeLapsedLeaves` (`:215`), `revokeWithProof` deny/remove/reset (`:377`) and `publishControllerLog`. Also adds `attestTreeTime`.
+- Modify: `packages/mls/src/group-lifecycle.ts` and `packages/mls/src/group-commit.ts`. `preservationClock(group, candidateTree, candidateRegistry)` (D18) replaces `clockEntries` inside `commitWithEntries`' central hook (Task 8), which covers `commitSelfRemovals`, `renewLeaf`, `removeLapsedLeaves`, `revokeWithProof`, `publishControllerLog` and `commitInvite` alike. Also adds `attestTreeTime`.
 - Modify: `packages/mls/src/recovery-verdict.ts` (`recoverySignerEligible`), `packages/mls/src/group-handle.ts` (`registryAt`, memoised per head, at most 8 entries)
 - Test: `packages/mls/test/tree-time.test.ts` (new), `packages/mls/test/lifecycle-pipeline.test.ts`, `packages/mls/test/group-lifecycle.test.ts`, `packages/mls/test/recovery-verdict.test.ts`
 
@@ -645,6 +677,7 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `root-issued leaves still advance tree time (0.11 behaviour)`.
   - `removed member's attestation stops counting; the preserved floor stays`.
   - `preservation clock cannot exceed attestedTreeTime`.
+  - `commitInvite bundling a second member's add keeps tree time` (round 3). A membership-only group has sole member A attesting 100. `commitInvite` of B's membership key package with `controllerLog` carrying B's add, and no prior `publishControllerLog`, emits one preservation clock at 100. Receivers accept it, and tree time stays 100.
   - `adding a second effective key keeps tree time` (re-review finding 6). A membership-only group has sole member A attesting 100. `publishControllerLog` with B's add emits a preservation clock at 100, the commit is accepted, and tree time stays 100.
   - `removing an attestor keeps tree time`: the remove commit carries a preservation clock computed from the candidate registry.
   - `attest clock from a non-member device is refused` and `attest clock past the member's lease is refused`.
@@ -675,7 +708,8 @@ Every new public symbol is exported from `packages/mls/src/index.ts` in the task
   - `reply omitting a known renewal is refused`: `epoch-event`.
   - `reply omitting a known revocation is refused`: `revocation`.
   - `reply omitting a known attestation or floor is refused`.
-  - `reply whose chain settles past the omitted epoch events is accepted` and `reply carrying a reset above the omitted removal's generation is accepted`: root supersession.
+  - `an unrelated settlement cannot revive a lapsed signer` (round 3). The known ledger holds a clock at T that lapses the signer's leaf. The reply carries a valid later controller settlement but omits that clock. It is refused with `RecoveryKnowledgeError('floor')`, and the signer stays ineligible.
+  - `reply whose chain settles past the omitted epoch events is accepted (its floors and attestations intact)` and `reply carrying a reset above the omitted removal's generation is accepted`: root supersession.
   - `forked reply is refused`: `forked`.
   - `known removal survives adoption and restore`. After a recovery adopts a reply that carries the removal, the adopted handle's `registry.controllers` holds the tombstone, and `restoreGroup` from its ledger gives the same tombstone.
   - `member-rooted signer judged on the candidate registry`: ineligible when removed, ineligible when unavailable, eligible when effective.
@@ -742,6 +776,16 @@ Review: `.superpowers/sdd/2026-10-23-management-tier/plan-review-codex.md` (3 Cr
 | RR7 | A membership survivor has no expiry | Resolved. `effectiveAuthorityOf` returns the substitute `expiry`, and `leafExpiry` uses it. Tests for lapse, Welcome, recovery and historical frames (Task 12). |
 | RR8 | Kokuin refuses a member `rev` of a member DID | Resolved by user decision: losing a managing device is `rmv` only, and root denies the DID at its next settle. The pairing text is removed from D6. Tests: kokuin refusal (Task 4), not provable (Task 11), `rmv`-only cascade with the other member's grant still valid (Task 12). No kokuin prerequisite. |
 | RR9 | Consumers before producers; `KeyState` versus `FoldResult` | Resolved. Wire types are in Task 2; `log`/`seed` replay acceptance in Task 3; the transitional array proof arm is removed in Task 11; Task 9's recovery row defers to Task 14; ingestion returns `FoldOk`s. No task renumbering. |
+
+### Round 3 findings (`plan-rereview-r3-codex.md`)
+
+| # | Finding | Disposition |
+|---|---|---|
+| R3-1 (Critical) | D14's settlement exception lets recovery roll back MLS time | Resolved. Supersession is specific to the effect: a settlement excuses only its controller's epoch events. Time floors and effective-key attestations must never drop (D14). Test: `an unrelated settlement cannot revive a lapsed signer` (Task 14). |
+| R3-2 | Seed and reset proofs cannot reference a reset-snapshot denial | Resolved. D19 `{ snapshot }` refs after signature, generation and target checks; ordinary revoke indexing is unchanged. Tests: seed from `[icp, reset(snapshot with a denial)]` (Task 4), and reset ingestion carrying a denial (Task 11). |
+| R3-3 | D17's historical closure is pruned before the producer can emit it | Resolved. `removalEvidence`, captured pre-settle and held by the host outside its kokuin store, feeds `revokeWithProof({ evidence })`. Only authoritative projections are stored. End-to-end `revokeWithProof → receiver → Welcome/restore` test (Task 12). |
+| R3-4 | D18 misses bundled invites | Resolved. Preservation is centralised in `commitWithEntries` before commit construction, from `proposedTree` and the final candidate registry (D18; Tasks 8 and 13). Test: second key through `commitInvite` with no prior publish. |
+| R3-5 | Persisted-shape migrations cross task boundaries | Resolved. Task 3 migrates every `recordedLog` consumer (`lifecycle-proof.ts`, `group-lifecycle.ts:263-275`, `registry.ts:181-200`) and introduces `DeviceRecord.proofRef` beside the transitional `logPosition`; Task 11 removes `logPosition`. |
 
 Also corrected while revising:
 - The P1 probe now lives in the plan workspace, not `packages/mls/test`.
