@@ -20,19 +20,23 @@ import {
   physicalRecordKey,
   recordAAD,
 } from '../src/persistence-codec.js'
+import { ReentrantOwnershipError } from '../src/persistence-errors.js'
 import type {
   AppOutboxEntry,
   AppStatusEvent,
   GroupKey,
   MemoryTransaction,
 } from '../src/persistence-types.js'
+import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { gateRegistryMaintenance } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import {
   createRegistryFixture,
   type PendingFault,
   type RegistryFixture,
+  registryFixtureForceOwnerMarker,
 } from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
 import {
@@ -941,3 +945,256 @@ test('certified removal captures its occurrence before queuing', async () => {
     await fixture.close()
   }
 })
+
+for (const afterAwait of [false, true]) {
+  for (const action of ['access', 'start', 'group-mls', 'registry'] as const) {
+    test(`startup effect root re-entry rejects promptly / ${action} / after await ${afterAwait}`, async () => {
+      let reenter: () => unknown = () => {
+        throw new Error('Unexpected publication effect')
+      }
+      const observed: Array<unknown> = []
+      let fixture = await createRegistryFixture({
+        mode: 'double',
+        setup: 'empty',
+        groupID: 'reentrant-startup',
+        backgroundMaintenance: 'gated',
+        ownershipContext: afterAwait ? createAsyncLocalOwnershipContext() : undefined,
+        effects: {
+          async outbox(_tx, event) {
+            if (event.kind !== 'published') return
+            if (afterAwait) await Promise.resolve()
+            let timer: ReturnType<typeof setTimeout> | undefined
+            try {
+              await Promise.race([
+                Promise.resolve(reenter()),
+                new Promise((_, reject) => {
+                  timer = setTimeout(() => reject(new Error('Root call waited on startup')), 100)
+                }),
+              ])
+              observed.push(null)
+            } catch (error) {
+              observed.push(error)
+            } finally {
+              clearTimeout(timer)
+            }
+          },
+        },
+      })
+      try {
+        const key = await fixture.registry.seed(await fixture.makeHandle(0), { packageUse: null })
+        await certifyRegistry(fixture, key)
+        fixture = await fixture.reopen()
+        const registry = fixture.registry
+        reenter = () => {
+          if (action === 'access') return registry.access(key.groupID)
+          if (action === 'start') return registry.start()
+          if (action === 'registry')
+            return createGroupHandleRegistry({
+              persistence: fixture.device,
+              providerID: fixture.device.providerID,
+              recovery: fixture.environment,
+              restore: async () => fixture.makeHandle(0),
+              restoreCandidate: async () => fixture.makeHandle(0),
+            })
+          return createRegistryGroupMLS({
+            registry,
+            key,
+            identity: fixture.identity,
+            recovery: fixture.environment,
+            target: { targetID: 'target', topicID: 'commit-topic' },
+            entrySlot: createLedgerEntrySlot(),
+          })
+        }
+        await registry.access(key.groupID)
+        expect(observed).toHaveLength(1)
+        expect(observed[0]).toBeInstanceOf(ReentrantOwnershipError)
+        expect(await fixture.device.groups.ports(key).outbox.loadSettlement(70)).toBeNull()
+      } finally {
+        await fixture.close()
+      }
+    })
+  }
+}
+
+for (const phase of ['certification', 'finalisation'] as const) {
+  test(`provider fail-stop rejects peer drainage with the owner error / ${phase}`, async () => {
+    const fixture = await createRegistryFixture({
+      mode: 'double',
+      setup: 'empty',
+      groupID: 'drain-conflict',
+      backgroundMaintenance: 'gated',
+    })
+    let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
+    const proofEntered = Promise.withResolvers<void>()
+    const proofRelease = Promise.withResolvers<void>()
+    const rejected = Promise.withResolvers<PendingFault>()
+    let armed = false
+    try {
+      const key = await fixture.registry.seed(await fixture.makeHandle(0), { packageUse: null })
+      const outbox = fixture.device.groups.ports(key).outbox
+      function arm() {
+        if (armed) return
+        armed = true
+        fixture.onPhase('proof', async () => {
+          proofEntered.resolve()
+          await proofRelease.promise
+        })
+        const fault = fixture.armNextWorkFault('pending')
+        void fault.rejected.then(() => rejected.resolve(fault))
+      }
+      running = await startLeaseRotationPeer({
+        mode: 'double',
+        fixture,
+        key,
+        outbox: {
+          ...outbox,
+          recordSettlement: (...args) => {
+            if (phase === 'certification') arm()
+            return outbox.recordSettlement(...args)
+          },
+          remove: (...args) => {
+            if (phase === 'finalisation') arm()
+            return outbox.remove(...args)
+          },
+        },
+      })
+      await running.owner.ready
+      const peer = running.owner.peer()
+      if (peer === null) throw new Error('Missing live peer')
+      const protocol = peer.protocol('chat') as ProtocolSurface<{
+        posted: { type: 'event'; retain: 'log'; data: { type: 'object' } }
+      }>
+      await protocol.dispatch('posted', { data: { text: 'conflicting proof' } })
+      const fault = await rejected.promise
+      await proofEntered.promise
+      vi.useFakeTimers()
+      await peer.dispose()
+      let result: unknown = 'pending'
+      const drain = peer.drained().then(
+        () => {
+          result = 'fulfilled'
+        },
+        (error: unknown) => {
+          result = error
+        },
+      )
+      await fault.finish('commit')
+      await registryFixtureForceOwnerMarker(
+        fixture,
+        { groupID: key.groupID },
+        { mutationID: 'other-owner', revision: 999 },
+      )
+      proofRelease.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+      const failure = entryCapability(fixture.device.groups)?.failureSignal
+      expect(failure?.aborted).toBe(true)
+      expect(result).toBe(failure?.reason)
+      await drain
+    } finally {
+      proofRelease.resolve()
+      running?.owner.dispose()
+      void running?.owner.drained().catch(() => {})
+      await fixture.close().catch(() => {})
+      vi.useRealTimers()
+    }
+  })
+}
+
+for (const mode of ['real-mls', 'double'] as const) {
+  test(`cold retired startup finalisation retries without another admission call / ${mode}`, async () => {
+    let unavailable = true
+    let attempts = 0
+    let fixture = await createRegistryFixture({
+      mode,
+      setup: 'empty',
+      groupID: 'cold-retry',
+      backgroundMaintenance: 'gated',
+      effects: {
+        async outbox(tx, event) {
+          if (event.kind !== 'published') return
+          attempts++
+          await writeSideRow(tx, 'published', new Uint8Array([42]))
+          if (unavailable) throw new Error('Temporary startup effect failure')
+        },
+      },
+    })
+    try {
+      const key = await fixture.registry.seed(await fixture.makeHandle(0), { packageUse: null })
+      await certifyRegistry(fixture, key)
+      const groups = fixture.device.groups
+      const change = await nextChange(groups, key.groupID, 'retire-before-restart')
+      await groups.transition(change, async (stores) => {
+        const lifetime = await stores.lifetime.load()
+        if (lifetime === null) throw new Error('Missing lifetime')
+        await stores.lifetime.save({
+          ...lifetime,
+          activeIncarnation: null,
+          revision: lifetime.revision + 1,
+          mutationID: change.mutationID,
+        })
+      })
+      fixture = await fixture.reopen()
+      const coordinator = entryCapability(fixture.device.groups)
+      const registry = fixture.registry
+      if (coordinator === null) throw new Error('Missing coordinator')
+      const completions = Array.from({ length: 3 }, () => Promise.withResolvers<void>())
+      let completed = 0
+      const finalise = coordinator.finaliseCertifiedApp.bind(coordinator)
+      vi.spyOn(coordinator, 'finaliseCertifiedApp').mockImplementation(async (...args) => {
+        try {
+          return await finalise(...args)
+        } finally {
+          completions[completed++]?.resolve()
+        }
+      })
+      const retryReads: Array<string> = []
+      const load = fixture.device.groups.load.bind(fixture.device.groups)
+      vi.spyOn(fixture.device.groups, 'load').mockImplementation((groupID) => {
+        retryReads.push(groupID)
+        return load(groupID)
+      })
+      vi.useFakeTimers()
+      await registry.start()
+      await completions[0]?.promise
+      await vi.advanceTimersByTimeAsync(0)
+      retryReads.length = 0
+      expect(attempts).toBe(1)
+      await vi.advanceTimersByTimeAsync(99)
+      expect(retryReads).toEqual([])
+      expect(attempts).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(retryReads).toEqual([key.groupID])
+      await vi.waitFor(() => expect(attempts).toBe(2), { interval: 0 })
+      await completions[1]?.promise
+      await vi.advanceTimersByTimeAsync(0)
+      expect(await fixture.device.groups.ports(key).outbox.loadSettlement(70)).not.toBeNull()
+      unavailable = false
+      retryReads.length = 0
+      await vi.advanceTimersByTimeAsync(199)
+      expect(retryReads).toEqual([])
+      expect(attempts).toBe(2)
+      await vi.advanceTimersByTimeAsync(1)
+      await completions[2]?.promise
+      expect(attempts).toBe(3)
+      const outbox = fixture.device.groups.ports(key).outbox
+      expect(await outbox.loadSettlement(70)).toBeNull()
+      expect(await outbox.list()).toEqual([])
+      expect((await outbox.events()).filter((event) => event.kind === 'published')).toMatchObject([
+        {
+          occurrence: {
+            incarnation: 1,
+            segment: 0,
+            topicID: 'original-topic',
+            position: '00000000000000000042',
+          },
+        },
+      ])
+      expect((await fixture.inspectRows())['host-side']?.size).toBe(1)
+      expect(entryCapability(fixture.device.groups)).toBe(coordinator)
+      expect(fixture.restoreCount(key.groupID)).toBe(0)
+    } finally {
+      await fixture.close()
+      vi.useRealTimers()
+    }
+  })
+}

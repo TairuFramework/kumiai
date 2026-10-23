@@ -100,6 +100,7 @@ export {
   type RecoveryRouting,
 } from './mls.js'
 export { MLSEncryptor, type MLSEncryptorParams } from './mls-encryptor.js'
+export { drainStoredOpened } from './opened-delivery.js'
 export type {
   EntryKind,
   EntryPhase,

@@ -41,6 +41,7 @@ export const DEFAULT_MAX_RETENTION = 2_592_000
  * a test that remembered to call `trim()` by hand.
  */
 export const DEFAULT_MAX_DEPTH = 1000
+export const PUBLISH_ID_RETENTION_MS = 365 * 24 * 60 * 60 * 1000
 
 export type FakeHubOptions = {
   /** Retention ceiling in seconds. Default {@link DEFAULT_MAX_RETENTION}. */
@@ -71,12 +72,8 @@ export class FakeHub implements LogHub {
   #removedThrough = new Map<string, string>()
   /** The sequenceIDs published `retain: 'log'`. A topic's log is these, and nothing else. */
   #logClass = new Set<string>()
-  /**
-   * publishID -> the sequenceID it was accepted as. NOT a log entry: no deleter reaches
-   * it, and it outlives the frame it names. It is the only thing that lets a peer replaying
-   * its journal learn that a commit it never saw acknowledged had in fact landed.
-   */
-  #publishRecords = new Map<string, string>()
+  // JSON tuple keys and acceptance times match the store's independent idempotency retention.
+  #publishRecords = new Map<string, { sequenceID: string; recordedAt: number }>()
   /** Retention seconds requested per topic, by the most recent subscribe. */
   #retention = new Map<string, number | undefined>()
   /**
@@ -247,14 +244,20 @@ export class FakeHub implements LogHub {
     if (set.size === 0) this.#topics.delete(topicID)
   }
 
+  purgePublishIDs(now: number): void {
+    for (const [key, record] of this.#publishRecords) {
+      if (record.recordedAt <= now - PUBLISH_ID_RETENTION_MS) this.#publishRecords.delete(key)
+    }
+  }
+
   async publish(params: HubPublishParams): Promise<{ sequenceID: string }> {
     // The dedup check comes BEFORE the compare-and-set, and the order is the store's
     // contract. A replay carries the publishID the store already accepted and the
     // expectedHead the caller journalled — which its own accepted publish made stale — so
     // comparing first would tell a peer its commit was lost when it landed.
     if (params.publishID != null) {
-      const accepted = this.#publishRecords.get(params.publishID)
-      if (accepted !== undefined) return { sequenceID: accepted }
+      const accepted = this.#publishRecords.get(JSON.stringify([params.topicID, params.publishID]))
+      if (accepted !== undefined) return { sequenceID: accepted.sequenceID }
     }
     // The compare-and-set, before anything is minted: a loser leaves the log, the head and
     // the sequence exactly as it found them. `null` means "the topic has never had an
@@ -269,7 +272,12 @@ export class FakeHub implements LogHub {
     }
 
     const sequenceID = formatSequenceID(++this.#sequence)
-    if (params.publishID != null) this.#publishRecords.set(params.publishID, sequenceID)
+    if (params.publishID != null) {
+      this.#publishRecords.set(JSON.stringify([params.topicID, params.publishID]), {
+        sequenceID,
+        recordedAt: Date.now(),
+      })
+    }
     const message: StoredMessage = {
       sequenceID,
       senderDID: params.senderDID,

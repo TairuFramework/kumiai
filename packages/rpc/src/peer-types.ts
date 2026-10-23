@@ -43,6 +43,7 @@ import type { LogPosition } from './cursor.js'
 import type { GroupProcedureHandlers } from './handlers.js'
 import type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
 import type { AppOutboxCleared } from './log-delivery.js'
+import type { OpenedDeliveryContext } from './opened-delivery.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 import type {
   CapturedRecapture,
@@ -246,6 +247,8 @@ export type RecoveryFailureDetails = {
 export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
   hub: LogHub
   crypto: GroupCrypto
+  /** Required with crypto.pending; propagates delivery tokens across awaits. */
+  openedDeliveryContext?: OpenedDeliveryContext
   localDID: string
   checkpoints?: CheckpointService
   protocols: Protocols
@@ -461,5 +464,6 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    * Core safety subscriptions latch memory only and are released by dispose().
    * Never await from this peer's counted callbacks or port calls. Drain before replacing its owner.
    */
+  drainOpened: () => Promise<void>
   drained: () => Promise<void>
 }

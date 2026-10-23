@@ -13,7 +13,12 @@ import type {
   LogHub,
 } from '@kumiai/hub-tunnel'
 
-import { DEFAULT_MAX_DEPTH, DEFAULT_MAX_RETENTION, type FakeHubOptions } from './fake-hub.js'
+import {
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_RETENTION,
+  type FakeHubOptions,
+  PUBLISH_ID_RETENTION_MS,
+} from './fake-hub.js'
 
 type Sink = {
   push: (message: StoredMessage) => void
@@ -44,8 +49,8 @@ export class DurableFakeHub implements LogHub {
   #sinks = new Map<string, Sink>()
   #live = new Map<string, boolean>()
   #acked = new Map<string, Set<string>>()
-  /** publishID -> the sequenceID it was accepted as. Not a log entry; no deleter reaches it. */
-  #publishRecords = new Map<string, string>()
+  // JSON tuple keys and acceptance times match the store's independent idempotency retention.
+  #publishRecords = new Map<string, { sequenceID: string; recordedAt: number }>()
   /** The sequenceIDs published `retain: 'log'`. A topic's log is these, and nothing else. */
   #logClass = new Set<string>()
   /** Append-only record of every published message, for test assertions. */
@@ -83,11 +88,17 @@ export class DurableFakeHub implements LogHub {
     if (set.size === 0) this.#topics.delete(topicID)
   }
 
+  purgePublishIDs(now: number): void {
+    for (const [key, record] of this.#publishRecords) {
+      if (record.recordedAt <= now - PUBLISH_ID_RETENTION_MS) this.#publishRecords.delete(key)
+    }
+  }
+
   async publish(params: HubPublishParams): Promise<{ sequenceID: string }> {
     // Dedup before compare-and-set: the store's order, and a replay depends on it.
     if (params.publishID != null) {
-      const accepted = this.#publishRecords.get(params.publishID)
-      if (accepted !== undefined) return { sequenceID: accepted }
+      const accepted = this.#publishRecords.get(JSON.stringify([params.topicID, params.publishID]))
+      if (accepted !== undefined) return { sequenceID: accepted.sequenceID }
     }
     if (params.expectedHead !== undefined) {
       const head = this.#heads.get(params.topicID) ?? null
@@ -98,7 +109,12 @@ export class DurableFakeHub implements LogHub {
       }
     }
     const sequenceID = formatSequenceID(++this.#seq)
-    if (params.publishID != null) this.#publishRecords.set(params.publishID, sequenceID)
+    if (params.publishID != null) {
+      this.#publishRecords.set(JSON.stringify([params.topicID, params.publishID]), {
+        sequenceID,
+        recordedAt: Date.now(),
+      })
+    }
     const message: StoredMessage = {
       sequenceID,
       senderDID: params.senderDID,

@@ -41,6 +41,7 @@ import {
   registryFixtureSafetyParams,
 } from '../../../packages/mls-rpc/test/fixtures/registry.js'
 import { FakeHub } from '../../../packages/rpc/test/fixtures/fake-hub.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 
 const key = { groupID: 'hub-migration-live', incarnation: 1 }
 const binding = { targetID: 'registry-recovery-hub', commitTopicID: `commits/${key.groupID}` }
@@ -51,6 +52,7 @@ async function start(
 ) {
   const created: Array<api.RegistryPeerOptions> = []
   const owner = await api.createRegistryPeer({
+    openedDeliveryContext,
     registry: fixture.registry,
     key,
     recovery: fixture.environment,
@@ -75,6 +77,7 @@ async function start(
       const crypto = api.createGroupCrypto({ access })
       const ports = fixture.device.groups.ports(current)
       return createGroupPeer({
+        openedDeliveryContext,
         ...options,
         hub: options.hub ?? new FakeHub(),
         crypto,
@@ -235,6 +238,7 @@ async function liveOwner(
   const hubs: Array<LogHub & MailboxHub> = []
   const events: Array<RecoveryEvent> = []
   const owner = await api.createRegistryPeer({
+    openedDeliveryContext,
     registry: fixture.registry,
     key: params.key,
     recovery: fixture.environment,
@@ -328,6 +332,7 @@ async function liveOwner(
       const hub = options.hub ?? params.hub
       hubs.push(hub)
       return createGroupPeer({
+        openedDeliveryContext,
         recoveryTarget: params.target,
         ...options,
         hub,

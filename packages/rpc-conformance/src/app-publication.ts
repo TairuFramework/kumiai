@@ -318,7 +318,7 @@ export function testAppPublicationConformance(params: {
       const f = await params.createFixture()
       try {
         const accepted = entry()
-        const original = structuredClone(accepted)
+        const original = { ...accepted, data: Uint8Array.from(accepted.data) }
         await f.outbox.put(accepted)
         accepted.data.fill(0)
         const listed = await f.outbox.list()

@@ -9,3 +9,5 @@ export function createAsyncLocalOwnershipContext(): OwnershipContextPort {
     get: () => context.getStore(),
   }
 }
+
+export const openedDeliveryContext = createAsyncLocalOwnershipContext()

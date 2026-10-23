@@ -110,6 +110,7 @@ export function createMemoryGroupPorts(params: {
         ),
     },
     outbox: {
+      failureSignal: entryCapability(params.groups)?.failureSignal,
       async put(entry) {
         const owned = copyStoredValue(entry)
         let isNew = false

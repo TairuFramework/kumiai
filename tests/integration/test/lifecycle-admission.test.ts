@@ -14,6 +14,7 @@ import {
   operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createGapHub } from './gap-hub.js'
 
 test('real MLS publishes paired snapshots only after an awaited adoption callback', async () => {
@@ -107,6 +108,7 @@ test('accepted adoption entries seal at the matching admission epoch once the de
   })
   appOutbox = host.appOutbox
   const peer = createGroupPeer<Protocols>({
+    openedDeliveryContext,
     hub: hub.connect(identity),
     crypto,
     mls,

@@ -4,6 +4,7 @@ import { APP_TOPIC_LABEL, createGroupPeer, protocolTopic } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createFoundingGroup } from './app-lane-e2e.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 describe('peer drain over the wire hub', () => {
@@ -46,6 +47,7 @@ describe('peer drain over the wire hub', () => {
     }
     const chat = { 'chat/changed': { type: 'event', data: { type: 'object' } } } as const
     const peer = createGroupPeer({
+      openedDeliveryContext,
       hub: {
         publish: (params) => connection.publish(params),
         subscribe: (did, topic, options) => connection.subscribe(did, topic, options),

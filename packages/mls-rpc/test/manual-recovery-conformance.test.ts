@@ -47,7 +47,10 @@ import { registryRecoveryCoordinator } from '../src/registry/recovery-coordinato
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
 import { capturedRecord, createForkRecoveryRealFixture } from './fixtures/captured-recovery.js'
-import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
+import {
+  createAsyncLocalOwnershipContext,
+  openedDeliveryContext,
+} from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
   createRegistryFixture,
@@ -726,6 +729,7 @@ async function liveManualPeer(
       cryptos.push(crypto)
       const ports = fixture.device.groups.ports(key)
       return createGroupPeer({
+        openedDeliveryContext,
         hub,
         crypto,
         recoveryTarget: target,

@@ -78,6 +78,7 @@ import {
   memoryFaults,
 } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
+import { openedDeliveryContext } from './ownership-context.js'
 import { testGroupMLSDependencies } from './real-group.js'
 import { createSealedControlAccess } from './sealed-control-access.js'
 import {
@@ -1111,6 +1112,7 @@ export async function createControlCrashHarness(
     const runtime = () => {
       if (running === undefined) {
         running = createGroupPeerWithControlWalk({
+          openedDeliveryContext,
           hub: transport,
           crypto: cryptoPort,
           mls,

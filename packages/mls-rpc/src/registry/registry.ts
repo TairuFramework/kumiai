@@ -1,6 +1,7 @@
 import { normalizeDID } from '@kokuin/token'
 import { decodeClientState, type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
+import { requireOpenedDeliveryContext } from '@kumiai/rpc'
 
 import { finaliseAppSettlements } from '../app-settlement.js'
 import { bindRegistryCheckpoint } from '../checkpoint.js'
@@ -12,6 +13,12 @@ import {
 } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import {
+  assertStoredOpenedEntry,
+  bindRegistryOpenedContext,
+  joinStoredOpened,
+  storedOpenedDeliveryContext,
+} from '../opened-delivery.js'
+import {
   DisplacedGroupHandleError,
   GroupControlUnsettledError,
   GroupStateConflictError,
@@ -20,7 +27,12 @@ import {
   SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
-import type { GroupKey, GroupStores, GroupTransaction } from '../persistence-types.js'
+import type {
+  GroupKey,
+  GroupLifetime,
+  GroupStores,
+  GroupTransaction,
+} from '../persistence-types.js'
 import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements } from './access.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
@@ -89,6 +101,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   params: GroupHandleRegistryParams<TTx>,
 ): GroupHandleRegistry {
   const { persistence } = params
+  if (params.deliverOpened !== undefined) requireOpenedDeliveryContext(params.openedDeliveryContext)
   if (!params.providerID || params.providerID !== persistence.providerID)
     throw new GroupStateConflictError('Registry provider mismatch')
   if (normalizeDID(params.recovery.identity.id) !== normalizeDID(persistence.ownerDID))
@@ -97,6 +110,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   const binding = coordinatorBinding(persistence.groups)
   if (registeredCapability === null || binding === null)
     throw new GroupStateConflictError('Registry requires registered entry capability')
+  registeredCapability.assertRoot()
   if (liveRegistries.has(binding))
     throw new GroupStateConflictError('Coordinator already has a live registry')
   const capability = registeredCapability
@@ -208,6 +222,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   let disposed = false
   let disposal: Promise<void> | null = null
   const initialFinalisers = new Map<string, Promise<void>>()
+  const finaliserStop = new AbortController()
   let starting: Promise<void> | null = null
   let started = false
   function assertOpen(): void {
@@ -227,6 +242,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     await initialise()
   }
   async function initialise(): Promise<void> {
+    capability.assertRoot()
     if (started) return
     if (starting !== null) return await starting
     starting = (async () => {
@@ -237,15 +253,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       if (lifetimes.some((value) => value.restorePending))
         throw new GroupUnavailableError({ reason: 'restore-pending' })
       for (const lifetime of lifetimes) {
-        const pending = track(
-          (async () => {
-            for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++)
-              await finaliseAppSettlements({
-                persistence: persistence.groups,
-                key: { groupID: lifetime.groupID, incarnation },
-              })
-          })(),
-        )
+        const pending = track(finaliseGroup(lifetime))
         initialFinalisers.set(lifetime.groupID, pending)
         void pending.catch(() => {})
       }
@@ -257,30 +265,46 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       starting = null
     }
   }
-  async function settleAppPublications(groupID: string): Promise<void> {
-    await initialise()
-    const pending = initialFinalisers.get(groupID)
-    if (pending === undefined) return
-    try {
-      await pending
-    } catch (error) {
-      if (initialFinalisers.get(groupID) === pending) {
-        const retry = track(
-          (async () => {
-            const lifetime = await persistence.groups.load(groupID)
-            if (lifetime === null) return
-            for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++)
-              await finaliseAppSettlements({
-                persistence: persistence.groups,
-                key: { groupID, incarnation },
-              })
-          })(),
-        )
-        initialFinalisers.set(groupID, retry)
-        void retry.catch(() => {})
+  async function finaliseGroup(initial: GroupLifetime): Promise<void> {
+    const groupID = initial.groupID
+    let retrying = false
+    let delay = 100
+    for (;;) {
+      if (finaliserStop.signal.aborted) throw finaliserStop.signal.reason
+      try {
+        const lifetime = retrying ? await persistence.groups.load(groupID) : initial
+        retrying = true
+        if (lifetime === null) return
+        for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++)
+          await finaliseAppSettlements({
+            persistence: persistence.groups,
+            key: { groupID, incarnation },
+          })
+        return
+      } catch (error) {
+        if (capability.failureSignal?.aborted) throw capability.failureSignal.reason
+        if (closing) throw error
+        await new Promise<void>((resolve, reject) => {
+          const signal = finaliserStop.signal
+          const timer = setTimeout(() => {
+            signal.removeEventListener('abort', abort)
+            resolve()
+          }, delay)
+          const abort = () => {
+            clearTimeout(timer)
+            signal.removeEventListener('abort', abort)
+            reject(signal.reason)
+          }
+          signal.addEventListener('abort', abort, { once: true })
+        })
+        delay = Math.min(delay * 2, 15000)
       }
-      throw error
     }
+  }
+  async function settleAppPublications(groupID: string): Promise<void> {
+    capability.assertRoot()
+    await initialise()
+    await initialFinalisers.get(groupID)
   }
   function notifyAdmission(slot: GroupSlot, key: GroupKey, next: number): void {
     for (const listener of slot.admissionListeners.get(key.incarnation) ?? []) {
@@ -613,6 +637,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         },
         waitForMaintenanceGate: (signal) => registryMaintenanceGates.get(registry)?.(signal),
         capability,
+        binding: registryBinding,
         environment: { ...environment, withPrivateRestore: privateRestoreBoundary(owner) },
         restoreCandidate: params.restoreCandidate,
         resolve: (mutationID) => persistence.groups.resolve(groupID, mutationID),
@@ -784,8 +809,14 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     }
   }
   function dispose(): Promise<void> {
+    try {
+      assertStoredOpenedEntry(registryBinding)
+    } catch (error) {
+      return Promise.reject(error)
+    }
     if (disposal !== null) return disposal
     closing = true
+    finaliserStop.abort(new DisplacedGroupHandleError('Registry is disposed'))
     for (const slot of slots.values()) {
       slot.pendingHandoff = null
       slot.live.cancellation.abort(new DisplacedGroupHandleError('Registry is disposed'))
@@ -884,6 +915,35 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     },
     delete(key) {
       return track(deleteGroup(key))
+    },
+    drainOpened(key) {
+      try {
+        assertStoredOpenedEntry(registryBinding, key)
+      } catch (error) {
+        return Promise.reject(error)
+      }
+      return track(
+        (async () => {
+          const context =
+            params.openedDeliveryContext ?? storedOpenedDeliveryContext(registryBinding, key)
+          if (context === undefined) {
+            const pending = await capability.read(key.groupID, (reads) =>
+              reads.pendingFrames(key.incarnation),
+            )
+            if (pending.length === 0) return
+          }
+          await joinStoredOpened({
+            persistence: persistence.groups,
+            key,
+            openedDeliveryContext: requireOpenedDeliveryContext(context),
+            deliver:
+              params.deliverOpened ??
+              (async () => {
+                throw new Error('Missing opened delivery handler')
+              }),
+          })
+        })(),
+      )
     },
     dispose,
     async recoverySource(groupID) {
@@ -1040,8 +1100,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       return restrictCommitAuthoring(await environment.restore({ ...record, state: record.state }))
     }),
   )
+  bindRegistryOpenedContext(registry, params.openedDeliveryContext)
   registryHandoffReaders.set(registry, (groupID) => slots.get(groupID)?.pendingHandoff != null)
   const onFailure = () => {
+    finaliserStop.abort(capability.failureSignal?.reason)
     for (const slot of slots.values()) {
       slot.pendingHandoff = null
       slot.live.base = null

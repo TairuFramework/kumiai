@@ -19,7 +19,10 @@ import { createRegistryAppPublication } from '../src/app-publication.js'
 import { entryCapability } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
 import { manualRecoveryStatus } from '../src/manual-recovery.js'
-import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
+import {
+  createAsyncLocalOwnershipContext,
+  openedDeliveryContext,
+} from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
   createRegistryFixture,
@@ -449,6 +452,7 @@ async function heldPeer(
       const crypto = api.createGroupCrypto({ access })
       const ports = fixture.device.groups.ports(current)
       return createGroupPeer({
+        openedDeliveryContext,
         hub,
         crypto,
         recoveryTarget: target,

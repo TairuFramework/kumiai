@@ -13,6 +13,7 @@ import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 function gate() {
@@ -34,6 +35,23 @@ async function pausedDrain(peer: { drained(): Promise<void> }) {
 }
 
 describe('peer host drain', { concurrent: false }, () => {
+  test('an unrelated provider fail-stop does not reject empty application drainage', async () => {
+    const failure = new AbortController()
+    const appOutbox = Object.assign(createMemoryAppOutbox(), { failureSignal: failure.signal })
+    const member = makeMLSPeer(new FakeHub(), 'alice', new Uint8Array(32).fill(0x34), {
+      appOutbox,
+    })
+    try {
+      await member.peer.replay()
+      failure.abort(new Error('Unrelated control ownership conflict'))
+      await member.peer.dispose()
+      await expect(member.peer.drained()).resolves.toBeUndefined()
+      expect(await appOutbox.list()).toEqual([])
+    } finally {
+      await member.peer.dispose()
+    }
+  })
+
   test.each(['certification', 'finalisation'] as const)(
     'disposal retains submitted settlement completion / %s',
     async (phase) => {

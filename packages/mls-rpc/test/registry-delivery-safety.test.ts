@@ -24,6 +24,7 @@ import { createLedgerEntrySlot } from '../src/mls.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
+import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import {
   memoryModel,
@@ -180,6 +181,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const onRecovery = vi.fn()
           const onSafetyEvent = vi.fn()
           running = createGroupPeerWithControlWalk({
+            openedDeliveryContext,
             hub,
             crypto,
             mls,

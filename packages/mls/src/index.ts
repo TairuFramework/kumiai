@@ -315,7 +315,7 @@ export {
   type RosterState,
   roleReducer,
 } from './roster.js'
-export { mergeReceiveSecretTree } from './secret-tree.js'
+export { mergeReceiveSecretTree, restoredImportedReservation } from './secret-tree.js'
 export {
   ApplicationSendRefusedError,
   bindSendCeiling,

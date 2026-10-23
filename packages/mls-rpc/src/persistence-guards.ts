@@ -21,10 +21,10 @@ export function projectStateVersion(
   record: GroupStateRecord | null,
   metadata: StateMetadata | null,
 ): GroupStateRecord | null {
-  if (record === null) return null
+  // Legacy and opaque host rows predate the administrative version side record.
+  if (record === null || metadata === null) return record
   requireCondition(
-    metadata !== null &&
-      metadata.groupID === record.groupID &&
+    metadata.groupID === record.groupID &&
       metadata.incarnation === record.incarnation &&
       metadata.deleted === record.deleted &&
       validCounter(record.version, 1) &&

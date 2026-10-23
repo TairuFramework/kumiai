@@ -41,13 +41,13 @@ export type PublishParams = {
    */
   expectedHead?: string | null
   /**
-   * Idempotency key. Republishing an already-accepted publishID returns its original sequenceID
+   * Per-topic idempotency key. Republishing an accepted publishID returns its original sequenceID
    * with `deduped: true` and appends nothing — what makes a peer's restart replay work.
    *
-   * - The `publishID` -> `sequenceID` record is **not a log entry**: `trim`/`purge` must not
-   *   remove it, and its retention (indefinite recommended) is its own, longer than the log's.
-   *   Hanging it off the message row is wrong — trim would delete it with the frame, and the
-   *   replay would silently become an ordinary new publish.
+   * - Records use `(topicID, publishID)` and the original acceptance time, independently of frames.
+   *   `purge` expires records accepted at or before `now - 365 days`. Trim, ack and retries never
+   *   refresh that time. Until purged, an accepted ID still deduplicates after the cutoff.
+   * - A refused CAS claims no ID. After expiry, the same ID is a new publish subject to CAS.
    * - The returned sequenceID may name an already-trimmed frame — a replay asks "did my publish
    *   land?", not "give me my frame".
    * - The dedup check runs **before** the `expectedHead` comparison: a replay's `expectedHead` is

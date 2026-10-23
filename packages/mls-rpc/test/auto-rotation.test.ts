@@ -23,6 +23,7 @@ import { decodeStoredValue } from '../src/persistence-codec.js'
 import { listRetiredOutcomes, retireIncarnation } from '../src/registry/retired.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { registryLeaseSnapshot } from '../src/testing.js'
+import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 import {
   buildSealedMemoryOperation,
@@ -71,6 +72,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
       entrySlot: api.createLedgerEntrySlot(),
     })
     const peer = createGroupPeer({
+      openedDeliveryContext,
       mls,
       hub: new FakeHub(),
       crypto: api.createGroupCrypto({ access: f.access() }),
@@ -403,6 +405,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
             newID: () => crypto.randomUUID(),
           })
           const peer = createGroupPeer({
+            openedDeliveryContext,
             ...options,
             hub,
             crypto: api.createGroupCrypto({ access: rawAccess }),

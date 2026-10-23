@@ -60,6 +60,7 @@ import type {
   MemoryTransaction,
   OwnershipContextPort,
   PackageUse,
+  PendingAppFrame,
   PersistenceEvent,
   TransactionalGroupEffects,
 } from '../../src/persistence-types.js'
@@ -78,6 +79,7 @@ import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
 import { gateRegistryMaintenance, restoreCommittedSender } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
+import { openedDeliveryContext } from './ownership-context.js'
 import { createRealGroup, testGroupMLSDependencies, testHandleAccess } from './real-group.js'
 import {
   type CapturedRecoveryFixture,
@@ -194,6 +196,8 @@ type FixtureParams = {
   groupID: string
   options?: GroupOptions
   effects?: TransactionalGroupEffects<MemoryTransaction>
+  openedDeliveryContext?: OwnershipContextPort
+  deliverOpened?: (record: PendingAppFrame) => Promise<void>
   ownershipContext?: OwnershipContextPort
   backgroundMaintenance?: 'gated'
 }
@@ -512,6 +516,8 @@ async function assemble(
       owner = createGroupHandleRegistry({
         persistence: fixture.device,
         providerID: fixture.device.providerID,
+        openedDeliveryContext: params.openedDeliveryContext ?? openedDeliveryContext,
+        deliverOpened: params.deliverOpened,
         recovery: environment,
         restore: (record) => {
           coldCounts.set(record.groupID, (coldCounts.get(record.groupID) ?? 0) + 1)

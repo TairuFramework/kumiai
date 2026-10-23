@@ -14,6 +14,7 @@ import { createRegistryAppPublication } from '../src/app-publication.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import * as api from '../src/index.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
+import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { restoreHost } from './fixtures/registry.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
 
@@ -66,6 +67,7 @@ async function setup(mode: 'real-mls' | 'double', name: string) {
       createPeer: async (key, options) => {
         const ports = f.device.groups.ports(key)
         return createGroupPeer({
+          openedDeliveryContext,
           ...options,
           hub,
           crypto,
@@ -156,14 +158,17 @@ for (const mode of ['real-mls', 'double'] as const) {
     const f = await setup(mode, 'restart-delivery')
     const firstGate = Promise.withResolvers<void>()
     const secondGate = Promise.withResolvers<void>()
-    const firstHandler = vi.fn<Handler>(async () => firstGate.promise)
+    const firstHandler = vi.fn<Handler>(async () => {
+      await firstGate.promise
+      throw new Error('Interrupted before acknowledgement')
+    })
     const secondHandler = vi.fn<Handler>(async () => secondGate.promise)
     try {
       const first = await f.start(firstHandler)
       const { sequenceID } = await f.publish(await f.seal())
       await vi.waitFor(() => expect(firstHandler).toHaveBeenCalledTimes(1), { timeout: 5000 })
       const disposing = first.peer.dispose()
-      // dispose closes app delivery synchronously, before the blocked handler settles.
+      // Disposal stops new callbacks; this handler interrupts before acknowledging.
       await vi.waitFor(
         async () => {
           await expect(first.peer.protocol('chat').to(f.group.sender.identity.id)).rejects.toThrow(

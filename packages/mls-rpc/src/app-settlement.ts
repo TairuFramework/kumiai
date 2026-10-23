@@ -14,7 +14,12 @@ export async function finaliseAppSettlements<TTx extends GroupTransaction>(param
     const entries = await reads.outbox(key.incarnation)
     const certified = []
     for (const entry of entries) {
-      if ((await reads.settlement(key.incarnation, entry.seq)) !== null) certified.push(entry)
+      // Legacy markers without an attempt cannot supply a publication occurrence.
+      if (
+        entry.lastAttempt !== null &&
+        (await reads.settlement(key.incarnation, entry.seq)) !== null
+      )
+        certified.push(entry)
     }
     return certified
   })

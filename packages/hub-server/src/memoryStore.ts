@@ -67,6 +67,7 @@ export type MemoryStoreOptions = {
 const DEFAULT_MAX_DEPTH = 1000
 /** 30 days, in seconds. A finite default ceiling on requested retention. */
 const DEFAULT_MAX_RETENTION = 2_592_000
+const PUBLISH_ID_RETENTION_MS = 365 * 24 * 60 * 60 * 1000
 
 function formatSequenceID(counter: number): string {
   return String(counter).padStart(12, '0')
@@ -127,13 +128,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const heads = new Map<string, string>()
   const removedThrough = new Map<string, string>()
   const deliveries = new Map<string, Array<string>>()
-  /**
-   * publishID -> the sequenceID it was accepted as. Not a log entry and not reachable from one: no
-   * deleter takes a publishID, so `removeEntry`, `trim` and `purge` cannot touch this map even by
-   * mistake. Retained indefinitely — it is the only thing that lets a peer replaying its journal
-   * learn that a commit it never saw acknowledged had in fact landed.
-   */
-  const publishRecords = new Map<string, string>()
+  // JSON tuple keys avoid delimiter collisions. Record retention is independent of frame retention.
+  const publishRecords = new Map<string, { sequenceID: string; recordedAt: number }>()
   /** Per topic: the subscribers, each with the retention it asked for. */
   const subscriptions = new Map<string, Map<string, number>>()
   // Reverse index for an O(1) per-DID subscription count. Kept in lockstep with `subscriptions`.
@@ -213,9 +209,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       // commit was lost when it landed. The returned sequenceID may name an already-trimmed frame,
       // which is correct: a replay asks "did my publish land?", not "give me my frame".
       if (params.publishID != null) {
-        const accepted = publishRecords.get(params.publishID)
+        const accepted = publishRecords.get(JSON.stringify([params.topicID, params.publishID]))
         if (accepted !== undefined) {
-          return { sequenceID: accepted, deduped: true }
+          return { sequenceID: accepted.sequenceID, deduped: true }
         }
       }
 
@@ -235,7 +231,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       counter++
       const sequenceID = formatSequenceID(counter)
       if (params.publishID != null) {
-        publishRecords.set(params.publishID, sequenceID)
+        publishRecords.set(JSON.stringify([params.topicID, params.publishID]), {
+          sequenceID,
+          recordedAt: Date.now(),
+        })
       }
 
       // Only a log publish moves the head. A head naming a mailbox frame is a head that the
@@ -420,6 +419,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
 
     async purge(params: PurgeParams): Promise<Array<string>> {
       const now = Date.now()
+      for (const [key, record] of publishRecords) {
+        if (record.recordedAt <= now - PUBLISH_ID_RETENTION_MS) publishRecords.delete(key)
+      }
       const purgedIDs: Array<string> = []
       const retainedTopics = new Set<string>()
       // Insertion order is log-position order, even if the clock moves backwards.

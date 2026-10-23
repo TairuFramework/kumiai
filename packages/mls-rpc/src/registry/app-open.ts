@@ -18,6 +18,7 @@ import {
 import type { ControlRead } from '../access.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
+import { bindRegistryOpenedDelivery } from '../opened-delivery.js'
 import { DisplacedGroupHandleError, GroupStateConflictError } from '../persistence-errors.js'
 import {
   type AppPoisonRecord,
@@ -54,6 +55,7 @@ class Noop extends Error {
 
 export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
+  binding: object
   capability: EntryCapability<TTx>
   run: ReturnType<typeof createLiveSend<TTx>>['run']
   isolated(reads: EntryReads, assertMutationSafety?: () => void): Promise<ControlRead>
@@ -178,7 +180,7 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                 const openedFrame = { ...frame, procedure: decoded.value.procedure }
                 const record: PendingAppFrame = {
                   frame: openedFrame,
-                  payload: opened.payload.slice(),
+                  payload: Uint8Array.from(opened.payload),
                   senderDID: opened.senderDID,
                   epoch,
                   idempotencyKey: appFrameIdempotencyKey(openedFrame),
@@ -255,7 +257,7 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
       params.publish()
     }
   }
-  return {
+  const result: Pick<RegistryHandleAccess, 'openBatch' | 'pending'> = {
     openBatch,
     pending: {
       async list() {
@@ -298,4 +300,11 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
       },
     },
   }
+  bindRegistryOpenedDelivery({
+    binding: params.binding,
+    capability,
+    key: owner.key,
+    pending: result.pending,
+  })
+  return result
 }

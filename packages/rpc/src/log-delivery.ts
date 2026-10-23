@@ -41,7 +41,28 @@ type Delivered = Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'> & {
   seq?: number
 }
 type LogFrame = { topicID: string; payload: Uint8Array; publishID: string }
+
+function copySnapshot(value: AppPublicationSnapshot): AppPublicationSnapshot {
+  return {
+    ...value,
+    identity: { ...value.identity, authenticator: Uint8Array.from(value.identity.authenticator) },
+  }
+}
+
+function copyPrepared(value: PreparedAppPublication): PreparedAppPublication {
+  return {
+    entry: {
+      ...value.entry,
+      data: Uint8Array.from(value.entry.data),
+      lastAttempt: value.entry.lastAttempt === null ? null : { ...value.entry.lastAttempt },
+    },
+    payload: Uint8Array.from(value.payload),
+    snapshot: copySnapshot(value.snapshot),
+  }
+}
+
 export type LogDeliveryParams = {
+  failureSignal?: AbortSignal
   queue: AppOutboxAcceptance
   ready: () => Promise<void>
   floor: () => EpochFloor
@@ -87,6 +108,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let backoff = 1000
   const submitted = new Set<Promise<unknown>>()
+  let settlementSubmitted = false
   let completion: Promise<void> | undefined
   function track<T>(promise: Promise<T>): Promise<T> {
     submitted.add(promise)
@@ -96,15 +118,38 @@ export function createLogDelivery(params: LogDeliveryParams) {
     )
     return promise
   }
+  function assertRunning(): void {
+    if (params.failureSignal?.aborted) throw params.failureSignal.reason
+  }
+  function waitForRetry(delay: number): Promise<void> {
+    assertRunning()
+    return new Promise((resolve, reject) => {
+      const signal = params.failureSignal
+      const finish = () => {
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }
+      const timer = setTimeout(finish, delay)
+      const abort = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        reject(signal?.reason)
+      }
+      signal?.addEventListener('abort', abort, { once: true })
+    })
+  }
   async function finishSubmitted(): Promise<void> {
+    if (settlementSubmitted) assertRunning()
     while (submitted.size > 0) await Promise.allSettled([...submitted])
+    if (settlementSubmitted) assertRunning()
     let delay = 100
     for (;;) {
       try {
         await removeProven()
         return
       } catch {
-        await new Promise((resolve) => setTimeout(resolve, delay))
+        assertRunning()
+        await waitForRetry(delay)
         delay = Math.min(delay * 2, 15000)
       }
     }
@@ -144,6 +189,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       const publication = publications.get(seq)
       const attempt = publication?.frame.entry.lastAttempt
       if (publication === undefined || attempt == null) continue
+      settlementSubmitted = true
       await params.remove(seq, {
         incarnation: attempt.incarnation,
         segment: attempt.segment,
@@ -170,7 +216,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
 
   const snapshot = async (protocol: string): Promise<AppPublicationSnapshot | null> => {
     const value = await params.snapshot(protocol)
-    return value === null ? null : structuredClone(value)
+    return value === null ? null : copySnapshot(value)
   }
   const capture = () => {
     const snapshots = new Map<string, Promise<AppPublicationSnapshot | null>>()
@@ -216,10 +262,11 @@ export function createLogDelivery(params: LogDeliveryParams) {
       return
     }
     const expected = {
-      identity: structuredClone(after.identity),
+      identity: copySnapshot(after).identity,
       stateVersion: after.stateVersion,
       attemptID: attempt.publishID,
     }
+    settlementSubmitted = true
     const result = await params.recordSettlement(
       seq,
       {
@@ -270,7 +317,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     }
     if (frame === undefined) {
       if (params.held()) return null
-      frame = structuredClone(await params.prepare(entry, params.floor().position))
+      frame = copyPrepared(await params.prepare(entry, params.floor().position))
       params.queue.replace(frame.entry)
       prepared.set(entry.seq, frame)
       const after = await snapshot(entry.protocol)
@@ -317,12 +364,13 @@ export function createLogDelivery(params: LogDeliveryParams) {
       floor: attempt.floor === null ? null : asLogPosition(attempt.floor),
       acknowledged: ++acknowledgements,
       sequenceID,
-      frame: structuredClone(frame),
+      frame: copyPrepared(frame),
     })
     return true
   }
 
   const pass = async (): Promise<void> => {
+    assertRunning()
     await params.ready()
     await params.queue.ready()
     if (closed) return
@@ -454,7 +502,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
   }
 
   const schedule = (delay: number): void => {
-    if (closed || active || timer != null) return
+    if (closed || params.failureSignal?.aborted || active || timer != null) return
     timer = setTimeout(() => {
       timer = undefined
       active = true
@@ -537,6 +585,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       prepared.clear()
       clearTimeout(timer)
       completion = finishSubmitted()
+      void completion.catch(() => {})
     },
   }
 }

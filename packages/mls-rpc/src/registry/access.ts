@@ -92,6 +92,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   live: LiveSlot
   dropOwner(): void
   waitForMaintenanceGate(signal: AbortSignal): Promise<void> | undefined
+  binding: object
   capability: EntryCapability<TTx>
   environment: ColdEnvironment
   restoreCandidate(candidate: Uint8Array): Promise<GroupHandle>

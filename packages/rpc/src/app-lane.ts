@@ -28,6 +28,7 @@ import { GroupSafetyHeldError, PeerDisposedError } from './errors.js'
 import type { BusHandlerMaps } from './handlers.js'
 import { notifyHost } from './host-notice.js'
 import { APP_OUTSTANDING_FETCHES_MAX, AppFetchBusyError, type HubMux } from './hub-mux.js'
+import { createOpenedRecordHandler } from './opened-delivery.js'
 import { retentionOf } from './protocol.js'
 import { protocolTopic } from './topic.js'
 
@@ -116,6 +117,10 @@ export type AppLaneParams = {
    * same door.
    */
   eventHandlers: Map<string, BusHandlerMaps['events']>
+  deliverOpened?: (record: PendingAppFrame) => Promise<void>
+  completeOpenedRecord?: (id: string) => Promise<void>
+  claimOpened?: (record: PendingAppFrame, fn: () => Promise<void>) => Promise<boolean>
+  openedFailureSignal?: AbortSignal
   /** App-log retention the hub is asked to hold on every topic this lane pulls, in seconds. */
   retentionSeconds: number
   appCursorStore?: AppCursorStore | undefined
@@ -169,6 +174,8 @@ export type AppLane = {
   completeOpened: () => Promise<void>
   /** Permanently stop network pulls and new opens after terminal removal. */
   stopOpening: () => void
+  handoffOpened: () => Promise<void>
+  acknowledgeOpened: (id: string) => Promise<void>
   /** Stop queued retries and prevent new handler calls. */
   dispose: () => void
 }
@@ -246,10 +253,21 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let segmentGeneration = 0
   const pendingRecords: Array<PendingAppFrame> = []
   const finishingRecords = new Set<Promise<void>>()
-  const openedWaiters = new Set<() => void>()
+  const deliveringRecords = new Set<Promise<void>>()
+  let openedFailure: unknown
+  let openedDrainRequested = false
+  let deliveryHandedOff = false
+  const openedWaiters = new Set<{ resolve(): void; reject(error: unknown): void }>()
   const notifyOpened = (): void => {
-    if (pendingRecords.length !== 0 && !disposed) return
-    for (const resolve of openedWaiters) resolve()
+    if (
+      openedFailure === undefined &&
+      (pendingRecords.length !== 0 || deliveringRecords.size !== 0 || finishingRecords.size !== 0)
+    )
+      return
+    for (const waiter of openedWaiters) {
+      if (openedFailure !== undefined) waiter.reject(openedFailure)
+      else waiter.resolve()
+    }
     openedWaiters.clear()
   }
   const pulls = new Map<AbortController, number>()
@@ -736,7 +754,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * The passed frames are dropped from the buffer here and only here: the cursor is what
    * remembers them from now on.
    */
-  const advanceCursor = async (topicID: string, frames: Array<AppFrame>): Promise<void> => {
+  type CursorAdvance = { topicID: string; position: LogPosition; apply(): void }
+  const advanceCursor = async (
+    topicID: string,
+    frames: Array<AppFrame>,
+    capture?: (advance: CursorAdvance) => void,
+  ): Promise<void> => {
     if (segment.get(topicID) !== frames) return
     const cursor = cursors.get(topicID)
     if (cursor == null) return
@@ -747,13 +770,28 @@ export function createAppLane(params: AppLaneParams): AppLane {
       passed += 1
     }
     if (position == null || position === cursor.position) return
-    await appCursorStore?.save(cursor.topicID, position)
-    cursor.position = position
-    if (cursor.accepted == null || compareLogPositions(position, cursor.accepted) > 0) {
-      cursor.accepted = position
+    const covered = position
+    const advance: CursorAdvance = {
+      topicID: cursor.topicID,
+      position: covered,
+      apply() {
+        if (
+          segment.get(topicID) !== frames ||
+          cursors.get(topicID) !== cursor ||
+          (cursor.position !== null && compareLogPositions(cursor.position, covered) >= 0)
+        )
+          return
+        cursor.position = covered
+        if (cursor.accepted == null || compareLogPositions(covered, cursor.accepted) > 0) {
+          cursor.accepted = covered
+        }
+        frames.splice(0, passed)
+        if (bufferBlockedTopics.delete(topicID)) scheduleContinuation()
+      },
     }
-    frames.splice(0, passed)
-    if (bufferBlockedTopics.delete(topicID)) scheduleContinuation()
+    capture?.(advance)
+    await appCursorStore?.save(cursor.topicID, covered)
+    advance.apply()
   }
 
   const orderedRecords = (name: string): Array<PendingAppFrame> =>
@@ -782,68 +820,106 @@ export function createAppLane(params: AppLaneParams): AppLane {
     return false
   }
 
-  const finishRecord = async (record: PendingAppFrame): Promise<void> => {
-    if (disposed) return
-    await crypto.pending?.complete(record.frame.id)
-    if (disposed) return
-    await runAppLane(async () => {
-      const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
-      if (index !== -1) pendingRecords.splice(index, 1)
-      resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
-      resumeUnknown(record)
-      notifyOpened()
-      const cursor = cursors.get(record.frame.topicID)
-      const frames = segment.get(record.frame.topicID)
-      if (cursor?.topicID === record.frame.topicID && frames != null) {
-        const buffered = frames.find((frame) => frame.position === record.frame.position)
-        if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id) {
-          buffered.sealed = { state: 'done' }
+  const finishRecord = async (record: PendingAppFrame, completed = false): Promise<void> => {
+    if (!completed)
+      await (params.completeOpenedRecord ?? crypto.pending?.complete)?.(record.frame.id)
+    let advance: CursorAdvance | undefined
+    try {
+      await runAppLane(async () => {
+        const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
+        if (index !== -1) pendingRecords.splice(index, 1)
+        resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
+        resumeUnknown(record)
+        notifyOpened()
+        const cursor = cursors.get(record.frame.topicID)
+        const frames = segment.get(record.frame.topicID)
+        if (cursor?.topicID === record.frame.topicID && frames != null) {
+          const buffered = frames.find((frame) => frame.position === record.frame.position)
+          if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id) {
+            buffered.sealed = { state: 'done' }
+          }
+          await advanceCursor(record.frame.topicID, frames, (captured) => {
+            advance = captured
+          })
         }
-        await advanceCursor(record.frame.topicID, frames)
+      })
+      return
+    } catch (error) {
+      if (advance === undefined) throw error
+    }
+    // Retain proven coverage even if a notice resets the lane after a failed save.
+    const covered = advance
+    let delay = 100
+    for (;;) {
+      if (params.openedFailureSignal?.aborted) throw params.openedFailureSignal.reason
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      try {
+        await runAppLane(async () => {
+          const saved = await appCursorStore?.load(covered.topicID)
+          if (saved == null || compareLogPositions(saved, covered.position) < 0)
+            await appCursorStore?.save(covered.topicID, covered.position)
+          covered.apply()
+        })
+        return
+      } catch (_error) {
+        if (params.openedFailureSignal?.aborted) throw params.openedFailureSignal.reason
+        delay = Math.min(delay * 2, 15000)
       }
-    })
+    }
   }
 
+  const openedHandler =
+    params.deliverOpened ??
+    createOpenedRecordHandler({
+      localDID,
+      protocols,
+      events: appEventHandlers,
+    })
   const deliverRecord = async (record: PendingAppFrame): Promise<void> => {
-    if (disposed) return
-    if (protocols[record.frame.protocol] == null) return
-    let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } } | undefined
-    try {
-      message = JSON.parse(toUTF(record.payload))
-    } catch {
-      // A malformed durable frame is acknowledged without reaching the host.
-    }
-    const prc = message?.payload?.prc
-    const protocol = protocols[record.frame.protocol]
-    const events = appEventHandlers.get(record.frame.protocol)
-    if (
-      normalizeDID(record.senderDID) !== localDID &&
-      message?.payload?.typ === 'event' &&
-      typeof prc === 'string' &&
-      protocol != null &&
-      retentionOf(protocol, prc) === 'log' &&
-      events != null
-    ) {
-      const event = {
-        data: message.payload.data ?? {},
-        senderDID: normalizeDID(record.senderDID),
-        frame: record.frame,
-      }
-      await events.emit(prc, event)
-    }
-    if (!disposed) {
-      const finishing = finishRecord(record)
-      finishingRecords.add(finishing)
-      try {
-        await finishing
-      } finally {
-        finishingRecords.delete(finishing)
+    const invoke = async () => {
+      await openedHandler(record)
+      let delay = 100
+      for (;;) {
+        if (params.openedFailureSignal?.aborted) throw params.openedFailureSignal.reason
+        const finishing = finishRecord(record)
+        finishingRecords.add(finishing)
+        try {
+          await finishing
+          return
+        } catch (error) {
+          if (params.openedFailureSignal?.aborted) throw params.openedFailureSignal.reason
+          if (!disposed && !deliveryHandedOff) throw error
+          await new Promise<void>((resolve, reject) => {
+            const signal = params.openedFailureSignal
+            const abort = () => {
+              clearTimeout(timer)
+              signal?.removeEventListener('abort', abort)
+              reject(signal?.reason)
+            }
+            const timer = setTimeout(() => {
+              signal?.removeEventListener('abort', abort)
+              resolve()
+            }, delay)
+            signal?.addEventListener('abort', abort, { once: true })
+          })
+          delay = Math.min(delay * 2, 15000)
+        } finally {
+          finishingRecords.delete(finishing)
+        }
       }
     }
+    if (params.claimOpened === undefined) await invoke()
+    else if (!(await params.claimOpened(record, invoke))) await finishRecord(record, true)
   }
 
   const scheduleWorker = (name: string, delay = 0): void => {
-    if (disposed || crypto.pending == null) return
+    if (
+      (disposed && !openedDrainRequested) ||
+      deliveryHandedOff ||
+      openedFailure !== undefined ||
+      crypto.pending == null
+    )
+      return
     let worker = workers.get(name)
     if (worker == null) {
       worker = { running: false, requested: false, retryNow: false, backoff: 1000, delayed: false }
@@ -853,14 +929,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (worker.running || worker.timer != null) return
     worker.delayed = delay > 0
     worker.timer = setTimeout(() => {
-      if (disposed) return
+      if ((disposed && !openedDrainRequested) || deliveryHandedOff) return
       worker.timer = undefined
       worker.running = true
       worker.requested = false
       void (async () => {
         let failed = false
         try {
-          while (!disposed) {
+          while ((!disposed || openedDrainRequested) && !deliveryHandedOff) {
             const record = orderedRecords(name)[0]
             if (
               record == null ||
@@ -868,13 +944,19 @@ export function createAppLane(params: AppLaneParams): AppLane {
               (!openedOnly && (await runAppLane(async () => blockedByEarlierSealed(record))))
             )
               break
-            if (disposed) break
+            if ((disposed && !openedDrainRequested) || deliveryHandedOff) break
+            const delivery = deliverRecord(record)
+            deliveringRecords.add(delivery)
             try {
-              await deliverRecord(record)
+              await delivery
               worker.backoff = 1000
-            } catch {
+            } catch (error) {
+              if (params.openedFailureSignal?.aborted) openedFailure = error
               failed = true
               break
+            } finally {
+              deliveringRecords.delete(delivery)
+              notifyOpened()
             }
           }
         } finally {
@@ -895,7 +977,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   const retryDelivery = (topicID?: string): void => {
-    if (disposed) return
+    if (disposed && !openedDrainRequested) return
     if (openedOnly) {
       for (const name of new Set(pendingRecords.map((record) => record.frame.protocol)))
         scheduleWorker(name)
@@ -1352,16 +1434,45 @@ export function createAppLane(params: AppLaneParams): AppLane {
     note,
     pendingRecords: () => [...pendingRecords],
     stopOpening,
+    acknowledgeOpened: async (id) => {
+      const record = pendingRecords.find((record) => record.frame.id === id)
+      if (record !== undefined) {
+        const finishing = finishRecord(record, true)
+        finishingRecords.add(finishing)
+        try {
+          await finishing
+        } finally {
+          finishingRecords.delete(finishing)
+          notifyOpened()
+        }
+      }
+    },
+    handoffOpened: async () => {
+      deliveryHandedOff = true
+      stopOpening()
+      await runAppLane(async () => {})
+      await Promise.allSettled([...deliveringRecords])
+      if (openedFailure !== undefined) throw openedFailure
+    },
     completeOpened: async () => {
+      openedDrainRequested = true
       stopOpening()
       // An open can have committed plaintext before returning its record to the lane.
       await runAppLane(async () => {})
       retryDelivery()
-      if (pendingRecords.length === 0 || disposed) return
-      await new Promise<void>((resolve) => openedWaiters.add(resolve))
+      if (openedFailure !== undefined) throw openedFailure
+      if (
+        pendingRecords.length === 0 &&
+        deliveringRecords.size === 0 &&
+        finishingRecords.size === 0
+      )
+        return
+      await new Promise<void>((resolve, reject) => openedWaiters.add({ resolve, reject }))
     },
     idle: async () => {
-      await Promise.allSettled([...finishingRecords])
+      if (openedFailure !== undefined) throw openedFailure
+      await Promise.allSettled([...deliveringRecords, ...finishingRecords])
+      if (openedFailure !== undefined) throw openedFailure
     },
     restore: async (records): Promise<void> => {
       await runAppLane(async () => {
@@ -1380,7 +1491,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     dispose: (): void => {
       disposed = true
-      notifyOpened()
       cancelBusyRetry?.()
       cancelBusyRetry = undefined
       busyTopics.clear()
@@ -1390,9 +1500,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
       if (retryTimer != null) clearTimeout(retryTimer)
       if (continuationTimer != null) clearTimeout(continuationTimer)
       caughtUpTimes.clear()
-      for (const worker of workers.values()) {
-        if (worker.timer != null) clearTimeout(worker.timer)
-      }
+      if (!openedDrainRequested)
+        for (const worker of workers.values()) {
+          if (worker.timer != null) clearTimeout(worker.timer)
+        }
     },
     reset: (): void => {
       const interrupted =

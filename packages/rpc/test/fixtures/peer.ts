@@ -41,6 +41,7 @@ import {
   encodeLedgerEntries,
 } from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
+import type { OpenedDeliveryContext } from '../../src/opened-delivery.js'
 import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer.js'
 import type { GroupPeerMLSParams, InternalOperations } from '../../src/peer-types.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
@@ -70,6 +71,7 @@ import {
   type MemoryGroupMLS,
   tagMemoryCommit,
 } from './memory-group-mls.js'
+import { openedDeliveryContext } from './opened-delivery.js'
 
 /**
  * `chat/changed` is EPHEMERAL — live push, nothing retained, nothing drainable — and every test
@@ -136,6 +138,7 @@ export async function rollBackForkHalt(member: TestPeer): Promise<{ settled: Pro
 }
 
 export type MakeMLSPeerOptions = {
+  openedDeliveryContext?: OpenedDeliveryContext
   recoveryOnly?: boolean
   continuation?: RecoveryContinuation | null
   completion?: RecoveryCompletion | null
@@ -275,6 +278,8 @@ export function makeMLSPeer(
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const ports = memoryControlPorts(mls, crypto, options.build ?? buildOperation, recoverySecret)
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
+    openedDeliveryContext:
+      'openedDeliveryContext' in options ? options.openedDeliveryContext : openedDeliveryContext,
     hub,
     crypto,
     mls,
@@ -339,7 +344,7 @@ export function makeMLSPeer(
     ...(options.onSubscribeFailed != null ? { onSubscribeFailed: options.onSubscribeFailed } : {}),
     localDID,
     protocols: { chat },
-    handlers: { chat: options.handlers ?? {} } as never,
+    handlers: { chat: { 'chat/posted': async () => {}, ...options.handlers } } as never,
     ...(options.operationTimeoutMs != null
       ? { operationTimeoutMs: options.operationTimeoutMs }
       : {}),

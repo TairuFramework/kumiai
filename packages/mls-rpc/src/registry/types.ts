@@ -6,6 +6,7 @@ import type {
   AppPublicationSnapshot,
   GroupCondition,
   LogPosition,
+  OpenedDeliveryContext,
   PreparedAppPublication,
   RecoverySource,
   ResyncProof,
@@ -23,6 +24,7 @@ import type {
   OpenAppInput,
   OpenAppResult,
   PackageUse,
+  PendingAppFrame,
   PendingAppFrames,
 } from '../persistence-types.js'
 import type { RecoveryEnvironment } from './validation.js'
@@ -130,6 +132,7 @@ export type GroupHandleRegistry = {
   access(groupID: string): Promise<RegistryHandleAccess>
   recoverySource(groupID: string): Promise<RegistryRecoverySource>
   delete(key: GroupKey): Promise<void>
+  drainOpened(key: GroupKey): Promise<void>
   dispose(): Promise<void>
 }
 export type ReadableGroupState = GroupStateRecord & { deleted: false; state: Uint8Array }
@@ -145,6 +148,9 @@ export type RetirementAttempt = {
 export type GroupHandleRegistryParams<TTx extends GroupTransaction> = {
   persistence: DevicePersistence<TTx>
   providerID: string
+  /** Required when deliverOpened is configured; shared by every peer and drain. */
+  openedDeliveryContext?: OpenedDeliveryContext
+  deliverOpened?: (record: PendingAppFrame) => Promise<void>
   recovery: RecoveryEnvironment
   restore(record: ReadableGroupState): Promise<GroupHandle>
   /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */

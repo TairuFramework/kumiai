@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { encodeEventFrame } from '@kumiai/broadcast'
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -154,6 +155,53 @@ test('failed and null handoff retry the same prepared bytes and ID', async () =>
     f.queue.close()
   }
 })
+
+test.each(['payload', 'plaintext', 'authenticator'] as const)(
+  'prepared Buffer %s stays isolated from producer mutation across handoffs',
+  async (field) => {
+    const f = fixture()
+    const plaintext = encodeEventFrame('chat/posted', {})
+    const bytes = Buffer.from(field === 'plaintext' ? plaintext : [1])
+    const prepare = f.prepare.getMockImplementation()
+    if (prepare === undefined) throw new Error('Missing preparation')
+    f.prepare.mockImplementation(async (...args) => {
+      const frame = await prepare(...args)
+      if (field === 'payload') frame.payload = bytes
+      else if (field === 'plaintext') frame.entry.data = bytes
+      else frame.snapshot.identity.authenticator = bytes
+      return frame
+    })
+    if (field === 'authenticator') {
+      const snapshot = f.getSnapshot()
+      if (snapshot === null) throw new Error('Missing snapshot')
+      f.setSnapshot({
+        ...snapshot,
+        identity: { ...snapshot.identity, authenticator: new Uint8Array([1]) },
+      })
+    }
+    const handoffs: Array<{ publishID: string; payload: Array<number> }> = []
+    f.publish.mockReset().mockImplementation((frame) => {
+      handoffs.push({ publishID: frame.publishID, payload: Array.from(frame.payload) })
+      return null
+    })
+    try {
+      await f.queue.accept({ protocol: 'chat', prc: 'chat/posted', data: plaintext })
+      f.worker.trigger()
+      await f.tick()
+      expect(handoffs).toHaveLength(1)
+      expect(handoffs[0]?.payload).toEqual([1])
+      bytes.fill(9)
+      await f.tick(1000)
+      expect(handoffs).toHaveLength(2)
+      expect(handoffs[1]).toEqual({ publishID: handoffs[0]?.publishID, payload: [1] })
+      expect(Array.from(f.queue.entries()[0]?.data ?? [])).toEqual(Array.from(plaintext))
+      expect(f.prepare).toHaveBeenCalledTimes(1)
+    } finally {
+      f.worker.close()
+      f.queue.close()
+    }
+  },
+)
 
 test.each(['epoch', 'authenticator', 'topic'] as const)(
   'identity or anchor movement invalidates an unproven prepared frame (%s)',
