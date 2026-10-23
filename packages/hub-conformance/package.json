@@ -16,10 +16,18 @@
   "sideEffects": false,
   "type": "module",
   "exports": {
-    ".": "./lib/index.js"
+    ".": "./lib/index.js",
+    "./purge-race": "./lib/purge-race.js"
   },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "purge-race": [
+        "./lib/purge-race.d.ts"
+      ]
+    }
+  },
   "files": [
     "lib/*"
   ],
