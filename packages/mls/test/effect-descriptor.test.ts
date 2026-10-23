@@ -1,3 +1,4 @@
+import * as controller from '@kokuin/controller'
 import {
   type ControllerLog,
   createDeviceRevoke,
@@ -8,15 +9,18 @@ import {
   deviceRevokeIndices,
   digestOf,
   epochHeads,
+  MAX_FAILED_SIGNATURES,
   snapshotOf,
 } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { foldControllerLog } from '../src/controller-log.js'
 import * as api from '../src/index.js'
 import type { EffectClaim } from '../src/member-root.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
+
+vi.mock('@kokuin/controller', { spy: true })
 
 function fold(did: string, log: ControllerLog) {
   const result = foldControllerLog(did, log)
@@ -377,4 +381,130 @@ test('claimsFor uses digest order independent of locale collation', async () => 
   })
   const claims = api.claimsFor(f.did, prior, { chain: [...prior.chain, dropped], events: [] }, 0)
   expect(claims.map((claim) => claim.kind === 'remove' && claim.member.add)).toEqual(['Z', 'a'])
+})
+
+test('claimsFor folds once when deriving and validating many event effects', async () => {
+  const f = await buildEpoch({ members: 1, revokes: 8 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const rmv = createRemove({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: member.add,
+  })
+  const log = { ...f.log, events: [...f.log.events, rmv] }
+  const spy = vi.spyOn(controller, 'foldLog')
+  spy.mockClear()
+  let claims: Array<EffectClaim>
+  try {
+    claims = api.claimsFor(f.did, undefined, log, 0)
+    expect(claims).toHaveLength(9)
+    expect(spy).toHaveBeenCalledTimes(1)
+  } finally {
+    spy.mockRestore()
+  }
+  for (const claim of claims) expect(() => api.effectOf(f.did, log, claim, 0)).not.toThrow()
+})
+
+test('claimsFor indexes snapshot drops once across repeated member snapshots', async () => {
+  const f = await buildEpoch({ members: 3 })
+  const first = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: f.inception.event,
+    snapshot: snapshotOf(f.head),
+  })
+  const second = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: first.event,
+    snapshot: snapshotOf(f.head),
+  })
+  const drop = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: second.event,
+    snapshot: { members: [], deny: [] },
+  })
+  const log = { chain: [f.inception, first, second, drop], events: [] }
+  const spy = vi.spyOn(controller, 'foldLog')
+  spy.mockClear()
+  let claims: Array<EffectClaim>
+  try {
+    claims = api.claimsFor(f.did, undefined, log, 0)
+    expect(claims).toHaveLength(3)
+    expect(spy).toHaveBeenCalledTimes(1)
+  } finally {
+    spy.mockRestore()
+  }
+  for (const claim of claims) {
+    expect(claim.ref).toEqual({ chainIndex: 3 })
+    expect(() => api.effectOf(f.did, log, claim, 0)).not.toThrow()
+  }
+})
+
+test('claimsFor keeps no-rev for an explicit removal without an admissible ref', async () => {
+  const f = await effects()
+  const removed = { ...f.log, events: [...f.log.events, f.rmv] }
+  expect(() => api.claimsFor(f.did, undefined, removed, 1)).toThrow(
+    expect.objectContaining({ reason: 'no-rev' }),
+  )
+  const reset = {
+    chain: [f.inception, createReset(f.seed, 0, 1)],
+    events: removed.events,
+  }
+  expect(() => api.claimsFor(f.did, f.log, reset, 1)).toThrow(
+    expect.objectContaining({ reason: 'no-rev' }),
+  )
+  const settle = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: f.inception.event,
+    snapshot: snapshotOf(fold(f.did, f.merged).head),
+  })
+  expect(() =>
+    api.claimsFor(f.did, f.log, { chain: [...f.log.chain, settle], events: [] }, 0),
+  ).toThrow(expect.objectContaining({ reason: 'no-rev' }))
+})
+
+test('claimsFor folds a refused historical epoch once and still uses an authenticated snapshot', async () => {
+  const f = await buildEpoch({ members: 0 })
+  const rev = createRevoke({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    target: 'did:key:edge',
+  })
+  const settle = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: f.inception.event,
+    snapshot: { members: [], deny: ['did:key:edge'] },
+  })
+  const log = {
+    chain: [f.inception, settle],
+    events: Array.from({ length: MAX_FAILED_SIGNATURES + 1 }, (_, index) => ({
+      ...rev,
+      event: { ...rev.event, x: `did:key:unrelated-${index}` },
+    })),
+  }
+  const spy = vi.spyOn(controller, 'foldLog')
+  spy.mockClear()
+  let claims: Array<EffectClaim>
+  try {
+    claims = api.claimsFor(f.did, undefined, log, 0)
+    expect(claims).toEqual([{ kind: 'deny', did: 'did:key:edge', ref: { chainIndex: 1 } }])
+    expect(spy).toHaveBeenCalledTimes(2)
+  } finally {
+    spy.mockRestore()
+  }
+  for (const claim of claims) expect(() => api.effectOf(f.did, log, claim, 0)).not.toThrow()
 })

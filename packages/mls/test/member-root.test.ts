@@ -3,6 +3,7 @@ import {
   type ControllerLog,
   createRemove,
   createReset,
+  createRevoke,
   createRotate,
   digestOf,
   epochHeads,
@@ -341,6 +342,51 @@ function removalLeaves() {
   ]
 }
 
+test('reset-only member loss emits no remove claim and cascades its leaves', () => {
+  const reset = createReset(f.seed, 0, 1)
+  const log = { chain: [f.inception, reset], events: [] }
+  expect(head(f.did, log).gen).toBe(1)
+  const claims = api.claimsFor(f.did, f.log, log, 0)
+  expect(claims).toEqual([])
+  for (const claim of claims) expect(() => api.effectOf(f.did, log, claim, 0)).not.toThrow()
+  const after = registryForLog(f.did, log)
+  expect(api.cascadeOf(removalLeaves(), claims, f.before, after, f.did)).toEqual({
+    revoked: [],
+    removed: [
+      { did: f.tokens.trusted.id, cascadedFrom: f.a.identity.id },
+      { did: f.leaf.did, cascadedFrom: f.a.identity.id },
+      { did: f.a.identity.id, cascadedFrom: f.a.identity.id },
+    ],
+    removeLeafIndices: [3, 4, 6],
+  })
+})
+
+test('root denial of an effective member emits only a deny claim and cascades its leaves', () => {
+  const rev = createRevoke({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    target: f.a.did,
+  })
+  const log = { chain: f.log.chain, events: [...f.log.events, rev] }
+  expect(head(f.did, log).members.get(f.a.add)?.effective).toBe(false)
+  const claims = api.claimsFor(f.did, f.log, log, 0)
+  expect(claims).toEqual([
+    { kind: 'deny', did: f.a.identity.id, ref: { event: digestOf(rev.event) } },
+  ])
+  for (const claim of claims) expect(() => api.effectOf(f.did, log, claim, 0)).not.toThrow()
+  const after = registryForLog(f.did, log)
+  expect(api.cascadeOf(removalLeaves(), claims, f.before, after, f.did)).toEqual({
+    revoked: [{ did: f.a.identity.id }],
+    removed: [
+      { did: f.tokens.trusted.id, cascadedFrom: f.a.identity.id },
+      { did: f.leaf.did, cascadedFrom: f.a.identity.id },
+    ],
+    removeLeafIndices: [3, 4, 6],
+  })
+})
+
 test("cascadeOf: rmv cascades a direct mbr leaf, a leaf whose parent came from the removed member, and the member's own membership leaf", () => {
   const leaves = removalLeaves()
   const result = api.cascadeOf(leaves, [removal()], f.before, f.after, f.did)
@@ -406,4 +452,68 @@ test('cascadeOf: rmv writes no revoked device records', () => {
   expect(before).toEqual(f.before)
   expect(after).toEqual(f.after)
   expect(api.denySetOf(after)).toEqual(new Set())
+})
+
+test('unavailable holder authority keeps a leaf with a tombstoned primary', () => {
+  const projection = f.after.controllers.get(f.did)
+  if (projection == null) throw new Error('Missing projection')
+  const after = {
+    ...f.after,
+    controllers: new Map([[f.did, { ...projection, recordedLog: saturated }]]),
+  }
+  const leaf = { ...f.leaf, leafIndex: 1, binding: { ...f.leaf.binding, holderGrant: f.holder } }
+  expect(
+    api.memberRootStatus(after, f.did, { kind: 'member', did: f.a.did, add: f.a.add, gen: 0 }),
+  ).toEqual({ status: 'removed' })
+  expect(
+    api.memberRootStatus(after, f.did, { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 }),
+  ).toEqual({ status: 'unavailable', why: 'saturated' })
+  expect(api.effectiveAuthorityOf(leaf, after, f.did)).toEqual({ status: 'unavailable' })
+  expect(api.cascadeOf([leaf], [removal()], f.before, after, f.did)).toEqual({
+    revoked: [],
+    removed: [],
+    removeLeafIndices: [],
+  })
+})
+
+test('registered survivor authority exempts a leaf when its former immediate issuer is denied', () => {
+  const projection = f.after.controllers.get(f.did)
+  if (projection == null) throw new Error('Missing projection')
+  const survivorGrants = new Map([[normalizeDID(f.leaf.did), f.holder]])
+  const before = {
+    ...f.after,
+    controllers: new Map([[f.did, { ...projection, survivorGrants }]]),
+  }
+  const rev = createRevoke({
+    did: f.did,
+    head: head(f.did, f.removedLog),
+    parents: epochHeads(f.did, f.removedLog),
+    signer: f.root,
+    target: f.tokens.trusted.id,
+  })
+  const log = { ...f.removedLog, events: [...f.removedLog.events, rev] }
+  const registry = registryForLog(f.did, log)
+  const updated = registry.controllers.get(f.did)
+  if (updated == null) throw new Error('Missing updated projection')
+  const after = {
+    ...registry,
+    controllers: new Map([[f.did, { ...updated, survivorGrants }]]),
+  }
+  const leaf = { ...f.leaf, leafIndex: 1 }
+  const authority = {
+    root: { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 },
+    slot: 'survivor',
+  }
+  expect(api.effectiveAuthorityOf(leaf, before, f.did)).toEqual(authority)
+  expect(api.effectiveAuthorityOf(leaf, after, f.did)).toEqual(authority)
+  const claims = api.claimsFor(f.did, f.removedLog, log, 0)
+  expect(claims).toEqual([
+    { kind: 'deny', did: f.tokens.trusted.id, ref: { event: digestOf(rev.event) } },
+  ])
+  for (const claim of claims) expect(() => api.effectOf(f.did, log, claim, 0)).not.toThrow()
+  expect(api.cascadeOf([leaf], claims, before, after, f.did)).toEqual({
+    revoked: [{ did: f.tokens.trusted.id }],
+    removed: [],
+    removeLeafIndices: [],
+  })
 })

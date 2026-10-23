@@ -9,7 +9,7 @@ import { normalizeDID } from '@kokuin/token'
 
 import { capabilityKey, readCapability } from './capability.js'
 import { effectDelta } from './controller-ingest.js'
-import { foldControllerLog, memberDropIndices, revokeIndices } from './controller-log.js'
+import { foldControllerLog } from './controller-log.js'
 import type { ControllerBinding } from './credential.js'
 import { LeafBindingError, RevokeProofError } from './errors.js'
 import type { ControllerProjection, DeviceRegistry, RevokedEffect } from './registry.js'
@@ -78,25 +78,74 @@ function denies(state: KeyState, did: string): boolean {
   return [...state.deny].some((entry) => normalizeDID(entry) === normalizeDID(did))
 }
 
-export function effectOf(
-  controller: string,
+function effectProofs(did: string, log: ControllerLog) {
+  const folded = foldedLog(did, log)
+  const events = new Map(log.events.map((signed) => [digestOf(signed.event), signed]))
+  const anchors = new Map(folded.states.map((state, index) => [state.digest, index]))
+  const views = new Map<string, { folded: FoldResult; applied: Set<string> }>([
+    [folded.head.epoch, { folded, applied: new Set(folded.applied) }],
+  ])
+  const drops = new Map<string, Array<number>>()
+  const revokes = new Map<string, Array<number>>()
+  const snapshots = new Map<string, Array<number>>()
+  const denials = folded.states.map((state) => new Set([...state.deny].map(normalizeDID)))
+  const rootOnly = log.chain.every(({ event }, index) => event.t === (index === 0 ? 'icp' : 'rot'))
+  const append = (indices: Map<string, Array<number>>, target: string, index: number) => {
+    const held = indices.get(target) ?? []
+    held.push(index)
+    indices.set(target, held)
+  }
+  for (let index = 1; index < folded.states.length; index++) {
+    const state = folded.states[index]
+    const prior = folded.states[index - 1]
+    if (state == null || prior == null || log.chain[index]?.event.t !== 'rot') continue
+    for (const target of denials[index] ?? []) {
+      if (state.gen > prior.gen) append(snapshots, target, index)
+      else if (rootOnly && state.gen === prior.gen && !denials[index - 1]?.has(target))
+        append(revokes, target, index)
+    }
+    if (state.gen !== prior.gen) continue
+    for (const [add, member] of prior.members) {
+      if (!member.removed && !state.members.has(add)) append(drops, add, index)
+    }
+  }
+  const viewAt = (epoch: string | undefined) => {
+    if (epoch == null) return views.get(folded.head.epoch)
+    const held = views.get(epoch)
+    if (held != null) return held
+    const anchor = anchors.get(epoch)
+    if (anchor == null) return undefined
+    const historical = foldControllerLog(did, {
+      chain: log.chain.slice(0, anchor + 1),
+      events: log.events,
+    })
+    const view = {
+      folded: historical,
+      applied: new Set(historical.ok ? historical.applied : []),
+    }
+    views.set(epoch, view)
+    return view
+  }
+  return { folded, events, drops, revokes, snapshots, viewAt }
+}
+
+function checkEffect(
   log: ControllerLog,
   claim: EffectClaim,
   genFloor: number,
+  proofs: ReturnType<typeof effectProofs>,
 ): void {
-  const did = normalizeDID(controller)
-  let folded = foldedLog(did, log)
+  let folded = proofs.folded
   const ref = claim.ref
   if ('event' in ref) {
-    if (ref.epoch != null) {
-      const anchor = folded.states.findIndex((state) => state.digest === ref.epoch)
-      if (anchor === -1) throw new RevokeProofError('no-rev')
-      folded = foldedLog(did, { chain: log.chain.slice(0, anchor + 1), events: log.events })
-    }
-    const signed = log.events.find(({ event }) => digestOf(event) === ref.event)
+    const view = proofs.viewAt(ref.epoch)
+    if (view == null) throw new RevokeProofError('no-rev')
+    if (!view.folded.ok) throw new RevokeProofError('effects-mismatch')
+    folded = view.folded
+    const signed = proofs.events.get(ref.event)
     if (signed == null) throw new RevokeProofError('no-rev')
     const event = signed.event
-    if (!folded.applied.includes(ref.event)) throw new RevokeProofError('effects-mismatch')
+    if (!view.applied.has(ref.event)) throw new RevokeProofError('effects-mismatch')
     if (event.g < genFloor) throw new RevokeProofError('generation-floor')
     if (claim.kind === 'deny') {
       if (event.t !== 'rev' || normalizeDID(event.x) !== normalizeDID(claim.did))
@@ -122,16 +171,24 @@ export function effectOf(
     if (claim.kind !== 'deny' || state.gen <= prior.gen || !denies(state, claim.did))
       throw new RevokeProofError('effects-mismatch')
   } else if (claim.kind === 'deny') {
-    if (!revokeIndices(did, log.chain, claim.did).includes(index))
+    if (!proofs.revokes.get(normalizeDID(claim.did))?.includes(index))
       throw new RevokeProofError('no-rev')
   } else {
     const member = prior.members.get(claim.member.add)
     if (member != null && normalizeDID(member.did) !== normalizeDID(claim.member.did))
       throw new RevokeProofError('effects-mismatch')
-    if (!memberDropIndices(did, log.chain, claim.member.add).includes(index))
-      throw new RevokeProofError('no-rev')
+    if (!proofs.drops.get(claim.member.add)?.includes(index)) throw new RevokeProofError('no-rev')
   }
   if (state.gen < genFloor) throw new RevokeProofError('generation-floor')
+}
+
+export function effectOf(
+  controller: string,
+  log: ControllerLog,
+  claim: EffectClaim,
+  genFloor: number,
+): void {
+  checkEffect(log, claim, genFloor, effectProofs(normalizeDID(controller), log))
 }
 
 export function claimsFor(
@@ -142,14 +199,40 @@ export function claimsFor(
 ): Array<EffectClaim> {
   const did = normalizeDID(controller)
   const before = recorded == null ? undefined : foldedLog(did, recorded)
-  const after = foldedLog(did, merged)
+  const proofs = effectProofs(did, merged)
+  const after = proofs.folded
   const delta = effectDelta(before?.head, after.head)
+  const eventClaims = new Map<string, Array<{ claim: EffectClaim; gen: number }>>()
+  // Authenticate each supplied epoch once, including retained pre-settlement closures.
+  for (const [digest, { event }] of proofs.events) {
+    if (event.t !== 'rev' && event.t !== 'rmv') continue
+    const view = proofs.viewAt(event.e)
+    if (view == null || !view.folded.ok || !view.applied.has(digest)) continue
+    const ref: ProofRef = {
+      event: digest,
+      ...(event.e === after.head.epoch ? {} : { epoch: event.e }),
+    }
+    let target: string
+    let claim: EffectClaim
+    if (event.t === 'rev') {
+      target = `deny:${normalizeDID(event.x)}`
+      claim = { kind: 'deny', did: normalizeDID(event.x), ref }
+    } else {
+      const member = view.folded.head.members.get(event.add)
+      if (member == null) continue
+      target = `remove:${event.add}`
+      claim = { kind: 'remove', member: { did: normalizeDID(member.did), add: event.add }, ref }
+    }
+    const held = eventClaims.get(target) ?? []
+    held.push({ claim, gen: event.g })
+    eventClaims.set(target, held)
+  }
   const removed = new Map(delta.removed.map((member) => [member.add, member]))
   if (before == null) {
     for (const state of [...after.states, after.head]) {
       for (const [add, member] of state.members) {
         if (after.head.members.get(add)?.effective) continue
-        if (member.removed || memberDropIndices(did, merged.chain, add).length > 0)
+        if (member.removed || proofs.drops.has(add))
           removed.set(add, { did: normalizeDID(member.did), add })
       }
     }
@@ -160,42 +243,45 @@ export function claimsFor(
       .sort((a, b) => (a.add < b.add ? -1 : a.add > b.add ? 1 : 0))
       .map((member): EffectTarget => ({ kind: 'remove', member })),
   ]
-  return claims.map((claim) => {
+  return claims.flatMap((claim): Array<EffectClaim> => {
     const floor = claim.kind === 'deny' ? Math.max(genFloor, after.head.gen) : genFloor
-    // Old-epoch copies remain in the entry even when the authoritative projection prunes them.
-    for (const { event } of merged.events) {
-      if (event.t !== (claim.kind === 'deny' ? 'rev' : 'rmv')) continue
-      const ref: ProofRef = {
-        event: digestOf(event),
-        ...('e' in event && event.e !== after.head.epoch ? { epoch: event.e } : {}),
-      }
-      const candidate = { ...claim, ref }
-      try {
-        effectOf(did, merged, candidate, floor)
-        return candidate
-      } catch (cause) {
-        if (!(cause instanceof RevokeProofError)) throw cause
-      }
+    const target = claim.kind === 'deny' ? `deny:${claim.did}` : `remove:${claim.member.add}`
+    const event = eventClaims.get(target)?.find(({ claim: candidate, gen }) => {
+      return (
+        gen >= floor &&
+        (claim.kind === 'deny' ||
+          (candidate.kind === 'remove' && candidate.member.did === claim.member.did))
+      )
+    })
+    if (event != null) {
+      checkEffect(merged, event.claim, floor, proofs)
+      return [event.claim]
     }
     const indices =
-      claim.kind === 'deny'
-        ? revokeIndices(did, merged.chain, claim.did)
-        : memberDropIndices(did, merged.chain, claim.member.add)
-    const index = indices.find((index) => (after.states[index]?.gen ?? -1) >= floor)
-    if (index != null) return { ...claim, ref: { chainIndex: index } }
+      claim.kind === 'deny' ? proofs.revokes.get(claim.did) : proofs.drops.get(claim.member.add)
+    const index = indices?.find((index) => (after.states[index]?.gen ?? -1) >= floor)
+    let ref: ProofRef | undefined = index == null ? undefined : { chainIndex: index }
     if (claim.kind === 'deny') {
-      const snapshot = after.states.findIndex((state, index) => {
-        const prior = after.states[index - 1]
-        return (
-          merged.chain[index]?.event.t === 'rot' &&
-          prior != null &&
-          state.gen > prior.gen &&
-          state.gen >= floor &&
-          denies(state, claim.did)
-        )
-      })
-      if (snapshot !== -1) return { ...claim, ref: { snapshot } }
+      const snapshot = proofs.snapshots
+        .get(claim.did)
+        ?.find((index) => (after.states[index]?.gen ?? -1) >= floor)
+      if (ref == null && snapshot != null) ref = { snapshot }
     }
+    if (ref != null) {
+      const candidate = { ...claim, ref }
+      checkEffect(merged, candidate, floor, proofs)
+      return [candidate]
+    }
+    // Generation changes and DID denials end authority without an explicit removal proof.
+    if (
+      claim.kind === 'remove' &&
+      before != null &&
+      !after.head.members.get(claim.member.add)?.removed &&
+      !proofs.drops.has(claim.member.add) &&
+      !eventClaims.has(target) &&
+      (before.head.gen !== after.head.gen || denies(after.head, claim.member.did))
+    )
+      return []
     throw new RevokeProofError('no-rev')
   })
 }
@@ -289,14 +375,16 @@ export function effectiveAuthorityOf(
     { slot: 'holder', raw: leaf.binding.holderGrant },
     { slot: 'survivor', raw: projection?.survivorGrants.get(normalizeDID(leaf.did)) },
   ]
+  let unavailable = false
   for (const { slot, raw } of substitutes) {
     if (raw == null) continue
     const root = substituteRoot(raw, leaf)
     if (root == null) continue
     const status = memberRootStatus(registry, did, root)
     if (status.status === 'root' || status.status === 'effective') return { root, slot }
+    if (status.status === 'unavailable') unavailable = true
   }
-  return { status: 'removed' }
+  return { status: unavailable ? 'unavailable' : 'removed' }
 }
 
 export function cascadeOf(
@@ -327,10 +415,13 @@ export function cascadeOf(
       leaf.binding.holderGrant == null ? undefined : substituteRoot(leaf.binding.holderGrant, leaf)
     const holderStatus =
       holderRoot == null ? undefined : memberRootStatus(after, controller, holderRoot)
+    const authority = effectiveAuthorityOf(leaf, after, controller)
     const evidenced =
       !direct.has(did) &&
       after.devices.get(did)?.status !== 'revoked' &&
-      (holderStatus?.status === 'root' || holderStatus?.status === 'effective')
+      (holderStatus?.status === 'root' ||
+        holderStatus?.status === 'effective' ||
+        ('root' in authority && authority.slot === 'survivor'))
     if (issuer != null && direct.has(issuer) && !direct.has(did) && !evidenced) {
       if (!affected.has(did)) revoked.push({ did, cascadedFrom: issuer })
       affected.add(did)
@@ -339,8 +430,6 @@ export function cascadeOf(
       removeLeafIndices.push(leaf.leafIndex)
       continue
     }
-    if (!claims.some((claim) => claim.kind === 'remove')) continue
-    const authority = effectiveAuthorityOf(leaf, after, controller)
     if (!('status' in authority) || authority.status !== 'removed') continue
     const prior = effectiveAuthorityOf(leaf, before, controller)
     const root = 'root' in prior ? prior.root : memberRootsOf(leaf.binding, leaf.did)[0]?.root
