@@ -181,6 +181,15 @@ export {
 } from './ledger.js'
 export { type AssertRecoveryBindingParams, assertRecoveryBinding } from './lifecycle.js'
 export {
+  type EffectClaim,
+  type EvidenceSlot,
+  type MemberRoot,
+  memberRootsOf,
+  type ProofRef,
+  type RemovedEffect,
+  type RemovedMember,
+} from './member-root.js'
+export {
   type CommitPolicyContext,
   defaultCommitPolicy,
   MissingLedgerEntriesError,
@@ -253,6 +262,6 @@ export {
   roleReducer,
 } from './roster.js'
 export { mergeReceiveSecretTree } from './secret-tree.js'
-export { DuplicateMemberLeafError } from './stale-leaf.js'
+export { bindingIssuedAt, DuplicateMemberLeafError } from './stale-leaf.js'
 export type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 export { welcomeKeyPackageRefs } from './welcome-refs.js'

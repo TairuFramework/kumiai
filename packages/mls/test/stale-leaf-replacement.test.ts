@@ -21,8 +21,10 @@ import {
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
+import { bindingIssuedAt } from '../src/index.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
 import { leafAt } from '../src/lifecycle.js'
+import { assertNewerBinding } from '../src/stale-leaf.js'
 import {
   agent,
   lowLevelWelcome,
@@ -36,6 +38,28 @@ beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(150_000))
 afterEach(() => vi.restoreAllMocks())
 
 const utf8 = new TextEncoder()
+
+test('assertNewerBinding orders a membership binding against a capability binding by bindingIssuedAt', async () => {
+  const { group, identity } = await pipelineGroup()
+  const capability = await timedBinding({ identity, iat: 100, exp: 200 })
+  const membership: ControllerBinding = {
+    id: capability.id,
+    prefix: capability.prefix,
+    member: { add: 'member-add', g: 0 },
+    iat: 120,
+  }
+  const old = (await rawBundle(group, identity, capability)).publicPackage.leafNode
+  const next = { ...old, credential: makeMLSCredential(identity, membership) }
+  expect(bindingIssuedAt(capability)).toBe(100)
+  expect(bindingIssuedAt(membership)).toBe(120)
+  expect(() => assertNewerBinding(next, old)).not.toThrow()
+  expect(() => assertNewerBinding(old, next)).toThrow(
+    expect.objectContaining({ reason: 'renewal-order' }),
+  )
+  expect(() => assertNewerBinding(next, next)).toThrow(
+    expect.objectContaining({ reason: 'renewal-order' }),
+  )
+})
 
 /** An own-agents group of A, a stale leaf for B whose handle is lost, and a live C. */
 async function staleGroup() {

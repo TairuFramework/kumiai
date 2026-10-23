@@ -13,6 +13,7 @@ import { controlCapabilities } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
 import { readCapability } from './capability.js'
 import type { ControllerBinding, MLSCredentialIdentity } from './credential.js'
+import { LeafBindingError } from './errors.js'
 import { resolveMlsContext } from './group-context.js'
 import type { GroupOptions, KeyPackageBundle } from './types.js'
 
@@ -43,6 +44,13 @@ export function makeMLSCredential(
 
 export function assertBindingAuthorTime(controller?: ControllerBinding): void {
   if (controller == null) return
+  if (controller.member != null) {
+    if (controller.iat == null || !Number.isFinite(controller.iat) || controller.iat > now()) {
+      throw new Error('Membership binding is not valid at authoring time')
+    }
+    return
+  }
+  if (controller.capability == null) throw new LeafBindingError('controller-mismatch')
   const { iat, exp } = readCapability(controller.capability).payload
   const timestamp = now()
   if (exp <= timestamp || iat > timestamp) {

@@ -1737,6 +1737,8 @@ export class GroupHandle {
               controller: parsed.controller.id,
               prefix: parsed.controller.prefix,
               capability: parsed.controller.capability,
+              ...(parsed.controller.member == null ? {} : { member: parsed.controller.member }),
+              ...(parsed.controller.iat == null ? {} : { iat: parsed.controller.iat }),
               ...(parsed.controller.holderGrant == null
                 ? {}
                 : { holderGrant: parsed.controller.holderGrant }),

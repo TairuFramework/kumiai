@@ -109,6 +109,7 @@ export type MintLeafCapabilityParams = {
   leafKey: Uint8Array
   exp: number
   parent?: string
+  member?: { add: string; g: number }
 }
 
 export type MintTrustedGrantParams = Omit<MintLeafCapabilityParams, 'parent'>
@@ -136,6 +137,7 @@ function issuingPayload(params: MintTrustedGrantParams, maximum: number) {
     cnf,
     iat,
     exp: params.exp,
+    ...(params.member == null ? {} : { mbr: params.member }),
   }
 }
 
@@ -145,7 +147,9 @@ export async function mintLeafCapability(params: MintLeafCapabilityParams): Prom
     throw new LeafBindingError('self-issued')
   }
   if (params.parent == null) {
-    assertControllerGrant({ ...payload, iss: params.signer.id }, params.controllerID)
+    if (params.member == null) {
+      assertControllerGrant({ ...payload, iss: params.signer.id }, params.controllerID)
+    }
   } else {
     // Issuing has no controller prefix; receivers authenticate the embedded parent.
     const parent = readCapability(params.parent)
@@ -180,6 +184,11 @@ export async function mintLeafCapability(params: MintLeafCapabilityParams): Prom
 
 export async function mintTrustedGrant(params: MintTrustedGrantParams): Promise<string> {
   const payload = issuingPayload(params, MAX_TRUSTED_GRANT_LIFETIME)
-  assertControllerGrant({ ...payload, iss: params.signer.id }, params.controllerID)
+  if (normalizeDID(params.audience) === normalizeDID(params.signer.id)) {
+    throw new LeafBindingError('self-issued')
+  }
+  if (params.member == null) {
+    assertControllerGrant({ ...payload, iss: params.signer.id }, params.controllerID)
+  }
   return stringifyToken(await params.signer.signToken(payload))
 }

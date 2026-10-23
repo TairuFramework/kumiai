@@ -16,6 +16,33 @@ const payloadOf = (token: string): Record<string, unknown> => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('capability issuing', () => {
+  test('mintLeafCapability with member writes mbr and refuses self-issue', async () => {
+    const f = await leafCapabilityFixture()
+    vi.spyOn(Date, 'now').mockReturnValue(2000000)
+    const params = {
+      signer: f.trusted,
+      controllerID: f.controller.id,
+      audience: f.device.id,
+      leafKey: f.device.publicKey,
+      exp: 3000,
+      member: { add: 'member-add', g: 0 },
+    }
+    for (const mint of [mls.mintLeafCapability, mls.mintTrustedGrant]) {
+      const token = await mint(params)
+      expect(payloadOf(token)).toMatchObject({
+        iss: f.trusted.id,
+        sub: f.controller.id,
+        aud: f.device.id,
+        mbr: { add: 'member-add', g: 0 },
+        iat: 2000,
+        exp: 3000,
+      })
+      await expect(mint({ ...params, audience: f.trusted.id })).rejects.toMatchObject({
+        reason: 'self-issued',
+      })
+    }
+  })
+
   test('mints a direct leaf at the seven-day ceiling with the required pins', async () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)

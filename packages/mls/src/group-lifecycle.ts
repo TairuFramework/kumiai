@@ -111,6 +111,7 @@ async function clockEntries(
     if (node?.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) continue
     const binding = parseMLSCredentialIdentity(node.leaf.credential.identity).controller
     if (binding == null || normalizeDID(binding.id) !== normalizeDID(controller)) continue
+    if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
     const payload = readCapability(binding.capability).payload
     const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
     after = Math.max(after, parent == null ? payload.iat : readCapability(parent).payload.iat)

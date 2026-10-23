@@ -49,6 +49,7 @@ async function fixture() {
   })
   delete binding.holderGrant
   const grant = await timedBinding({ identity: device, iat: 100, exp: 1000 })
+  if (grant.capability == null) throw new Error('Missing holder grant')
   const evidenced: ControllerBinding & { holderGrant: string } = {
     ...binding,
     holderGrant: grant.capability,

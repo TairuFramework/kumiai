@@ -241,6 +241,7 @@ export function checkHolderEvidence(
 ): string | undefined {
   const binding = parsed.controller
   if (binding == null) return
+  if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   const leafPayload = readCapability(binding.capability).payload
   if (leafPayload.cap === undefined) return
   if (binding.holderGrant == null) throw new LeafBindingError('missing-holder-evidence')
@@ -279,6 +280,7 @@ export function hasHolderEvidence(
 ): boolean {
   const binding = parsed.controller
   if (binding == null || isDenied(denied, parsed.id)) return false
+  if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   try {
     if (readCapability(binding.capability).payload.cap === undefined) return false
     return checkHolderEvidence(parsed, signaturePublicKey, trustedGrantLifetime) != null
@@ -307,6 +309,7 @@ export async function verifyLeafCredential(
     ? new Set([...denied].filter((did) => normalizeDID(did) !== normalizeDID(parsed.id)))
     : denied
   if (parsed.controller == null) return
+  if (parsed.controller.capability == null) throw new LeafBindingError('controller-mismatch')
   if (registry != null) {
     const folded = foldChain(parsed.controller.id, parsed.controller.prefix)
     if (!folded.ok) throw new LeafBindingError('controller-mismatch')

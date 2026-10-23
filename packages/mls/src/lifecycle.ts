@@ -62,7 +62,11 @@ function identity(leaf: LeafNode) {
   ) {
     throw new LeafBindingError('identity-change')
   }
-  return parseMLSCredentialIdentity(leaf.credential.identity)
+  const parsed = parseMLSCredentialIdentity(leaf.credential.identity)
+  if (parsed.controller == null) return { ...parsed, controller: undefined }
+  const capability = parsed.controller.capability
+  if (capability == null) throw new LeafBindingError('controller-mismatch')
+  return { ...parsed, controller: { ...parsed.controller, capability } }
 }
 
 export function leafAt(tree: ClientState['ratchetTree'], index: number): LeafNode | undefined {
@@ -133,6 +137,8 @@ function replacesRevokedIssuer(
 ): boolean {
   const controller = group.anchor.controller
   if (controller == null || normalizeDID(binding.id) !== normalizeDID(controller)) return false
+  if (binding.capability == null || old.capability == null)
+    throw new LeafBindingError('controller-mismatch')
   if (readCapability(binding.capability).payload.cap !== undefined) return false
   const current = readCapability(old.capability).payload
   return (
