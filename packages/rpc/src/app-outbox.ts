@@ -93,6 +93,7 @@ export type AppOutboxAcceptanceParams = {
 export type AppOutboxAcceptance = {
   ready: () => Promise<void>
   accept: (input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>) => Promise<void>
+  enqueue: (input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>) => Promise<number>
   entries: () => Array<AppOutboxEntry>
   lowestUnresolvedSeq: () => number | null
   replace: (entry: AppOutboxEntry) => void
@@ -137,9 +138,9 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): Ap
   }
   void load()
 
-  const accept = async (
+  const enqueue = async (
     input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>,
-  ): Promise<void> => {
+  ): Promise<number> => {
     if (params.admissionReady !== undefined) await params.admissionReady()
     // Later calls must join the handoff until earlier waiters have resumed.
     if (!listed || waiting > 0) {
@@ -174,6 +175,7 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): Ap
     try {
       await params.outbox.put(entry)
       accepted.set(seq, entry)
+      return seq
     } finally {
       reservations.delete(seq)
     }
@@ -181,7 +183,10 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): Ap
 
   return {
     ready: () => ready,
-    accept,
+    accept: async (input) => {
+      await enqueue(input)
+    },
+    enqueue,
     entries: (): Array<AppOutboxEntry> => [...accepted.values()].sort((a, b) => a.seq - b.seq),
     lowestUnresolvedSeq: (): number | null => {
       const first = reservations.values().next()

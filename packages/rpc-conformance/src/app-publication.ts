@@ -229,21 +229,54 @@ export function testAppPublicationConformance(params: {
         }
       },
     )
-    test.each(['epoch', 'incarnation', 'anchor'] as const)(
+    test.each(['version', 'epoch', 'incarnation', 'anchor'] as const)(
       'prepare refuses moved identity and anchor (%s)',
       async (kind) => {
         const f = await params.createFixture()
+        let release = () => {}
+        let pending: Promise<unknown> | undefined
         try {
           await f.outbox.put(entry())
           const first = await f.publication.prepare(entry(), null)
+          const gate = f.gateNext('prepare')
+          release = gate.release
+          let releasedPayload = false
+          pending = f.publication
+            .prepare(first.entry, null)
+            .then((frame) => {
+              releasedPayload = true
+              return frame
+            })
+            .catch((error: unknown) => error)
+          await gate.entered
           await f.change(kind)
           const snapshot = await f.publication.snapshot('chat')
-          if (snapshot !== null) {
-            expect(JSON.stringify([snapshot.identity, snapshot.topicID])).not.toBe(
-              JSON.stringify([first.snapshot.identity, first.snapshot.topicID]),
-            )
+          if (kind === 'incarnation') expect(snapshot).toBeNull()
+          else {
+            expect(snapshot).not.toBeNull()
+            if (snapshot === null) throw new Error('Missing active snapshot')
+            if (kind === 'version')
+              expect(snapshot.stateVersion).not.toBe(first.snapshot.stateVersion)
+            else
+              expect(JSON.stringify([snapshot.identity, snapshot.topicID])).not.toBe(
+                JSON.stringify([first.snapshot.identity, first.snapshot.topicID]),
+              )
           }
+          const rows = await f.rows()
+          const entries = await f.outbox.list()
+          const counts = f.counts()
+          gate.release()
+          expect(await pending).toBeInstanceOf(Error)
+          expect(releasedPayload).toBe(false)
+          expect(f.counts().seals).toBe(counts.seals)
+          expect(f.counts().publishes).toBe(counts.publishes)
+          expect(f.counts().effects).toBe(counts.effects)
+          expect(await f.outbox.list()).toEqual(entries)
+          expect(await f.rows()).toEqual(rows)
+          if (kind === 'incarnation') expect(await f.publication.snapshot('chat')).toBeNull()
         } finally {
+          release()
+          await pending
           await f.close()
         }
       },

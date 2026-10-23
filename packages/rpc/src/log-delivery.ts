@@ -8,6 +8,7 @@ import type {
 } from './app-publication.js'
 import type { SafetyHold } from './control/safety.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
+import { AppOutboxFullError } from './errors.js'
 
 export type EpochFloor = { epoch: number; position: LogPosition | null; covered: boolean }
 export type AppOutboxCleared = { reason: 'removed'; seqs: Array<number> }
@@ -195,7 +196,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     // A failed durable removal retries alone, even after another epoch arrives.
     if (!(await removeProven())) return
     if (safetyHeld()) return
-    // Sent again ahead of the queue, so a rejoined member reads them in their original order.
+    // Prefer resends in original order; a full queue must drain before admitting them.
     while (resend.length > 0) {
       const next = resend[0]
       if (next == null || closed || handoffHeld()) return
@@ -206,9 +207,12 @@ export function createLogDelivery(params: LogDeliveryParams) {
         continue
       }
       if (next.seq === undefined) {
-        const before = new Set(params.queue.entries().map((entry) => entry.seq))
-        await params.queue.accept(next)
-        next.seq = params.queue.entries().find((entry) => !before.has(entry.seq))?.seq
+        try {
+          next.seq = await params.queue.enqueue(next)
+        } catch (error) {
+          if (error instanceof AppOutboxFullError) break
+          throw error
+        }
       }
       const entry = params.queue.entries().find((entry) => entry.seq === next.seq)
       if (entry === undefined) {

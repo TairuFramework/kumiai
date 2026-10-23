@@ -61,6 +61,10 @@ export async function createAppPublicationFixture(
     const capability = entryCapability(fixture.device.groups)
     if (live === undefined || capability === null)
       throw new Error('Missing registry instrumentation')
+    let prepareGate: {
+      entered: ReturnType<typeof Promise.withResolvers<void>>
+      released: ReturnType<typeof Promise.withResolvers<void>>
+    } | null = null
     counts.seals = 0
     counts.transactions = 0
     counts.publishes = 0
@@ -73,6 +77,12 @@ export async function createAppPublicationFixture(
     const run = capability.run.bind(capability)
     capability.run = async (request, prepare, work) => {
       counts.transactions++
+      const gate = prepareGate
+      prepareGate = null
+      if (gate !== null) {
+        gate.entered.resolve()
+        await gate.released.promise
+      }
       return await run(request, prepare, async (stores, value) => {
         const incarnation = stores.incarnation.bind(stores)
         stores.incarnation = (number) => {
@@ -120,6 +130,11 @@ export async function createAppPublicationFixture(
       gateNext(stage) {
         const entered = Promise.withResolvers<void>()
         const released = Promise.withResolvers<void>()
+        // Suspend after source capture, before ownership, so genuine movement can win the queue.
+        if (stage === 'prepare') {
+          prepareGate = { entered, released }
+          return { entered: entered.promise, release: () => released.resolve() }
+        }
         const phase =
           stage === 'before-commit' ? 'finalise' : stage === 'after-commit' ? 'account' : stage
         let used = false

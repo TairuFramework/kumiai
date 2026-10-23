@@ -323,6 +323,7 @@ export type ConformanceEntryReads<Position extends string = string> = {
 }
 export type ConformancePrepared<T> = { expected: ConformanceGroupTransition['expected']; value: T }
 export type ConformanceEntryCapability<TTx extends ConformanceGroupTransaction> = {
+  assertRoot(): void
   observe(
     groupID: string,
     onProof: (observation: ConformanceAccountedGroupObservation) => void,

@@ -67,6 +67,7 @@ export type Prepared<T> = {
   value: T
 }
 export type EntryCapability<TTx extends GroupTransaction> = {
+  assertRoot(): void
   activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
   failureSignal?: AbortSignal
   observe(

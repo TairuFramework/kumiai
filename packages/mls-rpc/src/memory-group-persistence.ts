@@ -1417,6 +1417,11 @@ export function createMemoryGroupCoordinator(params: {
     resolve,
   }
   const capability: EntryCapability<MemoryTransaction> = {
+    assertRoot() {
+      if (owners.failure !== null) throw owners.failure
+      if (owners.current() !== undefined)
+        throw new ReentrantOwnershipError('Root persistence call inside an owner entry')
+    },
     activity: (groupID, excludingMutationID) => owners.activity(groupID, excludingMutationID),
     failureSignal: owners.failureSignal,
     observe(groupID, onProof, afterRelease) {

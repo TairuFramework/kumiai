@@ -11,7 +11,7 @@ const flush = async () => {
 }
 afterEach(() => vi.useRealTimers())
 
-function fixture() {
+function fixture(limit = 8) {
   vi.useFakeTimers()
   let snapshot: AppPublicationSnapshot | null = {
     identity: { groupID: 'retry', incarnation: 1, epoch: 2, authenticator: new Uint8Array([2]) },
@@ -30,7 +30,7 @@ function fixture() {
     allowed
       ? { admissible: true as const, epoch: 2 }
       : { admissible: false as const, reason: 'rotation-required' as const, epoch: 2 }
-  let queue = createAppOutboxAcceptance({ outbox, limit: 8, admission })
+  let queue = createAppOutboxAcceptance({ outbox, limit, admission })
   const prepare = vi.fn(
     async (entry: AppOutboxEntry, floor: string | null): Promise<PreparedAppPublication> => {
       if (snapshot === null) throw new Error('Retired')
@@ -66,6 +66,14 @@ function fixture() {
     .mockRejectedValueOnce(new Error('offline'))
     .mockReturnValueOnce(null)
     .mockResolvedValue({ sequenceID: 'accepted' })
+  const probe = vi.fn(async () => {
+    return {
+      messages: [],
+      head: 'commit' as string | null,
+      gap: false,
+      oldest: null,
+    }
+  })
   const makeWorker = () =>
     createLogDelivery({
       queue,
@@ -77,7 +85,7 @@ function fixture() {
       snapshot: async () => structuredClone(snapshot),
       loadSettlement: (seq) => outbox.loadSettlement(seq),
       publish,
-      probe: async () => ({ messages: [], head: 'commit', gap: false, oldest: null }),
+      probe,
       pull: async () => {},
       heal: async () => {},
       remove: (seq) => outbox.remove(seq),
@@ -93,6 +101,7 @@ function fixture() {
     },
     prepare,
     publish,
+    probe,
     get worker() {
       return worker
     },
@@ -106,7 +115,7 @@ function fixture() {
     restart() {
       worker.close()
       queue.close()
-      queue = createAppOutboxAcceptance({ outbox, limit: 8, admission })
+      queue = createAppOutboxAcceptance({ outbox, limit, admission })
       worker = makeWorker()
     },
     setSnapshot: (value: AppPublicationSnapshot | null) => {
@@ -304,6 +313,95 @@ test('unavailable snapshot preserves prepared bytes until a fresh source is know
     expect(f.prepare).toHaveBeenCalledTimes(1)
     expect(f.publish.mock.calls[1]?.[0]).toEqual(f.publish.mock.calls[0]?.[0])
   } finally {
+    f.worker.close()
+    f.queue.close()
+  }
+})
+
+const message = (text: string) => {
+  return {
+    protocol: 'chat',
+    prc: 'chat/posted',
+    data: encodeEventFrame('chat/posted', { text }),
+  }
+}
+
+test('a full outbox makes progress during rejoin and preserves resend order', async () => {
+  const f = fixture(2)
+  f.publish.mockReset().mockResolvedValue({ sequenceID: 'accepted' })
+  f.probe.mockResolvedValue({ messages: [], head: null, gap: false, oldest: null })
+  try {
+    await f.queue.accept(message('old-first'))
+    await f.queue.accept(message('old-second'))
+    f.worker.trigger()
+    await f.tick()
+    expect(f.queue.entries()).toEqual([])
+    await f.queue.accept(message('queued-first'))
+    await f.queue.accept(message('queued-second'))
+    f.worker.rejoined(2)
+    await f.tick()
+    await f.tick(1000)
+    expect(f.publish).toHaveBeenCalledTimes(6)
+    expect(f.queue.entries()).toEqual([])
+    const originals = [message('old-first').data, message('old-second').data]
+    const resends = f.prepare.mock.calls
+      .slice(2)
+      .map(([entry]) => entry.data)
+      .filter((data) => {
+        return originals.some(
+          (old) => old.length === data.length && old.every((byte, index) => byte === data[index]),
+        )
+      })
+    expect(resends).toEqual([message('old-first').data, message('old-second').data])
+  } finally {
+    f.worker.close()
+    f.queue.close()
+  }
+})
+
+test('a resend uses its own sequence across concurrent dispatch acceptance', async () => {
+  const f = fixture()
+  f.publish.mockReset().mockResolvedValue({ sequenceID: 'accepted' })
+  f.probe.mockResolvedValue({ messages: [], head: null, gap: false, oldest: null })
+  const dispatchEntered = Promise.withResolvers<void>()
+  const resendEntered = Promise.withResolvers<void>()
+  const releaseDispatch = Promise.withResolvers<void>()
+  const releaseResend = Promise.withResolvers<void>()
+  const put = f.outbox.put.bind(f.outbox)
+  let dispatch: Promise<void> | undefined
+  try {
+    await f.queue.accept(message('resend'))
+    f.worker.trigger()
+    await f.tick()
+    expect(f.queue.entries()).toEqual([])
+    vi.spyOn(f.outbox, 'put').mockImplementation(async (entry) => {
+      if (entry.lastAttempt === null) {
+        if (entry.seq === 1) {
+          dispatchEntered.resolve()
+          await releaseDispatch.promise
+        } else {
+          resendEntered.resolve()
+          await releaseResend.promise
+        }
+      }
+      await put(entry)
+    })
+    dispatch = f.queue.accept(message('dispatch'))
+    await dispatchEntered.promise
+    f.worker.rejoined(2)
+    const pass = f.tick()
+    await resendEntered.promise
+    releaseDispatch.resolve()
+    await dispatch
+    releaseResend.resolve()
+    await pass
+    expect(f.prepare.mock.calls[1]?.[0]).toMatchObject({ seq: 2, data: message('resend').data })
+    expect(f.publish).toHaveBeenCalledTimes(3)
+    expect(f.queue.entries()).toEqual([])
+  } finally {
+    releaseDispatch.resolve()
+    releaseResend.resolve()
+    await dispatch
     f.worker.close()
     f.queue.close()
   }

@@ -7,6 +7,7 @@ import type {
   AppOutboxEntry,
   AppSettlementExpected,
   AppSettlementObligation,
+  AppSettlementResult,
   AppStatusEvent,
 } from '../../src/app-outbox.js'
 import { controlSafetyHeld } from '../../src/control/safety.js'
@@ -167,11 +168,11 @@ export function createMemoryHostDatabase(
   const transact = async (
     groupID: string,
     point: WritePoint,
-    mutate: (next: GroupRecord) => void,
+    mutate: (next: GroupRecord) => void | false,
   ) => {
     await runSeam(`before-${point}`)
     const next = structuredClone(read(groupID))
-    mutate(next)
+    if (mutate(next) === false) return
     if (failure === `mid-${point}`) {
       failure = undefined
       throw new Error('Injected transaction failure')
@@ -215,30 +216,35 @@ export function createMemoryHostDatabase(
         loadSettlement: async (seq) =>
           structuredClone(read(storageID).appObligations.get(seq) ?? null),
         async recordSettlement(seq, obligation, expected) {
-          const current = read(storageID)
-          const identity =
-            current.state === null ? null : readIdentity(storageID, current.state, key)
-          if (!same(identity, expected.identity))
-            return { recorded: false, reason: 'identity-changed' }
-          if (current.version !== expected.stateVersion)
-            return { recorded: false, reason: 'state-version-changed' }
-          const entry = current.appEntries.get(seq)
-          if (entry === undefined) return { recorded: false, reason: 'entry-missing' }
-          if (
-            entry.lastAttempt?.publishID !== expected.attemptID ||
-            obligation.attemptID !== expected.attemptID ||
-            obligation.topicID !== entry.lastAttempt.topicID ||
-            entry.lastAttempt.incarnation !== identity?.incarnation ||
-            entry.lastAttempt.epoch !== identity?.epoch
-          )
-            return { recorded: false, reason: 'attempt-changed' }
+          const owned = structuredClone({ obligation, expected })
+          let result: AppSettlementResult = { recorded: true }
           await transact(storageID, 'apply', (next) => {
+            const { obligation, expected } = owned
+            const refuse = (
+              reason: Extract<AppSettlementResult, { recorded: false }>['reason'],
+            ) => {
+              result = { recorded: false, reason }
+              return false as const
+            }
+            const identity = next.state === null ? null : readIdentity(storageID, next.state, key)
+            if (!same(identity, expected.identity)) return refuse('identity-changed')
+            if (next.version !== expected.stateVersion) return refuse('state-version-changed')
+            const entry = next.appEntries.get(seq)
+            if (entry === undefined) return refuse('entry-missing')
+            if (
+              entry.lastAttempt?.publishID !== expected.attemptID ||
+              obligation.attemptID !== expected.attemptID ||
+              obligation.topicID !== entry.lastAttempt.topicID ||
+              entry.lastAttempt.incarnation !== identity?.incarnation ||
+              entry.lastAttempt.epoch !== identity?.epoch
+            )
+              return refuse('attempt-changed')
             const previous = next.appObligations.get(seq)
             if (previous !== undefined && !same(previous, obligation))
               throw new Error('Immutable obligation')
             next.appObligations.set(seq, structuredClone(obligation))
           })
-          return { recorded: true }
+          return result
         },
         async remove(seq, occurrence) {
           if (!read(storageID).appEntries.has(seq)) return

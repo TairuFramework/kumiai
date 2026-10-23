@@ -195,6 +195,51 @@ for (const mode of ['real-mls', 'double'] as const) {
           }
         },
       )
+      test.each(context === 'supplied' ? ['synchronous', 'after-await'] : ['synchronous'])(
+        'owner-held preparation rejects reentry before accounting or the send mutex (%s)',
+        async (timing) => {
+          const f = await setup()
+          const run = f.capability.run.bind(f.capability)
+          const nested: Array<Promise<unknown>> = []
+          let first = true
+          f.capability.run = (request, prepare, work) =>
+            run(
+              request,
+              async (reads) => {
+                if (first) {
+                  first = false
+                  if (timing === 'after-await') await Promise.resolve()
+                  const accounting = vi.spyOn(f.live, 'accounting')
+                  accounting.mockClear()
+                  let outcome: unknown
+                  nested.push(
+                    f.publication.prepare(f.entry, null).then(
+                      (value) => {
+                        outcome = value
+                      },
+                      (error: unknown) => {
+                        outcome = error
+                      },
+                    ),
+                  )
+                  for (let turn = 0; turn < 20; turn++) await Promise.resolve()
+                  expect(outcome).toMatchObject({ name: 'ReentrantOwnershipError' })
+                  expect(accounting).not.toHaveBeenCalled()
+                }
+                return await prepare(reads)
+              },
+              work,
+            )
+          try {
+            const prepared = await f.publication.prepare(f.entry, null)
+            expect(prepared.entry.lastAttempt?.attempts).toBe(1)
+            expect(await f.ports.outbox.list()).toEqual([prepared.entry])
+          } finally {
+            await Promise.all(nested)
+            await f.fixture.close()
+          }
+        },
+      )
       test('preparation rejects an obligated entry before seal or put', async () => {
         const f = await setup()
         try {

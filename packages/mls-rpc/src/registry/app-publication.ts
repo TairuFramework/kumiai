@@ -68,6 +68,7 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
     }
   }
   async function publicationSnapshot(protocol: string): Promise<AppPublicationSnapshot | null> {
+    capability.assertRoot()
     if (live.pendingProof()) return null
     await live.accounting()
     try {
@@ -86,6 +87,7 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
     input: AppOutboxEntry,
     floor: string | null,
   ): Promise<PreparedAppPublication> {
+    capability.assertRoot()
     const entry = copyStoredValue(input)
     decodeAppEntry(entry)
     // Capture before waiting for an owner; queued movement cannot silently change the source.
