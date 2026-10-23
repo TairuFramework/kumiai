@@ -129,6 +129,7 @@ test('terminal restart retains the outbox until real MLS plaintext delivery comp
       prc: 'chat/posted',
       data: encodeEventFrame('chat/posted', { text: 'retained' }),
       lastAttempt: null,
+      status: 'accepted',
     })
     const retained = await bob.appOutbox.list()
     const seen: Array<unknown> = []

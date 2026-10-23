@@ -114,7 +114,7 @@ test('app sizing uses the sealed payload', async () => {
     await member.peer.protocol('chat').dispatch('chat/posted', { data: { label: '組合' } })
     await vi.waitFor(() => expect(wrap).toHaveBeenCalled())
     expect(hub.published.length).toBe(before)
-    expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+    expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
     expect((await member.control.load()).operations.every((op) => op.stage === 'intent')).toBe(true)
   } finally {
     await member.peer.dispose()

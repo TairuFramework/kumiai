@@ -28,6 +28,7 @@ import {
 } from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 import { deferred } from './fixtures/single-connection-host.js'
+import { createWorkerPublication } from './fixtures/worker-publication.js'
 
 describe('held live publication proof', () => {
   afterEach(() => vi.useRealTimers())
@@ -50,7 +51,11 @@ describe('held live publication proof', () => {
         limit: 4,
         admission: () => ({ admissible: true, epoch: 1 }),
       })
-      await queue.accept({ protocol: 'chat', prc: 'chat/posted', data: new Uint8Array([1]) })
+      await queue.accept({
+        protocol: 'chat',
+        prc: 'chat/posted',
+        data: encodeEventFrame('chat/posted', { value: 1 }),
+      })
       const entered = deferred<void>()
       const release = deferred<void>()
       const probe = vi.fn(async () => ({ messages: [], head: null, oldest: null, gap: false }))
@@ -67,7 +72,7 @@ describe('held live publication proof', () => {
       })
       const floor = { epoch: 1, position: null, covered: true }
       const seal = vi.fn(async () => ({ topicID: 'app', payload: new Uint8Array([2]), floor }))
-      const publish = vi.fn(async () => {})
+      const publish = vi.fn(async () => ({ sequenceID: crypto.randomUUID() }))
       const remove = vi.fn(async (seq: number) => store.remove(seq))
       if (failRemoval) remove.mockRejectedValueOnce(new Error('removal failed'))
       const delivery = createLogDelivery({
@@ -79,8 +84,8 @@ describe('held live publication proof', () => {
         probe,
         pull: vi.fn(),
         heal: vi.fn(),
-        seal,
-        put: store.put,
+        ...createWorkerPublication({ outbox: store, floor: () => floor, seal, put: store.put }),
+        loadSettlement: store.loadSettlement,
         publish,
         remove,
         clear: store.clear,
@@ -542,7 +547,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     gate.resolve()
     await dispatch
     await flush()
-    expect(await store.list()).toMatchObject([{ lastAttempt: null }])
+    expect(await store.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
     expect(hub.published.filter((m) => m.senderDID === 'bob')).toEqual([])
     admission.mockRestore()
     await bob.peer.replay()
@@ -671,7 +676,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     },
   )
 
-  test('non-rotating ratchet during seal pairs ciphertext with its own epoch floor', async () => {
+  test('non-rotating ratchet before preparation pairs ciphertext with its own epoch floor', async () => {
     const hub = new FakeHub()
     const attempts: Array<{ epoch: number; floor: string | null }> = []
     const store = createMemoryAppOutbox()
@@ -685,15 +690,14 @@ describe('recovery ordering', { concurrent: false }, () => {
       },
     })
     await flush()
-    const wrap = bob.crypto.wrap.bind(bob.crypto)
+    const prepare = bob.appPublication.prepare.bind(bob.appPublication)
     let injected = false
-    vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
-      const sealed = await wrap(...args)
+    vi.spyOn(bob.appPublication, 'prepare').mockImplementation(async (...args) => {
       if (!injected) {
         injected = true
         await bob.peer.commit(buildLedgerCommit(bob, []))
       }
-      return sealed
+      return await prepare(...args)
     })
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'paired' } })
     await vi.waitFor(async () => expect(await store.list()).toEqual([]), { timeout: 300 })
@@ -702,11 +706,12 @@ describe('recovery ordering', { concurrent: false }, () => {
     const app = apps[0]
     if (app == null) throw new Error('Missing application frame')
     expect(bob.crypto.frameEpoch(app.payload)).toBe(2)
-    expect(attempts).toEqual([
+    expect(attempts).toMatchObject([
+      { epoch: 2, floor: null, attempts: 1 },
       {
         epoch: 2,
         floor: hub.published.find((m) => m.topicID === commitTopic(secret))?.sequenceID,
-        attempts: 1,
+        attempts: 2,
       },
     ])
   })
@@ -760,7 +765,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       })
       await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'checked' } })
       await flush()
-      expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+      expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
       expect(hub.published).toEqual([])
       spy.mockRestore()
       await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]), {
@@ -802,7 +807,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'unknown membership' } })
     await vi.waitFor(() => expect(events.some((event) => event.phase === 'failed')).toBe(true))
-    expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+    expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
     expect(
       hub.published.filter(
         (m) =>
@@ -1048,7 +1053,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       if (performance.now() - startedAt >= 4000) throw new Error('Recovery never failed')
       await vi.advanceTimersByTimeAsync(20)
     }
-    expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+    expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
     const received: Array<unknown> = []
     await returningResponder(hub, 3, {
       epoch: 3,
@@ -1103,6 +1108,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         prc: 'chat/posted',
         data: encodeEventFrame('chat/posted', { seq }),
         lastAttempt: null,
+        status: 'accepted',
       })
     const yielded = deferred<number>()
     const publish = hub.publish.bind(hub)
@@ -1488,7 +1494,8 @@ describe('recovery ordering', { concurrent: false }, () => {
       const wrap = bob.crypto.wrap.bind(bob.crypto)
       const sealed = new Map<string, { seq: number; epoch: number | null }>()
       let seals = 0
-      vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
+      const prepare = bob.appPublication.prepare.bind(bob.appPublication)
+      vi.spyOn(bob.appPublication, 'prepare').mockImplementation(async (...args) => {
         if (++seals === 2 && during === 'seal') {
           if (coverage === 'uncovered') {
             await publishCommit({
@@ -1502,6 +1509,9 @@ describe('recovery ordering', { concurrent: false }, () => {
           } else await bob.peer.commit(buildLedgerCommit(bob, []))
           await flush()
         }
+        return await prepare(...args)
+      })
+      vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
         const payload = await wrap(...args)
         const message = decodeFrame(args[0]) as { payload: { data: { seq: number } } }
         sealed.set(Array.from(payload).join(','), {
@@ -1570,7 +1580,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       if (during === 'catch-up') {
         expect(
           [...sealed.values()].filter((entry) => entry.seq === 1).map((entry) => entry.epoch),
-        ).toEqual([next, next])
+        ).toEqual([next])
       }
     },
   )

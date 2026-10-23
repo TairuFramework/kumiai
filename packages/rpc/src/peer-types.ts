@@ -19,6 +19,7 @@ import type { AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
 import type { AppOutbox } from './app-outbox.js'
+import type { AppPublicationPort } from './app-publication.js'
 import type { CheckpointService } from './checkpoint-types.js'
 import type { ControlBuildPort } from './control/build.js'
 import type { OperationDeps } from './control/operations.js'
@@ -115,6 +116,7 @@ export type GroupPeerMLSParams = {
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
   mls: GroupMLS
   /** Durable log plaintext. The host owns encryption at rest and erasure. */
+  appPublication: AppPublicationPort
   appOutbox: AppOutbox
   /** Accepted entries plus unresolved inserts. At the cap, new log events are refused. */
   appOutboxLimit: number
@@ -330,6 +332,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
       reconcileConfirmedRecovery?: undefined
       continuation?: undefined
       completion?: undefined
+      appPublication?: undefined
       appOutbox?: undefined
       appOutboxLimit?: undefined
       control?: undefined

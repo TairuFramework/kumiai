@@ -1,3 +1,5 @@
+import { decodeAppEntry } from './app-entry.js'
+import type { EpochIdentity, GroupKey } from './control/types.js'
 import type { SendAdmission } from './crypto.js'
 import {
   AppEntryTooLargeError,
@@ -9,27 +11,76 @@ import {
 
 export const MAX_APP_ENTRY_BYTES = 524_288
 
-/** Encoded app plaintext and the latest prepared publication attempt. */
+export type AppAttempt = {
+  incarnation: number
+  epoch: number
+  floor: string | null
+  attempts: number
+  publishID: string
+  segment: number
+  topicID: string
+}
+
 export type AppOutboxEntry = {
   seq: number
   protocol: string
   prc: string
   data: Uint8Array
-  lastAttempt: { epoch: number; floor: string | null; attempts: number } | null
+  lastAttempt: AppAttempt | null
+  status: 'accepted' | 'failed'
 }
 
-/**
- * Owned by one live peer per group. Writes are durable before resolution.
- * Hosts encrypt plaintext at rest and clear it on leave/deletion, choosing physical erasure policy.
- */
 export type AppOutbox = {
-  /** Atomic insert or replace by seq. A rejection leaves storage unchanged. */
   put(entry: AppOutboxEntry): Promise<void>
-  /** Ascending sequence order. */
   list(): Promise<Array<AppOutboxEntry>>
-  remove(seq: number): Promise<void>
+  recordSettlement(
+    seq: number,
+    obligation: AppSettlementObligation,
+    expected: AppSettlementExpected,
+  ): Promise<AppSettlementResult>
+  loadSettlement(seq: number): Promise<AppSettlementObligation | null>
+  remove(seq: number, outcome?: AppPublicationOutcome): Promise<void>
   clear(): Promise<void>
+  events(): Promise<Array<AppStatusEvent>>
+  ackEvent(id: string): Promise<void>
 }
+
+export type AppPublicationOutcome = {
+  incarnation: number
+  segment: number
+  topicID: string
+  position: string
+}
+
+export type AppSettlementObligation = {
+  sequenceID: string
+  attemptID: string
+  topicID: string
+  outcome: 'published'
+}
+
+export type AppSettlementExpected = {
+  identity: EpochIdentity
+  stateVersion: number
+  attemptID: string
+}
+
+export type AppSettlementResult =
+  | { recorded: true }
+  | {
+      recorded: false
+      reason: 'identity-changed' | 'state-version-changed' | 'attempt-changed' | 'entry-missing'
+    }
+
+export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & (
+    | { kind: 'accepted' }
+    | { kind: 'published'; occurrence: AppPublicationOutcome }
+    | {
+        kind: 'failed'
+        reason: 'incarnation-abandoned' | 'removed' | 'deleted' | 'database-restored'
+        nextIncarnation?: number
+      }
+  )
 
 export type AppOutboxAcceptanceParams = {
   outbox: AppOutbox
@@ -71,7 +122,7 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): Ap
       const entries = await params.outbox.list()
       if (closed) return
       for (const entry of entries) {
-        accepted.set(entry.seq, entry)
+        if (entry.status === 'accepted') accepted.set(entry.seq, entry)
         nextSeq = Math.max(nextSeq, entry.seq + 1)
       }
       listed = true
@@ -110,7 +161,15 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): Ap
       throw new AppOutboxFullError('App outbox is full')
     }
     const seq = nextSeq++
-    const entry: AppOutboxEntry = { ...input, data: input.data.slice(), seq, lastAttempt: null }
+    const entry: AppOutboxEntry = {
+      protocol: input.protocol,
+      prc: input.prc,
+      data: input.data.slice(),
+      seq,
+      lastAttempt: null,
+      status: 'accepted',
+    }
+    decodeAppEntry(entry)
     reservations.add(seq)
     try {
       await params.outbox.put(entry)

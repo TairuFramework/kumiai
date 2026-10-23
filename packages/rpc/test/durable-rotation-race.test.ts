@@ -41,7 +41,7 @@ describe('durable app rotation', () => {
       data: { text: 'must not leave' },
     })
     await new Promise((resolve) => setTimeout(resolve, 60))
-    expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+    expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
     expect(hub.published.length).toBe(before)
     await bob.peer.dispose()
   })

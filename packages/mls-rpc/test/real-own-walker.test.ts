@@ -17,6 +17,7 @@ import {
 import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import { expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
 import { decodeControlJournal } from '../src/control-journal.js'
@@ -129,6 +130,7 @@ async function fixture() {
     anchorStore: ports.anchor,
     appCursorStore: ports.cursor,
     appOutbox: ports.outbox,
+    appPublication: createRegistryAppPublication(await f.registry.access(key.groupID)),
     appOutboxLimit: 16,
     prepareBuild: async () => {
       throw new Error('Saved work must not rebuild')

@@ -1,19 +1,12 @@
 import { describe, expect, test } from 'vitest'
 
-export type ConformanceAppOutboxEntry = {
-  seq: number
-  protocol: string
-  prc: string
-  data: Uint8Array
-  lastAttempt: { epoch: number; floor: string | null; attempts: number } | null
-}
+import type {
+  ConformanceStorageAppOutbox,
+  ConformanceStorageAppOutboxEntry,
+} from './persistence-fixture.js'
 
-export type ConformanceAppOutbox = {
-  put(entry: ConformanceAppOutboxEntry): Promise<void>
-  list(): Promise<Array<ConformanceAppOutboxEntry>>
-  remove(seq: number): Promise<void>
-  clear(): Promise<void>
-}
+export type ConformanceAppOutboxEntry = ConformanceStorageAppOutboxEntry
+export type ConformanceAppOutbox = ConformanceStorageAppOutbox
 
 export type AppOutboxConformanceParams = {
   label: string
@@ -30,12 +23,36 @@ export function testAppOutboxConformance(params: AppOutboxConformanceParams): vo
         prc: 'chat/posted',
         data: new Uint8Array([1, 2]),
         lastAttempt: null,
+        status: 'accepted',
       }
       await outbox.put(entry)
       expect(await outbox.list()).toEqual([entry])
-      const earlier = { ...entry, seq: 2, lastAttempt: { epoch: 3, floor: null, attempts: 1 } }
+      const earlier = {
+        ...entry,
+        seq: 2,
+        lastAttempt: {
+          incarnation: 1,
+          epoch: 3,
+          floor: null,
+          attempts: 1,
+          publishID: 'first',
+          segment: 3,
+          topicID: 'topic',
+        },
+      }
       await outbox.put(earlier)
-      const replacement = { ...entry, lastAttempt: { epoch: 4, floor: 'head', attempts: 2 } }
+      const replacement = {
+        ...entry,
+        lastAttempt: {
+          incarnation: 1,
+          epoch: 4,
+          floor: 'head',
+          attempts: 2,
+          publishID: 'second',
+          segment: 4,
+          topicID: 'topic',
+        },
+      }
       await outbox.put(replacement)
       expect(await outbox.list()).toEqual([earlier, replacement])
     })
@@ -48,6 +65,7 @@ export function testAppOutboxConformance(params: AppOutboxConformanceParams): vo
         prc: 'chat/posted',
         data: new Uint8Array([3]),
         lastAttempt: null,
+        status: 'accepted',
       })
       await outbox.remove(99)
       expect(await outbox.list()).toHaveLength(1)
@@ -59,6 +77,7 @@ export function testAppOutboxConformance(params: AppOutboxConformanceParams): vo
         prc: 'chat/posted',
         data: new Uint8Array([4]),
         lastAttempt: null,
+        status: 'accepted',
       })
       await outbox.clear()
       expect(await outbox.list()).toEqual([])
@@ -71,6 +90,7 @@ export function testAppOutboxConformance(params: AppOutboxConformanceParams): vo
         prc: 'chat/posted',
         data: new Uint8Array([5]),
         lastAttempt: null,
+        status: 'accepted',
       }
       outbox.failNextPut()
       await expect(outbox.put(entry)).rejects.toThrow()

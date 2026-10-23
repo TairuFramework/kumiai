@@ -28,7 +28,6 @@ import {
   chat,
   createDurableHandleAccess,
   createMemoryAppCursorStore,
-  createMemoryAppOutbox,
   createOperationHost,
   groupMLSDependencies,
   type Protocols,
@@ -144,7 +143,6 @@ function recoveryPeer(params: {
 }) {
   const { hub, identity, access, mls, onRecovery } = params
   return createGroupPeer<Protocols>({
-    appOutbox: createMemoryAppOutbox(),
     appOutboxLimit: 128,
     hub: hub.connect(identity),
     crypto: createGroupCrypto({ access }),

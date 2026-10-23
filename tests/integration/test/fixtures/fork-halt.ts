@@ -38,6 +38,7 @@ import {
 } from '@kumiai/rpc'
 import { expect, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../../../../packages/mls-rpc/src/app-publication.js'
 import { createCheckpointService } from '../../../../packages/mls-rpc/src/checkpoint.js'
 import { entryCapability } from '../../../../packages/mls-rpc/src/entry-capability.js'
 import {
@@ -187,6 +188,9 @@ export async function createCapturedRecoveryFixture(
             mutate: async (fn, write) => (await opened()).mutate(fn, write),
             replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
             adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+            preparePublication: async (entry, floor) =>
+              (await opened()).preparePublication(entry, floor),
+            publicationSnapshot: async (protocol) => (await opened()).publicationSnapshot(protocol),
             seal: async (plaintext, opts) => (await opened()).seal(plaintext, opts),
             receive: async (frames) => (await opened()).receive(frames),
             onAdmissionChanged: (listener) => {
@@ -285,6 +289,7 @@ export async function createCapturedRecoveryFixture(
             anchorStore: ports.anchor,
             appCursorStore: ports.cursor,
             appOutbox: ports.outbox,
+            appPublication: createRegistryAppPublication(access),
             appOutboxLimit: 128,
             operationTimeoutMs: 10_000,
             deliverWelcome: async () => {
@@ -498,6 +503,12 @@ export async function makeCheckpointPeer(
     anchorStore: ports.anchor,
     appCursorStore: ports.cursor,
     appOutbox: ports.outbox,
+    appPublication: {
+      snapshot: async () => null,
+      prepare: async () => {
+        throw new Error('This local safety fixture has no app publisher')
+      },
+    },
     localDID: real.identity.id,
     protocols: { chat },
     handlers: {

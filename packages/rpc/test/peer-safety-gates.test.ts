@@ -183,7 +183,7 @@ test.each(reasons)('queued durable send is preserved under %s', async (reason) =
   expect(wrap).not.toHaveBeenCalled()
   expect(publish).not.toHaveBeenCalled()
   expect(fetch).not.toHaveBeenCalled()
-  expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+  expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
 })
 
 test.each([
@@ -191,27 +191,14 @@ test.each([
   ['recovery-unavailable', false],
   ['fork-halted', true],
 ] as const)(
-  'seal barrier retry starts no new wrap under %s (failed halt write=%s)',
+  'prepared frame never hands off under %s (failed halt write=%s)',
   async (reason, failedWrite) => {
-    const barrier = Promise.withResolvers<void>()
-    const waiting = Promise.withResolvers<void>()
     const finished = Promise.withResolvers<void>()
-    let pendingBarrier: Promise<void> | undefined
-    const createEpoch = epochFactory.createEpochRuntime
-    vi.spyOn(epochFactory, 'createEpochRuntime').mockImplementation((params) => {
-      return createEpoch({
-        ...params,
-        sealBarrier: () => {
-          if (pendingBarrier != null) waiting.resolve()
-          return pendingBarrier ?? params.sealBarrier()
-        },
-      })
-    })
     const createDelivery = logDeliveryModule.createLogDelivery
     vi.spyOn(logDeliveryModule, 'createLogDelivery').mockImplementation((params) =>
       createDelivery({
         ...params,
-        seal: (entry) => params.seal(entry).finally(() => finished.resolve()),
+        prepare: (entry, floor) => params.prepare(entry, floor).finally(() => finished.resolve()),
       }),
     )
     const { member, hub } = await fixture()
@@ -229,7 +216,6 @@ test.each([
     try {
       await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'queued' } })
       await entered.promise
-      pendingBarrier = barrier.promise
       if (failedWrite) {
         const write = Promise.withResolvers<void>()
         const apply = member.control.apply.bind(member.control)
@@ -253,17 +239,12 @@ test.each([
       // The peer latch must guard retries even when MLS itself still admits sends.
       vi.spyOn(member.mls, 'sendAdmission').mockReturnValue({ admissible: true, epoch: 1 })
       release.resolve()
-      await waiting.promise
-      pendingBarrier = undefined
-      barrier.resolve()
       await finished.promise
       expect(wraps).toHaveBeenCalledOnce()
       expect(publish).not.toHaveBeenCalled()
-      expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+      expect(await member.appOutbox.list()).toMatchObject([{ status: 'accepted' }])
     } finally {
       release.resolve()
-      pendingBarrier = undefined
-      barrier.resolve()
       if (halting != null) {
         await member.peer.dispose()
         await halting
@@ -293,7 +274,7 @@ test.each(reasons)(
     await new Promise((resolve) => setTimeout(resolve, 30))
     expect(fetch).not.toHaveBeenCalled()
     expect(wrap).toHaveBeenCalledOnce()
-    expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+    expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
   },
 )
 
@@ -304,10 +285,10 @@ test.each(reasons)('seal entry refusal under %s never consumes an attempt', asyn
   vi.spyOn(logDeliveryModule, 'createLogDelivery').mockImplementation((params) =>
     createDelivery({
       ...params,
-      seal: async (entry) => {
+      prepare: async (entry, floor) => {
         latch(member, reason)
         try {
-          return await params.seal(entry)
+          return await params.prepare(entry, floor)
         } catch (error) {
           refusals.push(error)
           throw error
@@ -331,7 +312,7 @@ test.each(reasons)('seal entry refusal under %s never consumes an attempt', asyn
   expect(refusals).toEqual([new SendNotAdmissibleError(reason)])
   await vi.advanceTimersByTimeAsync(120_000)
   expect(await member.appOutbox.list()).toEqual(before)
-  expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+  expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null, status: 'accepted' }])
   expect(put).not.toHaveBeenCalled()
   expect(remove).not.toHaveBeenCalled()
   expect(wrap).not.toHaveBeenCalled()

@@ -44,6 +44,9 @@ import type {
   AnchorStore,
   AppCursorStore,
   AppOutbox,
+  AppOutboxEntry,
+  AppPublicationPort,
+  AppSettlementExpected,
   ControlBuildPort,
   ControlEvidenceSnapshot,
   ControlStore,
@@ -62,21 +65,20 @@ import type {
 import {
   commitTopic,
   createLedgerEntryResolver,
+  decodeAppEntry,
   decodeCommitFrame,
   decodeHandshakeFrame,
   digestAppliedCommit,
+  encodeAppAAD,
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
   HANDSHAKE_KIND,
   OperationRejectedError,
+  protocolTopic,
 } from '@kumiai/rpc'
 import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
-import {
-  type CommitOnceEvidence,
-  type CommitOnceScenario,
-  createMemoryAppOutbox,
-} from '@kumiai/rpc-conformance'
+import type { CommitOnceEvidence, CommitOnceScenario } from '@kumiai/rpc-conformance'
 import { createCommit, encode, mlsMessageEncoder } from 'ts-mls'
 
 import {
@@ -94,7 +96,7 @@ import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import type { WireHub } from './log-hub-over-wire.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
-export { createMemoryAppOutbox }
+export { createMemoryAppOutbox } from '../../../packages/rpc/test/fixtures/outbox.js'
 
 /**
  * The app protocol under test: one logged procedure, one ephemeral one beside it, and one
@@ -172,6 +174,13 @@ function encodeStoredState(state: Uint8Array, ledger: Array<string>): Uint8Array
 export type StateStore = {
   database: MemoryHostDatabase
   control: ControlStore
+  appOutbox: AppOutbox
+  prepareApp(
+    original: AppOutboxEntry,
+    entry: AppOutboxEntry,
+    handle: GroupHandle,
+    expected: AppSettlementExpected,
+  ): Promise<void>
   save: (handle: GroupHandle, write?: AdoptionWrite) => Promise<void>
   saveOpened: (state: Uint8Array, ledger: Array<string>) => Promise<void>
   readEvidence(): Promise<ControlEvidenceSnapshot>
@@ -205,10 +214,29 @@ export function createMemoryStateStore(
       },
     })
   const control = database.control('state', key)
+  let prepared: { bytes: Uint8Array; version: number } | null = null
   return {
+    appOutbox: database.appOutbox('state', key),
+    async prepareApp(original, entry, handle, expected) {
+      const bytes = encodeJournal(handle)
+      await database.savePreparedApp('state', key, bytes, original, entry, expected)
+      prepared = { bytes, version: database.currentVersion('state') }
+    },
     database,
     control,
     save: async (handle, write) => {
+      const bytes = encodeJournal(handle)
+      if (
+        write === undefined &&
+        prepared !== null &&
+        prepared.version === database.currentVersion('state') &&
+        bytes.length === prepared.bytes.length &&
+        bytes.every((byte, index) => byte === prepared?.bytes[index])
+      ) {
+        prepared = null
+        return
+      }
+      prepared = null
       try {
         await database.saveState('state', encodeJournal(handle), write)
       } catch (error) {
@@ -350,6 +378,7 @@ export function makeMember(params: MakeMemberParams): Member {
     adopt: adoptHandle,
     persist: (next, write) => stateStore.save(next, write),
   })
+  operationStores.set(access, stateStore)
   const adopt = (next: GroupHandle) => access.replace(next)
   const pending =
     pendingStore == null
@@ -482,7 +511,8 @@ export function makeMember(params: MakeMemberParams): Member {
     restoreCandidate,
   })
   const connection = hub.connect(identity)
-  const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
+  const application = createHostApplicationPorts(access)
+  const appOutbox = application.appOutbox
   const adoptControl: ReturnType<typeof createControlAdoptionPort>['adopt'] = async (
     bytes,
     expected,
@@ -509,6 +539,7 @@ export function makeMember(params: MakeMemberParams): Member {
     anchorStore,
     appCursorStore,
     appOutbox,
+    appPublication: application.appPublication,
     localDID: identity.id,
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
@@ -758,6 +789,7 @@ export function createOperationHost(access: HandleAccess, identity: OwnIdentity)
     newID: () => crypto.randomUUID(),
   })
   return {
+    ...createHostApplicationPorts(access),
     builders,
     welcomes,
     control,
@@ -1069,5 +1101,98 @@ export async function runRealCommitOnceScenario(
     )
   } finally {
     await wire.dispose()
+  }
+}
+
+export function createHostApplicationPorts(access: HandleAccess): {
+  appOutbox: AppOutbox
+  appPublication: AppPublicationPort
+} {
+  const store = operationStores.get(access)
+  if (store === undefined)
+    throw new Error('Application publication requires the durable host store')
+  const appOutbox = store.appOutbox
+  let sealVersion = 0
+  const snapshot = (protocol: string) =>
+    access.readControl(async ({ source, handle }) => {
+      const slot = await store.database.anchorStore('state').load()
+      if (
+        source.identity === null ||
+        slot === null ||
+        slot.pending !== undefined ||
+        handle.state.groupActiveState.kind !== 'active'
+      )
+        return null
+      return {
+        identity: source.identity,
+        stateVersion: source.stateVersion,
+        sealVersion,
+        segment: slot.anchor.epoch,
+        topicID: protocolTopic(slot.anchor.secret, slot.anchor.epoch, protocol),
+      }
+    })
+  return {
+    appOutbox,
+    appPublication: {
+      snapshot,
+      async prepare(input, floor) {
+        const entry = structuredClone(input)
+        decodeAppEntry(entry)
+        return await access.mutate(async (handle, persist) => {
+          const source = await store.readEvidence()
+          const slot = await store.database.anchorStore('state').load()
+          if (
+            source.source.identity === null ||
+            slot === null ||
+            slot.pending !== undefined ||
+            !handle.sendAdmission().admissible
+          )
+            throw new Error('Application publication unavailable')
+          if ((await appOutbox.loadSettlement(entry.seq)) !== null || entry.status !== 'accepted')
+            throw new Error('Obligated or failed application entry')
+          const current = (await appOutbox.list()).find((row) => row.seq === entry.seq)
+          if (JSON.stringify(current) !== JSON.stringify(entry))
+            throw new Error('Application entry moved')
+          const topicID = protocolTopic(slot.anchor.secret, slot.anchor.epoch, entry.protocol)
+          const sealed = await handle.encryptApplication(entry.data, {
+            aad: encodeAppAAD({ topicID, intent: 'log' }),
+          })
+          sealVersion++
+          const updated: AppOutboxEntry = {
+            ...entry,
+            lastAttempt: {
+              incarnation: source.source.key.incarnation,
+              epoch: Number(handle.epoch),
+              floor,
+              attempts: (entry.lastAttempt?.attempts ?? 0) + 1,
+              publishID: crypto.randomUUID(),
+              segment: slot.anchor.epoch,
+              topicID,
+            },
+          }
+          await store.prepareApp(entry, updated, handle, {
+            identity: source.source.identity,
+            stateVersion: source.source.stateVersion,
+            attemptID:
+              updated.lastAttempt?.publishID ??
+              (() => {
+                throw new Error('Missing attempt')
+              })(),
+          })
+          await persist(handle)
+          return {
+            entry: updated,
+            payload: sealed.ciphertext.slice(),
+            snapshot: {
+              identity: source.source.identity,
+              stateVersion: store.database.currentVersion('state'),
+              sealVersion,
+              segment: slot.anchor.epoch,
+              topicID,
+            },
+          }
+        })
+      },
+    },
   }
 }

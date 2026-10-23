@@ -6,6 +6,7 @@ import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { memoryApplicationPorts } from './fixtures/app-publication.js'
 import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -14,7 +15,6 @@ import {
   memoryAuthenticator,
   memoryEntryID,
 } from './fixtures/memory-group-mls.js'
-import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { makeMLSPeer, memoryOperationHost } from './fixtures/peer.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
@@ -50,7 +50,7 @@ function makeDurablePeer(hub: DurableFakeHub, localDID: string, recoverySecret: 
     onAdvance: (e) => crypto.setEpoch(e),
   })
   const peer = createGroupPeer<Protocols>({
-    appOutbox: createMemoryAppOutbox(),
+    ...memoryApplicationPorts(mls, crypto),
     appOutboxLimit: 128,
     hub,
     crypto,

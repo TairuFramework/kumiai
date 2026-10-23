@@ -246,6 +246,7 @@ test.each([false, true])('terminal restart closes build, off-epoch=%s', async (o
     prc: 'chat/posted',
     data: new Uint8Array([1]),
     lastAttempt: null,
+    status: 'accepted',
   })
   const request = buildLedgerCommit(bob, [])
   const built = await seedBuiltOperation(bob, buildInviteCommit(bob, 'dave'))

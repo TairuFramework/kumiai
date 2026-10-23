@@ -10,6 +10,7 @@ import {
 } from '@kumiai/rpc'
 import { expect, onTestFinished, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import * as api from '../src/index.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
@@ -72,6 +73,7 @@ async function setup(mode: 'real-mls' | 'double', name: string) {
           anchorStore: ports.anchor,
           appCursorStore: ports.cursor,
           appOutbox: ports.outbox,
+          appPublication: createRegistryAppPublication(await f.registry.access(key.groupID)),
           appOutboxLimit: 16,
           localDID: f.identity.id,
           protocols: { chat },

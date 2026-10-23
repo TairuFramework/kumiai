@@ -8,7 +8,6 @@ import {
   chat,
   createDurableHandleAccess,
   createMemoryAppCursorStore,
-  createMemoryAppOutbox,
   createOperationHost,
   encodeJournal,
   groupMLSDependencies,
@@ -52,7 +51,7 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
 test('accepted adoption entries seal at the matching admission epoch once the delivery worker publishes them', async () => {
   const hub = createGapHub()
   const identity = randomIdentity()
-  const appOutbox = createMemoryAppOutbox()
+  let appOutbox: ReturnType<typeof createOperationHost>['appOutbox']
   let releasePut: () => void = () => {}
   let enteredPut: () => void = () => {}
   const putGate = new Promise<void>((resolve) => {
@@ -97,6 +96,16 @@ test('accepted adoption entries seal at the matching admission epoch once the de
     return sealed
   })
   const host = createOperationHost(access, identity)
+  const prepare = host.appPublication.prepare.bind(host.appPublication)
+  vi.spyOn(host.appPublication, 'prepare').mockImplementation(async (...args) => {
+    const frame = await prepare(...args)
+    const admission = mls.sendAdmission()
+    expect(admission.admissible).toBe(true)
+    expect(crypto.frameEpoch(frame.payload)).toBe(admission.epoch)
+    seals.push(admission.epoch)
+    return frame
+  })
+  appOutbox = host.appOutbox
   const peer = createGroupPeer<Protocols>({
     hub: hub.connect(identity),
     crypto,

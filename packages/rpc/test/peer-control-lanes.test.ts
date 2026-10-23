@@ -8,11 +8,11 @@ import {
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { memoryApplicationPorts } from './fixtures/app-publication.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
-import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   buildLedgerCommit,
   chat,
@@ -36,7 +36,7 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
-      appOutbox: createMemoryAppOutbox(),
+      ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
       crypto,
@@ -106,7 +106,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
-      appOutbox: createMemoryAppOutbox(),
+      ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
       crypto,
@@ -134,7 +134,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
-      appOutbox: createMemoryAppOutbox(),
+      ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
       crypto,
@@ -169,7 +169,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
-      appOutbox: createMemoryAppOutbox(),
+      ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
       crypto,
@@ -208,7 +208,7 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
-      appOutbox: createMemoryAppOutbox(),
+      ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
       crypto,

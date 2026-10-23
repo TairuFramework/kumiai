@@ -297,6 +297,9 @@ export type ConformanceAccountedGroupObservation<Position extends string = strin
   terminal: boolean | null
 }
 export type ConformanceEntryReads<Position extends string = string> = {
+  anchor(incarnation: number): Promise<ConformanceAnchorSlot | null>
+  outbox(incarnation: number): Promise<Array<ConformanceStorageAppOutboxEntry>>
+  settlement(incarnation: number, seq: number): Promise<ConformanceAppSettlementObligation | null>
   checkpoints(): Promise<Array<ConformanceCheckpointRecord<Position>>>
   lifetime(): Promise<ConformanceGroupLifetime | null>
   trust(): Promise<ConformanceGroupRecoveryTrust | null>

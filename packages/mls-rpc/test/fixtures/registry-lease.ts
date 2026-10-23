@@ -16,14 +16,11 @@ import {
   frameID,
   recoveryUnavailableEventID,
 } from '@kumiai/rpc'
-import {
-  type AppOutboxAcceptance,
-  createAppOutboxAcceptance,
-  createLogDelivery,
-} from '@kumiai/rpc/testing'
+import { createAppOutboxAcceptance, createLogDelivery } from '@kumiai/rpc/testing'
 import type { RegistryLeaseConformanceFixture } from '@kumiai/rpc-conformance'
 import { expect, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../../src/app-publication.js'
 import { entryCapability } from '../../src/entry-capability.js'
 import type { OwnershipContextPort } from '../../src/persistence-types.js'
 import { registryReceiveSlots } from '../../src/registry/live-receive.js'
@@ -634,17 +631,10 @@ export async function createRegistryLeaseFixture(
     replyAAD: () => encodeAppAAD({ topicID: 'directed-reply/request-42', intent: 'ephemeral' }),
     async acceptedHold(count = 1) {
       const store = () => fixture.device.groups.ports(key).outbox
-      const outbox = {
-        list: async () => (await store().list()).map((entry) => ({ ...entry, lastAttempt: null })),
-        put: async (entry: Parameters<AppOutboxAcceptance['replace']>[0]) => {
-          await store().put({ ...entry, status: 'accepted', lastAttempt: null })
-        },
-        remove: async (seq: number) => store().remove(seq),
-        clear: async () => store().clear(),
-      }
+      const outbox = store()
       const queue = createAppOutboxAcceptance({ outbox, limit: 4, admission: result.admission })
       const entered = Promise.withResolvers<void>()
-      const publish = vi.fn(async () => {})
+      const publish = vi.fn(async () => ({ sequenceID: crypto.randomUUID() }))
       const delivery = createLogDelivery({
         queue,
         ready: async () => {
@@ -656,15 +646,8 @@ export async function createRegistryLeaseFixture(
         probe: async () => ({ head: null, oldest: null, gap: false, messages: [] }),
         pull: async () => {},
         heal: async () => {},
-        seal: async (entry) => {
-          const sealed = await result.sealDurable(entry.data)
-          return {
-            topicID: 'lease-app',
-            payload: sealed.ciphertext,
-            floor: { epoch: sealed.epoch, position: null, covered: true },
-          }
-        },
-        put: outbox.put,
+        ...createRegistryAppPublication(access),
+        loadSettlement: outbox.loadSettlement,
         publish,
         remove: outbox.remove,
         clear: outbox.clear,

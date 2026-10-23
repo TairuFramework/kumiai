@@ -14,6 +14,7 @@ import {
 } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { entryCapability } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
 import { encodeStoredValue } from '../src/persistence-codec.js'
@@ -149,6 +150,9 @@ for (const mode of ['real-mls', 'double'] as const) {
             anchorStore: ports.anchor,
             appCursorStore: ports.cursor,
             appOutbox: ports.outbox,
+            appPublication: createRegistryAppPublication(
+              await fixture.registry.access(current.groupID),
+            ),
             appOutboxLimit: 16,
             localDID: fixture.identity.id,
             protocols: { chat },

@@ -85,7 +85,7 @@ test('rejected atomic put releases its reservation and capacity', async () => {
 
 test('one free slot accepts exactly one caller and counts unresolved puts', async () => {
   const store = createMemoryAppOutbox()
-  await store.put({ ...entry('restored'), seq: 7, lastAttempt: null })
+  await store.put({ ...entry('restored'), seq: 7, lastAttempt: null, status: 'accepted' })
   const gate = deferred<void>()
   const queue = createAppOutboxAcceptance({
     outbox: {
@@ -153,8 +153,8 @@ test('entry bound rejects before allocating a sequence and accepts the exact bou
     queue.accept({ ...entry('large'), data: new Uint8Array(524_289) }),
   ).rejects.toMatchObject({ name: 'AppEntryTooLargeError' })
   expect(queue.lowestUnresolvedSeq()).toBeNull()
-  await queue.accept({ ...entry('boundary'), data: new Uint8Array(524_288) })
-  expect((await store.list())[0]).toMatchObject({ seq: 0, lastAttempt: null })
+  await queue.accept(entry('x'.repeat(MAX_APP_ENTRY_BYTES - entry('').data.length)))
+  expect((await store.list())[0]).toMatchObject({ seq: 0, lastAttempt: null, status: 'accepted' })
   queue.close()
 })
 
@@ -203,7 +203,9 @@ test('peer dispatch resolves only after durable put and never seals or publishes
   gate.resolve()
   await dispatch
   expect(resolved).toBe(true)
-  expect(await store.list()).toEqual([{ ...entry('durable'), seq: 0, lastAttempt: null }])
+  expect(await store.list()).toEqual([
+    { ...entry('durable'), seq: 0, lastAttempt: null, status: 'accepted' },
+  ])
   expect(seal).not.toHaveBeenCalled()
   expect(hub.published).toEqual([])
   await member.peer.dispose()

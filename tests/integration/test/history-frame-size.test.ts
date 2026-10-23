@@ -14,7 +14,6 @@ import {
   chat,
   createDurableHandleAccess,
   createMemoryAppCursorStore,
-  createMemoryAppOutbox,
   createOperationHost,
   encodeJournal,
   groupMLSDependencies,
@@ -89,7 +88,6 @@ test('a final frame one byte above the hub cap settles rejected before publishin
   const host = createOperationHost(access, identity)
   const put = vi.spyOn(host.control, 'apply')
   const peer = createGroupPeer<Protocols>({
-    appOutbox: createMemoryAppOutbox(),
     appOutboxLimit: 128,
     hub: connection,
     crypto,

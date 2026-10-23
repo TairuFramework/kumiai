@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   type ControllerBinding,
   decodeClientState,
@@ -7,11 +8,11 @@ import {
   restoreGroup,
 } from '@kumiai/mls'
 import { forkEventID, type GroupPeer, type LogHub } from '@kumiai/rpc'
-import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { AppOutboxAcceptance, AppOutboxAcceptanceParams } from '../../rpc/lib/app-outbox.js'
 import type { LogDeliveryParams } from '../../rpc/lib/log-delivery.js'
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createLedgerEntrySlot } from '../src/index.js'
 import { registryReceiveSlots } from '../src/registry/live-receive.js'
@@ -627,7 +628,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           createAppOutboxAcceptance: (params: AppOutboxAcceptanceParams) => AppOutboxAcceptance
         }
         const queue = createAppOutboxAcceptance({
-          outbox: createMemoryAppOutbox(),
+          outbox: base.device.groups.ports(fixture.key).outbox,
           limit: 4,
           admission: () => mls.sendAdmission(),
         })
@@ -665,7 +666,13 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect.soft(mls.sendAdmission()).toMatchObject({ admissible: true })
           await expect.soft(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'cold' })
           await expect
-            .soft(queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([1]) }))
+            .soft(
+              queue.accept({
+                protocol: 'chat',
+                prc: 'posted',
+                data: encodeEventFrame('posted', { value: 1 }),
+              }),
+            )
             .resolves.toBeUndefined()
         } finally {
           released.resolve()
@@ -1331,6 +1338,7 @@ test.each([
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,
         appOutbox: ports.outbox,
+        appPublication: createRegistryAppPublication(fixture.access()),
         appOutboxLimit: 16,
         localDID: base.identity.id,
         protocols,
@@ -1402,7 +1410,18 @@ test.each(['real-mls', 'double'] as const)(
         close(): void
       }
     }
-    const store = createMemoryAppOutbox()
+    await fixture
+      .fixture()
+      .device.groups.ports(fixture.key)
+      .anchor.save({
+        anchor: {
+          epoch: fixture.access().epoch(),
+          secret: await fixture
+            .access()
+            .read((handle) => handle.exportSecret('kumiai/app-topic/v1', new Uint8Array(), 32)),
+        },
+      })
+    const store = fixture.fixture().device.groups.ports(fixture.key).outbox
     const queue = createAppOutboxAcceptance({
       outbox: store,
       limit: 4,
@@ -1418,17 +1437,11 @@ test.each(['real-mls', 'double'] as const)(
       probe: async () => ({ head: null, oldest: null, gap: false, messages: [] }),
       pull: async () => {},
       heal: async () => {},
-      seal: async (entry) => {
-        const sealed = await fixture.sealDurable(entry.data)
-        return {
-          topicID: 'lease-app',
-          payload: sealed.ciphertext,
-          floor: { epoch: sealed.epoch, position: null, covered: true },
-        }
-      },
-      put: store.put,
+      ...createRegistryAppPublication(fixture.access()),
+      loadSettlement: store.loadSettlement,
       publish: async () => {
         published.push(fixture.lease()?.own ?? -1)
+        return { sequenceID: crypto.randomUUID() }
       },
       remove: store.remove,
       clear: store.clear,
@@ -1437,7 +1450,11 @@ test.each(['real-mls', 'double'] as const)(
       deliveredLimit: 4,
     })
     try {
-      await queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([8]) })
+      await queue.accept({
+        protocol: 'chat',
+        prc: 'posted',
+        data: encodeEventFrame('posted', { value: 8 }),
+      })
       delivery.trigger()
       await vi.waitFor(() => expect(published).toHaveLength(1))
       await vi.waitFor(() => expect(queue.entries()).toEqual([]))

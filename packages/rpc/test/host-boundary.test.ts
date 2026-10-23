@@ -22,10 +22,10 @@ import { createGroupPeerWithControlWalk } from '../src/peer.js'
 import type { GroupProtocolDefinition } from '../src/protocol.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { memoryApplicationPorts } from './fixtures/app-publication.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
-import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { memoryControlPorts } from './fixtures/peer.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -720,7 +720,7 @@ test('manual authority cannot construct an ordinary peer', async () => {
         manualRecovery: { source: control.key, authorisationID: 'uncommitted' },
         anchorStore: createMemoryAnchorStore(),
         appCursorStore: createMemoryAppCursorStore(),
-        appOutbox: createMemoryAppOutbox(),
+        ...memoryApplicationPorts(mls, crypto),
         appOutboxLimit: 16,
         localDID: 'alice',
         protocols: {},
@@ -734,4 +734,28 @@ test('manual authority cannot construct an ordinary peer', async () => {
     await created?.peer.dispose()
     await created?.peer.drained().catch(() => {})
   }
+})
+
+test('application preparation participates in host drain and disposal fencing', async () => {
+  const boundary = createHostBoundary()
+  const pause = Promise.withResolvers<never>()
+  const host = wrapPeerHost(boundary, {
+    appPublication: {
+      prepare: async () => await pause.promise,
+      snapshot: async () => null,
+    },
+  })
+  const pending = host.appPublication.prepare().catch((error: unknown) => error)
+  boundary.close()
+  let finished = false
+  const drained = boundary.drained(Promise.resolve()).then(() => {
+    finished = true
+  })
+  await Promise.resolve()
+  expect(finished).toBe(false)
+  expect(() => host.appPublication.snapshot()).toThrow(PeerDisposedError)
+  pause.reject(new Error('Host preparation ended'))
+  expect(await pending).toMatchObject({ message: 'Host preparation ended' })
+  await drained
+  expect(finished).toBe(true)
 })

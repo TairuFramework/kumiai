@@ -31,6 +31,13 @@ export {
   testAppOutboxConformance,
 } from './app-outbox.js'
 export {
+  type AppPublicationFixture,
+  type ConformanceAppPublicationPort,
+  type ConformanceAppPublicationSnapshot,
+  type ConformancePreparedAppPublication,
+  testAppPublicationConformance,
+} from './app-publication.js'
+export {
   type CheckpointComparisonFixture,
   type CheckpointPortFixture,
   type CheckpointStorageConformanceParams,

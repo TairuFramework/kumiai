@@ -59,6 +59,8 @@ import { FAKE_BASE_SECRET, fakeEpochSecret } from './fake-crypto.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase, memoryInboundWrite } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
+  publication<T>(fn: () => Promise<T>): Promise<T>
+  stateVersion(): number
   database(): MemoryHostDatabase
   persistInitialState(): Promise<void>
   acceptsCommitter(did: string): boolean
@@ -1889,6 +1891,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       })
     },
     database: () => hostDB,
+    publication: serialise,
+    stateVersion: () => hostDB.currentVersion(storageID),
     persistInitialState: () =>
       serialise(async () => {
         if ((await hostDB.loadState(storageID)) === null)

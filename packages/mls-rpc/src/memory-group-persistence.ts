@@ -284,6 +284,18 @@ export function createMemoryGroupCoordinator(params: {
     const incarnation = (incarnation: number) =>
       createUnlockedIncarnationStores({ tx, key: { groupID, incarnation }, atRest })
     const reads: EntryReads = {
+      anchor: memoryOperation(
+        tx,
+        async (number: number) => await incarnation(number).anchor.load(),
+      ),
+      outbox: memoryOperation(
+        tx,
+        async (number: number) => await incarnation(number).outbox.list(),
+      ),
+      settlement: memoryOperation(
+        tx,
+        async (number: number, seq: number) => await incarnation(number).meta.loadSettlement(seq),
+      ),
       checkpoints: memoryOperation(tx, states.checkpoints.list),
       lifetime: memoryOperation(tx, states.lifetime.load),
       trust: memoryOperation(tx, states.trust.load),

@@ -10,6 +10,7 @@ import {
 } from '@kumiai/rpc'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import {
   autoRotationRequest,
   buildKeyRotation,
@@ -77,6 +78,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
       anchorStore: ports.anchor,
       appCursorStore: ports.cursor,
       appOutbox: ports.outbox,
+      appPublication: createRegistryAppPublication(f.access()),
       appOutboxLimit: 16,
       localDID: fixture.identity.id,
       protocols: {},
@@ -408,6 +410,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
             anchorStore: ports.anchor,
             appCursorStore: ports.cursor,
             appOutbox: ports.outbox,
+            appPublication: createRegistryAppPublication(rawAccess),
             appOutboxLimit: 16,
             localDID: fixture.identity.id,
             protocols: {},

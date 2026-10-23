@@ -70,6 +70,7 @@ export type LiveSlot = {
 type Saved = {
   record: ReadableGroupState
   reservation?: Reservation | null
+  publicationCopy?: SendCopy
   eligibility: Uint8Array
 }
 type OwnProof = Saved & { generation: number; registered: boolean; proven: boolean }
@@ -192,6 +193,9 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   const { owner, slot, capability, environment } = params
   const proofs = new WeakMap<ReadableGroupState, OwnProof>()
   let generation = 0
+  let sealVersion = 0
+  let publicationConsumed: { identity: EpochIdentity; next: number } | null = null
+  let sendTail = Promise.resolve()
   let foreignGeneration = 0
   let closed = false
   let paused = false
@@ -234,6 +238,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     if (!current.admissible) throw new SendNotAdmissibleError(current.reason)
   }
   function invalidate(): void {
+    sealVersion++
     generation++
     foreignGeneration++
     committed.headroom = { kind: 'cold' }
@@ -260,11 +265,16 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   function currentNext(): number {
     const headroom = committed.headroom
-    if (headroom.kind === 'pending' && headroom.proof.reservation != null)
-      return headroom.proof.reservation.start
-    return headroom.kind === 'live'
-      ? ownApplicationGeneration(headroom.copy.copy.state)
-      : committedGeneration()
+    const next =
+      headroom.kind === 'pending' && headroom.proof.reservation != null
+        ? headroom.proof.reservation.start
+        : headroom.kind === 'live'
+          ? ownApplicationGeneration(headroom.copy.copy.state)
+          : committedGeneration()
+    return publicationConsumed !== null &&
+      sameStoredValue(publicationConsumed.identity, identityOf(committed.record))
+      ? Math.max(next, publicationConsumed.next)
+      : next
   }
   function admission(): SendAdmission {
     const base = owner.admission
@@ -398,6 +408,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     const foreign = previous !== undefined && !own && !compatible
     if (foreign) {
       foreignGeneration++
+      sealVersion++
       generation++
       headroom = { kind: 'cold' }
     } else if (own) {
@@ -406,6 +417,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         (!sameStoredValue(identityOf(previous.record), identityOf(proof.record)) ||
           !sameStoredValue(previous.eligibility, eligibility))
       ) {
+        sealVersion++
         generation++
         headroom = { kind: 'cold' }
       }
@@ -479,6 +491,14 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       !valid()
     ) {
       if (available() && proof.generation === foreignGeneration) invalidate()
+      return
+    }
+    if (proof.publicationCopy !== undefined) {
+      const copy = proof.publicationCopy
+      if (ownApplicationGeneration(copy.copy.state) > reservation.limit) return
+      copy.limit = reservation.limit
+      committed.headroom = { kind: 'live', copy, fence: generation }
+      deferred = false
       return
     }
     params.assertCurrent()
@@ -736,7 +756,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
               const reserved = await reserveFromBytes(
                 environment,
                 { ...record, state: record.state },
-                record.senderHWM,
+                Math.max(record.senderHWM, currentNext()),
               )
               if (reserved.reservation === null) {
                 deferred = true
@@ -834,7 +854,14 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
           record !== null && ownApplicationGeneration(record.copy.state) >= record.limit
         if (record !== null && !exhausted) {
           try {
-            const sealed = await record.copy.encryptApplication(bytes, { aad })
+            const sealed = await withSend(async () => {
+              if (ownApplicationGeneration(record.copy.state) >= record.limit)
+                throw new ApplicationLeaseUnavailableError('exhausted')
+              assertSeal()
+              if (record !== sendCopy()) throw new ApplicationLeaseUnavailableError('cold')
+              sealVersion++
+              return await record.copy.encryptApplication(bytes, { aad })
+            })
             return { ...sealed, epoch: record.identity.epoch }
           } catch (error) {
             if (
@@ -871,7 +898,94 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     cancellation.abort(reason)
     invalidate()
   }
+  async function withSend<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = sendTail
+    let release!: () => void
+    sendTail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await previous
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
+  async function prepareSeal(record: ReadableGroupState, bytes: Uint8Array, aad: Uint8Array) {
+    assertSeal()
+    let copy = sendCopy()
+    if (!sameStoredValue(identityOf(record), identityOf(committed.record)))
+      throw new GroupStateConflictError('Publication identity moved')
+    const renew =
+      copy === null || copy.limit - ownApplicationGeneration(copy.copy.state) < LEASE_RENEW_BELOW
+    let reserved =
+      renew && committedNext(record) < LEASE_MAX_GENERATION
+        ? await reserveFromBytes(environment, record, Math.max(record.senderHWM, currentNext()))
+        : null
+    if (reserved !== null && reserved.reservation === null) {
+      if (copy === null || ownApplicationGeneration(copy.copy.state) >= copy.limit)
+        throw new ApplicationLeaseUnavailableError('deferred')
+      reserved = null
+    }
+    const saved =
+      reserved === null
+        ? { ...copyRecord(record), version: record.version + 1 }
+        : {
+            ...copyRecord(record),
+            state: reserved.state,
+            senderHWM: reserved.senderHWM,
+            version: record.version + 1,
+          }
+    const reservation =
+      reserved?.reservation == null
+        ? null
+        : {
+            ...reserved.reservation,
+            envelope: reservationEnvelope(saved),
+          }
+    if (copy === null || ownApplicationGeneration(copy.copy.state) >= copy.limit) {
+      if (reservation === null) throw new ApplicationLeaseUnavailableError('exhausted')
+      const handle = restrictCommitAuthoring(await environment.restore(copyRecord(reservation.pre)))
+      copy = {
+        copy: handle,
+        identity: reservation.identity,
+        limit: reservation.limit,
+        eligibility: reservation.eligibility.slice(),
+      }
+      const staged = copy
+      bindSendCeiling(handle, () => staged.limit)
+      liveHandles.add(handle)
+    }
+    assertSeal()
+    sealVersion++
+    try {
+      const sealed = await copy.copy.encryptApplication(bytes, { aad })
+      return {
+        record: saved,
+        reservation,
+        eligibility: copy.eligibility.slice(),
+        publicationCopy: copy,
+        sealed,
+      }
+    } finally {
+      const next = ownApplicationGeneration(copy.copy.state)
+      const previous =
+        publicationConsumed !== null && sameStoredValue(publicationConsumed.identity, copy.identity)
+          ? publicationConsumed.next
+          : 0
+      publicationConsumed = { identity: copy.identity, next: Math.max(previous, next) }
+      changed()
+    }
+  }
   return {
+    prepareSeal,
+    async publication<T>(fn: () => Promise<T>): Promise<T> {
+      await accounting()
+      return await withSend(fn)
+    },
+    frontier: () => sealVersion,
+    unresolved: () => unresolved.size !== 0 || checks.size !== 0,
+    pendingProof: () => unresolved.size !== 0,
     seal,
     run,
     observed,

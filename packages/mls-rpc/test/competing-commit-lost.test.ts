@@ -32,6 +32,7 @@ import {
 import { describe, expect, test, vi } from 'vitest'
 
 import type { ControlHandleAccess, PersistContext } from '../src/access.js'
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { autoRotationRequest } from '../src/auto-rotation.js'
 import { createControlAdoptionPort } from '../src/control-adoption.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../src/control-build.js'
@@ -284,6 +285,7 @@ async function setup(
       anchorStore: current.anchor,
       appCursorStore: current.cursor,
       appOutbox: current.outbox,
+      appPublication: createRegistryAppPublication(registryAccess),
       appOutboxLimit: 16,
       prepareBuild: build.prepareBuild,
       validation:

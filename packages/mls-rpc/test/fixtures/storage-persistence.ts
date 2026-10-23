@@ -1090,6 +1090,12 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
           validation,
           adopt: adoptControl,
           appOutbox: groups.ports(key).outbox,
+          appPublication: {
+            snapshot: async () => null,
+            prepare: async () => {
+              throw new Error('This control fixture has no application publisher')
+            },
+          },
           appOutboxLimit: 128,
           appCursorStore: groups.ports(key).cursor,
           readEvidence: () => groups.readEvidence(key),

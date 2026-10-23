@@ -5,6 +5,10 @@ import type {
   AnchorSlot,
   AnchorStore,
   AppCursorStore,
+  AppOutbox,
+  AppOutboxEntry,
+  AppSettlementObligation,
+  AppStatusEvent,
   BranchAbandonedEvent,
   CheckpointStore,
   ControlChanges,
@@ -27,6 +31,14 @@ export type OwnershipContextPort = {
 
 export type {
   AbandonedEpochRange,
+  AppAttempt,
+  AppOutbox,
+  AppOutboxEntry,
+  AppPublicationOutcome,
+  AppSettlementExpected,
+  AppSettlementObligation,
+  AppSettlementResult,
+  AppStatusEvent,
   BranchAbandonedEvent,
   BranchReportCoverage,
   EpochIdentity,
@@ -391,77 +403,6 @@ export type PendingAppFrame = {
 }
 
 export type AppPoisonRecord = { frame: PreOpenAppFrameRef; reason: string; keyConsumed: boolean }
-
-export type AppAttempt = {
-  incarnation: number
-  epoch: number
-  floor: string | null
-  attempts: number
-  publishID: string
-  segment: number
-  topicID: string
-}
-
-export type AppOutboxEntry = {
-  seq: number
-  protocol: string
-  prc: string
-  data: Uint8Array
-  lastAttempt: AppAttempt | null
-  status: 'accepted' | 'failed'
-}
-
-export type AppOutbox = {
-  put(entry: AppOutboxEntry): Promise<void>
-  list(): Promise<Array<AppOutboxEntry>>
-  recordSettlement(
-    seq: number,
-    obligation: AppSettlementObligation,
-    expected: AppSettlementExpected,
-  ): Promise<AppSettlementResult>
-  loadSettlement(seq: number): Promise<AppSettlementObligation | null>
-  remove(seq: number, outcome?: AppPublicationOutcome): Promise<void>
-  clear(): Promise<void>
-  events(): Promise<Array<AppStatusEvent>>
-  ackEvent(id: string): Promise<void>
-}
-
-export type AppPublicationOutcome = {
-  incarnation: number
-  segment: number
-  topicID: string
-  position: string
-}
-
-export type AppSettlementObligation = {
-  sequenceID: string
-  attemptID: string
-  topicID: string
-  outcome: 'published'
-}
-
-export type AppSettlementExpected = {
-  identity: EpochIdentity
-  stateVersion: number
-  attemptID: string
-}
-
-export type AppSettlementResult =
-  | { recorded: true }
-  | {
-      recorded: false
-      reason: 'identity-changed' | 'state-version-changed' | 'attempt-changed' | 'entry-missing'
-    }
-
-export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & (
-    | { kind: 'accepted' }
-    | { kind: 'published'; occurrence: AppPublicationOutcome }
-    | {
-        kind: 'failed'
-        reason: 'incarnation-abandoned' | 'removed' | 'deleted' | 'database-restored'
-        nextIncarnation?: number
-      }
-  )
 
 export type PersistenceEvent =
   | BranchAbandonedEvent

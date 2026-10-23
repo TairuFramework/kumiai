@@ -46,7 +46,6 @@ import {
   chat,
   createDurableHandleAccess,
   createMemoryAppCursorStore,
-  createMemoryAppOutbox,
   createOperationHost,
   encodeJournal,
   groupMLSDependencies,
@@ -199,7 +198,6 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
   ) {
     const operationHost = access === aliceAccess ? aliceHost : createOperationHost(access, identity)
     return createGroupPeer<Protocols>({
-      appOutbox: createMemoryAppOutbox(),
       appOutboxLimit: 128,
       hub: connection,
       crypto: createGroupCrypto({ access }),

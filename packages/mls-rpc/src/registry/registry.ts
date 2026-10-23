@@ -610,6 +610,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           return reason === null ? admission : { epoch: admission.epoch, admissible: false, reason }
         },
         seal: access.seal,
+        preparePublication: access.preparePublication,
+        publicationSnapshot: access.publicationSnapshot,
         receive: access.receive,
         onRotationRequired: access.onRotationRequired,
         onAdmissionChanged: access.onAdmissionChanged,

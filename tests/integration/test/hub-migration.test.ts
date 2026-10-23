@@ -26,6 +26,7 @@ import {
 import { toB64U as toB64 } from '@sozai/codec'
 import { expect, type MockInstance, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../../../packages/mls-rpc/src/app-publication.js'
 import { createRegistryCheckpointService } from '../../../packages/mls-rpc/src/checkpoint.js'
 import * as api from '../../../packages/mls-rpc/src/index.js'
 import { decodeStoredValue } from '../../../packages/mls-rpc/src/persistence-codec.js'
@@ -81,6 +82,7 @@ async function start(
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,
         appOutbox: ports.outbox,
+        appPublication: createRegistryAppPublication(access),
         appOutboxLimit: 16,
         localDID: fixture.identity.id,
         protocols: {},
@@ -282,6 +284,9 @@ async function liveOwner(
         mutate: async (fn, write) => (await opened()).mutate(fn, write),
         replace: async (next, write, prepare) => (await opened()).replace(next, write, prepare),
         adopt: async (next, expected, write) => (await opened()).adopt(next, expected, write),
+        preparePublication: async (entry, floor) =>
+          (await opened()).preparePublication(entry, floor),
+        publicationSnapshot: async (protocol) => (await opened()).publicationSnapshot(protocol),
         seal: async (plaintext, opts) => (await opened()).seal(plaintext, opts),
         receive: async (frames) => (await opened()).receive(frames),
         onAdmissionChanged: (listener) => {
@@ -348,6 +353,7 @@ async function liveOwner(
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,
         appOutbox: ports.outbox,
+        appPublication: createRegistryAppPublication(access),
         appOutboxLimit: 16,
         deliverWelcome: async () => {
           throw new Error('No Welcome is owed')

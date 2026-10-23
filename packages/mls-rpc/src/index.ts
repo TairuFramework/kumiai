@@ -22,6 +22,8 @@
 export { GroupRestoreError as InvalidCandidateError } from '@kumiai/mls'
 export type {
   AbandonedEpochRange,
+  AppPublicationPort,
+  AppPublicationSnapshot,
   BranchAbandonedEvent,
   BranchReportCoverage,
   CheckpointStore,
@@ -31,6 +33,7 @@ export type {
   ManualRecoveryRecord,
   ManualRecoveryStatus,
   PersistedManualRecovery,
+  PreparedAppPublication,
   RecoverySource,
   RecoveryUnavailableEvent,
   SafetyHold,
@@ -47,6 +50,7 @@ export {
   type SimpleHandleAccessParams,
   simpleHandleAccess,
 } from './access.js'
+export { createRegistryAppPublication } from './app-publication.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
 export {
   type AutoRotationCandidate,

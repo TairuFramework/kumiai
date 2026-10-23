@@ -881,7 +881,6 @@ export function createGroupPeerWithControlWalk<
     rebuildEpoch: rebuildEpochRuntime,
     epochSettled,
     surfaceFor,
-    sealForSegment,
   } = epochRuntime
   const rebuildEpoch = async (): Promise<void> => {
     if (safetyHold() !== null) return
@@ -974,38 +973,26 @@ export function createGroupPeerWithControlWalk<
             healRequested = safetyHold() === null
             await healIfRequested()
           },
-          seal: async (entry) => {
-            while (true) {
-              const reason = safetyHold()
-              if (reason !== null) throw new SendNotAdmissibleError(reason)
-              const at = anchor
-              const frame = await sealForSegment(entry.protocol, entry.data, 'log', () => {
-                const reason = safetyHold()
-                if (reason !== null) throw new SendNotAdmissibleError(reason)
-              }).catch((error: unknown) => {
-                if (error instanceof GroupSafetyHeldError) {
-                  latchSafetyHold(error.reason)
-                  throw new SendNotAdmissibleError(error.reason)
-                }
-                throw error
-              })
-              const currentReason = safetyHold()
-              if (currentReason !== null) throw new SendNotAdmissibleError(currentReason)
-              const epoch = crypto.frameEpoch(frame.payload)
-              const snapshot = floor
-              const admission = mls.sendAdmission()
-              if (anchor !== at || sealBarrier != null || snapshot.epoch !== epoch) continue
-              if (sealError != null) throw sealError
-              if (
-                (!admission.admissible && admission.reason !== 'rotation-required') ||
-                admission.epoch !== epoch
-              ) {
-                throw new Error('Application admission snapshot moved')
+          prepare: async (entry, floor) => {
+            const reason = safetyHold()
+            if (reason !== null) throw new SendNotAdmissibleError(reason)
+            if (sealBarrier !== null) await sealBarrier
+            const held = safetyHold()
+            if (held !== null) throw new SendNotAdmissibleError(held)
+            try {
+              return await params.appPublication.prepare(entry, floor)
+            } catch (error) {
+              if (error instanceof GroupSafetyHeldError) {
+                latchSafetyHold(error.reason)
+                const refused = new SendNotAdmissibleError(error.reason)
+                refused.cause = error
+                throw refused
               }
-              return { ...frame, floor: snapshot }
+              throw error
             }
           },
-          put: (entry) => params.appOutbox.put(entry),
+          snapshot: (protocol) => params.appPublication.snapshot(protocol),
+          loadSettlement: (seq) => params.appOutbox.loadSettlement(seq),
           publish: (frame) => {
             // No await between the hold check, registration and transport handoff.
             if (safetyHold() !== null || logSendsHeld()) return null

@@ -1,8 +1,13 @@
 import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 
-import type { AppOutboxAcceptance, AppOutboxEntry } from './app-outbox.js'
+import type { AppOutboxAcceptance, AppOutboxEntry, AppSettlementObligation } from './app-outbox.js'
+import type {
+  AppPublicationPort,
+  AppPublicationSnapshot,
+  PreparedAppPublication,
+} from './app-publication.js'
 import type { SafetyHold } from './control/safety.js'
-import type { LogPosition } from './cursor.js'
+import { asLogPosition, type LogPosition } from './cursor.js'
 
 export type EpochFloor = { epoch: number; position: LogPosition | null; covered: boolean }
 export type AppOutboxCleared = { reason: 'removed'; seqs: Array<number> }
@@ -17,10 +22,13 @@ export function checkedFetchResult(result: HubFetchTopicResult): CoveredFetchRes
 
 type Publication = { epoch: number; floor: LogPosition | null; acknowledged: number }
 /** A delivered entry kept for a member that rejoins later and could not read its epoch. */
-type Delivered = Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'> & { epoch: number; at: number }
-type LogFrame = { topicID: string; payload: Uint8Array }
-/** A sealed frame with the floor snapshot its admission was checked against. */
-type SealedLogFrame = LogFrame & { floor: EpochFloor }
+type Delivered = Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'> & {
+  epoch: number
+  incarnation: number
+  at: number
+  seq?: number
+}
+type LogFrame = { topicID: string; payload: Uint8Array; publishID: string }
 export type LogDeliveryParams = {
   queue: AppOutboxAcceptance
   ready: () => Promise<void>
@@ -31,9 +39,10 @@ export type LogDeliveryParams = {
   probe: () => Promise<CoveredFetchResult>
   pull: () => Promise<void>
   heal: () => Promise<void>
-  seal: (entry: AppOutboxEntry) => Promise<SealedLogFrame>
-  put: (entry: AppOutboxEntry) => Promise<void>
-  publish: (frame: LogFrame) => Promise<unknown> | null
+  prepare: AppPublicationPort['prepare']
+  snapshot: AppPublicationPort['snapshot']
+  loadSettlement: (seq: number) => Promise<AppSettlementObligation | null>
+  publish: (frame: LogFrame) => Promise<{ sequenceID: string }> | null
   remove: (seq: number) => Promise<void>
   clear: () => Promise<void>
   cleared: (notice: AppOutboxCleared) => void
@@ -47,6 +56,7 @@ export type LogDeliveryParams = {
 export function createLogDelivery(params: LogDeliveryParams) {
   const handoffHeld = params.handoffHeld ?? params.held
   const safetyHeld = () => params.safetyHold?.() != null
+  const prepared = new Map<number, PreparedAppPublication>()
   const publications = new Map<number, Publication>()
   const proven = new Set<number>()
   const delivered: Array<Delivered> = []
@@ -78,7 +88,15 @@ export function createLogDelivery(params: LogDeliveryParams) {
     const epoch = publications.get(seq)?.epoch
     if (entry == null || epoch == null) return
     const { protocol, prc, data } = entry
-    delivered.push({ protocol, prc, data, epoch, at: Date.now() })
+    if (entry.lastAttempt === null) return
+    delivered.push({
+      protocol,
+      prc,
+      data,
+      epoch,
+      incarnation: entry.lastAttempt.incarnation,
+      at: Date.now(),
+    })
     pruneDelivered()
   }
 
@@ -88,6 +106,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       keepDelivered(seq)
       params.queue.remove(seq)
       publications.delete(seq)
+      prepared.delete(seq)
       proven.delete(seq)
       if (closed) return false
     }
@@ -101,6 +120,62 @@ export function createLogDelivery(params: LogDeliveryParams) {
     }
   }
 
+  const sameSource = (a: AppPublicationSnapshot, b: AppPublicationSnapshot): boolean =>
+    a.identity.groupID === b.identity.groupID &&
+    a.identity.incarnation === b.identity.incarnation &&
+    a.identity.epoch === b.identity.epoch &&
+    a.segment === b.segment &&
+    a.topicID === b.topicID &&
+    a.identity.authenticator.length === b.identity.authenticator.length &&
+    a.identity.authenticator.every((byte, index) => byte === b.identity.authenticator[index])
+
+  const frameFor = async (entry: AppOutboxEntry): Promise<PreparedAppPublication | null> => {
+    if ((await params.loadSettlement(entry.seq)) !== null) return null
+    const current = await params.snapshot(entry.protocol)
+    if (current === null) return null
+    let frame = prepared.get(entry.seq)
+    if (
+      frame !== undefined &&
+      (!sameSource(frame.snapshot, current) ||
+        frame.entry.lastAttempt?.publishID !== entry.lastAttempt?.publishID)
+    ) {
+      prepared.delete(entry.seq)
+      frame = undefined
+    }
+    if (frame === undefined) {
+      if (params.held()) return null
+      frame = await params.prepare(entry, params.floor().position)
+      params.queue.replace(frame.entry)
+      prepared.set(entry.seq, frame)
+    }
+    return frame
+  }
+  const handoff = async (frame: PreparedAppPublication): Promise<boolean> => {
+    const attempt = frame.entry.lastAttempt
+    if (attempt === null || closed || handoffHeld()) return false
+    const current = await params.snapshot(frame.entry.protocol)
+    if (current === null) return false
+    if (!sameSource(frame.snapshot, current)) {
+      prepared.delete(frame.entry.seq)
+      return false
+    }
+    if (closed || handoffHeld()) return false
+    const submission = params.publish({
+      topicID: attempt.topicID,
+      payload: frame.payload,
+      publishID: attempt.publishID,
+    })
+    if (submission === null) return false
+    await submission
+    if (closed) return false
+    publications.set(frame.entry.seq, {
+      epoch: attempt.epoch,
+      floor: attempt.floor === null ? null : asLogPosition(attempt.floor),
+      acknowledged: ++acknowledgements,
+    })
+    return true
+  }
+
   const pass = async (): Promise<void> => {
     await params.ready()
     await params.queue.ready()
@@ -112,6 +187,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       await params.clear()
       params.queue.clear()
       publications.clear()
+      prepared.clear()
       proven.clear()
       if (!closed) params.cleared({ reason: 'removed', seqs })
       return
@@ -122,13 +198,25 @@ export function createLogDelivery(params: LogDeliveryParams) {
     // Sent again ahead of the queue, so a rejoined member reads them in their original order.
     while (resend.length > 0) {
       const next = resend[0]
-      if (next == null || closed || params.held()) return
-      const { protocol, prc, data } = next
-      const frame = await params.seal({ protocol, prc, data, seq: -1, lastAttempt: null })
-      if (closed || handoffHeld()) return
-      const submission = params.publish(frame)
-      if (submission == null) return
-      await submission
+      if (next == null || closed || handoffHeld()) return
+      const current = await params.snapshot(next.protocol)
+      if (current === null) return
+      if (current.identity.incarnation !== next.incarnation) {
+        resend.shift()
+        continue
+      }
+      if (next.seq === undefined) {
+        const before = new Set(params.queue.entries().map((entry) => entry.seq))
+        await params.queue.accept(next)
+        next.seq = params.queue.entries().find((entry) => !before.has(entry.seq))?.seq
+      }
+      const entry = params.queue.entries().find((entry) => entry.seq === next.seq)
+      if (entry === undefined) {
+        resend.shift()
+        continue
+      }
+      const frame = await frameFor(entry)
+      if (frame === null || !(await handoff(frame))) return
       resend.shift()
     }
     if (params.queue.entries().length === 0) return
@@ -152,10 +240,16 @@ export function createLogDelivery(params: LogDeliveryParams) {
         immediate = removed && params.queue.lowestUnresolvedSeq() == null
         return
       }
-      if (params.held()) return
+      if (handoffHeld()) return
       const floor = params.floor()
       if (publications.get(entry.seq)?.epoch === floor.epoch) continue
-      const frame = await params.seal(entry)
+      const frame = await frameFor(entry)
+      if (frame === null) return
+      if (frame.snapshot.identity.epoch !== floor.epoch) {
+        prepared.delete(entry.seq)
+        immediate = true
+        break
+      }
       if (closed || handoffHeld()) return
       const needsEarlierPublication = (): boolean =>
         params.queue
@@ -164,38 +258,15 @@ export function createLogDelivery(params: LogDeliveryParams) {
             (earlier) =>
               earlier.seq < entry.seq &&
               !proven.has(earlier.seq) &&
-              publications.get(earlier.seq)?.epoch !== frame.floor.epoch,
+              publications.get(earlier.seq)?.epoch !== frame.snapshot.identity.epoch,
           )
       if (needsEarlierPublication()) {
         immediate = true
         break
       }
-      const updated: AppOutboxEntry = {
-        ...entry,
-        lastAttempt: {
-          epoch: frame.floor.epoch,
-          floor: frame.floor.position,
-          attempts: (entry.lastAttempt?.attempts ?? 0) + 1,
-        },
-      }
-      await params.put(updated)
-      params.queue.replace(updated)
-      if (closed || handoffHeld()) return
-      if (needsEarlierPublication()) {
-        immediate = true
-        break
-      }
-      const submission = params.publish(frame)
-      if (submission == null) return
-      await submission
-      if (closed) return
-      publications.set(entry.seq, {
-        epoch: frame.floor.epoch,
-        floor: frame.floor.position,
-        acknowledged: ++acknowledgements,
-      })
+      if (!(await handoff(frame))) return
       // A later entry must not reach the new epoch before this one is re-sealed there.
-      if (params.floor().epoch !== frame.floor.epoch) {
+      if (params.floor().epoch !== frame.snapshot.identity.epoch) {
         immediate = true
         break
       }
@@ -287,6 +358,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     },
     removed: (): void => {
       removed = true
+      prepared.clear()
       delivered.length = 0
       resend = []
       params.queue.stop()
@@ -295,6 +367,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     },
     close: (): void => {
       closed = true
+      prepared.clear()
       clearTimeout(timer)
     },
   }

@@ -37,6 +37,7 @@ import {
 } from '@kumiai/rpc-conformance'
 import { expect, expectTypeOf, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { entryCapability } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
 import { createManualRecoveryStore } from '../src/manual-recovery.js'
@@ -733,6 +734,7 @@ async function liveManualPeer(
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,
         appOutbox: ports.outbox,
+        appPublication: createRegistryAppPublication(access),
         appOutboxLimit: 16,
         localDID: fixture.identity.id,
         protocols: {},

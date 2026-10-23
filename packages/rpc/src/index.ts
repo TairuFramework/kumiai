@@ -12,6 +12,7 @@ export type { LogHub, MailboxHub } from '@kumiai/hub-tunnel'
 export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
+export { decodeAppEntry } from './app-entry.js'
 export {
   type AppEventPlaintext,
   appFrameIdempotencyKey,
@@ -23,10 +24,21 @@ export {
 } from './app-frame.js'
 export { type AppDeliveryResumed, type AppDeliveryStalled, frameID } from './app-lane.js'
 export {
+  type AppAttempt,
   type AppOutbox,
   type AppOutboxEntry,
+  type AppPublicationOutcome,
+  type AppSettlementExpected,
+  type AppSettlementObligation,
+  type AppSettlementResult,
+  type AppStatusEvent,
   MAX_APP_ENTRY_BYTES,
 } from './app-outbox.js'
+export type {
+  AppPublicationPort,
+  AppPublicationSnapshot,
+  PreparedAppPublication,
+} from './app-publication.js'
 export { checkpointServiceHostMembers, retainForkEvidence } from './checkpoint.js'
 export type {
   AbandonedEpochRange,

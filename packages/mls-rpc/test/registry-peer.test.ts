@@ -27,6 +27,7 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import type { EntryReads } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
 import {
@@ -353,6 +354,7 @@ describe('registry peer recovery coordination', () => {
               anchorStore: ports.anchor,
               appCursorStore: ports.cursor,
               appOutbox: ports.outbox,
+              appPublication: createRegistryAppPublication(await f.registry.access(key.groupID)),
               appOutboxLimit: 16,
               localDID: f.identity.id,
               protocols: {},

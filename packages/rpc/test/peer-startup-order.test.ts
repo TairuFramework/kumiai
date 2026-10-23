@@ -335,6 +335,7 @@ test('terminal clearing requires pending restoration when safety latches just af
     prc: 'chat/posted',
     data: new Uint8Array([1]),
     lastAttempt: null,
+    status: 'accepted',
   })
   const record: PendingAppFrame = {
     frame: {

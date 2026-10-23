@@ -15,6 +15,7 @@ import {
 } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { entryCapability } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
 import { manualRecoveryStatus } from '../src/manual-recovery.js'
@@ -456,6 +457,7 @@ async function heldPeer(
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,
         appOutbox: ports.outbox,
+        appPublication: createRegistryAppPublication(access),
         appOutboxLimit: 16,
         localDID: fixture.identity.id,
         protocols: {},

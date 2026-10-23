@@ -1,6 +1,7 @@
 import type { GatherOptions } from '@kumiai/broadcast'
 
 import type { AnchorStore } from './anchor.js'
+import type { AppPublicationPort } from './app-publication.js'
 import { checkpointServiceHostMembers, copyCheckpointValue } from './checkpoint.js'
 import type { CheckpointPort, CheckpointService } from './checkpoint-types.js'
 import type { ControlValidation, ControlValidationPort } from './control/search.js'
@@ -31,6 +32,11 @@ type HostMembers<TValue extends object, TCore extends keyof TValue = never> = {
       ? 'host' | 'core'
       : 'data' | 'port'
 }
+
+export const appPublicationHostMembers = {
+  prepare: 'host',
+  snapshot: 'host',
+} as const satisfies HostMembers<AppPublicationPort>
 
 export const checkpointHostMembers = {
   signInstalled: 'host',
@@ -152,6 +158,7 @@ export const peerHostFields = {
   anchorStore: 'port',
   appCursorStore: 'port',
   appOutbox: 'port',
+  appPublication: 'port',
   appOutboxLimit: 'data',
   onAppOutboxCleared: 'callback',
   handlers: 'handlers',
@@ -398,6 +405,8 @@ export function wrapPeerHost<TParams extends object>(
           },
         ]),
       )
+    } else if (key === 'appPublication') {
+      selected = selectHostMembers(boundary, value as AppPublicationPort, appPublicationHostMembers)
     } else if (key === 'anchorStore')
       selected = selectHostMembers(boundary, value as AnchorStore, anchorStoreHostMembers)
     else if (kind === 'mls') {

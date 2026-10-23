@@ -8,6 +8,7 @@ import { expect, vi } from 'vitest'
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
 import type { AppOutbox } from '../../src/app-outbox.js'
+import type { AppPublicationPort } from '../../src/app-publication.js'
 import { digestAppliedCommit } from '../../src/classify.js'
 import { decodeCommitFrame, encodeCommitFrame } from '../../src/commit-frame.js'
 import type { FrameControlBuild } from '../../src/control/build.js'
@@ -50,6 +51,7 @@ import type {
 import { commitTopic } from '../../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
+import { memoryApplicationPorts } from './app-publication.js'
 import { publishCommit } from './commits.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { FakeHub } from './fake-hub.js'
@@ -64,7 +66,6 @@ import {
   type MemoryGroupMLS,
   tagMemoryCommit,
 } from './memory-group-mls.js'
-import { createMemoryAppOutbox } from './outbox.js'
 
 /**
  * `chat/changed` is EPHEMERAL — live push, nothing retained, nothing drainable — and every test
@@ -93,6 +94,7 @@ export type TestPeer = {
   buildOperation: (op: Operation) => Promise<HostBuilt>
   anchorStore: MemoryAnchorStore
   appOutbox: AppOutbox
+  appPublication: AppPublicationPort
   appCursorStore: MemoryAppCursorStore
   /** Every Welcome this host delivered, in order. Records the at-least-once repeats too. */
   welcomes: Array<string>
@@ -259,13 +261,20 @@ export function makeMLSPeer(
   anchorStore.connect(mls.anchorStore())
   const appCursorStore =
     options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
-  const appOutbox = options.appOutbox ?? restartOf?.appOutbox ?? createMemoryAppOutbox()
+  const application = memoryApplicationPorts(
+    mls,
+    crypto,
+    options.appOutbox ?? restartOf?.appOutbox,
+    anchorStore,
+  )
+  const appOutbox = application.appOutbox
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const ports = memoryControlPorts(mls, crypto, options.build ?? buildOperation, recoverySecret)
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
     hub,
     crypto,
     mls,
+    appPublication: application.appPublication,
     control,
     recoveryOnly: options.recoveryOnly,
     onConfirmedRecovery: options.onConfirmedRecovery,
@@ -346,6 +355,7 @@ export function makeMLSPeer(
     anchorStore,
     appCursorStore,
     appOutbox,
+    appPublication: application.appPublication,
     welcomes,
   }
 }

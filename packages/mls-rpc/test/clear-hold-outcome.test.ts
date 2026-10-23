@@ -10,6 +10,7 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { createControlValidationPort } from '../src/control-validation.js'
 import { createLedgerEntrySlot } from '../src/mls.js'
 import { StorageOutcomeUnknownError } from '../src/persistence-errors.js'
@@ -143,6 +144,7 @@ for (const context of ['supplied', 'absent'] as const) {
           anchorStore: ports.anchor,
           appCursorStore: ports.cursor,
           appOutbox: ports.outbox,
+          appPublication: createRegistryAppPublication(await f.registry.access(key.groupID)),
           appOutboxLimit: 16,
           validation: createControlValidationPort({
             identity: f.identity,

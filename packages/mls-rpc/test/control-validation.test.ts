@@ -1574,6 +1574,12 @@ async function expectPolicyPoison(
     anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
     appOutbox: createMemoryAppOutbox(),
+    appPublication: {
+      snapshot: async () => null,
+      prepare: async () => {
+        throw new Error('This control fixture has no application publisher')
+      },
+    },
     appOutboxLimit: 16,
     localDID: f.member.identity.id,
     protocols: {},
@@ -2069,6 +2075,12 @@ test.each(['outer', 'inner'] as const)(
       anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
       appOutbox: createMemoryAppOutbox(),
+      appPublication: {
+        snapshot: async () => null,
+        prepare: async () => {
+          throw new Error('This control fixture has no application publisher')
+        },
+      },
       appOutboxLimit: 16,
       localDID: f.member.identity.id,
       protocols: {},

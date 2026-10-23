@@ -98,6 +98,7 @@ export async function startLeaseRotationPeer(params: {
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,
         appOutbox: params.outbox,
+        appPublication: api.createRegistryAppPublication(rawAccess),
         appOutboxLimit: 4,
         localDID: fixture.identity.id,
         protocols: { chat: { posted: { type: 'event', retain: 'log', data: { type: 'object' } } } },

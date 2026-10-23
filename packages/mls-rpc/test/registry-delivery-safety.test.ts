@@ -16,6 +16,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import { expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../src/app-publication.js'
 import { encodeControlJournal } from '../src/control-journal.js'
 import { createControlValidationPort } from '../src/control-validation.js'
 import { createGroupCrypto } from '../src/crypto.js'
@@ -195,6 +196,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             anchorStore: ports.anchor,
             appCursorStore: ports.cursor,
             appOutbox: ports.outbox,
+            appPublication: createRegistryAppPublication(await f.registry.access(key.groupID)),
             appOutboxLimit: 16,
             localDID: f.identity.id,
             protocols: {},

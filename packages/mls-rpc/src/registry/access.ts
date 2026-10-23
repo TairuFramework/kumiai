@@ -44,6 +44,7 @@ import type {
 } from '../persistence-types.js'
 import { clearGroupCondition } from '../safety-conditions.js'
 import { createRegistryAppOpen } from './app-open.js'
+import { createPublicationPreparation } from './app-publication.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import { createLiveReceive, registryReceiveSlots } from './live-receive.js'
 import { createLiveSend, type LiveSlot, leaseReaders, registryLiveSend } from './live-send.js'
@@ -797,6 +798,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       throw new GroupUnavailableError({ reason: 'invalid' })
   }
   const access: RegistryHandleAccess = {
+    ...createPublicationPreparation({ ...params, live, assertWorkSafety }),
     receive: createLiveReceive({
       ...params,
       slot: params.live,

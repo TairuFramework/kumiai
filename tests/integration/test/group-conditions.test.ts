@@ -19,6 +19,7 @@ import {
 } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { createRegistryAppPublication } from '../../../packages/mls-rpc/src/app-publication.js'
 import { createCheckpointService } from '../../../packages/mls-rpc/src/checkpoint.js'
 import { entryCapability } from '../../../packages/mls-rpc/src/entry-capability.js'
 import {
@@ -103,6 +104,7 @@ async function start(
         anchorStore: ports.anchor,
         appCursorStore: ports.cursor,
         appOutbox: ports.outbox,
+        appPublication: createRegistryAppPublication(access),
         appOutboxLimit: 16,
         localDID: f.identity.id,
         protocols: {},

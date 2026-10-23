@@ -280,6 +280,7 @@ test('fresh startup with a lost anchor secret keeps consumed work closed while o
     prc: 'chat/posted',
     data: encodeEventFrame('chat/posted', { text: 'held' }),
     lastAttempt: null,
+    status: 'accepted',
   })
   const restarted = await state.restart()
   await restarted.peer.replay()
@@ -334,6 +335,7 @@ test('persisted but not adopted repairs from the durable handle before a queued 
     prc: 'chat/posted',
     data: encodeEventFrame('chat/posted', { text: 'from durable replacement' }),
     lastAttempt: null,
+    status: 'accepted',
   })
   const restarted = await state.restart(alice)
   await restarted.peer.protocol('chat').to(bob.identity.id)
@@ -366,6 +368,7 @@ test('a failed anchor save repairs before the restarted worker seals and reaches
     prc: 'chat/posted',
     data: encodeEventFrame('chat/posted', { text: 'after failed save' }),
     lastAttempt: null,
+    status: 'accepted',
   })
   refused = false
   const restarted = await state.restart(alice)

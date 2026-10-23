@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { createAppOutboxAcceptance } from '../src/app-outbox.js'
@@ -6,6 +7,7 @@ import { createLogDelivery } from '../src/log-delivery.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { makeMLSPeer } from './fixtures/peer.js'
+import { createWorkerPublication } from './fixtures/worker-publication.js'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -23,7 +25,7 @@ test.each(['seal', 'put', 'resend'] as const)(
     const admission = (): SendAdmission =>
       held ? { epoch, admissible: false, reason: 'rotation-required' } : { epoch, admissible: true }
     const queue = createAppOutboxAcceptance({ outbox: store, limit: 4, admission })
-    const publish = vi.fn(async () => {})
+    const publish = vi.fn(async () => ({ sequenceID: crypto.randomUUID() }))
     const seal = vi.fn(async () => {
       if (flipNext) held = true
       return {
@@ -41,11 +43,16 @@ test.each(['seal', 'put', 'resend'] as const)(
       probe: async () => ({ head: null, oldest: null, gap: false, messages: [] }),
       pull: async () => {},
       heal: async () => {},
-      seal,
-      put: async (entry) => {
-        await store.put(entry)
-        if (flip === 'put') held = true
-      },
+      ...createWorkerPublication({
+        outbox: store,
+        floor: () => ({ epoch, position: null, covered: true }),
+        seal,
+        put: async (entry) => {
+          await store.put(entry)
+          if (flip === 'put') held = true
+        },
+      }),
+      loadSettlement: store.loadSettlement,
       publish,
       remove: store.remove,
       clear: store.clear,
@@ -54,8 +61,16 @@ test.each(['seal', 'put', 'resend'] as const)(
       deliveredLimit: 4,
     })
     try {
-      await queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([1]) })
-      await queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([2]) })
+      await queue.accept({
+        protocol: 'chat',
+        prc: 'posted',
+        data: encodeEventFrame('posted', { value: 1 }),
+      })
+      await queue.accept({
+        protocol: 'chat',
+        prc: 'posted',
+        data: encodeEventFrame('posted', { value: 2 }),
+      })
       delivery.trigger()
       await vi.advanceTimersByTimeAsync(0)
       if (flip === 'resend') {
@@ -72,7 +87,11 @@ test.each(['seal', 'put', 'resend'] as const)(
         await vi.advanceTimersByTimeAsync(0)
         expect(queue.entries()).toHaveLength(1)
         await expect(
-          queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([3]) }),
+          queue.accept({
+            protocol: 'chat',
+            prc: 'posted',
+            data: encodeEventFrame('posted', { value: 3 }),
+          }),
         ).rejects.toMatchObject({ reason: 'rotation-required' })
         await vi.advanceTimersByTimeAsync(1_000)
         expect(publish).toHaveBeenCalledTimes(1)
@@ -134,7 +153,7 @@ test.each([false, true])(
       limit: 4,
       admission: () => ({ epoch: 1, admissible: true }),
     })
-    const publish = vi.fn(async () => {})
+    const publish = vi.fn(async () => ({ sequenceID: crypto.randomUUID() }))
     const delivery = createLogDelivery({
       queue,
       ready: async () => {},
@@ -144,15 +163,20 @@ test.each([false, true])(
       probe: async () => ({ head: null, oldest: null, gap: false, messages: [] }),
       pull: async () => {},
       heal: async () => {},
-      seal: async () => {
-        held = true
-        return {
-          topicID: 'app',
-          payload: new Uint8Array([1]),
-          floor: { epoch: 1, position: null, covered: true },
-        }
-      },
-      put: store.put,
+      ...createWorkerPublication({
+        outbox: store,
+        floor: () => ({ epoch: 1, position: null, covered: true }),
+        seal: async () => {
+          held = true
+          return {
+            topicID: 'app',
+            payload: new Uint8Array([1]),
+            floor: { epoch: 1, position: null, covered: true },
+          }
+        },
+        put: store.put,
+      }),
+      loadSettlement: store.loadSettlement,
       publish,
       remove: store.remove,
       clear: store.clear,
@@ -161,7 +185,11 @@ test.each([false, true])(
       deliveredLimit: 4,
     })
     try {
-      await queue.accept({ protocol: 'chat', prc: 'posted', data: new Uint8Array([1]) })
+      await queue.accept({
+        protocol: 'chat',
+        prc: 'posted',
+        data: encodeEventFrame('posted', { value: 1 }),
+      })
       delivery.trigger()
       await vi.advanceTimersByTimeAsync(0)
       expect(publish).not.toHaveBeenCalled()

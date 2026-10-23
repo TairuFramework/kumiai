@@ -97,6 +97,7 @@ describe('durable pending restoration', () => {
         prc: 'chat/posted',
         data: payload('retained transport work'),
         lastAttempt: null,
+        status: 'accepted',
       })
       const retained = await first.appOutbox.list()
       expect(retained).toHaveLength(1)

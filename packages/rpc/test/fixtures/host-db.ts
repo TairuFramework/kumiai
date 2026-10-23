@@ -2,6 +2,13 @@ import type { MigrationFixture } from '../../../rpc-conformance/src/control-migr
 import { migrateMemoryControl } from '../../../rpc-conformance/src/memory-control-migration.js'
 import type { MemoryMigrationBackend } from '../../../rpc-conformance/src/memory-migration-backend.js'
 import type { AnchorSlot, AnchorStore } from '../../src/anchor.js'
+import type {
+  AppOutbox,
+  AppOutboxEntry,
+  AppSettlementExpected,
+  AppSettlementObligation,
+  AppStatusEvent,
+} from '../../src/app-outbox.js'
 import { controlSafetyHeld } from '../../src/control/safety.js'
 import {
   applyChanges,
@@ -39,6 +46,9 @@ type GroupRecord = {
   anchorSlot: AnchorSlot | null
   control: ControlSnapshot
   mutationID: string | null
+  appEntries: Map<number, AppOutboxEntry>
+  appObligations: Map<number, AppSettlementObligation>
+  appEvents: Map<string, AppStatusEvent>
 }
 
 type SeedOptions = { replace?: false } | { replace: true; expectedVersion: number }
@@ -60,9 +70,19 @@ export type MemoryHostDatabase = {
     expected: AdoptionExpected,
     mutationID: string,
   ): Promise<'saved' | 'moved' | 'occupied'>
+  appOutbox(storageID: string, key: GroupKey): AppOutbox
+  savePreparedApp(
+    storageID: string,
+    key: GroupKey,
+    state: Uint8Array,
+    original: AppOutboxEntry,
+    entry: AppOutboxEntry,
+    expected: AppSettlementExpected,
+  ): Promise<void>
   anchorStore(groupID: string): AnchorStore
   saveState(groupID: string, state: Uint8Array, write?: AdoptionWrite): Promise<void>
   seed(groupID: string, state: Uint8Array, options?: SeedOptions): Promise<void>
+  currentVersion(groupID: string): number
   loadVersion(groupID: string): Promise<number>
   loadState(groupID: string): Promise<Uint8Array | null>
   snapshot(
@@ -76,6 +96,9 @@ export type MemoryHostDatabase = {
 
 function emptyRecord(): GroupRecord {
   return {
+    appEntries: new Map(),
+    appObligations: new Map(),
+    appEvents: new Map(),
     version: 0,
     state: null,
     initialState: null,
@@ -161,7 +184,144 @@ export function createMemoryHostDatabase(
     }
     await runSeam(`after-${point}`)
   }
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
   return {
+    appOutbox(storageID, key) {
+      const event = (next: GroupRecord, value: AppStatusEvent) =>
+        next.appEvents.set(value.id, structuredClone(value))
+      return {
+        async put(input) {
+          const entry = structuredClone(input)
+          await transact(storageID, 'apply', (next) => {
+            const previous = next.appEntries.get(entry.seq)
+            if (
+              previous !== undefined &&
+              (!same(
+                [previous.protocol, previous.prc, previous.data],
+                [entry.protocol, entry.prc, entry.data],
+              ) ||
+                (next.appObligations.has(entry.seq) && !same(previous, entry)))
+            )
+              throw new Error('Immutable outbox entry')
+            if (previous === undefined)
+              event(next, { ...key, id: crypto.randomUUID(), kind: 'accepted', entry })
+            next.appEntries.set(entry.seq, entry)
+          })
+        },
+        list: async () =>
+          [...read(storageID).appEntries.values()]
+            .sort((a, b) => a.seq - b.seq)
+            .map((value) => structuredClone(value)),
+        loadSettlement: async (seq) =>
+          structuredClone(read(storageID).appObligations.get(seq) ?? null),
+        async recordSettlement(seq, obligation, expected) {
+          const current = read(storageID)
+          const identity =
+            current.state === null ? null : readIdentity(storageID, current.state, key)
+          if (!same(identity, expected.identity))
+            return { recorded: false, reason: 'identity-changed' }
+          if (current.version !== expected.stateVersion)
+            return { recorded: false, reason: 'state-version-changed' }
+          const entry = current.appEntries.get(seq)
+          if (entry === undefined) return { recorded: false, reason: 'entry-missing' }
+          if (
+            entry.lastAttempt?.publishID !== expected.attemptID ||
+            obligation.attemptID !== expected.attemptID ||
+            obligation.topicID !== entry.lastAttempt.topicID ||
+            entry.lastAttempt.incarnation !== identity?.incarnation ||
+            entry.lastAttempt.epoch !== identity?.epoch
+          )
+            return { recorded: false, reason: 'attempt-changed' }
+          await transact(storageID, 'apply', (next) => {
+            const previous = next.appObligations.get(seq)
+            if (previous !== undefined && !same(previous, obligation))
+              throw new Error('Immutable obligation')
+            next.appObligations.set(seq, structuredClone(obligation))
+          })
+          return { recorded: true }
+        },
+        async remove(seq, occurrence) {
+          if (!read(storageID).appEntries.has(seq)) return
+          await transact(storageID, 'apply', (next) => {
+            const entry = next.appEntries.get(seq)
+            if (entry === undefined) return
+            if (occurrence !== undefined) {
+              if (
+                entry.lastAttempt === null ||
+                entry.lastAttempt.topicID !== occurrence.topicID ||
+                entry.lastAttempt.segment !== occurrence.segment ||
+                entry.lastAttempt.incarnation !== occurrence.incarnation ||
+                (next.appObligations.has(seq) &&
+                  next.appObligations.get(seq)?.sequenceID !== occurrence.position)
+              )
+                throw new Error('Publication occurrence mismatch')
+              event(next, { ...key, id: crypto.randomUUID(), kind: 'published', entry, occurrence })
+            } else {
+              if (next.appObligations.has(seq))
+                throw new Error('Certified entry requires its original occurrence')
+              event(next, {
+                ...key,
+                id: crypto.randomUUID(),
+                kind: 'failed',
+                reason: 'removed',
+                entry,
+              })
+            }
+            next.appEntries.delete(seq)
+            next.appObligations.delete(seq)
+          })
+        },
+        clear: async () =>
+          transact(storageID, 'apply', (next) => {
+            if (next.appObligations.size !== 0)
+              throw new Error('Certified entry requires its original occurrence')
+            for (const entry of next.appEntries.values())
+              event(next, {
+                ...key,
+                id: crypto.randomUUID(),
+                kind: 'failed',
+                reason: 'removed',
+                entry,
+              })
+            next.appEntries.clear()
+          }),
+        events: async () =>
+          [...read(storageID).appEvents.values()].map((value) => structuredClone(value)),
+        ackEvent: async (id) => {
+          if (read(storageID).appEvents.has(id))
+            await transact(storageID, 'apply', (next) => {
+              next.appEvents.delete(id)
+            })
+        },
+      }
+    },
+    async savePreparedApp(storageID, key, state, original, entry, expected) {
+      const owned = structuredClone({ state, original, entry, expected })
+      try {
+        await transact(storageID, 'save', (next) => {
+          const identity = next.state === null ? null : readIdentity(storageID, next.state, key)
+          if (
+            !same(identity, owned.expected.identity) ||
+            next.version !== owned.expected.stateVersion ||
+            !same(next.appEntries.get(original.seq), owned.original) ||
+            next.appObligations.has(original.seq) ||
+            controlSafetyHeld(next.control) !== null
+          )
+            throw new Error('Publication source moved')
+          next.state = owned.state
+          next.appEntries.set(entry.seq, owned.entry)
+        })
+      } catch (error) {
+        const saved = read(storageID)
+        if (
+          !(error instanceof StorageOutcomeUnknownError) ||
+          saved.version <= owned.expected.stateVersion ||
+          !same(saved.state, owned.state) ||
+          !same(saved.appEntries.get(entry.seq), owned.entry)
+        )
+          throw error
+      }
+    },
     bindIdentity: (storageID, reader) => {
       readers.set(storageID, reader)
     },
@@ -315,6 +475,7 @@ export function createMemoryHostDatabase(
         })
       },
     }),
+    currentVersion: (groupID) => read(groupID).version,
     loadVersion: async (groupID) => {
       await activate(groupID)
       return read(groupID).version

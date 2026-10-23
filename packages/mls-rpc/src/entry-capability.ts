@@ -1,7 +1,9 @@
-import type { CheckpointRecord, ControlSnapshot, GroupCondition } from '@kumiai/rpc'
+import type { AnchorSlot, CheckpointRecord, ControlSnapshot, GroupCondition } from '@kumiai/rpc'
 
 import type {
+  AppOutboxEntry,
   AppPoisonRecord,
+  AppSettlementObligation,
   EpochIdentity,
   GroupKey,
   GroupLifetime,
@@ -38,6 +40,9 @@ export type AccountedGroupObservation = {
   terminal: boolean | null
 }
 export type EntryReads = {
+  anchor(incarnation: number): Promise<AnchorSlot | null>
+  outbox(incarnation: number): Promise<Array<AppOutboxEntry>>
+  settlement(incarnation: number, seq: number): Promise<AppSettlementObligation | null>
   checkpoints(): Promise<Array<CheckpointRecord>>
   lifetime(): Promise<GroupLifetime | null>
   trust(): Promise<GroupRecoveryTrust | null>
