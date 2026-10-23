@@ -1,11 +1,22 @@
-import { createReset, createRotate, digestOf, type SignedEvent } from '@kokuin/controller'
+import {
+  authorityPath,
+  canonicalBytes,
+  createReset,
+  createRotate,
+  deriveKeyMaterial,
+  digestOf,
+  type SignedEvent,
+} from '@kokuin/controller'
 import { createIdentity, normalizeDID } from '@kokuin/token'
+import { ed25519 } from '@noble/curves/ed25519.js'
+import { toB64U } from '@sozai/codec'
 import { beforeAll, describe, expect, test } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
 import { foldChain } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
+import { LeafBindingError, RevokeProofError } from '../src/errors.js'
 import { restoreGroup } from '../src/group-create.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup } from '../src/group-handle.js'
@@ -42,6 +53,22 @@ async function addUnevidenced(
 
 const target = agent(61).id
 const otherTarget = agent(71).id
+
+function legacyRevoke(crit: boolean): SignedEvent {
+  return {
+    event: {
+      t: 'rev',
+      crit,
+      g: 0,
+      s: 1,
+      p: digestOf(inception.event),
+      i: controllerID,
+      v: 1,
+      x: target,
+    },
+    sigs: [],
+  } as unknown as SignedEvent
+}
 
 function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
   return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
@@ -541,6 +568,71 @@ describe('live effect derivation', () => {
 })
 
 describe('proof boundary cases', () => {
+  test.each([false, true])(
+    'restore refuses persisted legacy revoke proofs with crit=%s',
+    async (crit) => {
+      const { group, identity } = await lifecycleGroup()
+      const token = await signLedgerEntry(
+        identity,
+        proofEntry(identity.id, target, {
+          op: 'revoke',
+          proof: [inception, legacyRevoke(crit)],
+          revoked: [{ did: target }],
+        }).entry,
+      )
+      const restoring = restoreGroup({
+        state: group.state,
+        credential: group.credential,
+        ledgerEntries: [token],
+      })
+      await expect(restoring).rejects.toBeInstanceOf(RevokeProofError)
+      await expect(restoring).rejects.toMatchObject({ reason: 'legacy-log' })
+      expect(group.ledgerTokens).toEqual([])
+    },
+  )
+
+  test.each([false, true])(
+    'leaf verification refuses unsigned legacy revokes with crit=%s',
+    async (crit) => {
+      const identity = agent(41)
+      const binding = await bindingFor(identity)
+      const verifying = verifyLeafCredential(
+        makeMLSCredential(identity, { ...binding, prefix: [inception, legacyRevoke(crit)] }),
+        identity.publicKey,
+      )
+      await expect(verifying).rejects.toBeInstanceOf(LeafBindingError)
+      await expect(verifying).rejects.toMatchObject({ reason: 'controller-mismatch' })
+    },
+  )
+
+  test('leaf verification refuses a signed non-reset rotate without a snapshot', async () => {
+    const identity = agent(41)
+    const binding = await bindingFor(identity)
+    const rotation = rotateChain({
+      seed: controllerSeed,
+      profile: 0,
+      did: controllerID,
+      chain: [inception],
+    })
+    const event: SignedEvent['event'] & { m?: unknown; d?: unknown } = { ...rotation.event }
+    delete event.m
+    delete event.d
+    const sigs = [
+      toB64U(
+        ed25519.sign(
+          canonicalBytes(event),
+          deriveKeyMaterial(controllerSeed, authorityPath(0, 0, 1), 'EdDSA'),
+        ),
+      ),
+    ]
+    const verifying = verifyLeafCredential(
+      makeMLSCredential(identity, { ...binding, prefix: [inception, { event, sigs }] }),
+      identity.publicKey,
+    )
+    await expect(verifying).rejects.toBeInstanceOf(LeafBindingError)
+    await expect(verifying).rejects.toMatchObject({ reason: 'controller-mismatch' })
+  })
+
   test('an empty first proof has no revocation', async () => {
     const { group, identity } = await lifecycleGroup()
     await expect(
@@ -910,22 +1002,9 @@ describe('deny-gaining rotate proofs', () => {
     expect(authenticate(chain, normalizeDID(peer.id)).logPosition).toBe(1)
   })
 
-  test('rejects legacy chain revokes as unauthenticated authority evidence', () => {
-    const legacy = {
-      event: {
-        t: 'rev',
-        crit: true,
-        g: 0,
-        s: 1,
-        p: digestOf(inception.event),
-        i: controllerID,
-        v: 1,
-        x: target,
-      },
-      sigs: [],
-    } as unknown as SignedEvent
-    expect(() => authenticate([inception, legacy])).toThrow(
-      expect.objectContaining({ reason: 'not-authority-signed' }),
+  test.each([false, true])('rejects legacy chain revoke proofs with crit=%s', (crit) => {
+    expect(() => authenticate([inception, legacyRevoke(crit)])).toThrow(
+      expect.objectContaining({ reason: 'legacy-log' }),
     )
   })
 

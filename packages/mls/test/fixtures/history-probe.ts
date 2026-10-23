@@ -6,7 +6,13 @@ import {
   didFromInception,
   type SignedEvent,
 } from '@kokuin/controller'
-import { createIdentity, encodeMultibase, now, stringifyToken } from '@kokuin/token'
+import {
+  createFullIdentity,
+  createIdentity,
+  encodeMultibase,
+  now,
+  stringifyToken,
+} from '@kokuin/token'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { createCommit, defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
 
@@ -53,8 +59,9 @@ export function buildLog(count: number, target: string, mixed = false) {
   for (let i = 1; i < count; i++) {
     const prior = log.at(-1)
     if (prior == null) throw new Error('Missing prior')
-    if (mixed && i % 4 === 0 && !snapshot.deny.includes(target)) {
-      snapshot = { ...snapshot, deny: [...snapshot.deny, target] }
+    if (mixed && i % 4 === 0) {
+      const subject = createFullIdentity(sha256(jsonBytes([target, i]))).id
+      snapshot = { ...snapshot, deny: [...snapshot.deny, subject] }
     }
     log.push(createRotate({ seed, profile: 0, did: controllerID, prior: prior.event, snapshot }))
   }

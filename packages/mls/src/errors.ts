@@ -52,6 +52,7 @@ export class LeafLapsedError extends Error {
 
 export type RevokeProofReason =
   | 'no-rev'
+  | 'legacy-log'
   | 'wrong-controller'
   | 'not-authority-signed'
   | 'generation-floor'

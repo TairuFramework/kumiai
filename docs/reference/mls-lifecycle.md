@@ -59,6 +59,8 @@ Terminally denied DIDs cannot enter as bound or floating leaves, or issue leaf c
 
 The ledger is the only revocation authority.
 A proven revoke verifies authority-signed controller events against the group's recorded log.
+A device revoke is a non-reset rotate whose state snapshot newly denies the device DID.
+A later rotate retaining that denial does not create another revoke.
 The first proof carries a chain. Later proofs carry a suffix after its recorded head, possibly empty.
 A reset carries a chain re-parented on inception and raises the generation floor.
 Revoking T cascades to its current child leaves. Effects and exact Removes are authenticated in the entry.
@@ -171,7 +173,18 @@ Closing this residual requires an upstream MLS change.
 `LeafBindingError.reason` includes issuer-mismatch, subject-mismatch, audience-mismatch, permission-denied, signature-invalid, confirmation-invalid, chain-depth, self-issued, child-outlives-parent, denied-issuer,
 lifetime-cap, generation-floor, identity-change, controller-mismatch, floating-refused and history-horizon.
 `LeafLapsedError` refuses sending or opening a lapsed leaf's traffic.
-`RevokeProofError.reason` includes no-rev, wrong-controller, not-authority-signed, generation-floor, too-large,
+`RevokeProofError.reason` includes no-rev, legacy-log, wrong-controller, not-authority-signed, generation-floor, too-large,
 detached, needs-reset, effects-mismatch and removes-mismatch. Helpers return these through `not-provable`.
+`no-rev` means no revoking rotate for the subject. A reset carrying a denial does not count.
+
+Legacy profile logs containing a chain `rev` or a non-reset rotate without a snapshot no longer fold.
+Leaves carrying these prefixes fail `controller-mismatch`.
+Revoke proofs containing a chain `rev`, or following a recorded log containing one, fail `legacy-log`.
+A non-reset rotate without a snapshot fails `not-authority-signed` in a revoke proof.
+A profile reset can replace an obsolete prefix.
+
+Persisted group ledgers containing pre-0.11 chain-`rev` proofs cannot replay.
+Restore and derivation throw `RevokeProofError('legacy-log')` instead of dropping the revocation. Recreate the group.
+
 `CommitRejectedError` carries binding, lapse, floor, policy or invalid refusal reasons.
 `InviteRecipientMismatchError` refuses a key package or Welcome for another recipient.

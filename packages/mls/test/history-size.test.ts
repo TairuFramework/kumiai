@@ -2,13 +2,14 @@
 import { createReset, createRotate } from '@kokuin/controller'
 import { expect, test } from 'vitest'
 
+import { foldChain } from '../src/controller-log.js'
 import { createGroup } from '../src/group-create.js'
 import * as history from '../src/history.js'
 import { HISTORY_HORIZON } from '../src/history.js'
 import type { VerifiedLedgerEntry } from '../src/ledger.js'
 import { signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
 import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
-import { historyBytes, logMeasurements } from './fixtures/history-probe.js'
+import { buildLog, historyBytes, logMeasurements } from './fixtures/history-probe.js'
 import {
   addMember,
   agent,
@@ -19,6 +20,15 @@ import {
   inception,
   lifecycleGroup,
 } from './fixtures/lifecycle-ledger.js'
+
+test('mixed history gains a distinct denial every fourth event', () => {
+  const folded = foldChain(controllerID, buildLog(13, agent(71).id, true))
+  expect(folded.ok).toBe(true)
+  if (!folded.ok) throw new Error(folded.reason)
+  expect(folded.states.map((state) => state.deny.size)).toEqual([
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3,
+  ])
+})
 
 test('measures signed controller history and repeated copies', async () => {
   const rows = await logMeasurements()

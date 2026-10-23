@@ -4,7 +4,13 @@ import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes }
 
 import { hasHolderEvidence } from './authentication.js'
 import { readCapability } from './capability.js'
-import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
+import {
+  foldChain,
+  hasLegacyRevoke,
+  isDetachedFoldReason,
+  LEGACY_CHAIN_REVOKE,
+  revokesSubject,
+} from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
@@ -56,6 +62,7 @@ export function authenticateLifecycleProof(
     throw new RevokeProofError('wrong-controller')
   const proof = value.proof
   if (!Array.isArray(proof)) throw new RevokeProofError('no-rev')
+  if (hasLegacyRevoke(recorded) || hasLegacyRevoke(proof)) throw new RevokeProofError('legacy-log')
   if (recorded.length === 0 && proof.length === 0) throw new RevokeProofError('no-rev')
   for (const signed of proof) {
     const event = signed?.event
@@ -91,6 +98,7 @@ export function authenticateLifecycleProof(
   const log = value.op === 'reset' ? proof : [...recorded, ...proof]
   const folded = foldChain(controller, log)
   if (!folded.ok) {
+    if (folded.reason === LEGACY_CHAIN_REVOKE) throw new RevokeProofError('legacy-log')
     const detached = isDetachedFoldReason(folded.reason)
     throw new RevokeProofError(detached ? 'detached' : 'not-authority-signed')
   }
