@@ -45,7 +45,7 @@ type LogFrame = { topicID: string; payload: Uint8Array; publishID: string }
 function copySnapshot(value: AppPublicationSnapshot): AppPublicationSnapshot {
   return {
     ...value,
-    identity: { ...value.identity, authenticator: value.identity.authenticator.slice() },
+    identity: { ...value.identity, authenticator: Uint8Array.from(value.identity.authenticator) },
   }
 }
 
@@ -53,10 +53,10 @@ function copyPrepared(value: PreparedAppPublication): PreparedAppPublication {
   return {
     entry: {
       ...value.entry,
-      data: value.entry.data.slice(),
+      data: Uint8Array.from(value.entry.data),
       lastAttempt: value.entry.lastAttempt === null ? null : { ...value.entry.lastAttempt },
     },
-    payload: value.payload.slice(),
+    payload: Uint8Array.from(value.payload),
     snapshot: copySnapshot(value.snapshot),
   }
 }
