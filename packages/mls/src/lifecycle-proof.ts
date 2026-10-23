@@ -4,13 +4,7 @@ import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes }
 
 import { hasHolderEvidence } from './authentication.js'
 import { readCapability } from './capability.js'
-import {
-  foldChain,
-  hasLegacyRevoke,
-  isAuthenticLegacyRevoke,
-  isDetachedFoldReason,
-  revokesSubject,
-} from './controller-log.js'
+import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
@@ -62,15 +56,6 @@ export function authenticateLifecycleProof(
     throw new RevokeProofError('wrong-controller')
   const proof = value.proof
   if (!Array.isArray(proof)) throw new RevokeProofError('no-rev')
-  if (hasLegacyRevoke(recorded) || hasLegacyRevoke(proof)) {
-    if (
-      isAuthenticLegacyRevoke(controller, recorded) ||
-      isAuthenticLegacyRevoke(controller, proof) ||
-      (value.op !== 'reset' && isAuthenticLegacyRevoke(controller, [...recorded, ...proof]))
-    )
-      throw new RevokeProofError('legacy-log')
-    throw new RevokeProofError('not-authority-signed')
-  }
   if (recorded.length === 0 && proof.length === 0) throw new RevokeProofError('no-rev')
   for (const signed of proof) {
     const event = signed?.event
@@ -220,7 +205,6 @@ export async function verifyLifecycleProof(
     const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
     return {
       did: normalizeDID(member.id),
-      controller: binding?.controller == null ? undefined : normalizeDID(binding.controller),
       leafIndex: member.leafIndex,
       issuer,
       exempt: isExemptMember(group, member.leafIndex),
@@ -262,7 +246,7 @@ export async function verifyLifecycleProof(
     revoked.push({ did: subject })
   } else if (value.op === 'reset') {
     for (const leaf of leaves) {
-      if (leaf.controller === controller && (leaf.generation ?? -1) < authenticated.genFloor)
+      if (leaf.generation != null && leaf.generation < authenticated.genFloor)
         revoked.push({ did: leaf.did })
     }
   } else {

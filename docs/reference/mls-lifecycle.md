@@ -173,23 +173,11 @@ Closing this residual requires an upstream MLS change.
 `LeafBindingError.reason` includes issuer-mismatch, subject-mismatch, audience-mismatch, permission-denied, signature-invalid, confirmation-invalid, chain-depth, self-issued, child-outlives-parent, denied-issuer,
 lifetime-cap, generation-floor, identity-change, controller-mismatch, floating-refused and history-horizon.
 `LeafLapsedError` refuses sending or opening a lapsed leaf's traffic.
-`RevokeProofError.reason` includes no-rev, legacy-log, wrong-controller, not-authority-signed, generation-floor, too-large,
+`RevokeProofError.reason` includes no-rev, wrong-controller, not-authority-signed, generation-floor, too-large,
 detached, needs-reset, effects-mismatch and removes-mismatch. Helpers return these through `not-provable`.
 `no-rev` means no revoking rotate for the subject. A reset carrying a denial does not count.
 
-Legacy profile logs containing a chain `rev` or a non-reset rotate without a snapshot no longer fold.
-Leaves carrying these prefixes fail `controller-mismatch`.
-`legacy-log` is raised only for authenticated legacy revokes in a proof or its recorded log.
-Unsigned or malformed legacy markers fail `not-authority-signed` and are dropped during permissive replay.
-A non-reset rotate without a snapshot fails `not-authority-signed` in a revoke proof.
-A profile reset can replace an obsolete prefix.
-A reset removes controller-attributed leaves whose prefixes cannot fold, as well as those below its generation floor.
-
-0.10 and 0.11 peers cannot share a lifecycle group because revoke encoding changed; upgrade all members together.
-`@kumiai/mls-rpc` and `@kumiai/mls-hub` inherit the `@kumiai/mls` behaviour break.
-
-Persisted group ledgers containing authenticated pre-0.11 chain-`rev` proofs cannot replay.
-Restore and derivation throw `RevokeProofError('legacy-log')` instead of dropping the revocation. Recreate the group.
+`@kumiai/mls-rpc` and `@kumiai/mls-hub` inherit the `@kumiai/mls` behaviour change.
 
 `CommitRejectedError` carries binding, lapse, floor, policy or invalid refusal reasons.
 `InviteRecipientMismatchError` refuses a key package or Welcome for another recipient.

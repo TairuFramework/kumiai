@@ -11,13 +11,7 @@ import {
 } from 'ts-mls'
 
 import { readCapability } from './capability.js'
-import {
-  foldChain,
-  hasLegacyRevoke,
-  isAuthenticLegacyRevoke,
-  isDetachedFoldReason,
-  revokesSubject,
-} from './controller-log.js'
+import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { LeafBindingError, RevokeProofError, type RevokeProofReason } from './errors.js'
 import { commitWithEntries } from './group-commit.js'
@@ -235,13 +229,6 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
   const { group, log, subject, reset } = params
   const controller = group.anchor.controller
   if (controller == null) throw new RevokeProofError('wrong-controller')
-  const projection = group.registry.controllers.get(normalizeDID(controller))
-  const recorded = projection?.recordedLog ?? []
-  if (hasLegacyRevoke(recorded) || hasLegacyRevoke(log)) {
-    if (isAuthenticLegacyRevoke(controller, recorded) || isAuthenticLegacyRevoke(controller, log))
-      throw new RevokeProofError('legacy-log')
-    throw new RevokeProofError('not-authority-signed')
-  }
   if (log.length === 0) throw new RevokeProofError('no-rev')
   const first = log[0]
   if (first?.event.t === 'icp') {
@@ -273,6 +260,8 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
   for (let index = 1; index < advancing.length; index++) {
     if (advancing[index]?.event.g !== advancing[index - 1]?.event.g) resetIndex = index
   }
+  const projection = group.registry.controllers.get(normalizeDID(controller))
+  const recorded = projection?.recordedLog ?? []
   const floor = projection?.genFloor ?? 0
   if (reset) {
     if (resetIndex < 0) throw new RevokeProofError('no-rev')
@@ -354,7 +343,6 @@ export async function revokeWithProof(
         const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
         return {
           ...member,
-          controller: binding?.controller == null ? undefined : normalizeDID(binding.controller),
           issuer: payload?.cap == null ? undefined : normalizeDID(payload.iss),
           generation: folded?.ok ? folded.states.at(-1)?.gen : undefined,
           exempt: isExemptMember(group, member.leafIndex),
@@ -362,10 +350,7 @@ export async function revokeWithProof(
       })
       if (reset)
         for (const leaf of leaves) {
-          if (
-            leaf.controller === normalizeDID(controller) &&
-            (leaf.generation ?? -1) < authenticated.genFloor
-          )
+          if (leaf.generation != null && leaf.generation < authenticated.genFloor)
             revoked.push({ did: normalizeDID(leaf.id) })
         }
       const direct = new Set(revoked.map(({ did }) => did))

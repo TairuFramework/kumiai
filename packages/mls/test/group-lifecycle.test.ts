@@ -1,16 +1,11 @@
 import {
-  authorityPath,
-  canonicalBytes,
   createControllerIdentity,
   createInception,
   createReset,
   createRotate,
-  deriveKeyPair,
   type SignedEvent,
 } from '@kokuin/controller'
 import { createIdentity, type OwnIdentity } from '@kokuin/token'
-import { ed25519 } from '@noble/curves/ed25519.js'
-import { toB64U } from '@sozai/codec'
 import { createProposal, defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -23,14 +18,8 @@ import { deriveGroup } from '../src/group-handle.js'
 import { removeLapsedLeaves, renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { isLapsed, leafAt, treeTime } from '../src/lifecycle.js'
-import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
-import { type ControllerProjection, DEVICE_ENTRY_TYPE, revocationOf } from '../src/registry.js'
-import {
-  legacyRevokeChain,
-  revokeChain,
-  rotateChain,
-  snapshotForChain,
-} from './fixtures/controller-chain.js'
+import { revocationOf } from '../src/registry.js'
+import { revokeChain, rotateChain, snapshotForChain } from './fixtures/controller-chain.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -181,61 +170,6 @@ describe('lapse removal', () => {
 })
 
 describe('proof builders', () => {
-  test.each([
-    ['log', 'revoke'],
-    ['recorded', 'revoke'],
-    ['log', 'reset'],
-    ['recorded', 'reset'],
-  ] as const)('reports authenticated legacy %s input for a %s', async (source, op) => {
-    const { group } = await pipelineGroup()
-    const target = agent(51).id
-    const legacy = legacyRevokeChain({
-      seed: controllerSeed,
-      profile: 0,
-      did: controllerID,
-      chain: [inception],
-      subject: target,
-    })
-    const legacyLog = [inception, legacy]
-    const current = op === 'reset' ? createReset(controllerSeed, 0, 1) : revoke([inception], target)
-    if (source === 'recorded') {
-      const controllers = group.registry.controllers as Map<string, ControllerProjection>
-      controllers.set(controllerID, { recordedLog: legacyLog, genFloor: 0, timeFloor: 0 })
-    }
-    const log = source === 'log' ? legacyLog : [inception, current]
-    expect(
-      await revokeWithProof(
-        group,
-        op === 'reset' ? { reset: true, log } : { subject: target, log },
-      ),
-    ).toEqual({ status: 'not-provable', reason: 'legacy-log' })
-  })
-
-  test.each(['log', 'recorded'] as const)(
-    'does not authenticate an unsigned legacy %s',
-    async (source) => {
-      const { group } = await pipelineGroup()
-      const target = agent(51).id
-      const signed = legacyRevokeChain({
-        seed: controllerSeed,
-        profile: 0,
-        did: controllerID,
-        chain: [inception],
-        subject: target,
-      })
-      const legacyLog = [inception, { ...signed, sigs: [] }]
-      if (source === 'recorded') {
-        const controllers = group.registry.controllers as Map<string, ControllerProjection>
-        controllers.set(controllerID, { recordedLog: legacyLog, genFloor: 0, timeFloor: 0 })
-      }
-      const log = source === 'log' ? legacyLog : [inception, revoke([inception], target)]
-      expect(await revokeWithProof(group, { subject: target, log })).toEqual({
-        status: 'not-provable',
-        reason: 'not-authority-signed',
-      })
-    },
-  )
-
   test('evicts a leaf once, records a leafless subject and returns already-revoked for a winning proof', async () => {
     const { group, identity, tokens } = await pipelineGroup()
     const target = agent(51)
@@ -289,61 +223,6 @@ describe('proof builders', () => {
         log: [inception, createReset(controllerSeed, 0, 1)],
       }),
     ).toEqual({ status: 'self-affected', subject: identity.id })
-  })
-
-  test('reset removes a legacy-prefix leaf and the group can commit again', async () => {
-    const { group, identity, tokens } = await pipelineGroup()
-    const current = [inception, createReset(controllerSeed, 0, 1)]
-    const renewal = await renewLeaf(
-      group,
-      await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
-    )
-    const target = agent(51)
-    const rotation = rotateChain({
-      seed: controllerSeed,
-      profile: 0,
-      did: controllerID,
-      chain: [inception],
-    })
-    const binding = await timedBinding({
-      identity: target,
-      iat: 100,
-      exp: 200,
-      prefix: [inception, rotation],
-    })
-    const event: SignedEvent['event'] & { m?: unknown; d?: unknown } = { ...rotation.event }
-    delete event.m
-    delete event.d
-    const key = deriveKeyPair(controllerSeed, authorityPath(0, 0, 1), 'EdDSA')
-    const legacy = { event, sigs: [toB64U(ed25519.sign(canonicalBytes(event), key.privateKey))] }
-    expect(foldChain(controllerID, [inception, legacy]).ok).toBe(false)
-    const fixture = await belowGateWelcome(renewal.newGroup, target, {
-      ...binding,
-      prefix: [inception, legacy],
-    })
-    const effects = await verifyLifecycleProof(fixture.author, {
-      issuer: identity.id,
-      entry: {
-        type: DEVICE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: controllerID,
-        value: { op: 'reset', proof: current, revoked: [{ did: target.id }] },
-      },
-    })
-    expect(effects.removeLeafIndices).toEqual([fixture.author.findMemberLeafIndex(target.id)])
-    const reset = await revokeWithProof(fixture.author, { reset: true, log: current })
-    expect(reset.status).toBe('built')
-    if (reset.status !== 'built') throw new Error('Missing reset')
-    expect(reset.result.newGroup.findMemberLeafIndex(target.id)).toBeUndefined()
-    expect(revocationOf(reset.result.newGroup, target.id)?.reason).toBe('reset')
-    for (const held of reset.result.newGroup.ledger) tokens.set(held.entryID, held.token)
-    await fixture.joined.processMessage(reset.result.commitMessage)
-    expect(fixture.joined.state.groupActiveState.kind).toBe('removedFromGroup')
-    const next = await renewLeaf(
-      reset.result.newGroup,
-      await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
-    )
-    expect(next.epoch).toBe(reset.result.epoch + 1n)
   })
 
   test('reset after renewal raises the floor without evicting a retained member', async () => {

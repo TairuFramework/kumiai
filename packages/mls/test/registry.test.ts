@@ -1,9 +1,8 @@
-import { createInception, didFromInception, type SignedEvent } from '@kokuin/controller'
+import { createInception, didFromInception } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
 import type { GroupAnchor } from '../src/anchor.js'
-import { RevokeProofError } from '../src/errors.js'
 import type { FoldInput } from '../src/fold.js'
 import {
   authority,
@@ -19,7 +18,7 @@ import {
   registrySeed,
 } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE, type RoleValue } from '../src/roster.js'
-import { legacyRevokeChain, revokeChain } from './fixtures/controller-chain.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 
 const GROUP = 'group-1'
 const CREATOR = 'did:key:zCreator'
@@ -426,120 +425,6 @@ describe('authenticated lifecycle projections', () => {
     subject: DEV_A,
   })
   const anchor: GroupAnchor = { creatorDID: CREATOR, version: 1, controller }
-
-  test.each([false, true])(
-    'legacy revoke replay throws instead of dropping with crit=%s',
-    (crit) => {
-      const legacy = legacyRevokeChain({
-        seed,
-        profile: 0,
-        did: controller,
-        chain: [inception],
-        subject: DEV_A,
-        crit,
-      })
-      const drops: Array<unknown> = []
-      expect(() =>
-        foldControl(
-          [
-            deviceInput(
-              DEV_B,
-              DEV_A,
-              {
-                op: 'revoke',
-                proof: [inception, legacy],
-                revoked: [{ did: DEV_A }],
-              },
-              'legacy',
-            ),
-            deviceInput(DEV_B, controller, { op: 'clock', time: 100 }, 'later'),
-          ],
-          anchor,
-          GROUP,
-          (drop) => drops.push(drop),
-        ),
-      ).toThrow(expect.objectContaining({ name: 'RevokeProofError', reason: 'legacy-log' }))
-      expect(drops).toEqual([])
-    },
-  )
-
-  test.each(['marker', 'unsigned full chain', 'unsigned suffix'])(
-    'drops a member-forged legacy %s and continues replay',
-    (kind) => {
-      const forged = {
-        ...legacyRevokeChain({
-          seed,
-          profile: 0,
-          did: controller,
-          chain: [inception],
-          subject: DEV_A,
-        }),
-        sigs: [],
-      }
-      const proof =
-        kind === 'marker'
-          ? [{ event: { t: 'rev' }, sigs: [] } as unknown as SignedEvent]
-          : kind === 'unsigned full chain'
-            ? [inception, forged]
-            : [forged]
-      const drops: Array<unknown> = []
-      const result = foldControl(
-        [
-          deviceInput(DEV_B, DEV_A, { op: 'revoke', proof, revoked: [] }, 'forged'),
-          deviceInput(DEV_B, controller, { op: 'clock', time: 100 }, 'later'),
-        ],
-        anchor,
-        GROUP,
-        (drop) => drops.push(drop),
-      )
-      expect(result.registry.devices.size).toBe(0)
-      expect(result.registry.controllers.get(controller)?.timeFloor).toBe(100)
-      expect(drops).toEqual([
-        {
-          entryID: 'forged',
-          type: DEVICE_ENTRY_TYPE,
-          reason: 'invalid lifecycle proof',
-        },
-      ])
-    },
-  )
-
-  test('a later revoke refuses a recorded legacy chain', () => {
-    const legacy = legacyRevokeChain({
-      seed,
-      profile: 0,
-      did: controller,
-      chain: [inception],
-      subject: DEV_B,
-    })
-    const registry = {
-      ...registrySeed(),
-      controllers: new Map([
-        [
-          controller,
-          {
-            recordedLog: [inception, legacy],
-            genFloor: 0,
-            timeFloor: 0,
-          },
-        ],
-      ]),
-    }
-    const { verified } = deviceInput(
-      DEV_B,
-      DEV_A,
-      {
-        op: 'revoke',
-        proof: [rev],
-        revoked: [{ did: DEV_A }],
-      },
-      'next',
-    )
-    expect(() => registryApply(verified, registry, controller)).toThrow(RevokeProofError)
-    expect(() => registryApply(verified, registry, controller)).toThrow(
-      expect.objectContaining({ reason: 'legacy-log' }),
-    )
-  })
 
   test('records a leafless revocation from authenticated ledger data alone', () => {
     const entries = [

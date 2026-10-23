@@ -4,32 +4,29 @@ import {
   createReset,
   createRotate,
   deriveKeyMaterial,
+  digestOf,
   type SignedEvent,
 } from '@kokuin/controller'
 import { createIdentity, normalizeDID } from '@kokuin/token'
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { toB64U } from '@sozai/codec'
-import { beforeAll, describe, expect, test } from 'vitest'
+import { beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
 import { foldChain } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
-import { LeafBindingError, RevokeProofError } from '../src/errors.js'
+import { LeafBindingError } from '../src/errors.js'
 import { restoreGroup } from '../src/group-create.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup } from '../src/group-handle.js'
 import type { VerifiedLedgerEntry } from '../src/ledger.js'
 import { signLedgerEntry } from '../src/ledger.js'
 import { authenticateLifecycleProof, verifyLifecycleProof } from '../src/lifecycle-proof.js'
+import * as registryModule from '../src/registry.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue, registrySeed, revocationOf } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
-import {
-  legacyRevokeChain,
-  revokeChain,
-  rotateChain,
-  snapshotForChain,
-} from './fixtures/controller-chain.js'
+import { revokeChain, rotateChain, snapshotForChain } from './fixtures/controller-chain.js'
 import {
   addMember,
   agent,
@@ -58,15 +55,20 @@ async function addUnevidenced(
 const target = agent(61).id
 const otherTarget = agent(71).id
 
-function legacyRevoke(crit: boolean): SignedEvent {
-  return legacyRevokeChain({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    chain: [inception],
-    subject: target,
-    crit,
-  })
+function chainRevoke(crit: boolean): SignedEvent {
+  return {
+    event: {
+      t: 'rev',
+      crit,
+      g: 0,
+      s: 1,
+      p: digestOf(inception.event),
+      i: controllerID,
+      v: 1,
+      x: target,
+    },
+    sigs: [],
+  } as unknown as SignedEvent
 }
 
 function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
@@ -567,84 +569,23 @@ describe('live effect derivation', () => {
 })
 
 describe('proof boundary cases', () => {
-  test.each([false, true])(
-    'authenticates a legacy suffix against recorded authority with crit=%s',
-    (crit) => {
-      const rotation = rotateChain({
-        seed: controllerSeed,
-        profile: 0,
-        did: controllerID,
-        chain: [inception],
-      })
-      const recordedLog = [inception, rotation]
-      const legacy = legacyRevokeChain({
-        seed: controllerSeed,
-        profile: 0,
-        did: controllerID,
-        chain: recordedLog,
-        subject: target,
-        crit,
-      })
-      const registry = {
-        ...registrySeed(),
-        controllers: new Map([[controllerID, { recordedLog, genFloor: 0, timeFloor: 0 }]]),
-      }
-      const verified = proofEntry(agent(41).id, target, {
-        op: 'revoke',
-        proof: [legacy],
-        revoked: [{ did: target }],
-      })
-      expect(() => authenticateLifecycleProof(controllerID, verified, registry)).toThrow(
-        expect.objectContaining({ reason: 'legacy-log' }),
-      )
-      verified.entry.value.proof = [{ ...legacy, sigs: [] }]
-      expect(() => authenticateLifecycleProof(controllerID, verified, registry)).toThrow(
-        expect.objectContaining({ reason: 'not-authority-signed' }),
-      )
-    },
-  )
-
-  test('drops member-forged legacy markers through apply, derivation and restore', async () => {
-    const { group, identity } = await lifecycleGroup()
-    const token = await signLedgerEntry(
-      identity,
-      proofEntry(identity.id, target, {
-        op: 'revoke',
-        proof: [{ event: { t: 'rev' }, sigs: [] } as unknown as SignedEvent],
-        revoked: [],
-      }).entry,
-    )
-    await group.applyLedgerEntries([token])
-    expect(revocationOf(group, target)).toBeNull()
-    expect(deriveGroup(group, group.state).registry).toEqual(group.registry)
-    const restored = await restoreGroup({
-      state: group.state,
-      credential: group.credential,
-      ledgerEntries: [token],
-    })
-    expect(restored.registry).toEqual(group.registry)
-    await expect(group.applyLedgerEntries([])).resolves.toEqual([])
-  })
-
   test('a throwing ledger apply leaves the handle usable and unchanged', async () => {
     const { group, identity } = await lifecycleGroup()
     const clock = await signLedgerEntry(
       identity,
       proofEntry(identity.id, controllerID, { op: 'clock', time: 100 }).entry,
     )
-    const legacy = await signLedgerEntry(
-      identity,
-      proofEntry(identity.id, target, {
-        op: 'revoke',
-        proof: [inception, legacyRevoke(true)],
-        revoked: [{ did: target }],
-      }).entry,
-    )
     const registry = group.registry
     const roster = group.roster
-    await expect(group.applyLedgerEntries([clock, legacy])).rejects.toMatchObject({
-      reason: 'legacy-log',
+    const failure = new Error('Control fold failed')
+    const fold = vi.spyOn(registryModule, 'foldControl').mockImplementationOnce(() => {
+      throw failure
     })
+    try {
+      await expect(group.applyLedgerEntries([clock])).rejects.toBe(failure)
+    } finally {
+      fold.mockRestore()
+    }
     expect(group.ledgerTokens).toEqual([])
     expect(group.registry).toEqual(registry)
     expect(group.roster).toEqual(roster)
@@ -655,37 +596,14 @@ describe('proof boundary cases', () => {
   })
 
   test.each([false, true])(
-    'restore refuses persisted legacy revoke proofs with crit=%s',
-    async (crit) => {
-      const { group, identity } = await lifecycleGroup()
-      const token = await signLedgerEntry(
-        identity,
-        proofEntry(identity.id, target, {
-          op: 'revoke',
-          proof: [inception, legacyRevoke(crit)],
-          revoked: [{ did: target }],
-        }).entry,
-      )
-      const restoring = restoreGroup({
-        state: group.state,
-        credential: group.credential,
-        ledgerEntries: [token],
-      })
-      await expect(restoring).rejects.toBeInstanceOf(RevokeProofError)
-      await expect(restoring).rejects.toMatchObject({ reason: 'legacy-log' })
-      expect(group.ledgerTokens).toEqual([])
-    },
-  )
-
-  test.each([false, true])(
-    'leaf verification refuses unsigned legacy revokes with crit=%s',
+    'leaf verification refuses unsigned chain revokes with crit=%s',
     async (crit) => {
       const identity = agent(41)
       const binding = await bindingFor(identity)
       const verifying = verifyLeafCredential(
         makeMLSCredential(identity, {
           ...binding,
-          prefix: [inception, { ...legacyRevoke(crit), sigs: [] }],
+          prefix: [inception, { ...chainRevoke(crit), sigs: [] }],
         }),
         identity.publicKey,
       )
@@ -1091,9 +1009,9 @@ describe('deny-gaining rotate proofs', () => {
     expect(authenticate(chain, normalizeDID(peer.id)).logPosition).toBe(1)
   })
 
-  test.each([false, true])('rejects legacy chain revoke proofs with crit=%s', (crit) => {
-    expect(() => authenticate([inception, legacyRevoke(crit)])).toThrow(
-      expect.objectContaining({ reason: 'legacy-log' }),
+  test.each([false, true])('rejects chain revoke proofs with crit=%s', (crit) => {
+    expect(() => authenticate([inception, chainRevoke(crit)])).toThrow(
+      expect.objectContaining({ reason: 'not-authority-signed' }),
     )
   })
 

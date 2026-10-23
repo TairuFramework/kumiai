@@ -717,7 +717,6 @@ export class GroupHandle {
    * dropped (defensive — the strict admin-issuer enforcement is the commit pre-pass).
    * Exact token bytes can reuse verification on the same array or a handle's export.
    * did:key and embedded peer:4 keys are immutable; time claims still check on reuse.
-   * Throws RevokeProofError('legacy-log') without applying anything for authenticated legacy revokes.
    *
    * A token the log already holds is appended again, not skipped: the log records
    * what each commit enacted, not a set of claims, and a repeat is the only way to

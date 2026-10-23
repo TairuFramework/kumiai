@@ -4,7 +4,6 @@ import { normalizeDID } from '@kokuin/token'
 import type { GroupAnchor } from './anchor.js'
 import { foldChain } from './controller-log.js'
 import type { MLSCredentialIdentity } from './credential.js'
-import { RevokeProofError } from './errors.js'
 import type { FoldDrop, FoldInput } from './fold.js'
 import type { GroupHandle } from './group-handle.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
@@ -363,9 +362,7 @@ export function foldControl(
           registry,
           anchor.controller,
         )
-      } catch (error) {
-        // Dropping an old revoke would erase its persisted deny effect.
-        if (error instanceof RevokeProofError && error.reason === 'legacy-log') throw error
+      } catch {
         onDrop?.({ entryID, type: entry.type, reason: 'invalid lifecycle proof' })
       }
       continue
