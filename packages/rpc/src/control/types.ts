@@ -136,7 +136,10 @@ export type BuiltCommit = {
   enqueuedAt: number
   deadline: number
   acceptedAs?: LogPosition
+  /** Coverage uncertainty, independent of identical-byte retry eligibility. */
   skipped?: true
+  /** False distinguishes coverage-only skips. Older skipped rows default to forbidden. */
+  retryForbidden?: boolean
   reported?: true
   incarnation: number
   head: LogPosition | null

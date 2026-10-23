@@ -164,10 +164,11 @@ export async function stepLiveBuild(deps: OperationDeps): Promise<void> {
   }
   snapshot = await deps.control.load()
   built = snapshot.commitOnce
+  // Older skipped rows lack the retry distinction and retain their prohibition.
   if (
     built === null ||
     built.acceptedAs !== undefined ||
-    built.skipped ||
+    (built.retryForbidden ?? built.skipped) ||
     deps.now() >= built.deadline ||
     snapshot.strand !== null ||
     snapshot.cursor?.stranded ||

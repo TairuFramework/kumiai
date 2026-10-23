@@ -812,6 +812,7 @@ async function receivedPublicCommit(
 
 describe.each(['real-mls', 'double'] as const)('received commit gates (%s)', (mode) => {
   const proposalErrors: Record<string, RegExp> = {
+    'invalid content': /^Invalid memory commit$/,
     'committer self-removal': /Cannot remove memory committer/,
     'duplicate removal targets': /Duplicate memory removal target/,
     'unknown removal target': /Unknown memory removal target/,

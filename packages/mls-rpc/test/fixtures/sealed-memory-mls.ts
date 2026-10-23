@@ -878,13 +878,18 @@ class MemoryControlHandle extends GroupHandle {
     }
   }
 
-  override async verifyCommitSignature(commit: Uint8Array): Promise<boolean> {
+  override async verifyCommitSignature(
+    commit: Uint8Array,
+    senderLeafIndex = this.state.privatePath.leafIndex,
+  ): Promise<boolean> {
     const header = await this.#mls.readCommitHeader(commit)
+    const sender = this.listMembers().find((member) => member.leafIndex === senderLeafIndex)
     return (
-      this.state.ratchetTree[this.state.privatePath.leafIndex * 2]?.nodeType === 1 &&
+      this.state.ratchetTree[senderLeafIndex * 2]?.nodeType === 1 &&
       header?.external !== true &&
       header?.epoch === Number(this.epoch) &&
-      header?.committerDID === this.credential.id &&
+      sender !== undefined &&
+      header?.committerDID === sender.id &&
       verifyMemoryCommitTag(commit, this.#mls.authenticator())
     )
   }

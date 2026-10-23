@@ -1686,8 +1686,11 @@ export class GroupHandle {
     }
   }
 
-  /** Authenticate our member leaf on disposable state, without adopting or running host policy. */
-  async verifyCommitSignature(commit: Uint8Array): Promise<boolean> {
+  /** Authenticate a member leaf on disposable state, without adopting or running host policy. */
+  async verifyCommitSignature(
+    commit: Uint8Array,
+    senderLeafIndex = this.#state.privatePath.leafIndex,
+  ): Promise<boolean> {
     return mutexFor(this).run(async () => {
       let authenticated = false
       try {
@@ -1699,15 +1702,14 @@ export class GroupHandle {
         )
           return false
         if (readMessageEpoch(commit) !== this.epoch) return false
-        const ownIndex = this.#state.privatePath.leafIndex
-        const ownLeaf = leafAt(this.#state.ratchetTree, ownIndex)
-        if (ownLeaf === undefined) return false
+        const senderLeaf = leafAt(this.#state.ratchetTree, senderLeafIndex)
+        if (senderLeaf === undefined) return false
         if (message.wireformat === wireformats.mls_public_message) {
           const { content } = message.publicMessage
           if (
             content.contentType !== contentTypes.commit ||
             content.sender.senderType !== senderTypes.member ||
-            content.sender.leafIndex !== ownIndex
+            content.sender.leafIndex !== senderLeafIndex
           )
             return false
         } else {
@@ -1718,7 +1720,7 @@ export class GroupHandle {
               this.#context,
               this.#state.keySchedule.senderDataSecret,
               frame,
-            )) !== ownIndex
+            )) !== senderLeafIndex
           )
             return false
         }
@@ -1739,7 +1741,7 @@ export class GroupHandle {
                   const valid = await this.#context.cipherSuite.signature.verify(publicKey, ...args)
                   if (!signatureChecked) {
                     signatureChecked = true
-                    authenticated = bytesEqual(publicKey, ownLeaf.signaturePublicKey) && valid
+                    authenticated = bytesEqual(publicKey, senderLeaf.signaturePublicKey) && valid
                   }
                   return valid
                 },

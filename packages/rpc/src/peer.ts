@@ -1107,6 +1107,7 @@ export function createGroupPeerWithControlWalk<
     position: LogPosition,
     response?: ExternalResponse,
     occurrenceEpoch?: number,
+    retryForbidden = false,
   ): Promise<void> => {
     if (safetyHold() !== null || mls == null) return
     if (control != null) {
@@ -1144,7 +1145,15 @@ export function createGroupPeerWithControlWalk<
           cursor.position !== null &&
           (snapshot.commitOnce.head === null || cursor.position > snapshot.commitOnce.head) &&
           (snapshot.cursor?.position == null || cursor.position > snapshot.cursor.position)
-            ? { commitOnce: { ...snapshot.commitOnce, skipped: true as const } }
+            ? {
+                commitOnce: {
+                  ...snapshot.commitOnce,
+                  skipped: true as const,
+                  retryForbidden:
+                    retryForbidden ||
+                    (snapshot.commitOnce.retryForbidden ?? snapshot.commitOnce.skipped === true),
+                },
+              }
             : {}),
           cursor,
           ...(!cursor.stranded ? { strand: null } : {}),
@@ -2221,7 +2230,7 @@ export function createGroupPeerWithControlWalk<
                   slot.publishID,
                 )
             }
-            await saveCommitCursor(position, undefined, header?.epoch)
+            await saveCommitCursor(position, undefined, header?.epoch, true)
             if (commitTopicID != null)
               emitStrand({
                 groupID: commitTopicID,
@@ -2353,8 +2362,8 @@ export function createGroupPeerWithControlWalk<
             if (disposed || safetyHold() !== null) return false
             if (unsupportedEntries) {
               await resolveAnchorRotation({ port, knownUnlanded: true })
-              // A tampered version byte must not plant a digest-keyed refusal.
-              await saveCommitCursor(position, undefined, header?.epoch)
+              // The authenticated source-epoch frame classifies this refusal, not its blob.
+              await saveCommitCursor(position, undefined, header?.epoch, true)
               if (safetyHold() !== null) return advancedEpoch
               if (commitTopicID != null)
                 emitStrand({
@@ -2386,7 +2395,7 @@ export function createGroupPeerWithControlWalk<
             }
             await resolveAnchorRotation({ port, knownUnlanded: true })
             // Missing bodies describe this copy, never an authenticated commit refusal.
-            await saveCommitCursor(position, undefined, header?.epoch)
+            await saveCommitCursor(position, undefined, header?.epoch, true)
             break
           }
           if (disposed) return false
@@ -2411,9 +2420,8 @@ export function createGroupPeerWithControlWalk<
             advancedEpoch = true
             if (header?.external) logDelivery?.rejoined(anchorEpochBefore)
           }
-          // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
-          // epoch from another member: poison on the same terms as an unresolvable one.
-          if (!applied.applied) await saveCommitCursor(position, undefined, header?.epoch)
+          // The header authenticates this foreign commit's content signature before refusal.
+          if (!applied.applied) await saveCommitCursor(position, undefined, header?.epoch, true)
           if (applied.applied && (reconciledHead == null || reconciledHead < position))
             reconciledHead = position
           if (locallyRemoved) return advancedEpoch
@@ -3352,6 +3360,7 @@ export function createGroupPeerWithControlWalk<
           const operation = snapshot.commitOnce
           if (
             operation == null ||
+            (operation.retryForbidden ?? operation.skipped) === true ||
             Date.now() >= operation.deadline ||
             safetyHold() !== null ||
             controlSafetyHeld(snapshot) !== null ||

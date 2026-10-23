@@ -179,6 +179,7 @@ export type ConformanceBuiltCommit<Position extends string = string> = {
   deadline: number
   acceptedAs?: Position
   skipped?: true
+  retryForbidden?: boolean
   reported?: true
   incarnation: number
   head: Position | null
@@ -1486,21 +1487,66 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       ).rejects.toThrow()
       expect((await (await params.reopen()).control.load()).commitOnce).toEqual(expected)
     })
-    test('skipped and reported are monotone, copied owner metadata and build head remain immutable', async () => {
+
+    test('an older skipped row cannot gain retry permission on a later cursor advance', async () => {
+      const host = await params.open()
+      const { slot } = await prepareSlot(host)
+      await host.control.apply(
+        {
+          commitOnce: { ...slot, skipped: true },
+          cursor: { position: 'skip', epoch: slot.epoch },
+        },
+        'older-skip',
+      )
+      const reopened = await params.reopen()
+      const older = (await reopened.control.load()).commitOnce
+      if (older === null) throw new Error('Missing older build')
+      expect(older.skipped).toBe(true)
+      expect(older.retryForbidden).toBeUndefined()
+      await expect(
+        reopened.control.apply(
+          {
+            commitOnce: { ...older, retryForbidden: false },
+            cursor: { position: 'skip2', epoch: slot.epoch },
+          },
+          'allow-older-retry',
+        ),
+      ).rejects.toThrow()
+      expect((await reopened.control.load()).commitOnce).toEqual(older)
+    })
+    test('coverage, retry prohibition and reporting are monotone across restart and head refresh', async () => {
       const host = await params.open()
       const { slot } = await prepareSlot(host)
       await expect(
         host.control.apply({ commitOnce: { ...slot, skipped: true } }, 'unbound-skip'),
       ).rejects.toThrow()
       await host.control.apply(
-        { commitOnce: { ...slot, skipped: true }, cursor: { position: 'skip', epoch: slot.epoch } },
+        {
+          commitOnce: { ...slot, skipped: true, retryForbidden: false },
+          cursor: { position: 'skip', epoch: slot.epoch },
+        },
         'skip',
       )
       const skipped = (await host.control.load()).commitOnce
       if (skipped === null) throw new Error('Missing build')
+      // r28h: coverage uncertainty alone does not prohibit retry; classification can add the ban.
+      expect(skipped.retryForbidden).toBe(false)
+      await expect(
+        host.control.apply({ commitOnce: { ...skipped, retryForbidden: true } }, 'unbound-ban'),
+      ).rejects.toThrow()
       await host.control.apply(
         {
-          commitOnce: { ...skipped, reported: true },
+          commitOnce: { ...skipped, retryForbidden: true },
+          cursor: { position: 'skip2', epoch: slot.epoch },
+        },
+        'classified-skip',
+      )
+      const classified = (await (await params.reopen()).control.load()).commitOnce
+      if (classified === null) throw new Error('Missing classified build')
+      expect(classified.retryForbidden).toBe(true)
+      await host.control.apply(
+        {
+          commitOnce: { ...classified, reported: true },
           putOutcomes: [
             { id: 'provisional', opID: skipped.opID, at: skipped.deadline, kind: 'unknown' },
           ],
@@ -1511,17 +1557,25 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       if (marked === null) throw new Error('Missing build')
       await host.control.apply({ commitOnce: { ...marked, expectedHead: 'refresh' } }, 'head')
       const saved = await host.control.load()
+      if (saved.commitOnce === null) throw new Error('Missing refreshed build')
       expect(saved.commitOnce?.skipped).toBe(true)
       expect(saved.commitOnce?.reported).toBe(true)
+      expect(saved.commitOnce?.retryForbidden).toBe(true)
       for (const mutation of [
-        { ...marked, skipped: undefined },
-        { ...marked, reported: undefined },
-        { ...marked, deadline: 999 },
-        { ...marked, kind: 'rotation' as const },
-        { ...marked, revokes: true },
-        { ...marked, enqueuedAt: 9 },
+        { ...saved.commitOnce, skipped: undefined },
+        { ...saved.commitOnce, retryForbidden: undefined },
+        { ...saved.commitOnce, reported: undefined },
+        { ...saved.commitOnce, deadline: 999 },
+        { ...saved.commitOnce, kind: 'rotation' as const },
+        { ...saved.commitOnce, revokes: true },
+        { ...saved.commitOnce, enqueuedAt: 9 },
       ]) {
-        await expect(host.control.apply({ commitOnce: mutation }, 'invalid')).rejects.toThrow()
+        await expect(
+          host.control.apply(
+            { commitOnce: mutation, cursor: { position: 'skip3', epoch: slot.epoch } },
+            'invalid',
+          ),
+        ).rejects.toThrow()
         expect(await host.control.load()).toEqual(saved)
       }
     })

@@ -2084,7 +2084,12 @@ test.each(['outer', 'inner'] as const)(
       expect(after.strand).toBeNull()
       expect(after.forkHalt).toBeNull()
       expect(after.controlHold?.reason).not.toBe('unsupported-version')
-      expect(after.commitOnce).toEqual({ ...before.commitOnce, skipped: true, reported: true })
+      expect(after.commitOnce).toEqual({
+        ...before.commitOnce,
+        skipped: true,
+        retryForbidden: true,
+        reported: true,
+      })
       expect(after.operations).toEqual(before.operations)
       expect(after.outcomes).toEqual(expect.arrayContaining(before.outcomes))
       expect(

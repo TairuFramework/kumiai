@@ -1,5 +1,6 @@
 import { decodeClientState, encodeClientState, restoreGroup, withCommitPermit } from '@kumiai/mls'
 import {
+  commitTopic,
   createGroupPeer,
   type InternalOperations,
   type LogHub,
@@ -288,7 +289,16 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
       await f.fixture().registry.dispose()
     }
   })
-  test.each(['landed', 'withheld', 'proposals', 'live-bound', 'retired'] as const)(
+  const privateProducerScenarios = [
+    'landed',
+    'withheld',
+    'proposals',
+    'live-bound',
+    'retired',
+    'uncertain',
+    'uncertain-restart',
+  ] as const
+  test.each(privateProducerScenarios)(
     'reopen at 500 uses the private producer: %s',
     async (scenario) => {
       const withheld = scenario === 'withheld' || scenario === 'retired'
@@ -299,8 +309,20 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
       )
       if (scenario === 'proposals') await f.writeElsewhere('proposal')
       if (scenario !== 'live-bound') await f.reopen()
-      const fixture = f.fixture()
+      let fixture = f.fixture()
       const hub = new FakeHub()
+      const uncertain = scenario === 'uncertain' || scenario === 'uncertain-restart'
+      let recovered = !uncertain
+      let rotationTopic: string | undefined
+      const publish = hub.publish.bind(hub)
+      const handoffs: Array<{ payload: Uint8Array; publishID?: string }> = []
+      if (uncertain)
+        vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+          if (params.topicID === rotationTopic)
+            handoffs.push({ payload: params.payload.slice(), publishID: params.publishID })
+          if (!recovered) throw new Error('Hub temporarily unavailable')
+          return publish(params)
+        })
       if (withheld) vi.spyOn(hub, 'publish').mockResolvedValue({ sequenceID: 'withheld-position' })
       const onOutcome = vi.fn()
       const publishErrors = vi.fn()
@@ -323,7 +345,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
           options: fixture.environment.options,
         })
       }
-      const owner = await api.createRegistryPeer({
+      const ownerParams: Parameters<typeof api.createRegistryPeer>[0] = {
         registry: fixture.registry,
         key: f.key,
         recovery: fixture.environment,
@@ -395,6 +417,18 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
             prepareBuild: async (...args) => {
               const result = await buildPort.prepareBuild(...args)
               preparations.push(result.kind)
+              if (uncertain && result.kind === 'saved') {
+                // r28h: unreadable occurrence before the first rotation handoff.
+                rotationTopic =
+                  options.recoveryTarget?.topicID ??
+                  commitTopic(await options.mls.exportRecoverySecret())
+                await publish({
+                  topicID: rotationTopic,
+                  senderDID: 'hub-copy',
+                  retain: 'log',
+                  payload: new Uint8Array([255]),
+                })
+              }
               return result
             },
             validation:
@@ -416,7 +450,8 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
           publicEnqueue = vi.spyOn(peer, 'enqueue')
           return peer
         },
-      })
+      }
+      let owner = await api.createRegistryPeer(ownerParams)
       try {
         await owner.ready
         if (scenario === 'live-bound') {
@@ -424,7 +459,50 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
           expect(f.admission().admissible).toBe(true)
           for (let index = 0; index < 16; index++) await f.sealEphemeral()
         }
-        const control = fixture.device.groups.ports(f.key).control
+        let control = fixture.device.groups.ports(f.key).control
+        if (uncertain) {
+          await vi.waitFor(async () =>
+            expect((await control.load()).commitOnce?.skipped).toBe(true),
+          )
+          const saved = (await control.load()).commitOnce
+          if (saved === null) throw new Error('Missing saved rotation')
+          expect(saved.acceptedAs).toBeUndefined()
+          expect(f.admission()).toMatchObject({ reason: 'rotation-required' })
+          expect(preparations).toEqual(['saved'])
+          if (scenario === 'uncertain-restart') {
+            owner.dispose()
+            await owner.drained()
+            await f.reopen()
+            fixture = f.fixture()
+            control = fixture.device.groups.ports(f.key).control
+            expect((await control.load()).commitOnce).toEqual(saved)
+            owner = await api.createRegistryPeer({
+              ...ownerParams,
+              registry: fixture.registry,
+              recovery: fixture.environment,
+              continuation: api.createRecoveryContinuationPort({
+                registry: fixture.registry,
+                persistence: fixture.device.groups,
+              }),
+            })
+            await owner.ready
+          }
+          recovered = true
+          await vi.waitFor(
+            async () => {
+              await owner.peer()?.replay()
+              expect(f.access().epoch()).toBe(1)
+            },
+            { timeout: 3000 },
+          )
+          expect(handoffs.length).toBeGreaterThan(0)
+          for (const handoff of handoffs) {
+            expect(handoff.payload).toEqual(saved.payload)
+            expect(handoff.publishID).toBe(saved.publishID)
+          }
+          expect(preparations).toEqual(['saved'])
+          expect((await fixture.device.groups.ports(f.key).control.load()).commitOnce).toBeNull()
+        }
         if (withheld) {
           await vi.waitFor(
             async () =>
@@ -550,6 +628,11 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
           await vi.waitFor(async () => expect((await control.load()).outcomes).toEqual([]))
           expect(registryLeaseSnapshot(f.access())).toMatchObject({ own: 0, limit: 16 })
           expect((await control.load()).commitOnce).toBeNull()
+        }
+        if (uncertain) {
+          const sealed = await f.sealEphemeral()
+          expect(sealed.epoch).toBe(1)
+          expect(sealed.ciphertext.byteLength).toBeGreaterThan(0)
         }
         expect(onOutcome).not.toHaveBeenCalled()
         expect(publicEnqueue).not.toHaveBeenCalled()

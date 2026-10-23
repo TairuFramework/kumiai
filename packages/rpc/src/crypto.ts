@@ -501,7 +501,8 @@ export type GroupMLS = {
    *
    * If the bytes are a Commit, always return its `epoch`. Return `committerDID` only when the
    * Commit itself authenticates one — leave it ABSENT rather than guessing, never fill it from
-   * the frame's transport sender.
+   * the frame's transport sender. Sender-data identification alone is insufficient: verify the
+   * commit-content signature before reporting a member committer.
    *
    * Async and handle-bound: a real host recovers a member commit's committer by decrypting its
    * sender-data with the epoch secret and mapping the sender leaf to a DID against the ratchet

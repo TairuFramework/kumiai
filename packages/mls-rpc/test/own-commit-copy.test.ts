@@ -217,7 +217,8 @@ test.each([true, false])(
     if (beforeSkip === null) throw new Error('Missing build')
     await store.control.apply(
       {
-        commitOnce: { ...beforeSkip, skipped: true },
+        // r28h: mirror the walker's classified own-copy skip, including the retry ban.
+        commitOnce: { ...beforeSkip, skipped: true, retryForbidden: true },
         cursor: { position: asLogPosition('1'), epoch: f.built.epoch },
       },
       'skip',

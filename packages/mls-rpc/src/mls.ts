@@ -637,13 +637,12 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
       const header = await access.read(async (group) => {
         const header = await group.readCommitHeader(commit)
-        if (
-          header?.external !== true &&
-          header?.committerDID !== undefined &&
-          normalizeDID(header.committerDID) === normalizeDID(identity.id) &&
-          !(await group.verifyCommitSignature(commit))
-        )
-          return { epoch: header.epoch }
+        if (header?.external !== true && header?.committerDID !== undefined) {
+          const leafIndex = group.findMemberLeafIndex(header.committerDID)
+          // Sender data authenticates only a ciphertext sample, not the commit content.
+          if (leafIndex === undefined || !(await group.verifyCommitSignature(commit, leafIndex)))
+            return { epoch: header.epoch }
+        }
         return header
       })
       if (header == null) return null

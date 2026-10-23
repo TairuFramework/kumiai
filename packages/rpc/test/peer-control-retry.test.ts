@@ -3,6 +3,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { digestAppliedCommit } from '../src/classify.js'
 import { decodeCommitFrame, encodeCommitFrame } from '../src/commit-frame.js'
 import type { ControlSnapshot } from '../src/control/types.js'
+import { asLogPosition } from '../src/cursor.js'
 import { PeerDisposedError } from '../src/errors.js'
 import { FrameTooLargeError } from '../src/frame-size.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
@@ -11,7 +12,12 @@ import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
-import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  decodeMemoryCommit,
+  memoryAuthenticator,
+  tagMemoryCommit,
+} from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   makeMLSPeer,
@@ -409,6 +415,127 @@ test('a changed own blob holds on unavailable header input and installs after lo
   expect(receive).not.toHaveBeenCalled()
 })
 
+test('an older saved skipped build never republishes after restart before its deadline', async () => {
+  const hub = new FakeHub()
+  const original = makeMLSPeer(hub, 'alice', secret)
+  peers.push(original)
+  await original.peer.replay()
+  const saved = await seedBuiltOperation(original, buildLedgerCommit(original, ['saved-entry']))
+  const occurrence = await hub.publish({
+    senderDID: 'hub-copy',
+    topicID: commitTopic(secret),
+    retain: 'log',
+    payload: new Uint8Array([255]),
+  })
+  // Persist the pre-distinction shape, with the failed copy already behind the cursor.
+  await original.control.apply(
+    {
+      commitOnce: { ...saved.slot, skipped: true },
+      cursor: { position: asLogPosition(occurrence.sequenceID), epoch: saved.slot.epoch },
+    },
+    'older-skip',
+  )
+  expect((await original.control.load()).commitOnce?.retryForbidden).toBeUndefined()
+  await original.peer.dispose()
+  await original.peer.drained()
+  const again = makeMLSPeer(hub, 'alice', secret, { restartOf: original })
+  peers.push(again)
+  const publish = vi.spyOn(hub, 'publish')
+  expect(Date.now()).toBeLessThan(saved.slot.deadline)
+  await again.peer.replay()
+  expect(publish).not.toHaveBeenCalled()
+  await again.controlWalk.stepOperation(saved.id)
+  expect(publish).not.toHaveBeenCalled()
+  expect(again.mls.epoch()).toBe(saved.slot.epoch)
+  expect((await again.control.load()).commitOnce).toMatchObject({
+    payload: saved.slot.payload,
+    publishID: saved.slot.publishID,
+    skipped: true,
+  })
+})
+
+test.each(
+  [false, true].flatMap((restart) => {
+    return ['unreadable', 'foreign-content'].map((kind) => ({ restart, kind }))
+  }),
+)(
+  'coverage-only $kind skip permits identical saved host bytes after hub recovery (restart=$restart)',
+  async ({ restart, kind }) => {
+    // r28h: uncertainty affects settlement coverage, not identical-byte publication.
+    const hub = new FakeHub()
+    let author = makeMLSPeer(hub, 'alice', secret)
+    peers.push(author)
+    await author.peer.replay()
+    const build = vi.fn()
+    const saved = await seedBuiltOperation(
+      author,
+      buildLedgerCommit(author, ['saved-entry'], { onBuild: build }),
+    )
+    const submit = hub.publish.bind(hub)
+    let recovered = false
+    const publish = vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+      if (!recovered) throw new Error('Hub temporarily unavailable')
+      return submit(params)
+    })
+    let payload: Uint8Array = new Uint8Array([255])
+    if (kind === 'foreign-content') {
+      const foreign = createMemoryGroupMLS({ recoverySecret: secret, epoch: 1, localDID: 'bob' })
+      const commit = decodeMemoryCommit(foreign.buildCommit())
+      if (commit === null) throw new Error('Missing foreign commit')
+      const changed = tagMemoryCommit(
+        new TextEncoder().encode(JSON.stringify({ ...commit, invalidContent: true })),
+        memoryAuthenticator(foreign),
+      )
+      payload = encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(changed, new Uint8Array()),
+      )
+    }
+    const occurrence = await submit({
+      senderDID: 'hub-copy',
+      topicID: commitTopic(secret),
+      retain: 'log',
+      payload,
+    })
+    await author.controlWalk.walkCommits()
+    const skipped = await author.control.load()
+    expect(skipped.cursor?.position).toBe(occurrence.sequenceID)
+    expect(skipped.commitOnce).toMatchObject({
+      payload: saved.slot.payload,
+      publishID: saved.slot.publishID,
+      journal: saved.slot.journal,
+      head: saved.slot.head,
+      skipped: true,
+      retryForbidden: false,
+    })
+    if (restart) {
+      await author.peer.dispose()
+      await author.peer.drained()
+      author = makeMLSPeer(hub, 'alice', secret, { restartOf: author })
+      peers.push(author)
+    }
+    recovered = true
+    if (!restart) await author.controlWalk.stepOperation(saved.id)
+    await author.peer.replay()
+    await vi.waitFor(async () => expect((await author.control.load()).commitOnce).toBeNull())
+    const copies = publish.mock.calls
+      .map(([row]) => row)
+      .filter((row) => row.publishID === saved.slot.publishID)
+    expect(copies.length).toBeGreaterThan(0)
+    for (const copy of copies) {
+      expect(copy.payload).toEqual(saved.slot.payload)
+      expect(copy.expectedHead).toBe(occurrence.sequenceID)
+    }
+    expect(
+      hub.published.filter((row) => row.payload.length === saved.slot.payload.length),
+    ).toHaveLength(1)
+    expect(build).toHaveBeenCalledTimes(1)
+    expect(author.mls.epoch()).toBe(saved.slot.epoch + 1)
+    expect((await author.control.load()).commitOnce).toBeNull()
+    expect(await author.peer.outcomes()).toMatchObject([{ opID: saved.id, kind: 'unknown' }])
+  },
+)
+
 test.each([false, true])(
   'a classified altered own copy prevents identical retry and later own installation closes unknown (restart=%s)',
   async (restart) => {
@@ -447,7 +574,7 @@ test.each([false, true])(
     await author.controlWalk.walkCommits()
     const skipped = await author.control.load()
     expect(skipped.cursor?.position).toBe(occurrence.sequenceID)
-    expect(skipped.commitOnce).toMatchObject({ ...saved.slot, skipped: true })
+    expect(skipped.commitOnce).toMatchObject({ ...saved.slot, skipped: true, retryForbidden: true })
     expect(skipped.outcomes).toEqual([])
     const publish = vi.spyOn(hub, 'publish')
     await author.controlWalk.stepOperation(saved.id)

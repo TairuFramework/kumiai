@@ -171,9 +171,20 @@ for (const winner of ['historical', 'malformed', 'policy-refused', 'applied'] as
           expect(attempt.publishID).toBe(built.publishID)
         }
         const snapshot = await current.control.load()
-        if (winner === 'historical') {
+        if (winner === 'historical' || winner === 'malformed') {
           expect(snapshot.commitOnce).toBeNull()
           expect(h.observations.ownAdoptions).toBe(1)
+          if (winner === 'malformed') {
+            expect(h.publications).toHaveLength(2)
+            expect(snapshot.outcomes).toContainEqual(
+              expect.objectContaining({ opID: op.id, kind: 'unknown' }),
+            )
+            expect(snapshot.welcomes).toEqual([])
+            expect(snapshot.applied).toContainEqual(
+              expect.objectContaining({ opID: op.id, payloadDigest: built.payloadDigest }),
+            )
+            expect((await current.source()).identity?.epoch).toBe(epoch + 1)
+          }
         } else if (winner === 'applied') {
           expect(snapshot.commitOnce).toBeNull()
           expect(snapshot.outcomes).toContainEqual(
@@ -183,6 +194,7 @@ for (const winner of ['historical', 'malformed', 'policy-refused', 'applied'] as
         } else {
           expect(snapshot.commitOnce?.payload).toEqual(built.payload)
           expect(snapshot.commitOnce?.skipped).toBe(true)
+          expect(snapshot.commitOnce?.retryForbidden).toBe(true)
           expect(h.publications).toHaveLength(1)
         }
       } finally {

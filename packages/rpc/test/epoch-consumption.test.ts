@@ -172,15 +172,30 @@ test('an unreadable occurrence marks skipped with its cursor and survives restar
       retain: 'log',
       payload: new Uint8Array([255]),
     })
-    const publish = vi.spyOn(hub, 'publish')
+    const publish = vi.spyOn(hub, 'publish').mockRejectedValue(new Error('Hub offline'))
     await member.peer.resync()
     const snapshot = await member.control.load()
     expect(snapshot.cursor?.position).toBe(occurrence.sequenceID)
-    expect(snapshot.commitOnce).toMatchObject({ publishID: saved.slot.publishID, skipped: true })
-    expect(publish).not.toHaveBeenCalled()
+    expect(snapshot.commitOnce).toEqual({
+      ...saved.slot,
+      expectedHead: occurrence.sequenceID,
+      skipped: true,
+      retryForbidden: false,
+    })
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: saved.slot.payload,
+        publishID: saved.slot.publishID,
+        expectedHead: occurrence.sequenceID,
+      }),
+    )
     await member.peer.dispose()
     await member.peer.drained()
     member = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+    const restored = await member.control.load()
+    expect(restored.cursor).toEqual(snapshot.cursor)
+    expect(restored.commitOnce).toEqual(snapshot.commitOnce)
+    publish.mockRestore()
     const later = await hub.publish({
       senderDID: 'replayer',
       topicID: commitTopic(secret),
@@ -204,7 +219,7 @@ test('an unknown handshake kind cannot preserve complete source coverage', async
   const member = makeMLSPeer(hub, 'alice', secret)
   try {
     await member.peer.replay()
-    await seedBuiltOperation(member, buildLedgerCommit(member, ['saved']))
+    const saved = await seedBuiltOperation(member, buildLedgerCommit(member, ['saved']))
     const payload = encodeHandshakeFrame(0, new Uint8Array())
     payload[3] = 255
     const occurrence = await hub.publish({
@@ -213,10 +228,30 @@ test('an unknown handshake kind cannot preserve complete source coverage', async
       retain: 'log',
       payload,
     })
+    const publish = vi.spyOn(hub, 'publish').mockRejectedValue(new Error('Hub offline'))
     await member.controlWalk.walkCommits()
     const snapshot = await member.control.load()
     expect(snapshot.cursor?.position).toBe(occurrence.sequenceID)
-    expect(snapshot.commitOnce?.skipped).toBe(true)
+    expect(snapshot.commitOnce).toEqual({
+      ...saved.slot,
+      expectedHead: occurrence.sequenceID,
+      skipped: true,
+      retryForbidden: false,
+    })
+    expect(snapshot.outcomes).toEqual([])
+    publish.mockRestore()
+    const later = await hub.publish({
+      senderDID: 'replayer',
+      topicID: commitTopic(secret),
+      retain: 'log',
+      payload: saved.slot.payload,
+    })
+    await member.controlWalk.walkCommits()
+    const consumed = await member.control.load()
+    expect(consumed.commitOnce).toBeNull()
+    expect(consumed.outcomes).toMatchObject([{ opID: saved.id, kind: 'unknown' }])
+    expect(consumed.applied).toMatchObject([{ opID: saved.id, sequenceID: later.sequenceID }])
+    expect(consumed.welcomes).toEqual([])
   } finally {
     await member.peer.dispose()
     await member.peer.drained()

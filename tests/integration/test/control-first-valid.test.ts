@@ -252,7 +252,147 @@ test('a classified past-epoch prefix refreshes CAS and retries identical saved b
   }
 })
 
-test('poison prefix suppresses retry; later own occurrence installs and matches the real receiver', async () => {
+test('unreadable prefix permits identical saved host publication with uncertain coverage', async () => {
+  // r28h preserves commit-once while separating publication from coverage.
+  const f = await firstValidRunner()
+  try {
+    const prefix = await f.append(new Uint8Array([255]))
+    const publish = vi.fn(f.deps.publish)
+    f.deps.publish = publish
+    await stepLiveBuild(f.deps)
+    expect(publish.mock.calls).toEqual([[f.slot.payload, f.slot.publishID, prefix.sequenceID]])
+    expect(f.builds).toHaveBeenCalledTimes(1)
+    expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+      f.candidate().state.keySchedule.epochAuthenticator,
+    )
+    expect((await f.member.control.load()).commitOnce).toBeNull()
+    expect((await f.member.control.load()).outcomes).toMatchObject([
+      { opID: f.op.id, kind: 'unknown' },
+    ])
+    expect(f.welcomes).toEqual([])
+  } finally {
+    await f.close()
+  }
+})
+
+test('a foreign private commit with a changed ciphertext tail permits identical saved retry', async () => {
+  const f = await firstValidRunner()
+  try {
+    const handoff = f.deps.publish
+    let recovered = false
+    const publish = vi.fn(async (...args: Parameters<typeof handoff>) => {
+      if (!recovered) throw new Error('Hub temporarily unavailable')
+      return handoff(...args)
+    })
+    f.deps.publish = publish
+    await stepLiveBuild(f.deps)
+    expect(publish.mock.calls).toEqual([[f.slot.payload, f.slot.publishID, null]])
+    const author = f.group.members[1]
+    if (author === undefined) throw new Error('Missing foreign author')
+    const foreign = await commitKeyRotation(author.handle)
+    const changed = foreign.commitMessage.slice()
+    changed[changed.length - 1] = (changed[changed.length - 1] ?? 0) ^ 1
+    // Sender-data identification still succeeds because the ciphertext sample is unchanged.
+    expect(await f.member.handle().readCommitHeader(changed)).toMatchObject({
+      epoch: BigInt(f.slot.epoch),
+      committerDID: author.identity.id,
+    })
+    const prefix = await f.append(
+      encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(changed, new Uint8Array())),
+    )
+    await f.member.controlWalk.walkCommits()
+    const skipped = (await f.member.control.load()).commitOnce
+    expect(skipped?.skipped).toBe(true)
+    expect(skipped?.retryForbidden).toBe(false)
+    recovered = true
+    await stepLiveBuild(f.deps)
+    expect(publish.mock.calls).toEqual([
+      [f.slot.payload, f.slot.publishID, null],
+      [f.slot.payload, f.slot.publishID, prefix.sequenceID],
+    ])
+    expect(f.builds).toHaveBeenCalledTimes(1)
+    expect(f.member.handle().state.keySchedule.epochAuthenticator).toEqual(
+      f.candidate().state.keySchedule.epochAuthenticator,
+    )
+    expect((await f.member.control.load()).commitOnce).toBeNull()
+    expect((await f.member.control.load()).outcomes).toMatchObject([
+      { opID: f.op.id, kind: 'unknown' },
+    ])
+    expect(f.welcomes).toEqual([])
+  } finally {
+    await f.close()
+  }
+})
+
+test('an authenticated foreign refusal still forbids identical saved retry', async () => {
+  const f = await firstValidRunner()
+  try {
+    const author = f.group.members[1]
+    if (author === undefined) throw new Error('Missing foreign author')
+    const refused = await createCommit({
+      context: author.handle.context,
+      state: { ...author.handle.state, unappliedProposals: {} },
+      extraProposals: [
+        {
+          proposalType: defaultProposalTypes.remove,
+          remove: { removed: f.group.committer.handle.state.privatePath.leafIndex },
+        },
+      ],
+      wireAsPublicMessage: true,
+      authenticatedData: encodeControlEnvelope({ v: 1 }),
+    })
+    const commit = encode(mlsMessageEncoder, refused.commit)
+    expect(await f.member.mls.readCommitHeader(commit)).toMatchObject({
+      committerDID: author.identity.id,
+    })
+    await f.append(
+      encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, new Uint8Array())),
+    )
+    await f.member.controlWalk.walkCommits()
+    expect((await f.member.control.load()).commitOnce?.skipped).toBe(true)
+    const publish = vi.fn(f.deps.publish)
+    f.deps.publish = publish
+    await stepLiveBuild(f.deps)
+    expect(publish).not.toHaveBeenCalled()
+    expect((await f.member.control.load()).commitOnce?.retryForbidden).toBe(true)
+    expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
+    expect(f.builds).toHaveBeenCalledTimes(1)
+  } finally {
+    await f.close()
+  }
+})
+
+test.each(['tag', 'reference', 'version'] as const)(
+  'a classified own named-entry %s failure still forbids identical retry',
+  async (fault) => {
+    // r28h retains the failed delivered named-entry copy prohibition.
+    const f = await firstValidRunner()
+    try {
+      const frame = decodeCommitFrame(decodeHandshakeFrame(f.slot.payload).payload)
+      let blob: Uint8Array = frame.sealedEntries.slice()
+      if (fault === 'tag') blob[blob.length - 1] = (blob[blob.length - 1] ?? 0) ^ 1
+      else if (fault === 'version') blob = new Uint8Array([99])
+      else blob = (await f.member.crypto.sealEntries(encodeLedgerEntries([]))).sealed
+      await f.append(
+        encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(frame.commit, blob)),
+      )
+      await f.member.controlWalk.walkCommits()
+      const skipped = (await f.member.control.load()).commitOnce
+      expect(skipped?.skipped).toBe(true)
+      expect(skipped?.retryForbidden).toBe(true)
+      const publish = vi.fn(f.deps.publish)
+      f.deps.publish = publish
+      await stepLiveBuild(f.deps)
+      expect(publish).not.toHaveBeenCalled()
+      expect(f.builds).toHaveBeenCalledTimes(1)
+      expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))
+    } finally {
+      await f.close()
+    }
+  },
+)
+
+test('classified poison prefix suppresses retry; later own occurrence installs and matches the real receiver', async () => {
   const f = await firstValidRunner()
   try {
     const sealedEntries = decodeCommitFrame(
@@ -285,7 +425,10 @@ test('poison prefix suppresses retry; later own occurrence installs and matches 
     })
     f.deps.publish = publish
     await stepLiveBuild(f.deps)
-    expect((await f.member.control.load()).commitOnce).toMatchObject({ skipped: true })
+    expect((await f.member.control.load()).commitOnce).toMatchObject({
+      skipped: true,
+      retryForbidden: true,
+    })
     await stepLiveBuild(f.deps)
     expect(publish).toHaveBeenCalledTimes(1)
     expect(f.member.handle().epoch).toBe(BigInt(f.slot.epoch))

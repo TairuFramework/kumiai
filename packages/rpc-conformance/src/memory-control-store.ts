@@ -334,11 +334,18 @@ function guard(
     if (mutable !== null) {
       const keys = new Set([...Object.keys(previous), ...Object.keys(next)])
       keys.delete(mutable)
+      if (mutable === 'skipped') keys.delete('retryForbidden')
       const unchanged = [...keys].every((key) =>
         equal(Reflect.get(previous, key), Reflect.get(next, key)),
       )
       if (
         unchanged &&
+        (mutable !== 'skipped' ||
+          equal(previous.retryForbidden, next.retryForbidden) ||
+          next.retryForbidden === true ||
+          (previous.retryForbidden === undefined &&
+            previous.skipped !== true &&
+            next.retryForbidden === false)) &&
         (mutable === 'expectedHead' ||
           ((mutable === 'skipped' || mutable === 'reported') && next[mutable] === true) ||
           (mutable === 'acceptedAs' &&
@@ -541,7 +548,8 @@ function mutateControl<Position extends string>(
   guard(snapshot.commitOnce, slot, context)
   if (
     context?.kind === 'cursor' &&
-    snapshot.commitOnce?.skipped !== slot?.skipped &&
+    (snapshot.commitOnce?.skipped !== slot?.skipped ||
+      snapshot.commitOnce?.retryForbidden !== slot?.retryForbidden) &&
     (owned.cursor?.position == null ||
       (snapshot.cursor?.position != null && owned.cursor.position <= snapshot.cursor.position))
   )

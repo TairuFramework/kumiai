@@ -265,6 +265,7 @@ export function assertCommitOnceChange(
     const {
       expectedHead: beforeHead,
       skipped: beforeSkip,
+      retryForbidden: beforeRetry,
       reported: beforeReport,
       acceptedAs: beforeAck,
       ...before
@@ -272,6 +273,7 @@ export function assertCommitOnceChange(
     const {
       expectedHead: afterHead,
       skipped: afterSkip,
+      retryForbidden: afterRetry,
       reported: afterReport,
       acceptedAs: afterAck,
       ...after
@@ -279,6 +281,7 @@ export function assertCommitOnceChange(
     if (sameValue(before, after)) {
       if (
         context.kind === 'head' &&
+        sameValue(beforeRetry, afterRetry) &&
         sameValue(beforeSkip, afterSkip) &&
         sameValue(beforeReport, afterReport) &&
         sameValue(beforeAck, afterAck)
@@ -287,6 +290,9 @@ export function assertCommitOnceChange(
       if (
         context.kind === 'cursor' &&
         afterSkip === true &&
+        (sameValue(beforeRetry, afterRetry) ||
+          afterRetry === true ||
+          (beforeRetry === undefined && beforeSkip !== true && afterRetry === false)) &&
         sameValue(beforeHead, afterHead) &&
         sameValue(beforeReport, afterReport) &&
         sameValue(beforeAck, afterAck)
@@ -294,6 +300,7 @@ export function assertCommitOnceChange(
         return
       if (
         context.kind === 'report' &&
+        sameValue(beforeRetry, afterRetry) &&
         afterReport === true &&
         sameValue(beforeHead, afterHead) &&
         sameValue(beforeSkip, afterSkip) &&
@@ -302,6 +309,7 @@ export function assertCommitOnceChange(
         return
       if (
         context.kind === 'ack' &&
+        sameValue(beforeRetry, afterRetry) &&
         afterAck !== undefined &&
         sameValue(beforeHead, afterHead) &&
         sameValue(beforeSkip, afterSkip) &&
@@ -573,7 +581,8 @@ export function applyChanges(
   assertCommitOnceChange(snapshot.commitOnce, nextSlot, context)
   if (
     context?.kind === 'cursor' &&
-    snapshot.commitOnce?.skipped !== nextSlot?.skipped &&
+    (snapshot.commitOnce?.skipped !== nextSlot?.skipped ||
+      snapshot.commitOnce?.retryForbidden !== nextSlot?.retryForbidden) &&
     (changes.cursor?.position === undefined ||
       changes.cursor.position === null ||
       (snapshot.cursor?.position !== null &&

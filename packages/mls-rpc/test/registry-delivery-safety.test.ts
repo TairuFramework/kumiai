@@ -310,7 +310,13 @@ for (const mode of ['real-mls', 'double'] as const) {
             epoch: Number(installed.epoch),
           })
           expect(after.commitOnce).toEqual(
-            before.commitOnce === null ? null : { ...before.commitOnce, skipped: true },
+            before.commitOnce === null
+              ? null
+              : {
+                  ...before.commitOnce,
+                  skipped: true,
+                  retryForbidden: kind === 'own-mismatch',
+                },
           )
           expect(after.operations).toEqual(before.operations)
           expect(after.outcomes).toEqual(before.outcomes)

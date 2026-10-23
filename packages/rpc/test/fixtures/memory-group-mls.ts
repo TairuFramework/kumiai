@@ -2236,7 +2236,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (
         !verifyMemoryCommitTag(commit, authenticator()) ||
         (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID ||
-        (parsed.committerDID === localDID && parsed.invalidContent === true)
+        parsed.invalidContent === true
       ) {
         return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
       }
