@@ -17,7 +17,15 @@ export function createMemoryAppOutbox(params: {
   const rows = new Map<number, ConformanceAppOutboxEntry>()
   const obligations = new Map<number, ConformanceAppSettlementObligation>()
   const events = new Map<string, ConformanceAppStatusEvent>()
-  const copy = <T>(value: T): T => structuredClone(value)
+  const copy = <T>(value: T): T => {
+    if (value instanceof Uint8Array) return Uint8Array.from(value) as T
+    if (Array.isArray(value)) return value.map(copy) as T
+    if (value !== null && typeof value === 'object')
+      return Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [key, copy(child)]),
+      ) as T
+    return value
+  }
   const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const serial = <T>(fn: () => T | Promise<T>): Promise<T> => {
     const result = tail.then(fn)

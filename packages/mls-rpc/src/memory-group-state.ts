@@ -543,7 +543,11 @@ export function createUnlockedGroupStateStores(params: {
           if (value !== null && value.incarnation !== incarnation) {
             throw new GroupStateConflictError('Stored incarnation mismatch')
           }
-          return projectStateVersion(value, await stateMetadata(incarnation).load())
+          const metadata = await stateMetadata(incarnation).load()
+          // Admission diagnoses a side-record tombstone without hiding the source row.
+          if (value !== null && metadata !== null && value.deleted !== metadata.deleted)
+            return value
+          return projectStateVersion(value, metadata)
         },
         async save(value) {
           assertMemoryWrite(tx, 'domain')

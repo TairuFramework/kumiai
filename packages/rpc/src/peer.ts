@@ -1610,6 +1610,7 @@ export function createGroupPeerWithControlWalk<
       rendezvousTopicID == null ||
       disposed ||
       hardControlHeld() ||
+      activeRecovery !== null ||
       pendingRecovery != null
     )
       return
@@ -1630,7 +1631,8 @@ export function createGroupPeerWithControlWalk<
         try {
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
-          if (disposed || hardControlHeld() || pendingRecovery != null) return
+          if (disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null)
+            return
           if (port.capturedRecovery !== undefined) {
             await replyWithCapturedGroupInfo(request)
             return
@@ -1638,7 +1640,8 @@ export function createGroupPeerWithControlWalk<
           const groupInfo = await port.sealGroupInfo(request.request)
           await refreshControl()
           // Disposal can occur while a fired timer is still sealing.
-          if (disposed || hardControlHeld() || pendingRecovery != null) return
+          if (disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null)
+            return
           // Mailbox class, deliberately: a rendezvous frame must never move the commit topic's
           // head, and its reader — the requester — subscribed before it asked.
           await mux.publish({
@@ -2596,10 +2599,12 @@ export function createGroupPeerWithControlWalk<
           return evidence
         }
       },
-      blocked: () => disposed || hardControlHeld() || pendingRecovery != null,
+      blocked: () =>
+        disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null,
       publish: async (groupInfo) => {
         await refreshControl()
-        if (disposed || hardControlHeld() || pendingRecovery != null) return
+        if (disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null)
+          return
         return await mux.publish({
           topicID,
           payload: encodeHandshakeFrame(

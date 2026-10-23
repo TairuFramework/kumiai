@@ -5,6 +5,7 @@ import {
   type GroupHandle,
   GroupRestoreError as InvalidCandidateError,
   type MemberCredential,
+  restoredImportedReservation,
   restoreGroup,
   restrictCommitAuthoring,
   withCommitPermit,
@@ -230,6 +231,7 @@ export function createControlBuildPort(params: {
   entryLabel?: string
   runtime?: Runtime
 }): ControlBuildPort {
+  const normalisedSources = new WeakSet<GroupHandle['state']>()
   const read = () =>
     params.access.readControl(async (scope) => ({
       handle: scope.handle,
@@ -240,79 +242,93 @@ export function createControlBuildPort(params: {
   const safetyHeld = async () => controlSafetyHeld((await read()).snapshot)
   return {
     async prepareBuild(op, frame) {
-      const captured = await params.access.readControl(async (scope) => {
-        const snapshot = await scope.loadControl(params.control)
-        const saved = snapshot.operations.find((row) => row.id === op.id)
-        if (
-          saved === undefined ||
-          saved.stage !== 'intent' ||
-          executableOperations(snapshot)[0]?.id !== saved.id ||
-          !sameStoredValue(params.control.key, scope.source.key) ||
-          scope.source.identity === null
-        )
-          return { kind: 'moved' as const, operation: saved ?? op }
-        if (params.now() >= saved.deadline) return { kind: 'expired' as const, operation: saved }
-        if (
-          controlSafetyHeld(snapshot) !== null ||
-          snapshot.controlHold !== null ||
-          scope.handle.state.groupActiveState.kind === 'removedFromGroup'
-        )
-          return { kind: 'occupied' as const, operation: saved }
-        const original = scope.source
-        const identity = original.identity
-        if (identity === null) return { kind: 'moved' as const, operation: saved }
-        if (
-          snapshot.cursor !== null &&
-          (snapshot.cursor.epoch !== identity.epoch ||
-            snapshot.cursor.stranded ||
-            snapshot.cursor.incomplete)
-        )
-          return { kind: 'moved' as const, operation: saved }
-        if (
-          snapshot.spentSource?.epoch === identity.epoch ||
-          (snapshot.commitOnce !== null &&
-            snapshot.commitOnce.incarnation === original.key.incarnation &&
-            snapshot.commitOnce.epoch >= identity.epoch)
-        )
-          return { kind: 'occupied' as const, operation: saved }
-        const suite = scope.handle.context.cipherSuite
-        const options = {
-          ciphersuiteName: Object.keys(ciphersuites).find(
-            (name) => ciphersuites[name as keyof typeof ciphersuites] === suite.id,
-          ),
-          cryptoProvider: { getCiphersuiteImpl: async () => suite },
-          keyRetention: { ...scope.handle.context.clientConfig?.keyRetentionConfig },
-          commitPolicy: scope.handle.commitPolicy,
-          resolveLedgerEntries: scope.handle.resolveLedgerEntries,
-          onLedgerEntries: scope.handle.onLedgerEntries,
-        }
-        return {
-          kind: 'captured' as const,
-          saved,
-          original,
-          identity,
-          restoreSource:
-            params.restoreSource ??
-            (async ({
-              state,
-              credential,
-              ledgerEntries,
-            }: {
-              state: Uint8Array
-              credential: MemberCredential
-              ledgerEntries: Array<string>
-            }) => {
-              const decoded = decodeClientState(state)
-              if (decoded === undefined) throw new TypeError('Invalid control source state')
-              return restoreGroup({ state: decoded, credential, ledgerEntries, options })
-            }),
-          checkpoint: snapshot.cursor?.position ?? null,
-          sourceState: encodeClientState(scope.handle.state),
-          sourceCredential: { ...scope.handle.credential },
-          sourceLedger: scope.handle.ledgerTokens,
-          key: await deriveEntryKey(scope.handle, params.entryLabel),
-        }
-      })
+      const capture = () => {
+        return params.access.readControl(async (scope) => {
+          const snapshot = await scope.loadControl(params.control)
+          const saved = snapshot.operations.find((row) => row.id === op.id)
+          if (
+            saved === undefined ||
+            saved.stage !== 'intent' ||
+            executableOperations(snapshot)[0]?.id !== saved.id ||
+            !sameStoredValue(params.control.key, scope.source.key) ||
+            scope.source.identity === null
+          )
+            return { kind: 'moved' as const, operation: saved ?? op }
+          if (params.now() >= saved.deadline) return { kind: 'expired' as const, operation: saved }
+          if (
+            controlSafetyHeld(snapshot) !== null ||
+            snapshot.controlHold !== null ||
+            scope.handle.state.groupActiveState.kind === 'removedFromGroup'
+          )
+            return { kind: 'occupied' as const, operation: saved }
+          const original = scope.source
+          const identity = original.identity
+          if (identity === null) return { kind: 'moved' as const, operation: saved }
+          if (
+            snapshot.cursor !== null &&
+            (snapshot.cursor.epoch !== identity.epoch ||
+              snapshot.cursor.stranded ||
+              snapshot.cursor.incomplete)
+          )
+            return { kind: 'moved' as const, operation: saved }
+          if (
+            snapshot.spentSource?.epoch === identity.epoch ||
+            (snapshot.commitOnce !== null &&
+              snapshot.commitOnce.incarnation === original.key.incarnation &&
+              snapshot.commitOnce.epoch >= identity.epoch)
+          )
+            return { kind: 'occupied' as const, operation: saved }
+          if (
+            restoredImportedReservation(scope.handle.state) &&
+            !normalisedSources.has(scope.handle.state)
+          )
+            return { kind: 'normalise' as const, state: scope.handle.state }
+          const suite = scope.handle.context.cipherSuite
+          const options = {
+            ciphersuiteName: Object.keys(ciphersuites).find(
+              (name) => ciphersuites[name as keyof typeof ciphersuites] === suite.id,
+            ),
+            cryptoProvider: { getCiphersuiteImpl: async () => suite },
+            keyRetention: { ...scope.handle.context.clientConfig?.keyRetentionConfig },
+            commitPolicy: scope.handle.commitPolicy,
+            resolveLedgerEntries: scope.handle.resolveLedgerEntries,
+            onLedgerEntries: scope.handle.onLedgerEntries,
+          }
+          return {
+            kind: 'captured' as const,
+            saved,
+            original,
+            identity,
+            restoreSource:
+              params.restoreSource ??
+              (async ({
+                state,
+                credential,
+                ledgerEntries,
+              }: {
+                state: Uint8Array
+                credential: MemberCredential
+                ledgerEntries: Array<string>
+              }) => {
+                const decoded = decodeClientState(state)
+                if (decoded === undefined) throw new TypeError('Invalid control source state')
+                return restoreGroup({ state: decoded, credential, ledgerEntries, options })
+              }),
+            checkpoint: snapshot.cursor?.position ?? null,
+            sourceState: encodeClientState(scope.handle.state),
+            sourceCredential: { ...scope.handle.credential },
+            sourceLedger: scope.handle.ledgerTokens,
+            key: await deriveEntryKey(scope.handle, params.entryLabel),
+          }
+        })
+      }
+      let captured = await capture()
+      while (captured.kind === 'normalise') {
+        // Save the imported generation skip independently of application publication.
+        await params.access.mutate(async () => {})
+        normalisedSources.add(captured.state)
+        captured = await capture()
+      }
       if (captured.kind !== 'captured') return captured
       const {
         saved,

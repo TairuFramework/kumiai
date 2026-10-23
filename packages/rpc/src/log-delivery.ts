@@ -41,6 +41,26 @@ type Delivered = Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'> & {
   seq?: number
 }
 type LogFrame = { topicID: string; payload: Uint8Array; publishID: string }
+
+function copySnapshot(value: AppPublicationSnapshot): AppPublicationSnapshot {
+  return {
+    ...value,
+    identity: { ...value.identity, authenticator: value.identity.authenticator.slice() },
+  }
+}
+
+function copyPrepared(value: PreparedAppPublication): PreparedAppPublication {
+  return {
+    entry: {
+      ...value.entry,
+      data: value.entry.data.slice(),
+      lastAttempt: value.entry.lastAttempt === null ? null : { ...value.entry.lastAttempt },
+    },
+    payload: value.payload.slice(),
+    snapshot: copySnapshot(value.snapshot),
+  }
+}
+
 export type LogDeliveryParams = {
   failureSignal?: AbortSignal
   queue: AppOutboxAcceptance
@@ -88,6 +108,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let backoff = 1000
   const submitted = new Set<Promise<unknown>>()
+  let settlementSubmitted = false
   let completion: Promise<void> | undefined
   function track<T>(promise: Promise<T>): Promise<T> {
     submitted.add(promise)
@@ -118,9 +139,9 @@ export function createLogDelivery(params: LogDeliveryParams) {
     })
   }
   async function finishSubmitted(): Promise<void> {
-    assertRunning()
+    if (settlementSubmitted) assertRunning()
     while (submitted.size > 0) await Promise.allSettled([...submitted])
-    assertRunning()
+    if (settlementSubmitted) assertRunning()
     let delay = 100
     for (;;) {
       try {
@@ -168,6 +189,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       const publication = publications.get(seq)
       const attempt = publication?.frame.entry.lastAttempt
       if (publication === undefined || attempt == null) continue
+      settlementSubmitted = true
       await params.remove(seq, {
         incarnation: attempt.incarnation,
         segment: attempt.segment,
@@ -194,7 +216,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
 
   const snapshot = async (protocol: string): Promise<AppPublicationSnapshot | null> => {
     const value = await params.snapshot(protocol)
-    return value === null ? null : structuredClone(value)
+    return value === null ? null : copySnapshot(value)
   }
   const capture = () => {
     const snapshots = new Map<string, Promise<AppPublicationSnapshot | null>>()
@@ -240,10 +262,11 @@ export function createLogDelivery(params: LogDeliveryParams) {
       return
     }
     const expected = {
-      identity: structuredClone(after.identity),
+      identity: copySnapshot(after).identity,
       stateVersion: after.stateVersion,
       attemptID: attempt.publishID,
     }
+    settlementSubmitted = true
     const result = await params.recordSettlement(
       seq,
       {
@@ -294,7 +317,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     }
     if (frame === undefined) {
       if (params.held()) return null
-      frame = structuredClone(await params.prepare(entry, params.floor().position))
+      frame = copyPrepared(await params.prepare(entry, params.floor().position))
       params.queue.replace(frame.entry)
       prepared.set(entry.seq, frame)
       const after = await snapshot(entry.protocol)
@@ -341,7 +364,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
       floor: attempt.floor === null ? null : asLogPosition(attempt.floor),
       acknowledged: ++acknowledgements,
       sequenceID,
-      frame: structuredClone(frame),
+      frame: copyPrepared(frame),
     })
     return true
   }

@@ -5,6 +5,13 @@ import type { GenerationSecret, MlsContext, SecretTree } from 'ts-mls'
 import type { ClientState } from './codec.js'
 import { expandWithLabel } from './sender-data.js'
 
+// Control preparation must save restore-time skips even without application traffic.
+const restoredReservations = new WeakSet<ClientState>()
+
+export function restoredImportedReservation(state: ClientState): boolean {
+  return restoredReservations.has(state)
+}
+
 function children(node: number): [number, number] {
   let level = 0
   while (((node >> level) & 1) === 1) level++
@@ -16,6 +23,7 @@ function children(node: number): [number, number] {
 export function clearImportedReservation(state: ClientState, context: MlsContext): void {
   const reservation = state.handshakeReservation
   if (reservation === undefined) return
+  restoredReservations.add(state)
   const own = 2 * state.privatePath.leafIndex
   let leaf = state.secretTree.leafNodes[own]
   if (
