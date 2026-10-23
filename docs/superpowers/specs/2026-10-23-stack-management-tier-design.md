@@ -20,8 +20,8 @@ what, and verifies it from the same log.
    neither holds the seed day to day.
 2. **Migration.** Sakui's seed-on-desktop is an MVP state. The design includes the move: root goes
    cold, the desktop becomes a member.
-3. **Flows.** Recovery = reset from the cold root. Lost or hostile device = another member removes it
-   and revokes its grants.
+3. **Flows.** Recovery = reset from the cold root. Lost or hostile managing device = another member
+   `rmv`s its incarnation; root denies its DID at the next settle.
 4. **Stolen member (N3).** A lapsed-lease member keeps log authority until removed (can remove honest
    members or saturate the epoch → `EPOCH_SATURATED` until root settles). Accepted: root can fix the
    log. No further mitigations.
@@ -48,7 +48,7 @@ root settlement or reset ends.
 | Day-to-day grants | cold, unused | members | none; `mbr` grants, `exp ≤ lease` | yes |
 | Renewal (≥ 2 effective members) | cold, unused | members renew each other | `ren` | yes; log authority is clock-free, so two members with lapsed leases can still renew each other |
 | Renewal (1 effective member) | cold, used | root | root `ren` | no; self-renewal is forbidden, root must renew before the member's grant lease runs out |
-| (e) Lost/hostile device | cold, unused | surviving member | `rmv` its member pin + `rev` its device DID and other edge audiences | yes |
+| (e) Lost/hostile device | cold, unused until settle | surviving member; root at settle | member: `rmv` its member pin (ends its log authority, every `mbr` grant rooted in it, and its MLS leaf by member-root cascade); `rev` of other members' edge audiences only. Root: deny the device DID at its next settle | yes |
 | Concurrent mutual `rmv` | cold, then used | both | both removed (union) | no; falls to recovery |
 | (c) Recovery (no effective member) | cold, used | root | blind `reset` (clears members and denials, kills prior-generation grants) → re-`add` → re-mint grants | no |
 | Settle / fix log | cold, used | root | merge all available authenticated epoch state, then `rot` with `snapshotOf(head)`; unseen epoch effects are lost (N4, disclosed) | no |
@@ -64,7 +64,8 @@ root settlement or reset ends.
 6. Remove the seed from the desktop keystore.
 Each step is retryable and idempotent; an interrupted migration leaves the seed on the desktop
 (steps 1–5 change nothing a seed-holding desktop cannot redo). Member removal never substitutes for
-ending legacy root-issued grants: those end by expiry or by a root settlement.
+ending legacy root-issued grants: those end by expiry or by a root settlement. After the seed leaves the desktop, denying a lost managing device's DID also waits for a root
+settlement: members only `rmv` it.
 
 ## Layers — open design
 
@@ -117,7 +118,9 @@ becomes member-signed (`mbr`). That is the whole kumiai change.
     tree-time inflation risk below to leaves a member mints for others.
 
   The member root of such a leaf is its own incarnation, so its `rmv` cascades it with no special
-  case. Its `rev` (same DID, per decision) denies it as before. Wire: `controller.capability`
+  case. A member cannot `rev` its DID: kokuin refuses a member-authored `rev` targeting any member of
+  its causal past, removed ones included (`MEMBER_REVOKES_MEMBER`, members leave through remove), which
+  keeps root able to re-add it. Root denies the DID at its next settle. Wire: `controller.capability`
   becomes optional only when `member` is present. A 0.11 peer rejects this form, which is already
   covered by band 0.12. Rotating a managing device's key is a new pin and a new incarnation, so it
   is a root occasion.
@@ -125,13 +128,16 @@ becomes member-signed (`mbr`). That is the whole kumiai change.
   g)` that signed the root of its chain, read from the leaf capability (direct `mbr`), its parent,
   or its holder grant, or the leaf's own `member` for a membership binding. Root-signed roots record the controller. Every cascade, survivor and freshness
   rule below keys on the member root (incarnation), not on the immediate `iss`.
-- **Leaf events.** Required. A member's renewals (`ren`), and its `add` until root settles, live only
-  in epoch events. A chain-only prefix would report the lease from the last snapshot, so a member
-  renewed since then could mint nothing past it. `controller.events` (optional, additive) carries the
-  causal closure of the issuing member's `add` and latest `ren`. Authorisation is causal, so a partial
-  epoch does not authenticate. In practice the closure is most of the current epoch up to that point.
-  Option to evaluate: the registry holds the epoch once and leaves reference it. Smaller leaves, but
-  a Welcome joiner would validate leaves against registry state.
+- **Leaf events.** Required, held once per group in the device registry, not per leaf. A member's
+  renewals (`ren`), and its `add` until root settles, live only in epoch events; a chain-only prefix
+  alone would report the lease from the last snapshot. Per-leaf epoch events were measured out: a
+  6-month, 3-member epoch is about 755 KB of history at 50 leaves, past `HISTORY_HORIZON` (393 216).
+  So bound leaves keep the chain-only prefix, and each controller's current epoch lives once per group
+  in the registry (`recordedLog: ControllerLog`), fed by signed `kumiai.device` `log` entries carrying
+  event deltas. A delta is accepted only if it merges into a fold where every delta digest is applied,
+  and the registry stores the pruned fold (the ingestion contract). About 34 KB at 50 leaves. A Welcome
+  joiner validates leaves against registry state. Settlement policy for this workload: cap 32 events,
+  prompt at 24, so the cold root settles about every 6 months.
 - **Proof form.** A member revoke (`rev` of an edge) or removal (`rmv`) is a log event with no chain
   position. The registry proof becomes `{ chain, events }`: the chain plus the event's causal
   closure. Its effect is read from the folded `head` (`head.deny`, removed members), never
@@ -178,12 +184,12 @@ becomes member-signed (`mbr`). That is the whole kumiai change.
   (`exp ≤ lease`), so a lapsed lease stops new leaves, and existing ones lapse within the leaf
   lifetime by tree time. A peer that has not processed the removing commit still accepts the
   removed member's grants until its lease end (N3, accepted).
-- **Tree time under member attestation (new risk).** Tree time takes the maximum `iat` any bound
-  leaf attests. Today only root attests. Under the tier any member does, bounded only by
-  `iat ≤ exp ≤ lease`, so a buggy-clock or hostile member could advance tree time by up to its
-  lease and lapse every other leaf of the controller. kumiai needs a bound before attestation counts.
-  Options: cap an attested `iat` to `timeFloor` plus a skew, advance the floor only through `clock`
-  entries, or count only root and a quorum. To decide in the kumiai plan.
+- **Tree time under member attestation.** Tree time takes the maximum `iat` bound leaves attest.
+  Under the tier any member attests, bounded only by `iat ≤ exp ≤ lease`, so one buggy-clock or
+  hostile member could advance tree time by up to its lease and lapse every other leaf. Decided
+  (kumiai plan): an attested time counts once two distinct effective member roots agree (the
+  second-highest attested time), or the sole member's when there is only one. Root-only attestation
+  was rejected: it would freeze tree time while the root is cold.
 - **Saturation.** An `EPOCH_SATURATED` embedded or recorded log means no new bound leaf, no registry
   entry for that controller, and existing leaves untouched until root settles. It is never read as
   "nothing denied".
@@ -218,7 +224,8 @@ kumiai's read on open Q1/Q2:
   the ingestion contract; deny and member reads from `head`.
 - Membership leaves (kumiai option a): a managing device's leaf carries `controller.member = { add, g }` and no capability. Kubun code reading `binding.capability` unconditionally (own-agents effective-leaf and survivor checks, records) branches on `member`.
 - Own-agents: pairing as root-assisted `add` (member device) or `mbr` edge grant (edge device);
-  departure/loss as `rmv` + `rev` of the device DID; revocation verified from epoch events; a
+  departure/loss of a managing device as `rmv` of its incarnation (root denies the DID at settle; a
+  member never `rev`s a member DID), loss of an edge device as `rev` of its edge audience; revocation verified from epoch events; a
   member-lease renewal loop. Survivor validation changes from `iss === sub === controller`
   (backlog `2026-10-21-kokuin-management-tier-adoption.md:84`) to "effective member root of the current
   generation, not the removed incarnation".
@@ -246,7 +253,7 @@ kumiai's read on open Q1/Q2:
 - **OQ-offline → local + MLS sync.** A phone offline ~30 days keeps working locally and keeps participating in groups (MLS leaf/holder grants up to its lease, 90 d default, per kumiai); issuing new grants to other devices may pause until it reconnects. The records lane picks its own, possibly shorter, member-grant limit.
 - **OQ-record-history → valid if signed while effective.** A record a member signed keeps verifying after its lease lapses and after the member is removed, as long as it was signed while the member was effective (proved by its incarnation and the owner's log); only a reset or an explicit revoke of that member's grants invalidates it.
 - **OQ-settle → size-triggered prompt.** Devices prompt the user to settle with the cold root when the unsettled epoch passes a size threshold; past a hard cap, new member-issued MLS leaves fail closed until root settles.
-- **OQ-device-binding → the device DID is the member pin.** Every app instance (desktop, phone, agent) has its own `did:peer:4` identity and is an MLS group member as itself. Root MAY add that same `did:peer:4` (long form) as a management member; a device that is not a member is a plain participant holding a root- or member-issued grant (e.g. desktop managing, phone not). No separate member key and no binding statement. Consequences: (1) a managing device's own leaf/holder grant is self-issued — kumiai must let effective membership authorise the member's own leaf, or accept a self-issued `mbr` grant only from an effective member; (2) rotating a managing device's key is a new member pin, hence a root occasion; (3) member pins are long-form `did:peer:4` and every layer compares DIDs canonically (as kokuin's `deviceRevokeIndex`). Losing a managing device = `rmv` its membership + `rev` the same DID.
+- **OQ-device-binding → the device DID is the member pin.** Every app instance (desktop, phone, agent) has its own `did:peer:4` identity and is an MLS group member as itself. Root MAY add that same `did:peer:4` (long form) as a management member; a device that is not a member is a plain participant holding a root- or member-issued grant (e.g. desktop managing, phone not). No separate member key and no binding statement. Consequences: (1) a managing device's own leaf/holder grant is self-issued — kumiai must let effective membership authorise the member's own leaf, or accept a self-issued `mbr` grant only from an effective member; (2) rotating a managing device's key is a new member pin, hence a root occasion; (3) member pins are long-form `did:peer:4` and every layer compares DIDs canonically (as kokuin's `deviceRevokeIndex`). Losing a managing device = a member `rmv`s its incarnation; denying its DID is a root action at the next settle (user, 2026-10-23: kokuin's `MEMBER_REVOKES_MEMBER`). Grants other members issued *to* that DID stay valid until they expire (≤ lease).
 
 ## Open questions (stable IDs)
 
