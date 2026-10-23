@@ -69,6 +69,11 @@ import {
 } from 'ts-mls'
 
 import { authorPrivateCommit } from '../../../mls/lib/authoring.js'
+import {
+  assertAutoRotation,
+  decodeAutoRotationCandidate,
+  isAutoRotation,
+} from '../../src/auto-rotation.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { ENTRY_SEAL_LABEL, openEntries } from '../../src/crypto.js'
 import { decodeStoredValue, encodeStoredValue } from '../../src/persistence-codec.js'
@@ -1087,6 +1092,7 @@ export async function buildSealedMemoryOperation(
   op: Operation,
   handle: GroupHandle,
 ): Promise<HostBuilt> {
+  const rotationIdentity = isAutoRotation(op) ? assertAutoRotation(op, handle) : null
   return authorPrivateCommit(handle, async () => {
     const sourceState = handle.state
     const mls = memoryModel(handle)
@@ -1097,9 +1103,9 @@ export async function buildSealedMemoryOperation(
     const before = mls.serializeState()
     const epoch = mls.epoch()
     const authenticatorBefore = mls.authenticator()
-    const { target } = decodeStoredValue(op.body) as { target: string }
     const rotation = op.kind === 'rotation'
-    const commit = mls.buildCommit([], rotation ? {} : { adds: [target] })
+    const target = rotation ? null : (decodeStoredValue(op.body) as { target: string }).target
+    const commit = mls.buildCommit([], target === null ? {} : { adds: [target] })
     let candidate: Uint8Array
     let candidateAuthenticator: Uint8Array
     try {
@@ -1109,7 +1115,7 @@ export async function buildSealedMemoryOperation(
     } finally {
       mls.restoreState(before)
     }
-    const welcome = rotation ? null : new TextEncoder().encode(target)
+    const welcome = target === null ? null : new TextEncoder().encode(target)
     return {
       receipt: {
         commit,
@@ -1122,9 +1128,17 @@ export async function buildSealedMemoryOperation(
       value: {
         commit,
         bodies: [],
-        journal: candidate,
-        welcome: welcome === null ? null : { bytes: welcome, recipients: [target] },
-        incarnation: 1,
+        journal:
+          rotationIdentity === null
+            ? candidate
+            : encodeStoredValue({
+                state: candidate,
+                credential: handle.credential,
+                ledger: handle.ledgerTokens,
+              }),
+        welcome:
+          welcome === null || target === null ? null : { bytes: welcome, recipients: [target] },
+        incarnation: rotationIdentity?.incarnation ?? 1,
         epoch,
         authenticatorBefore,
         digest: toB64U(sha256(commit)),
@@ -1170,7 +1184,10 @@ export function sealedMemoryValidation(): ControlValidationPort {
         readCommitHeader: (commit) => source().readCommitHeader(commit),
         verifyOwn: async (value) => {
           if (toB64U(value.payload) !== toB64U(built.payload)) return false
-          const candidate = decodeClientState(journal.candidate)
+          const candidateBytes = isAutoRotation({ id: built.opID })
+            ? decodeAutoRotationCandidate(journal.candidate).state
+            : journal.candidate
+          const candidate = decodeClientState(candidateBytes)
           if (candidate === undefined) return false
           const checked = await check(value.payload)
           if (checked === null) return false

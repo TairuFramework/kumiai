@@ -184,6 +184,26 @@ async function setup(confirmed = true) {
   }
 }
 
+test('an ordinary registry peer receives a private rotation producer that stops with its owner', async () => {
+  const f = await setup(false)
+  const access = vi.spyOn(f.f.registry, 'access')
+  const owner = await f.start()
+  try {
+    await owner.ready
+    expect(f.created[0]?.options.internalOperations).toMatchObject({
+      bind: expect.any(Function),
+      onOutcome: expect.any(Function),
+    })
+    f.created[0]?.options.internalOperations?.bind({ enqueue: async () => {} })
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+    expect(access).not.toHaveBeenCalled()
+  } finally {
+    owner.dispose()
+    await owner.drained()
+    await f.f.registry.dispose()
+  }
+})
+
 describe('registry peer recovery coordination', () => {
   test('peer factories receive the registry-bound checkpoint service', async () => {
     const s = await setup(false)

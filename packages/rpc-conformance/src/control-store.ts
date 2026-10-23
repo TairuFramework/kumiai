@@ -91,7 +91,7 @@ export type ConformanceHostBuilt<Position extends string = string> = Pick<
 export type ConformanceControlSnapshot<Position extends string = string> = {
   schemaVersion: 1
   commitOnce: ConformanceControlSlot<Position> | null
-  spentSource: { epoch: number } | null
+  spentSource: { epoch: number; opID?: string } | null
   controlHold: ConformanceControlHold<Position> | null
   forkHalt: ConformanceForkHalt | null
   recoveryUnavailable: ConformanceRecoveryUnavailableEvent | null
@@ -111,7 +111,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
 }
 export type ConformanceControlChanges<Position extends string = string> = {
   commitOnce?: ConformanceControlSlot<Position> | null
-  spentSource?: { epoch: number } | null
+  spentSource?: { epoch: number; opID?: string } | null
   controlHold?: ConformanceControlSnapshot<Position>['controlHold']
   clearAppHold?: { eventID: string; reportMutationID: string }
   forkHalt?: ConformanceForkHalt
@@ -1205,16 +1205,30 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
     test.each(
       (['complete', 'incomplete'] as const).flatMap((coverage) =>
         (['landed', 'unknown'] as const).flatMap((kind) =>
-          [false, true].map((welcome) => ({ coverage, kind, welcome })),
+          [false, true].flatMap((welcome) =>
+            (['none', 'matching', 'bytes', 'recipients'] as const).map((retained) => ({
+              coverage,
+              kind,
+              welcome,
+              retained,
+            })),
+          ),
         ),
       ),
     )(
-      'own consumption shape: $coverage / $kind / Welcome=$welcome',
-      async ({ coverage, kind, welcome }) => {
+      'own consumption shape: $coverage / $kind / Welcome=$welcome / retained=$retained',
+      async ({ coverage, kind, welcome, retained }) => {
         const host = await params.open()
         const { slot, source } = await prepareSlot(host)
         const speculative = slot.welcome
         if (speculative === null) throw new Error('Missing speculative Welcome')
+        const owed = {
+          opID: slot.opID,
+          welcome: retained === 'bytes' ? new Uint8Array([99]) : speculative.bytes.slice(),
+          recipients: retained === 'recipients' ? ['carol'] : [...speculative.recipients],
+        }
+        if (retained !== 'none')
+          await host.control.apply({ putWelcomes: [owed] }, 'retained-welcome')
         if (coverage === 'incomplete')
           await host.control.apply(
             { cursor: { position: slot.head, epoch: slot.epoch, incomplete: true } },
@@ -1222,6 +1236,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
           )
         const before = await host.control.load()
         const state = await host.loadState()
+        const mutation = await host.control.lastMutation()
         const write: ConformanceAdoptionWrite = {
           mutationID: 'own-shape',
           expected: {
@@ -1266,7 +1281,10 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
           write,
         )
         if (
-          (coverage === 'complete' && kind === 'landed' && welcome) ||
+          (coverage === 'complete' &&
+            kind === 'landed' &&
+            (welcome || retained === 'matching') &&
+            (retained === 'none' || retained === 'matching')) ||
           (coverage === 'incomplete' && kind === 'unknown' && !welcome)
         ) {
           await saving
@@ -1275,11 +1293,16 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
           expect(closed.outcomes).toEqual(write.changes.putOutcomes)
           expect(closed.applied).toEqual(write.changes.putApplied)
           expect(closed.cursor).toEqual(write.changes.cursor)
-          expect(closed.welcomes).toEqual(write.changes.putWelcomes ?? [])
+          expect(closed.welcomes).toEqual(
+            write.changes.putWelcomes ?? (retained === 'none' ? [] : [owed]),
+          )
         } else {
-          await expect(saving).rejects.toThrow()
-          expect(await host.control.load()).toEqual(before)
-          expect(await host.loadState()).toEqual(state)
+          await expect(saving).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+          const reopened = await params.reopen()
+          expect(await reopened.control.load()).toEqual(before)
+          expect(await reopened.loadState()).toEqual(state)
+          expect(await reopened.loadVersion()).toBe(write.expected?.stateVersion)
+          expect(await reopened.control.lastMutation()).toBe(mutation)
         }
       },
     )
@@ -1602,7 +1625,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       )
       expect((await (await params.reopen()).control.load()).outcomes).toEqual([final])
     })
-    test.each(['absent', 'epoch', 'report', 'clear', 'reuse'] as const)(
+    test.each(['absent', 'epoch', 'operation', 'report', 'clear', 'reuse'] as const)(
       'raw control writes cannot change spent-source authority: %s',
       async (mutation) => {
         const host = await params.open()
@@ -1624,9 +1647,11 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
               ? { spentSource: { epoch: slot.epoch + 1 } }
               : mutation === 'epoch'
                 ? { ...close, spentSource: { epoch: slot.epoch + 1 } }
-                : mutation === 'report'
-                  ? { ...close, putOutcomes: [] }
-                  : close
+                : mutation === 'operation'
+                  ? { ...close, spentSource: { epoch: slot.epoch, opID: 'different-operation' } }
+                  : mutation === 'report'
+                    ? { ...close, putOutcomes: [] }
+                    : close
         await expect(host.control.apply(changes, 'invalid')).rejects.toThrow()
         expect(await host.control.load()).toEqual(before)
       },

@@ -153,7 +153,7 @@ export function migrateMemoryControl(input: MigrationFixture): MigrationResult {
     !terminal &&
     !input.source.retired
   )
-    result.spentSource = { epoch: slot.epoch }
+    result.spentSource = { epoch: slot.epoch, opID: slot.opID }
   if (
     modern &&
     slot !== null &&

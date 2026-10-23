@@ -53,6 +53,11 @@ import type {
 } from './recovery-types.js'
 
 export const DEFAULT_RECOVERY_TIMEOUT_MS = 5000
+export const INTERNAL_OPERATION_PREFIX = 'kumiai/internal/'
+export type InternalOperations = {
+  bind(capability: { enqueue(request: OperationRequest): Promise<void> }): void
+  onOutcome(outcome: Outcome): void | Promise<void>
+}
 export const DEFAULT_RECOVERY_JITTER_MS = 250
 
 /**
@@ -92,6 +97,7 @@ export type GroupPeerMLSParams = {
   recoveryTarget?: { targetID: string; topicID: string }
   manualRecovery?: { authorisationID: string; source: GroupKey }
   recoveryOnly?: boolean
+  internalOperations?: InternalOperations
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
   settleAcceptedRecovery?: (
     record: CapturedRejoinRecord,
@@ -317,6 +323,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
       recoveryTarget?: undefined
       manualRecovery?: undefined
       recoveryOnly?: undefined
+      internalOperations?: undefined
       onConfirmedRecovery?: undefined
       settleAcceptedRecovery?: undefined
       reconcileAcceptedRecovery?: undefined

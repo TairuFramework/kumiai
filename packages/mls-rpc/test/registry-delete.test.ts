@@ -162,7 +162,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         const settled = await control.load()
         expect(settled.outcomes).toEqual([])
         expect(settled.welcomes).toEqual([])
-        expect(settled.spentSource).toEqual({ epoch: state.epoch })
+        expect(settled.spentSource).toEqual({ epoch: state.epoch, opID: owed.outcomes[0]?.opID })
         expect(controlSettled(settled)).toBe(true)
         fixture.armNextWorkFault('before-commit')
         await expect(fixture.registry.delete(key)).rejects.toThrow('Injected before-commit failure')

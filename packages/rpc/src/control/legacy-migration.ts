@@ -174,7 +174,7 @@ export function migrateLegacyControl(params: {
     } else next.operations.push(intent(row))
   }
   if (!owned && slot !== null && slot.epoch === source.epoch && !source.terminal && !source.retired)
-    next.spentSource = { epoch: slot.epoch }
+    next.spentSource = { epoch: slot.epoch, opID: slot.opID }
   if (
     currentBuild &&
     next.commitOnce !== null &&

@@ -161,6 +161,7 @@ export function createControlValidationPort(params: {
   identity: OwnIdentity
   options: GroupOptions
   entryLabel?: string
+  /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */
   restoreCandidate: (candidate: Uint8Array) => Promise<GroupHandle>
 }): ControlValidationPort {
   return {

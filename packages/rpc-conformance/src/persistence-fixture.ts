@@ -599,6 +599,7 @@ export type ConformancePendingAppFrames = {
 }
 
 export type RegistryLeaseFixture = {
+  rotate(): Promise<void>
   admission(): ConformanceSendAdmission
   openEphemeral(frames: Array<{ ciphertext: Uint8Array; expectedAAD: Uint8Array }>): Promise<
     Array<

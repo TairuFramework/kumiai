@@ -37,7 +37,7 @@ import type { SubscribeFailure } from '../../src/hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import type { GroupPeer, RecoveryEvent, StrandObservation } from '../../src/peer.js'
-import type { GroupPeerMLSParams } from '../../src/peer-types.js'
+import type { GroupPeerMLSParams, InternalOperations } from '../../src/peer-types.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import { settleRecovery } from '../../src/recovery-reconcile.js'
 import type {
@@ -169,6 +169,7 @@ export type MakeMLSPeerOptions = {
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onOutcome?: (outcome: Outcome) => void | Promise<void>
   onInternalOutcome?: (outcome: Outcome) => void | Promise<void>
+  internalOperations?: InternalOperations
   onControlPublishError?: (notice: { opID: string | null; error: unknown }) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onConfirmedRecovery?: (handoff: ConfirmedRecoveryHandoff) => void
@@ -312,6 +313,7 @@ export function makeMLSPeer(
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
     ...(options.onOutcome != null ? { onOutcome: options.onOutcome } : {}),
     ...(options.onInternalOutcome != null ? { onInternalOutcome: options.onInternalOutcome } : {}),
+    internalOperations: options.internalOperations,
     ...(options.onControlPublishError != null
       ? { onControlPublishError: options.onControlPublishError }
       : {}),

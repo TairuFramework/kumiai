@@ -163,6 +163,10 @@ export async function createRegistryLeaseFixture(
       peer = await peerFixture.registry.access(key.groupID)
       return peer
     },
+    async rotate() {
+      const next = await fixture.acceptedOrdinary(access)
+      await access.replace(next.candidate, () => next.write)
+    },
     async advanceEpoch() {
       if (group === null) throw new Error('Epoch advance requires a peer')
       await group.advance(undefined, async (commit) => {

@@ -17,7 +17,7 @@ export function closeControlBuild(
   if (built === null) return result.kind === 'abandon' ? {} : { spentSource: null }
   return {
     commitOnce: null,
-    spentSource: result.kind === 'abandon' ? { epoch: built.epoch } : null,
+    spentSource: result.kind === 'abandon' ? { epoch: built.epoch, opID: built.opID } : null,
     deleteOutcomes: snapshot.outcomes.filter((row) => row.opID === built.opID).map((row) => row.id),
     putOutcomes: [
       {

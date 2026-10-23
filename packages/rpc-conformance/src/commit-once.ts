@@ -33,7 +33,7 @@ export type CommitOnceEvidence = {
     sourceEpoch: number
     provisionalID: string
     outcomes: Array<ConformanceOutcome>
-    spentSourceAfterAck: { epoch: number } | null
+    spentSourceAfterAck: { epoch: number; opID?: string } | null
   }
   winnerFollowed: boolean
   candidateMatchesReceiver: boolean
@@ -144,7 +144,10 @@ export function testCommitOnceConformance(params: {
             const abandoned = evidence.abandonment
             expect(abandoned).toBeDefined()
             if (abandoned === undefined) throw new Error('Missing abandonment evidence')
-            expect(abandoned.spentSourceAfterAck).toEqual({ epoch: abandoned.sourceEpoch })
+            expect(abandoned.spentSourceAfterAck).toEqual({
+              epoch: abandoned.sourceEpoch,
+              opID: abandoned.outcomes[0]?.opID,
+            })
             expect(abandoned.outcomes).toEqual([
               expect.objectContaining({ id: expect.any(String), kind: 'unknown' }),
             ])

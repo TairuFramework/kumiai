@@ -31,6 +31,7 @@ import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import type { CommitOnceEvidence, StorageTestPorts } from '@kumiai/rpc-conformance'
 import { expect, vi } from 'vitest'
 
+import { decodeAutoRotationCandidate } from '../../src/auto-rotation.js'
 import { prepareCheckpointInstallationFromTrust } from '../../src/checkpoint-capture.js'
 import { createControlAdoptionPort } from '../../src/control-adoption.js'
 import { createControlBuildPort, createPersistenceBuildSaver } from '../../src/control-build.js'
@@ -990,7 +991,13 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
       restoreHandle,
     )
     const restoreCandidate = async (bytes: Uint8Array) => {
-      const state = decodeClientState(bytes)
+      let candidateBytes = bytes
+      try {
+        candidateBytes = decodeAutoRotationCandidate(bytes).state
+      } catch {
+        // Host invites retain their existing raw-state format.
+      }
+      const state = decodeClientState(candidateBytes)
       if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
       const slot = (await control.load()).commitOnce
       return restoreHandle({
@@ -1031,6 +1038,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
       access: host.access,
       control,
       build: buildHost,
+      rotate: mode === 'double' ? buildSealedMemoryOperation : undefined,
       restoreCandidate,
       restoreSource: async ({ state, credential, ledgerEntries }) => {
         const decoded = decodeClientState(state)
@@ -1143,6 +1151,7 @@ export async function createControlCrashHarness(mode: 'real-mls' | 'double', see
         access: host.access,
         control,
         build: buildHost,
+        rotate: mode === 'double' ? buildSealedMemoryOperation : undefined,
         restoreCandidate,
         restoreSource: async ({ state, credential, ledgerEntries }) => {
           const decoded = decodeClientState(state)
