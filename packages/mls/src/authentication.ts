@@ -40,7 +40,7 @@ export { MLS_LEAF_ACT, MLS_LEAF_RES } from './capability.js'
 
 /** The action a management capability must grant to mutate a profile's device registry. */
 export const MLS_DEVICES_ACT = 'manage'
-/** The resource half — kumiai-namespaced, group-independent, per the kokuin management tier. */
+/** The resource half — kumiai-namespaced and group-independent. */
 export const MLS_DEVICES_RES = 'kumiai/devices'
 
 const EMPTY_DENY: ReadonlySet<string> = new Set()

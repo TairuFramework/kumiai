@@ -28,9 +28,13 @@ export function createEmbeddedControllerResolver(params: {
         ? asControllerLog(params.prefix)
         : undefined,
   })
-  const { resolveMember: _resolveMember, frozen: _frozen, ...resolver } = base
+  // Forward only what verification needs: anything else kokuin adds is not passed through unseen.
+  const { method, resolve, resolveHistoric, resolveAgreementKey } = base
   return {
-    ...resolver,
+    method,
+    resolve,
+    resolveHistoric,
+    resolveAgreementKey,
     async resolveDenySet(_did: string): Promise<ReadonlySet<string>> {
       return params.denySet ?? EMPTY
     },

@@ -20,6 +20,17 @@ describe('createEmbeddedControllerResolver', () => {
     expect(method in resolver).toBe(false)
   })
 
+  test('exposes only the members verification needs', () => {
+    const resolver = createEmbeddedControllerResolver({ controllerID: did, prefix: [inception] })
+    expect(Object.keys(resolver).sort()).toEqual([
+      'method',
+      'resolve',
+      'resolveAgreementKey',
+      'resolveDenySet',
+      'resolveHistoric',
+    ])
+  })
+
   test('returns the injected deny set', async () => {
     const denySet = new Set(['did:key:zDenied'])
     const resolver = createEmbeddedControllerResolver({
