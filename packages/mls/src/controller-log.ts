@@ -5,9 +5,8 @@ import {
   digestOf,
   type FoldResult,
   foldLog,
-  isEpochEventShape,
+  pruneLog,
   type SignedEvent,
-  verifyEpochSignature,
 } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
@@ -52,40 +51,19 @@ export function closureOf(
   targets: ReadonlyArray<string>,
 ): ControllerLog | undefined {
   const folded = foldControllerLog(did, log)
-  if (!folded.ok) return undefined
+  if (!folded.ok || folded.head.saturated) return undefined
   const applied = new Set(folded.applied)
   if (targets.some((digest) => !applied.has(digest))) return undefined
 
-  const authentic = new Map<string, ControllerLog['events'][number]>()
-  for (const signed of log.events) {
-    if (!isEpochEventShape(signed)) continue
-    const digest = digestOf(signed.event)
-    if (!applied.has(digest) || authentic.has(digest)) continue
-    const by = signed.event.by
-    const member = by == null ? undefined : folded.head.members.get(by)
-    if (by != null && member == null) continue
-    // Applied authorisation fixes the signer; removal never changes its pin.
-    const signer = member == null ? { rootKeys: folded.head.keys } : { memberKey: member.key }
-    if (verifyEpochSignature(signed, signer)) authentic.set(digest, signed)
-  }
-
-  const needed = new Set<string>()
-  const pending = [...targets]
-  while (pending.length > 0) {
-    const digest = pending.pop()
-    if (digest == null || digest === folded.head.epoch || needed.has(digest)) continue
-    const signed = authentic.get(digest)
-    if (signed == null) return undefined
-    needed.add(digest)
-    pending.push(...signed.event.p)
-  }
-
+  const needed = new Set(targets)
   const events: ControllerLog['events'] = []
-  for (const digest of folded.applied) {
-    const signed = authentic.get(digest)
-    if (needed.has(digest) && signed != null) events.push(signed)
+  // Applied copies are topologically ordered and closed under ancestry in an unsaturated epoch.
+  for (const signed of pruneLog(did, log).events.toReversed()) {
+    if (!needed.has(digestOf(signed.event))) continue
+    events.push(signed)
+    for (const parent of signed.event.p) needed.add(parent)
   }
-  return { chain: [...log.chain], events }
+  return structuredClone({ chain: log.chain, events: events.reverse() })
 }
 
 export function isDetachedFoldReason(reason: string): boolean {

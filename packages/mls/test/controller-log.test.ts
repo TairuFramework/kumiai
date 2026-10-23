@@ -12,11 +12,17 @@ import {
   didFromInception,
   digestOf,
   encodeKey,
+  isEpochEventShape,
+  MAX_EPOCH_EVENTS,
+  pruneLog,
   ROTATE_NEEDS_SNAPSHOT,
   type SignedEvent,
+  verifyEpochSignature,
 } from '@kokuin/controller'
 import { createIdentity, normalizeDID } from '@kokuin/token'
 import { ed25519 } from '@noble/curves/ed25519.js'
+import { bytesToNumberLE, concatBytes } from '@noble/curves/utils.js'
+import { sha512 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
@@ -135,6 +141,14 @@ test('revokeIndices matches revokesSubject on every index', async () => {
   }
 })
 
+test('revokeIndices returns no indices when the chain is invalid', () => {
+  const chain: Array<SignedEvent> = [inception]
+  const subject = 'did:key:revoked-device'
+  chain.push(revokeChain({ ...params, chain, subject }))
+  chain.push({ ...rotateChain({ ...params, chain }), sigs: [] })
+  expect(revokeIndices(did, chain, subject)).toEqual([])
+})
+
 test('closureOf returns the renew with its add', async () => {
   const { log, add, renew } = await memberLog()
   const closure = closureOf(did, log, [digestOf(renew.event)])
@@ -145,11 +159,14 @@ test('closureOf returns the renew with its add', async () => {
   expect(folded.applied).toEqual([digestOf(add.event), digestOf(renew.event)])
 })
 
-test('closureOf refuses a missing parent', async () => {
+test('closureOf refuses a target pending on a missing parent', async () => {
   const { renew } = await memberLog()
-  expect(
-    closureOf(did, { chain: [inception], events: [renew] }, [digestOf(renew.event)]),
-  ).toBeUndefined()
+  const log = { chain: [inception], events: [renew] }
+  const folded = foldControllerLog(did, log)
+  if (!folded.ok) throw new Error(folded.reason)
+  expect(folded.applied).toEqual([])
+  expect(folded.pending).toBe(1)
+  expect(closureOf(did, log, [digestOf(renew.event)])).toBeUndefined()
 })
 
 test('closureOf refuses a target not applied', async () => {
@@ -173,6 +190,12 @@ test('closureOf refuses a target not applied', async () => {
 
 test('closureOf keeps authenticated copies and excludes unrelated events', async () => {
   const { log, add, renew, head } = await memberLog()
+  const forgedAdd = { ...add, sigs: renew.sigs }
+  const forgedRenew = { ...renew, sigs: add.sigs }
+  for (const forged of [forgedAdd, forgedRenew]) {
+    expect(isEpochEventShape(forged)).toBe(true)
+    expect(verifyEpochSignature(forged, { rootKeys: head.keys })).toBe(false)
+  }
   const unrelated = createRevoke({
     did,
     head,
@@ -180,12 +203,50 @@ test('closureOf keeps authenticated copies and excludes unrelated events', async
     signer: { root: { seed, profile: 0 } },
     target: 'did:key:unrelated',
   })
-  log.events = [{ ...add, sigs: [] }, { ...renew, sigs: [] }, unrelated, renew, add]
-  expect(closureOf(did, log, [digestOf(renew.event), digestOf(add.event)])).toEqual({
+  log.events = [
+    ...Array.from({ length: 128 }, () => forgedAdd),
+    ...Array.from({ length: 128 }, () => forgedRenew),
+    unrelated,
+    renew,
+    add,
+  ]
+  const closure = closureOf(did, log, [digestOf(renew.event), digestOf(add.event)])
+  expect(closure).toEqual({
     chain: [inception],
     events: [add, renew],
   })
+  expect(closure?.events).toEqual(
+    pruneLog(did, log).events.filter(
+      (signed) => digestOf(signed.event) !== digestOf(unrelated.event),
+    ),
+  )
 })
+
+test.each([false, true])(
+  'closureOf keeps kokuin canonical signatures with reversed input=%s',
+  async (reverse) => {
+    const { log, add, renew, head } = await memberLog()
+    const privateKey = deriveKeyMaterial(seed, authorityPath(0, 0, 0), 'EdDSA')
+    const { scalar, pointBytes } = ed25519.utils.getExtendedPublicKey(privateKey)
+    // A different signing nonce gives a second valid signature for the same body.
+    const nonce = 1n
+    const point = ed25519.Point.BASE.multiply(nonce).toBytes()
+    const challenge = bytesToNumberLE(
+      sha512(concatBytes(point, pointBytes, canonicalBytes(add.event))),
+    )
+    const response = ed25519.Point.Fn.toBytes(ed25519.Point.Fn.create(nonce + challenge * scalar))
+    const alternative = { ...add, sigs: [toB64U(concatBytes(point, response))] }
+    expect(alternative.sigs).not.toEqual(add.sigs)
+    for (const signed of [add, alternative]) {
+      expect(isEpochEventShape(signed)).toBe(true)
+      expect(verifyEpochSignature(signed, { rootKeys: head.keys })).toBe(true)
+    }
+    log.events = reverse ? [alternative, renew, add] : [add, renew, alternative]
+    const canonical = pruneLog(did, log).events
+    expect(canonical).toHaveLength(2)
+    expect(closureOf(did, log, [digestOf(renew.event)])?.events).toEqual(canonical)
+  },
+)
 
 test('closureOf includes every ancestor back to the epoch anchor', async () => {
   const { log, add, renew, head, privateKey } = await memberLog()
@@ -212,7 +273,7 @@ test('closureOf includes every ancestor back to the epoch anchor', async () => {
     signer: { root: { seed, profile: 0 } },
     add: addDigest,
   })
-  log.events = [remove, later, { ...revoke, sigs: [] }, revoke, ...log.events]
+  log.events = [remove, later, { ...revoke, sigs: add.sigs }, revoke, ...log.events]
   expect(closureOf(did, log, [digestOf(later.event)])).toEqual({
     chain: [inception],
     events: [add, renew, revoke, later],
@@ -224,6 +285,68 @@ test('closureOf includes every ancestor back to the epoch anchor', async () => {
 test('closureOf refuses a missing target', async () => {
   const { log } = await memberLog()
   expect(closureOf(did, log, [digestOf('missing target')])).toBeUndefined()
+})
+
+test('closureOf refuses a log that does not fold', async () => {
+  const { log, renew } = await memberLog()
+  log.chain = [{ ...inception, sigs: [] }]
+  expect(foldControllerLog(did, log).ok).toBe(false)
+  expect(closureOf(did, log, [digestOf(renew.event)])).toBeUndefined()
+})
+
+test('closureOf refuses the epoch anchor as a target', async () => {
+  const { log, head } = await memberLog()
+  expect(closureOf(did, log, [head.epoch])).toBeUndefined()
+})
+
+test('closureOf returns the chain alone for empty targets', async () => {
+  const { log } = await memberLog()
+  expect(closureOf(did, log, [])).toEqual({ chain: [inception], events: [] })
+})
+
+test('closureOf refuses a saturated epoch even for empty targets', async () => {
+  const { log, add, renew } = await memberLog()
+  const privateKey = deriveKeyMaterial(seed, authorityPath(0, 0, 0), 'EdDSA')
+  log.events = [
+    add,
+    ...Array.from({ length: MAX_EPOCH_EVENTS }, (_, index) => {
+      const event = { ...renew.event, lease: 2000 + index }
+      return { event, sigs: [toB64U(ed25519.sign(canonicalBytes(event), privateKey))] }
+    }),
+  ]
+  const folded = foldControllerLog(did, log)
+  if (!folded.ok) throw new Error(folded.reason)
+  expect(folded.applied).toHaveLength(MAX_EPOCH_EVENTS + 1)
+  expect(folded.head.saturated).toBe(true)
+  expect(closureOf(did, log, [digestOf(add.event)])).toBeUndefined()
+  expect(closureOf(did, log, [])).toBeUndefined()
+})
+
+test('mutating a closure does not change the input log', async () => {
+  const fixture = await memberLog()
+  const log = structuredClone(fixture.log)
+  const before = structuredClone(log)
+  const closure = closureOf(did, log, [digestOf(fixture.renew.event)])
+  if (closure == null) throw new Error('Missing closure')
+  const chainEntry = closure.chain[0]
+  const eventEntry = closure.events[0]
+  if (
+    chainEntry == null ||
+    !('k' in chainEntry.event) ||
+    !Array.isArray(chainEntry.event.k) ||
+    eventEntry == null
+  ) {
+    throw new Error('Missing closure entries')
+  }
+  chainEntry.sigs.push('changed chain signature')
+  chainEntry.event.crit = false
+  chainEntry.event.k.push('changed root key')
+  eventEntry.sigs.push('changed epoch signature')
+  eventEntry.event.crit = false
+  eventEntry.event.p.push('changed parent')
+  closure.chain.length = 0
+  closure.events.length = 0
+  expect(log).toEqual(before)
 })
 
 describe('controller chain adapter', () => {
