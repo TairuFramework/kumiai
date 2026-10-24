@@ -91,5 +91,5 @@ entries and removals on the controller's behalf. They never go beyond root's aut
 ## Follow-ons
 
 - `../next/2026-10-24-management-tier-followups.md`: the 0.12 release, kubun unblock, and adopting
-  kokuin controller 0.3.
+  kokuin #23 (a controller 0.2.x patch if proven compatible).
 - `../backlog/2026-10-24-management-tier-residuals.md`: parked minors.
