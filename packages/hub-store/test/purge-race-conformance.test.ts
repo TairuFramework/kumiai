@@ -1,6 +1,6 @@
 import type { Kysely } from '@hozon/db'
 import { sql } from '@hozon/db'
-import { testHubStorePurgeRaceConformance } from '@kumiai/hub-conformance/purge-race'
+import { testHubStorePurgeRaceConformance } from '@kumiai/hub-conformance'
 import type { HubStore } from '@kumiai/hub-protocol'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
 
