@@ -68,6 +68,31 @@ export function memberDropIndices(
   return indices
 }
 
+/** Same-generation `rot` indices whose snapshot newly carries `add` as a removed incarnation. */
+export function memberTombstoneIndices(
+  did: string,
+  chain: ReadonlyArray<SignedEvent>,
+  add: string,
+): Array<number> {
+  const folded = foldChain(did, chain)
+  if (!folded.ok) return []
+  const indices: Array<number> = []
+  for (let index = 1; index < chain.length; index++) {
+    const state = folded.states[index]
+    const prior = folded.states[index - 1]
+    if (
+      chain[index]?.event.t === 'rot' &&
+      state != null &&
+      prior != null &&
+      state.gen === prior.gen &&
+      state.tombstones?.has(add) === true &&
+      prior.tombstones?.has(add) !== true
+    )
+      indices.push(index)
+  }
+  return indices
+}
+
 export function closureOf(
   did: string,
   log: ControllerLog,

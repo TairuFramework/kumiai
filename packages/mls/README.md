@@ -89,7 +89,8 @@ Member roots are supported only in lifecycle groups. Admission refuses removed o
 The reset form is `{ reset: true, log }`. Proofs carry `ControllerLog` and exact `EffectClaim` references.
 References identify a chain index, epoch event or reset snapshot.
 Removing an incarnation cascades through its rooted leaves. Valid holder or survivor grants can preserve them until their substitute expiry.
-`removalEvidence` captures removal evidence before settlement. Hosts retain it beside their controller store.
+A settlement that keeps the removed incarnation as a tombstone (`snapshotOf`'s default) proves the removal itself.
+`removalEvidence` captures the removal's epoch proof before settlement. A host needs it only when the settlement drops that tombstone.
 
 Tree time combines a preserved floor, root-issued token times and effective-member attestations over distinct pinned keys.
 The quorum uses the second-highest attestation, or the highest for one effective key.

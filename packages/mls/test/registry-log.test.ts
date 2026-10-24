@@ -180,17 +180,22 @@ test('attest clock is refused when the issuer has no effective incarnation', asy
     member: { add: member.add, g: 0 },
     iat: 100,
   })
-  await expect(
-    verifyLifecycleProof(group, {
-      issuer: member.identity.id,
-      entry: {
-        type: registry.DEVICE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: f.did,
-        value: { op: 'clock', time: 200, attest: true },
-      },
-    }),
-  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+  const clock = {
+    issuer: member.identity.id,
+    entry: {
+      type: registry.DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: f.did,
+      value: { op: 'clock', time: 200, attest: true } as const,
+    },
+  }
+  await expect(verifyLifecycleProof(group, clock)).rejects.toMatchObject({
+    reason: 'effects-mismatch',
+  })
+  // The fold refuses it too, not only the admission gate.
+  expect(() => registry.registryApply(clock, group.registry, f.did)).toThrow(
+    expect.objectContaining({ reason: 'effects-mismatch' }),
+  )
 })
 
 test('seed at a later position, or into a recorded log, is refused', async () => {

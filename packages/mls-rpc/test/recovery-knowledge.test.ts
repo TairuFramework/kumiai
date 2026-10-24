@@ -145,7 +145,11 @@ test.each(['attestation', 'timeFloor', 'genFloor'] as const)(
   },
 )
 
-function settle(f: Awaited<ReturnType<typeof buildEpoch>>, log = f.log): ControllerLog {
+function settle(
+  f: Awaited<ReturnType<typeof buildEpoch>>,
+  log = f.log,
+  drop: Array<string> = [],
+): ControllerLog {
   const prior = log.chain.at(-1)
   if (prior == null) throw new Error('Missing chain head')
   const rotation = createRotate({
@@ -153,7 +157,7 @@ function settle(f: Awaited<ReturnType<typeof buildEpoch>>, log = f.log): Control
     profile: 0,
     did: f.did,
     prior: prior.event,
-    snapshot: snapshotOf(head(f.did, log)),
+    snapshot: snapshotOf(head(f.did, log), { members: drop }),
   })
   return { chain: [...log.chain, rotation], events: [] }
 }
@@ -290,10 +294,17 @@ test('a pruned stale reset cannot roll back a later settlement in its generation
 
 test('settlement does not supersede an omitted removal', async () => {
   const f = await removal()
-  const candidate = mls.registryForLog(f.did, settle(f, f.removedLog))
+  const candidate = mls.registryForLog(f.did, settle(f, f.removedLog, [f.a.add]))
   expect(() => mls.assertRetainsKnownEffects(f.did, f.known, candidate)).toThrow(
     new mls.RecoveryKnowledgeError('removal'),
   )
+})
+
+test('settlement keeping the tombstone retains the removal', async () => {
+  const f = await removal()
+  const candidate = mls.registryForLog(f.did, settle(f, f.removedLog))
+  expect(candidate.controllers.get(f.did)?.removedMembers.has(f.a.add)).toBe(true)
+  expect(() => mls.assertRetainsKnownEffects(f.did, f.known, candidate)).not.toThrow()
 })
 
 test('forked reply is refused', async () => {

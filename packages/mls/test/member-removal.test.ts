@@ -36,7 +36,7 @@ import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import * as lifecycle from '../src/lifecycle.js'
 import { isLapsed, leafAt, leafExpiry, prepareLifecycleGate } from '../src/lifecycle.js'
 import { authenticateLifecycleProof } from '../src/lifecycle-proof.js'
-import { effectiveAuthorityOf } from '../src/member-root.js'
+import { effectiveAuthorityOf, effectOf } from '../src/member-root.js'
 import { recoverySignerEligible } from '../src/recovery-verdict.js'
 import { DEVICE_ENTRY_TYPE, denySetOf, registryForLog } from '../src/registry.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
@@ -148,7 +148,11 @@ function built(result: Awaited<ReturnType<typeof api.revokeWithProof>>) {
   return result.result
 }
 
-function settle(f: Awaited<ReturnType<typeof fixture>>, log = f.removedLog) {
+function settle(
+  f: Awaited<ReturnType<typeof fixture>>,
+  log = f.removedLog,
+  drop: Array<string> = [],
+) {
   const prior = log.chain.at(-1)
   if (prior == null) throw new Error('Missing chain')
   return {
@@ -159,7 +163,7 @@ function settle(f: Awaited<ReturnType<typeof fixture>>, log = f.removedLog) {
         profile: 0,
         did: f.did,
         prior: prior.event,
-        snapshot: snapshotOf(head(f.did, log)),
+        snapshot: snapshotOf(head(f.did, log), { members: drop }),
       }),
     ],
     events: [],
@@ -224,9 +228,40 @@ test('settled rmv proved by chain index removes the same leaves', async () => {
   ).toEqual({ chainIndex: 2 })
 })
 
-test('settled rmv of a never-snapshotted incarnation lands with its epoch proof', async () => {
+test('settled rmv of a never-snapshotted incarnation is proved by its tombstone', async () => {
   const f = await fixture()
-  const log = settle(f)
+  const log = pruneLog(f.did, settle(f))
+  expect(log.events).toEqual([])
+  expect(head(f.did, log).tombstones?.has(f.a.add)).toBe(true)
+  const result = built(await api.revokeWithProof(f.group, { log, remove: f.remove }))
+  expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    effects: [{ kind: 'remove', ref: { chainIndex: 1 } }],
+  })
+  f.publish(result.newGroup)
+  await f.receiver.processMessage(result.commitMessage)
+  for (const group of [result.newGroup, f.receiver]) {
+    expect(group.findMemberLeafIndex(f.device.id)).toBeUndefined()
+    expect(group.registry.controllers.get(f.did)?.removedMembers.get(f.a.add)).toEqual({
+      did: f.a.identity.id,
+      gen: 0,
+      proofRef: { chainIndex: 1 },
+    })
+  }
+})
+
+test('an rmv proved by its epoch event upgrades to the tombstone after the settle', async () => {
+  const f = await fixture()
+  const result = built(await f.build())
+  const next = await api.publishControllerLog(result.newGroup, settle(f))
+  expect(
+    next?.newGroup.registry.controllers.get(f.did)?.removedMembers.get(f.a.add)?.proofRef,
+  ).toEqual({ chainIndex: 1 })
+})
+
+test('a settle that drops the tombstone needs the epoch proof', async () => {
+  const f = await fixture()
+  const log = settle(f, f.removedLog, [f.a.add])
+  expect(head(f.did, log).tombstones?.has(f.a.add) ?? false).toBe(false)
   await expect(api.publishControllerLog(f.group, log)).rejects.toMatchObject({
     reason: 'effects-mismatch',
   })
@@ -245,11 +280,79 @@ test('settled rmv of a never-snapshotted incarnation lands with its epoch proof'
   ).toEqual({ event: digestOf(f.rmv.event), epoch: digestOf(f.inception.event) })
 })
 
-test('revokeWithProof with retained removal evidence lands after a settle, and Welcome and restore agree', async () => {
+test('evidence takes precedence over the tombstone', async () => {
   const f = await fixture()
   const evidence = api.removalEvidence(f.did, f.removedLog, digestOf(f.rmv.event))
   if (evidence == null) throw new Error('Missing evidence')
-  const log = pruneLog(f.did, settle(f))
+  const result = built(
+    await api.revokeWithProof(f.group, {
+      log: pruneLog(f.did, settle(f)),
+      remove: f.remove,
+      evidence: [evidence],
+    }),
+  )
+  expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    effects: [{ kind: 'remove', ref: { event: digestOf(f.rmv.event) } }],
+  })
+})
+
+test('a tombstone proof is checked against the tombstoned DID and the generation floor', async () => {
+  const f = await fixture()
+  const log = settle(f)
+  const claim = (did: string) => ({
+    kind: 'remove' as const,
+    member: { did, add: f.a.add },
+    ref: { chainIndex: 1 },
+  })
+  expect(() => effectOf(f.did, log, claim(f.a.identity.id), 0)).not.toThrow()
+  expect(() => effectOf(f.did, log, claim(f.b.identity.id), 0)).toThrow(
+    expect.objectContaining({ reason: 'effects-mismatch' }),
+  )
+  expect(() => effectOf(f.did, log, claim(f.a.identity.id), 1)).toThrow(
+    expect.objectContaining({ reason: 'generation-floor' }),
+  )
+})
+
+test.each([
+  ['a tombstone of another DID', 'did', 'effects-mismatch'],
+  ['a chain state that does not newly carry it', 'index', 'no-rev'],
+] as const)('a tombstone proof naming %s is refused', async (_name, wrong, reason) => {
+  const f = await fixture()
+  const log = settle(f, settle(f))
+  expect(() =>
+    authenticateLifecycleProof(
+      f.did,
+      {
+        issuer: f.identity.id,
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: f.group.groupID,
+          subject: f.did,
+          value: {
+            op: 'revoke',
+            proof: { chain: log.chain.slice(1), events: [] },
+            effects: [
+              {
+                kind: 'remove',
+                member: { did: wrong === 'did' ? f.b.identity.id : f.a.identity.id, add: f.a.add },
+                ref: { chainIndex: wrong === 'index' ? 2 : 1 },
+              },
+            ],
+            revoked: [],
+            removed: [],
+          },
+        },
+      },
+      registryForLog(f.did, f.log),
+    ),
+  ).toThrow(expect.objectContaining({ constructor: RevokeProofError, reason }))
+})
+
+test('revokeWithProof with retained removal evidence lands after a tombstone-dropping settle, and Welcome and restore agree', async () => {
+  const f = await fixture()
+  const evidence = api.removalEvidence(f.did, f.removedLog, digestOf(f.rmv.event))
+  if (evidence == null) throw new Error('Missing evidence')
+  const log = pruneLog(f.did, settle(f, f.removedLog, [f.a.add]))
   expect(log.events).toEqual([])
   expect(await api.revokeWithProof(f.group, { log, remove: f.remove })).toEqual({
     status: 'not-provable',

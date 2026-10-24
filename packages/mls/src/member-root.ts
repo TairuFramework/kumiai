@@ -87,6 +87,8 @@ function effectProofs(did: string, log: ControllerLog) {
     [folded.head.epoch, { folded, applied: new Set(folded.applied) }],
   ])
   const drops = new Map<string, Array<number>>()
+  // A settle that carries a removal in snapshot `u` proves it even when no chain state held it live.
+  const tombstones = new Map<string, Array<number>>()
   const revokes = new Map<string, Array<number>>()
   const snapshots = new Map<string, Array<number>>()
   const denials = folded.states.map((state) => new Set([...state.deny].map(normalizeDID)))
@@ -109,6 +111,9 @@ function effectProofs(did: string, log: ControllerLog) {
     for (const [add, member] of prior.members) {
       if (!member.removed && !state.members.has(add)) append(drops, add, index)
     }
+    for (const add of state.tombstones?.keys() ?? []) {
+      if (!prior.tombstones?.has(add)) append(tombstones, add, index)
+    }
   }
   const viewAt = (epoch: string | undefined) => {
     if (epoch == null) return views.get(folded.head.epoch)
@@ -127,7 +132,7 @@ function effectProofs(did: string, log: ControllerLog) {
     views.set(epoch, view)
     return view
   }
-  return { folded, events, drops, revokes, snapshots, viewAt }
+  return { folded, events, drops, tombstones, revokes, snapshots, viewAt }
 }
 
 function checkEffect(
@@ -178,7 +183,13 @@ function checkEffect(
     const member = prior.members.get(claim.member.add)
     if (member != null && normalizeDID(member.did) !== normalizeDID(claim.member.did))
       throw new RevokeProofError('effects-mismatch')
-    if (!proofs.drops.get(claim.member.add)?.includes(index)) throw new RevokeProofError('no-rev')
+    if (!proofs.drops.get(claim.member.add)?.includes(index)) {
+      const tombstone = state.tombstones?.get(claim.member.add)
+      if (tombstone == null || !proofs.tombstones.get(claim.member.add)?.includes(index))
+        throw new RevokeProofError('no-rev')
+      if (normalizeDID(tombstone.did) !== normalizeDID(claim.member.did))
+        throw new RevokeProofError('effects-mismatch')
+    }
   }
   if (state.gen < genFloor) throw new RevokeProofError('generation-floor')
 }
@@ -254,6 +265,10 @@ function claimsWithProofs(
         if (member.removed || proofs.drops.has(add))
           removed.set(add, { did: normalizeDID(member.did), add })
       }
+      for (const [add, member] of state.tombstones ?? []) {
+        if (!after.head.members.get(add)?.effective)
+          removed.set(add, { did: normalizeDID(member.did), add })
+      }
     }
   }
   const claims: Array<EffectTarget> = [
@@ -276,9 +291,13 @@ function claimsWithProofs(
       checkEffect(merged, event.claim, floor, proofs)
       return [event.claim]
     }
-    const indices =
-      claim.kind === 'deny' ? proofs.revokes.get(claim.did) : proofs.drops.get(claim.member.add)
-    const index = indices?.find((index) => (after.states[index]?.gen ?? -1) >= floor)
+    const atFloor = (index: number) => (after.states[index]?.gen ?? -1) >= floor
+    // Drops before tombstones: a 0.12.0 receiver accepts only the drop.
+    const index =
+      claim.kind === 'deny'
+        ? proofs.revokes.get(claim.did)?.find(atFloor)
+        : (proofs.drops.get(claim.member.add)?.find(atFloor) ??
+          proofs.tombstones.get(claim.member.add)?.find(atFloor))
     let ref: ProofRef | undefined = index == null ? undefined : { chainIndex: index }
     if (claim.kind === 'deny') {
       const snapshot = proofs.snapshots
@@ -297,6 +316,7 @@ function claimsWithProofs(
       before != null &&
       !after.head.members.get(claim.member.add)?.removed &&
       !proofs.drops.has(claim.member.add) &&
+      !proofs.tombstones.has(claim.member.add) &&
       !eventClaims.has(target) &&
       (before.head.gen !== after.head.gen || denies(after.head, claim.member.did))
     )
