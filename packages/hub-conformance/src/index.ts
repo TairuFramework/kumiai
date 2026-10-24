@@ -1302,6 +1302,11 @@ export {
   testMailboxHubConformance,
 } from './log-hub.js'
 export {
+  type HubStorePurgeRaceParams,
+  type PurgeRaceHarness,
+  testHubStorePurgeRaceConformance,
+} from './purge-race.js'
+export {
   testWakeRegistryConformance,
   type WakeRegistryConformanceParams,
 } from './wake-registry.js'

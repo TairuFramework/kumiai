@@ -10,6 +10,8 @@ import { type HubPluginParams, hubPlugin, KUMIAI_HUB, type KumiaiHub } from './p
 export type CreateHubServerParams = HubPluginParams & {
   db: HozonDBInput
   tablePrefix?: string
+  /** Extra plugins composed after the hub plugin. */
+  plugins?: Array<AnyHTTPPlugin>
   /** Per-IP HTTP rate limit. Defaults to 600 requests per minute. */
   rateLimit?: { windowMs: number; limit: number } | false
 } & Omit<CreateServerParams, 'plugins'>
@@ -20,6 +22,7 @@ export async function createHubServer(
   const {
     db,
     tablePrefix,
+    plugins: extraPlugins = [],
     rateLimit = { windowMs: 60_000, limit: 600 },
     port,
     hostname,
@@ -63,6 +66,7 @@ export async function createHubServer(
       },
     }),
   )
+  plugins.push(...extraPlugins)
   const server = await createServer({
     port,
     hostname,

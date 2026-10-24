@@ -10,8 +10,8 @@ server with a custom transport or when you need the store API separately.
 
 - `createHubStoreDefinition(options?)` -- the Hozon `StoreDefinition`, named `'kumiai-hub'`
   (`HUB_STORE`).
-- `getHubStore(provider)` -- the `HubStore` from a `HozonDB` or any Hozon `StoreProvider`.
-- `HubStoreOptions`.
+- `getHubStore(provider)` -- the `SQLHubStore` from a `HozonDB` or any Hozon `StoreProvider`.
+- `HubStoreOptions`, `HubSubscriptionReaper`, and `SQLHubStore` (`HubStore & HubSubscriptionReaper`).
 
 ```ts
 import { HozonDB } from '@hozon/db'
@@ -49,3 +49,10 @@ head advance in one transaction. The head advance is a conditional write, so two
 one Postgres database cannot both accept a publish at the same head.
 
 Concurrent retries of one publish ID wait for the accepting transaction and return its sequence ID with `deduped: true`.
+
+## Subscription reaping
+
+`store.purgeSubscriptions({ olderThan })` removes subscriptions inactive for strictly more than `olderThan` seconds.
+It returns exactly the deleted `{ topicID, subscriberDID }` pairs. A subscription refreshed at the boundary survives.
+The delete and return happen atomically, so a refreshed subscription is neither removed nor reported.
+This operation emits no event. `createHub` calls it after scheduled message purge when the store supports it.
