@@ -312,9 +312,7 @@ export function memberRootStatus(
   if (root.kind === 'root') return { status: 'root' }
   const did = normalizeDID(controller)
   const projection = registry.controllers.get(did)
-  const tombstone = projection?.removedMembers.get(root.add)
-  if (tombstone != null && normalizeDID(tombstone.did) === normalizeDID(root.did))
-    return { status: 'removed' }
+  if (projection?.removedMembers.has(root.add)) return { status: 'removed' }
   const folded = projectionFold(did, projection)
   if (folded == null) return { status: 'unavailable', why: 'no-log' }
   if (!folded.ok) return { status: 'unavailable', why: 'prefix' }
@@ -322,9 +320,9 @@ export function memberRootStatus(
     return { status: 'removed' }
   if (folded.head.saturated) return { status: 'unavailable', why: 'saturated' }
   const member = folded.head.members.get(root.add)
-  if (member == null || normalizeDID(member.did) !== normalizeDID(root.did))
-    return { status: 'unavailable', why: 'unknown-incarnation' }
-  if (member.removed || !member.effective) return { status: 'removed' }
+  if (member == null) return { status: 'unavailable', why: 'unknown-incarnation' }
+  if (member.removed || !member.effective || normalizeDID(member.did) !== normalizeDID(root.did))
+    return { status: 'removed' }
   return { status: 'effective', key: decodeKey(member.key).publicKey, lease: member.lease }
 }
 

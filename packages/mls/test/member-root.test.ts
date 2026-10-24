@@ -142,6 +142,7 @@ test.each([
   'rmv',
   'generation',
   'tombstone',
+  'another-did-tombstone',
   'unknown-incarnation',
   'no-log',
   'saturated',
@@ -168,7 +169,9 @@ test.each([
       })
       expected = { status: 'removed' }
       break
-    case 'tombstone': {
+    case 'tombstone':
+    case 'another-did-tombstone': {
+      if (row === 'another-did-tombstone') root = { ...root, did: f.b.did }
       const settle = createRotate({
         seed: f.seed,
         profile: 0,
@@ -222,9 +225,28 @@ test.each([
   expect(api.memberRootStatus(registry, f.did, root)).toEqual(expected)
 })
 
-test('memberRootStatus refuses a DID that does not name the incarnation', () => {
+test.each(['effective', 'removed'] as const)(
+  "memberRootStatus classifies another DID's %s incarnation as removed",
+  (status) => {
+    expect(
+      api.memberRootStatus(status === 'effective' ? f.before : f.after, f.did, {
+        kind: 'member',
+        did: f.b.did,
+        add: f.a.add,
+        gen: 0,
+      }),
+    ).toEqual({ status: 'removed' })
+  },
+)
+
+test('memberRootStatus treats an unknown add ending in a resolver refusal as unavailable', () => {
   expect(
-    api.memberRootStatus(f.before, f.did, { kind: 'member', did: f.b.did, add: f.a.add, gen: 0 }),
+    api.memberRootStatus(f.before, f.did, {
+      kind: 'member',
+      did: f.a.identity.id,
+      add: 'unknown is another DID',
+      gen: 0,
+    }),
   ).toEqual({ status: 'unavailable', why: 'unknown-incarnation' })
 })
 

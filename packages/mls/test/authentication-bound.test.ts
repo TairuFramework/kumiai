@@ -11,7 +11,7 @@ import {
   type SignedEvent,
   snapshotOf,
 } from '@kokuin/controller'
-import { normalizeDID, stringifyToken } from '@kokuin/token'
+import { createIdentity, encodePeer4, normalizeDID, stringifyToken } from '@kokuin/token'
 import type { Credential } from 'ts-mls'
 import { defaultCredentialTypes, nodeTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
@@ -1043,12 +1043,89 @@ test('membership leaf authenticates when the signature key equals the pin', asyn
   ).rejects.toMatchObject({ reason: 'identity-change' })
 })
 
-test("membership leaf naming another member's incarnation is refused", async () => {
-  const f = await membershipFixture()
-  await expect(
-    f.verify(f.judging, { ...f.binding, member: { add: f.other.add, g: 0 } }),
-  ).rejects.toMatchObject({ reason: 'member-removed' })
-})
+test.each(['admit', 'retain', 'rejudge'] as const)(
+  "%s refuses a membership leaf naming another member's effective incarnation",
+  async (mode) => {
+    const f = await membershipFixture()
+    await expect(
+      f.verify({ ...f.judging, mode }, { ...f.binding, member: { add: f.other.add, g: 0 } }),
+    ).rejects.toMatchObject({ reason: 'member-removed' })
+  },
+)
+
+test.each(['admit', 'retain', 'rejudge'] as const)(
+  "%s refuses a membership leaf naming another member's removed incarnation",
+  async (mode) => {
+    const f = await membershipFixture()
+    await expect(
+      verifyLeafCredential(
+        makeMLSCredential(f.other.identity, f.binding),
+        f.other.identity.publicKey,
+        { judging: () => ({ registry: f.removed, stage: 'full', mode }) },
+      ),
+    ).rejects.toMatchObject({ reason: 'member-removed' })
+  },
+)
+
+test.each(['admit', 'retain', 'rejudge'] as const)(
+  '%s treats an unknown membership add ending in a resolver refusal as unavailable',
+  async (mode) => {
+    const f = await membershipFixture()
+    const verdict = f.verify(
+      { ...f.judging, mode },
+      { ...f.binding, member: { add: 'unknown is another DID', g: 0 } },
+    )
+    if (mode === 'retain') await expect(verdict).resolves.toBeUndefined()
+    else await expect(verdict).rejects.toMatchObject({ reason: 'member-unavailable' })
+  },
+)
+
+test.each(['admit', 'retain', 'rejudge'] as const)(
+  '%s refuses a membership signature key differing from the pin with confirmation-invalid',
+  async (mode) => {
+    const f = await buildEpoch({ members: 0 })
+    const identity = await createIdentity({
+      keys: [
+        { purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(71) },
+        { purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(72) },
+      ],
+    })
+    const [pinned, alternate] = identity.doc.verificationMethod
+    const alternateKey = identity.keys[1]
+    if (pinned == null || alternate == null || alternateKey == null)
+      throw new Error('Missing authentication keys')
+    // Kokuin pins the first method for a fragment; leaf key matching also sees its duplicate.
+    const { shortForm, longForm } = encodePeer4({
+      ...identity.doc,
+      verificationMethod: [pinned, { ...alternate, id: pinned.id }],
+      authentication: [pinned.id],
+    })
+    const member = { ...identity, id: shortForm, longForm }
+    const add = createAdd({
+      seed: f.seed,
+      profile: 0,
+      did: f.did,
+      head: f.head,
+      parents: epochHeads(f.did, f.log),
+      member: { did: longForm, key: encodeKey(identity.publicKey, 'EdDSA'), lease: 1000 },
+    })
+    const registry = registryForLog(f.did, { ...f.log, events: [add] })
+    const binding: ControllerBinding = {
+      id: f.did,
+      prefix: f.log.chain,
+      member: { add: digestOf(add.event), g: 0 },
+      iat: 100,
+    }
+    const credential = makeMLSCredential(member, binding)
+    const deps = { judging: (): JudgingContext => ({ registry, stage: 'full', mode }) }
+    await expect(
+      verifyLeafCredential(credential, identity.publicKey, deps),
+    ).resolves.toBeUndefined()
+    await expect(
+      verifyLeafCredential(credential, alternateKey.publicKey, deps),
+    ).rejects.toMatchObject({ reason: 'confirmation-invalid' })
+  },
+)
 
 test('membership leaf refused for a removed incarnation', async () => {
   const f = await membershipFixture()
@@ -1093,3 +1170,23 @@ test('standard group refuses a membership binding', async () => {
     reason: 'controller-mismatch',
   })
 })
+
+test.each(['retain', 'rejudge'] as const)(
+  '%s authentication refuses a membership leaf when the group anchor names no controller',
+  async (mode) => {
+    const f = await membershipFixture()
+    const { group } = await pipelineGroup({ standard: true })
+    expect(group.anchor.controller).toBeUndefined()
+    const holder = deviceDenyHolderFor(group.context)
+    if (holder?.judging == null) throw new Error('Missing judging context')
+    const judging = { ...holder.judging(), mode }
+    holder.judging = () => judging
+    const credential = makeMLSCredential(f.member.identity, f.binding)
+    await expect(
+      verifyLeafCredential(credential, f.member.identity.publicKey, { judging: () => judging }),
+    ).rejects.toMatchObject({ reason: 'controller-mismatch' })
+    await expect(
+      group.context.authService.validateCredential(credential, f.member.identity.publicKey),
+    ).resolves.toBe(false)
+  },
+)

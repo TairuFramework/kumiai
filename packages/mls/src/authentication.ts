@@ -387,7 +387,10 @@ export async function verifyLeafCredential(
         if (judging.mode !== 'retain') throw new LeafBindingError('member-unavailable')
       }
       const projection = registry.controllers.get(normalizeDID(binding.id))
-      if (prefixRelation(projection?.recordedLog, binding.prefix) !== 'contained') {
+      if (
+        status.status !== 'effective' ||
+        prefixRelation(projection?.recordedLog, binding.prefix) !== 'contained'
+      ) {
         unavailable()
         return
       }
@@ -398,16 +401,11 @@ export async function verifyLeafCredential(
           add: binding.member.add,
           gen: binding.member.g,
         })
-      } catch (cause) {
-        if (cause instanceof Error && cause.message.endsWith('is another DID')) {
-          const error = new LeafBindingError('member-removed')
-          error.cause = cause
-          throw error
-        }
+      } catch {
         unavailable()
         return
       }
-      if (member == null || status.status !== 'effective') {
+      if (member == null) {
         unavailable()
         return
       }
