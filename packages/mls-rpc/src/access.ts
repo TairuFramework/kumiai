@@ -28,7 +28,11 @@ export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => v
   }
 }
 
-/** Fails loudly when an access implementation skips the guard. */
+/**
+ * Replaces through `retainsKnownEffects`. A guard never invoked throws after the fact (the skipping
+ * implementation has already adopted `next`): this surfaces a broken adapter, it does not undo it.
+ * It cannot prove the guard ran on the live handle or under the lock; that stays the port contract.
+ */
 export async function guardedReplace(access: HandleAccess, next: GroupHandle): Promise<void> {
   const guard = retainsKnownEffects(next)
   let ran = false

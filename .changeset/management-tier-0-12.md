@@ -27,4 +27,6 @@ Verify lifecycle envelopes in order so renewal and attestation can share a commi
 
 Cascade chained leaves when their required holder grant loses member authority.
 
-Use one effective-member clock predicate and skip attestations beyond the author’s lease. `HandleAccess.replace(next, guard)` now requires a guard that implementations run under the replacement lock; hosts adopt through `guardedReplace`.
+Use one effective-member clock predicate and skip attestations beyond the author’s lease.
+
+`HandleAccess.replace(next, guard)` requires a guard that implementations run on the live handle under the replacement lock. New `retainsKnownEffects` and `guardedReplace`; recovery adoption and revoke replace through them, and hosts adopt authored commits through `guardedReplace`.
