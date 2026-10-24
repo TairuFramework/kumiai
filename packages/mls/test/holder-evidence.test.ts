@@ -4,7 +4,11 @@ import { stringifyToken } from '@kokuin/token'
 import { defaultCredentialTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { verifyLeafCredential } from '../src/authentication.js'
+import {
+  type DIDAuthenticationDependencies,
+  type JudgingContext,
+  verifyLeafCredential,
+} from '../src/authentication.js'
 import { mintLeafCapability, mintTrustedGrant, readCapability } from '../src/capability.js'
 import { asControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
@@ -20,7 +24,7 @@ import {
   renewLeaf,
   revokeWithProof,
 } from '../src/index.js'
-import { registryForLog } from '../src/registry.js'
+import { registryForLog, registrySeed } from '../src/registry.js'
 import { revokeChain } from './fixtures/controller-chain.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
 import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
@@ -469,7 +473,7 @@ async function memberHolderFixture() {
   const capability = stringifyToken(await f.trusted.signToken(leafPayload))
   const binding = { id: epoch.did, prefix: epoch.log.chain, capability, holderGrant }
   const registry = registryForLog(epoch.did, epoch.log)
-  const deps = {
+  const deps: DIDAuthenticationDependencies = {
     judging: () => ({ registry, stage: 'full' as const, mode: 'admit' as const }),
     leafLifetime: () => 3600,
     trustedGrantLifetime: () => 2_592_000,
@@ -549,3 +553,63 @@ test('leaf minting accepts a well-formed member-rooted parent', async () => {
     }),
   ).resolves.toEqual(expect.any(String))
 })
+
+test.each([
+  ['structural', false],
+  ['structural', true],
+  ['full', false],
+  ['full', true],
+] as const)(
+  '%s refuses a holder grant on a direct member binding (forged: %s)',
+  async (stage, forged) => {
+    const f = await memberHolderFixture()
+    const capability = stringifyToken(
+      await f.member.identity.signToken(
+        {
+          ...readCapability(f.holderGrant).payload,
+          exp: 200,
+        },
+        { embedLongForm: true },
+      ),
+    )
+    await expect(
+      f.verify(
+        { capability, holderGrant: forged ? `${f.holderGrant}x` : f.holderGrant },
+        {
+          ...f.deps,
+          judging: () => ({ registry: f.registry, stage, mode: 'admit' }),
+        },
+      ),
+    ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+  },
+)
+
+test.each(['retain', 'rejudge'] as const)(
+  '%s judges a member holder on a root-kind primary with an unavailable registry',
+  async (mode) => {
+    const f = await memberHolderFixture()
+    const parent = stringifyToken(
+      await f.f.controller.signToken({
+        ...readCapability(f.parent).payload,
+        iss: f.f.controller.id,
+        mbr: undefined,
+      }),
+    )
+    const capability = stringifyToken(
+      await f.f.trusted.signToken({ ...f.leafPayload, cap: parent }),
+    )
+    const judging: JudgingContext = { registry: registrySeed(), stage: 'full', mode }
+    const checking = f.verify({ capability }, { ...f.deps, judging: () => judging })
+    if (mode === 'retain') await expect(checking).resolves.toBeUndefined()
+    else await expect(checking).rejects.toMatchObject({ reason: 'member-unavailable' })
+    await expect(
+      f.verify(
+        { capability, holderGrant: `${f.holderGrant}x` },
+        {
+          ...f.deps,
+          judging: () => judging,
+        },
+      ),
+    ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+  },
+)

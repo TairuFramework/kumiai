@@ -1,3 +1,7 @@
+import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { deserialize } from 'node:v8'
 import {
   authorityPath,
   type ControllerLog,
@@ -18,6 +22,7 @@ import { ed25519 } from '@noble/curves/ed25519.js'
 import { toB64U } from '@sozai/codec'
 
 import { foldControllerLog } from '../../src/controller-log.js'
+import type { DeviceRegistry } from '../../src/registry.js'
 
 export async function buildEpoch({
   members = 3,
@@ -105,15 +110,31 @@ export async function buildEpoch({
   return { seed, did, inception, log, genesis, deltas, members: pins, head: headOf(), root }
 }
 
-let saturated: Promise<ControllerLog> | undefined
+type SaturatedFixture = { log: ControllerLog; registry: DeviceRegistry }
 
-export async function saturatedLog(): Promise<ControllerLog> {
-  saturated ??= buildSaturatedLog()
-  // Each caller can mutate its fixture without rebuilding thousands of signatures.
-  return structuredClone(await saturated)
+let saturated: Promise<SaturatedFixture> | undefined
+
+export const SATURATED_LOG_VERSION = 2
+export const SATURATED_LOG_PATH = join(
+  tmpdir(),
+  `kumiai-mls-saturated-log-v${SATURATED_LOG_VERSION}.bin`,
+)
+
+function saturatedFixture(): Promise<SaturatedFixture> {
+  saturated ??= readFile(SATURATED_LOG_PATH).then((raw) => deserialize(raw) as SaturatedFixture)
+  return saturated
 }
 
-async function buildSaturatedLog(): Promise<ControllerLog> {
+export async function saturatedLog(): Promise<ControllerLog> {
+  // Each caller can mutate its fixture without rebuilding thousands of signatures.
+  return structuredClone((await saturatedFixture()).log)
+}
+
+export async function saturatedRegistry(): Promise<DeviceRegistry> {
+  return structuredClone((await saturatedFixture()).registry)
+}
+
+export async function buildSaturatedLog(): Promise<ControllerLog> {
   const fixture = await buildEpoch({ members: 1 })
   const member = fixture.members[0]
   if (member == null) throw new Error('Missing member')

@@ -4,8 +4,10 @@ import { b64uToJSON } from '@sozai/codec'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
+import { makeMLSCredential } from '../src/group-credential.js'
 import * as mls from '../src/index.js'
 import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
+import { agent } from './fixtures/lifecycle-pipeline.js'
 
 const payloadOf = (token: string): Record<string, unknown> => {
   const payload = token.split('.')[1]
@@ -65,7 +67,14 @@ describe('capability issuing', () => {
     })
     expect(payloadOf(token).cap).toBeUndefined()
     await expect(
-      verifyLeafCredential(f.credential(token), f.device.publicKey),
+      verifyLeafCredential(
+        makeMLSCredential(agent(41), {
+          id: f.controller.id,
+          prefix: [f.inception],
+          capability: token,
+        }),
+        f.device.publicKey,
+      ),
     ).resolves.toBeUndefined()
   })
 

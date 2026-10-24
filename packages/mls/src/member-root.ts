@@ -355,6 +355,10 @@ export function effectiveAuthorityOf(
 ): { root: MemberRoot; slot: EvidenceSlot } | { status: 'removed' } | { status: 'unavailable' } {
   const did = normalizeDID(controller)
   if (normalizeDID(leaf.binding.id) !== did) return { status: 'unavailable' }
+  const roots = memberRootsOf(leaf.binding, leaf.did)
+  const primary = roots[0]
+  if (primary == null) return { status: 'unavailable' }
+  const status = memberRootStatus(registry, did, primary.root)
   const projection = registry.controllers.get(did)
   const chain = projection?.recordedLog?.chain
   if (
@@ -364,27 +368,21 @@ export function effectiveAuthorityOf(
       return recorded == null || digestOf(recorded.event) !== digestOf(signed.event)
     })
   )
-    return { status: 'unavailable' }
-  const roots = memberRootsOf(leaf.binding, leaf.did)
-  const primary = roots[0]
-  if (primary == null) return { status: 'unavailable' }
-  const status = memberRootStatus(registry, did, primary.root)
+    return { status: status.status === 'removed' ? 'removed' : 'unavailable' }
   if (status.status === 'root' || status.status === 'effective') return primary
   if (status.status === 'unavailable') return { status: 'unavailable' }
   const substitutes: Array<{ slot: EvidenceSlot; raw: string | undefined }> = [
     { slot: 'holder', raw: leaf.binding.holderGrant },
     { slot: 'survivor', raw: projection?.survivorGrants.get(normalizeDID(leaf.did)) },
   ]
-  let unavailable = false
   for (const { slot, raw } of substitutes) {
     if (raw == null) continue
     const root = substituteRoot(raw, leaf)
     if (root == null) continue
     const status = memberRootStatus(registry, did, root)
     if (status.status === 'root' || status.status === 'effective') return { root, slot }
-    if (status.status === 'unavailable') unavailable = true
   }
-  return { status: unavailable ? 'unavailable' : 'removed' }
+  return { status: 'removed' }
 }
 
 export function cascadeOf(

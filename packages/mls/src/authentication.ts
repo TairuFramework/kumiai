@@ -184,7 +184,8 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
     }).frozen()
   const resolver = {
     ...base,
-    async resolveDenySet(): Promise<ReadonlySet<string>> {
+    async resolveDenySet(did: string): Promise<ReadonlySet<string>> {
+      await base.resolveDenySet?.(did)
       return denySet
     },
   }
@@ -272,7 +273,10 @@ export function checkHolderEvidence(
   if (binding == null) return
   if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   const leafPayload = readCapability(binding.capability).payload
-  if (leafPayload.cap === undefined) return
+  if (leafPayload.cap === undefined) {
+    if (binding.holderGrant != null) throw new LeafBindingError('holder-evidence-mismatch')
+    return
+  }
   if (binding.holderGrant == null) throw new LeafBindingError('missing-holder-evidence')
   try {
     const grant = readCapability(binding.holderGrant).payload
@@ -362,7 +366,7 @@ export async function verifyLeafCredential(
   try {
     const roots = memberRootsOf(binding, parsed.id)
     const primary = roots[0]
-    if (!structural && deps.judging == null && roots.some(({ root }) => root.kind === 'member'))
+    if (!structural && registry == null && roots.some(({ root }) => root.kind === 'member'))
       throw new LeafBindingError('controller-mismatch')
     const frozen = createRegistryControllerResolver({
       controllerID: binding.id,
@@ -414,7 +418,8 @@ export async function verifyLeafCredential(
       const projection = registry?.controllers.get(normalizeDID(binding.id))
       const unavailable =
         status.status === 'unavailable' ||
-        prefixRelation(projection?.recordedLog, binding.prefix) !== 'contained'
+        (status.status !== 'removed' &&
+          prefixRelation(projection?.recordedLog, binding.prefix) !== 'contained')
       if (unavailable) {
         if (judging.mode === 'retain') return
         throw new LeafBindingError('member-unavailable')
@@ -452,7 +457,24 @@ export async function verifyLeafCredential(
       capability: binding.capability,
       denySet: leafDenySet,
     })
-    if (holderGrant != null) await verifyHolder(holderGrant, 'full')
+    if (holderGrant != null) {
+      const holder = roots.find(({ slot }) => slot === 'holder')
+      if (holder?.root.kind === 'member' && registry != null) {
+        const status = memberRootStatus(registry, binding.id, holder.root)
+        if (
+          status.status === 'unavailable' ||
+          (status.status !== 'removed' &&
+            prefixRelation(
+              registry.controllers.get(normalizeDID(binding.id))?.recordedLog,
+              binding.prefix,
+            ) !== 'contained')
+        ) {
+          if (judging.mode === 'retain') return
+          throw new LeafBindingError('member-unavailable')
+        }
+      }
+      await verifyHolder(holderGrant, 'full')
+    }
   } catch (error) {
     if (error instanceof LeafBindingError) throw error
     const rejection = new LeafBindingError('signature-invalid')

@@ -15,7 +15,7 @@ import { foldChain } from '../src/controller-log.js'
 import { createRegistryControllerResolver, prefixRelation } from '../src/embedded-resolver.js'
 import { type DeviceRegistry, denySetOf, registryForLog, registrySeed } from '../src/registry.js'
 import { rotateChain } from './fixtures/controller-chain.js'
-import { buildEpoch, saturatedLog } from './fixtures/controller-epoch.js'
+import { buildEpoch, saturatedLog, saturatedRegistry } from './fixtures/controller-epoch.js'
 
 const loads = vi.hoisted(() => ({ dids: [] as Array<string>, recorded: 0 }))
 vi.mock('@kokuin/controller', async (importOriginal) => {
@@ -347,7 +347,7 @@ describe('saturated recorded log', () => {
       throw new Error('Missing saturated fixture')
     controller = add.event.i
     member = { did: add.event.did, add: digestOf(add.event), gen: 0 }
-    registry = registryForLog(controller, log)
+    registry = await saturatedRegistry()
   })
 
   test('resolveMember refuses on a saturated recorded log, while root-token historic resolution still answers from the prefix', async () => {

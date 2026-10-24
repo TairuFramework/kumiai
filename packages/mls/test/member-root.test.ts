@@ -313,7 +313,8 @@ test('effectiveAuthorityOf reports a prefix absent from the recorded chain as un
     ...f.leaf,
     binding: { ...f.leaf.binding, prefix: [f.inception, fork], holderGrant: f.holder },
   }
-  expect(api.effectiveAuthorityOf(leaf, f.after, f.did)).toEqual({ status: 'unavailable' })
+  expect(api.effectiveAuthorityOf(leaf, f.before, f.did)).toEqual({ status: 'unavailable' })
+  expect(api.effectiveAuthorityOf(leaf, f.after, f.did)).toEqual({ status: 'removed' })
 })
 
 function removal(): EffectClaim {
@@ -454,7 +455,7 @@ test('cascadeOf: rmv writes no revoked device records', () => {
   expect(api.denySetOf(after)).toEqual(new Set())
 })
 
-test('unavailable holder authority keeps a leaf with a tombstoned primary', () => {
+test('unavailable holder authority cannot keep a leaf with a tombstoned primary', () => {
   const projection = f.after.controllers.get(f.did)
   if (projection == null) throw new Error('Missing projection')
   const after = {
@@ -468,11 +469,11 @@ test('unavailable holder authority keeps a leaf with a tombstoned primary', () =
   expect(
     api.memberRootStatus(after, f.did, { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 }),
   ).toEqual({ status: 'unavailable', why: 'saturated' })
-  expect(api.effectiveAuthorityOf(leaf, after, f.did)).toEqual({ status: 'unavailable' })
+  expect(api.effectiveAuthorityOf(leaf, after, f.did)).toEqual({ status: 'removed' })
   expect(api.cascadeOf([leaf], [removal()], f.before, after, f.did)).toEqual({
     revoked: [],
-    removed: [],
-    removeLeafIndices: [],
+    removed: [{ did: f.leaf.did, cascadedFrom: f.a.identity.id }],
+    removeLeafIndices: [1],
   })
 })
 
