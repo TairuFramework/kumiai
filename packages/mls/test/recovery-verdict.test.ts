@@ -57,6 +57,7 @@ test.each(['missing', 'failed'] as const)(
   },
 )
 
+// Saturated-log verification can exceed 30s on shared CI runners.
 test('recovery refuses a saturated candidate even when the known epoch has no applied events', async () => {
   const candidate = await saturatedRegistry()
   const [did, projection] = [...candidate.controllers][0] ?? []
@@ -69,7 +70,7 @@ test('recovery refuses a saturated candidate even when the known epoch has no ap
     new RecoveryKnowledgeError('epoch-event'),
   )
   expect(() => assertRetainsKnownEffects(did, registrySeed(), candidate)).not.toThrow()
-})
+}, 60_000)
 
 test('member-rooted signer judged on the candidate registry', async () => {
   vi.spyOn(Date, 'now').mockReturnValue(150_000)

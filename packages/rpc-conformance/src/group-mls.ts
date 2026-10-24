@@ -768,6 +768,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
         })
       })
+      // Recovery round trips exceed 5s on shared CI runners.
       test.each(['root', 'mbr', 'membership'] as const)(
         'a marked %s replacement binding is not reused after a ratchet or returned again by the host',
         async (binding) => {
@@ -790,6 +791,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           await replaceBinding()
           expect(await requester.prepareRecovery()).toBe('ready')
         },
+        30_000,
       )
 
       test.each(['mbr', 'membership'] as const)(

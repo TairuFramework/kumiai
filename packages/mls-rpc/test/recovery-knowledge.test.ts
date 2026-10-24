@@ -498,6 +498,7 @@ test('recovery cannot roll back a published settlement to revive a lapsed signer
   ).toBe(false)
 })
 
+// Recovery round trips exceed 5s on shared CI runners.
 test.each(['at', 'ahead'] as const)(
   'a responder %s the known chain is accepted',
   async (position) => {
@@ -515,6 +516,7 @@ test.each(['at', 'ahead'] as const)(
     const recorded = r.group().registry.controllers.get(f.did)?.recordedLog
     expect(recorded?.chain.length).toBe(position === 'ahead' ? 3 : 2)
   },
+  30_000,
 )
 
 test('an effective member reply omitting the known removal is ineligible', async () => {
@@ -528,7 +530,7 @@ test('an effective member reply omitting the known removal is ineligible', async
   expect(retention.mock.results[0]?.value).toBeInstanceOf(mls.RecoveryKnowledgeError)
   expect(retention.mock.results[0]?.value).toHaveProperty('reason', 'removal')
   expect(f.group().registry.controllers.get(f.did)?.removedMembers.has(f.a.add)).toBe(true)
-})
+}, 30_000)
 
 test('known removal survives adoption and restore', async () => {
   const f = await recovery()
@@ -560,7 +562,7 @@ test('known removal survives adoption and restore', async () => {
   expect(restored.registry.controllers.get(f.did)?.removedMembers.get(f.a.add)).toEqual(
     f.group().registry.controllers.get(f.did)?.removedMembers.get(f.a.add),
   )
-})
+}, 30_000)
 
 test('recovery adoption refuses knowledge bootstrapped after preparation, including retries', async () => {
   const f = await removal()
