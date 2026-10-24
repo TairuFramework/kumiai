@@ -27,8 +27,8 @@ import { type ControllerBinding, parseMLSCredentialIdentity } from './credential
 import { prefixRelation } from './embedded-resolver.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
-import type { GroupHandle } from './group-handle.js'
-import { decodeLedgerHead, extendHead, genesisHead, headsMatch } from './head.js'
+import { type GroupHandle, registryAt } from './group-handle.js'
+import { decodeLedgerHead } from './head.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
@@ -74,27 +74,59 @@ export function leafAt(tree: ClientState['ratchetTree'], index: number): LeafNod
   return node?.nodeType === nodeTypes.leaf ? node.leaf : undefined
 }
 
-function attestedTime(leaf: LeafNode, controllerID: string): number {
-  const binding = identity(leaf).controller
-  if (
-    binding == null ||
-    binding.member != null ||
-    binding.capability == null ||
-    normalizeDID(binding.id) !== normalizeDID(controllerID)
+export function attestedTreeTime(
+  tree: ClientState['ratchetTree'],
+  registry: DeviceRegistry,
+  controllerID: string,
+): number {
+  const controller = normalizeDID(controllerID)
+  const projection = registry.controllers.get(controller)
+  const folded =
+    projection?.recordedLog == null
+      ? undefined
+      : foldControllerLog(controller, projection.recordedLog)
+  const head = folded?.ok && !folded.head.saturated ? folded.head : undefined
+  const effective = new Map(
+    [...(head?.members ?? [])].filter(
+      ([add, member]) =>
+        member.effective &&
+        !member.removed &&
+        !projection?.removedMembers.has(add) &&
+        (head?.gen ?? 0) >= (projection?.genFloor ?? 0),
+    ),
   )
-    return 0
-  const payload = readCapability(binding.capability).payload
-  const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
-  return parent == null ? payload.iat : readCapability(parent).payload.iat
-}
-
-function timeOf(tree: ClientState['ratchetTree'], controllerID: string, floor: number): number {
-  let time = floor
+  const attestations = new Map<string, number>()
+  for (const member of effective.values())
+    attestations.set(member.key, projection?.attestations.get(member.key) ?? 0)
+  let rootTime = 0
   for (const node of tree) {
-    if (node?.nodeType === nodeTypes.leaf)
-      time = Math.max(time, attestedTime(node.leaf, controllerID))
+    if (node?.nodeType !== nodeTypes.leaf) continue
+    const binding = identity(node.leaf).controller
+    if (
+      binding?.capability == null ||
+      binding.member != null ||
+      normalizeDID(binding.id) !== controller
+    )
+      continue
+    const payload = readCapability(binding.capability).payload
+    const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
+    const attested = parent == null ? payload : readCapability(parent).payload
+    if (attested.mbr == null) {
+      if (normalizeDID(attested.iss) === controller) rootTime = Math.max(rootTime, attested.iat)
+      continue
+    }
+    const member = effective.get(attested.mbr.add)
+    if (
+      member == null ||
+      attested.mbr.g !== head?.gen ||
+      normalizeDID(member.did) !== normalizeDID(attested.iss)
+    )
+      continue
+    attestations.set(member.key, Math.max(attestations.get(member.key) ?? 0, attested.iat))
   }
-  return time
+  const times = [...attestations.values()].sort((a, b) => b - a)
+  const quorum = times.length === 1 ? times[0] : times[1]
+  return Math.max(projection?.timeFloor ?? 0, rootTime, quorum ?? 0)
 }
 
 export function treeTime(
@@ -102,11 +134,11 @@ export function treeTime(
   controllerID: string,
   registry: DeviceRegistry = group.registry,
 ): number {
-  const floor =
-    group.anchor.controller == null
-      ? 0
-      : (registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0)
-  return timeOf(group.state.ratchetTree, controllerID, floor)
+  return attestedTreeTime(
+    group.state.ratchetTree,
+    group.anchor.controller == null ? { ...registry, controllers: new Map() } : registry,
+    controllerID,
+  )
 }
 
 export function isLapsed(group: GroupHandle, leaf: LeafNode): boolean {
@@ -542,8 +574,8 @@ export async function prepareLifecycleGate(
   }
   function checkTime(tree: ClientState['ratchetTree']): void {
     if (controller == null) return
-    const floor = candidateRegistry.controllers.get(normalizeDID(controller))?.timeFloor ?? 0
-    if (timeOf(tree, controller, floor) < beforeTime) throw new RevokeProofError('time-regression')
+    if (attestedTreeTime(tree, candidateRegistry, controller) < beforeTime)
+      throw new RevokeProofError('time-regression')
   }
   function checkRegistryAdds(proposals: Array<ProposalWithSender>): void {
     for (const { entry } of entries) {
@@ -791,7 +823,7 @@ export type AssertSenderNotLapsedParams = {
   extensions: Array<GroupContextExtension>
 }
 
-/** Historical messages use the tree and clock floor authenticated in their own epoch. */
+/** Historical messages use the tree and registry authenticated in their own epoch. */
 export function assertSenderNotLapsed(params: AssertSenderNotLapsedParams): void {
   const { group, tree, leafIndex, extensions } = params
   const controller = group.anchor.controller
@@ -803,20 +835,10 @@ export function assertSenderNotLapsed(params: AssertSenderNotLapsedParams): void
   )?.extensionData
   const expected = data instanceof Uint8Array ? decodeLedgerHead(data) : null
   if (expected == null) throw new Error('Missing epoch ledger head')
-  let head = genesisHead(group.groupID)
-  let floor = 0
-  for (const held of group.ledger) {
-    if (headsMatch(head, expected.head)) break
-    head = extendHead(head, [held.entryID])
-    const { entry } = held.verified
-    if (entry.type !== DEVICE_ENTRY_TYPE) continue
-    const value = entry.value as DeviceValue
-    if (value.op === 'clock') floor = Math.max(floor, value.time ?? 0)
-  }
-  if (!headsMatch(head, expected.head)) throw new Error('Unknown epoch ledger head')
+  const registry = registryAt(group, expected.head)
   const binding = identity(leaf).controller
-  const expiry = binding == null ? undefined : leafExpiry(binding, group.registry, controller)
-  if (expiry != null && expiry < timeOf(tree, controller, floor))
+  const expiry = binding == null ? undefined : leafExpiry(binding, registry, controller)
+  if (expiry != null && expiry < attestedTreeTime(tree, registry, controller))
     throw new LeafLapsedError('lapsed')
 }
 
@@ -843,8 +865,7 @@ export async function assertRecoveryBinding(params: AssertRecoveryBindingParams)
   tree[index * 2] = { nodeType: nodeTypes.leaf, leaf }
   const controllerID = group.anchor.controller
   if (controllerID == null) return
-  const floor = group.registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0
-  if (timeOf(tree, controllerID, floor) < treeTime(group, controllerID))
+  if (attestedTreeTime(tree, group.registry, controllerID) < treeTime(group, controllerID))
     throw new RevokeProofError('effects-mismatch')
   const ledger = group.ledger.map(({ verified }) => verified)
   const size = historySize(tree, ledger)

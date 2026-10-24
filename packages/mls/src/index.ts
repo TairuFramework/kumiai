@@ -143,10 +143,13 @@ export {
   revokeDevice,
   type SendAdmission,
 } from './group.js'
+export { registryAt } from './group-handle.js'
 export {
+  attestTreeTime,
   type CommitResult,
   commitSelfRemovals,
   controllerLogDelta,
+  preservationClock,
   proposeSelfRemoval,
   publishControllerLog,
   type RemovalEvidence,
@@ -197,7 +200,12 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-export { type AssertRecoveryBindingParams, assertRecoveryBinding, leafExpiry } from './lifecycle.js'
+export {
+  type AssertRecoveryBindingParams,
+  assertRecoveryBinding,
+  attestedTreeTime,
+  leafExpiry,
+} from './lifecycle.js'
 export {
   cascadeOf,
   claimsFor,

@@ -13,7 +13,7 @@ import { readCapability } from './capability.js'
 import { foldChain } from './controller-log.js'
 import type { ControllerBinding } from './credential.js'
 import type { GroupHandle } from './group-handle.js'
-import { leafExpiry } from './lifecycle.js'
+import { attestedTreeTime, leafExpiry } from './lifecycle.js'
 import { effectiveAuthorityOf, memberRootStatus } from './member-root.js'
 import {
   type OpenSealedGroupInfoParams,
@@ -207,15 +207,7 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
     }
     const expiry = leafExpiry(bound, known, controller)
     if (expiry == null) return false
-    let time = projection?.timeFloor ?? 0
-    for (const member of group.listMembers()) {
-      const leaf = group.bindingOfDID(member.id)
-      if (leaf?.controller !== controller || leaf.member != null || leaf.capability == null)
-        continue
-      const capability = readCapability(leaf.capability).payload
-      const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
-      time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
-    }
+    const time = attestedTreeTime(group.state.ratchetTree, known, controller)
     return expiry >= Math.max(time, now - 300)
   } catch {
     return false

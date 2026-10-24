@@ -60,6 +60,7 @@ import {
   decodeLedgerHead,
   encodeLedgerHead,
   extendHead,
+  genesisHead,
   headsMatch,
   readLedgerHead,
   readLedgerHeadExtension,
@@ -105,6 +106,38 @@ import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
  *  time in issue order. Keyed weakly: the entry is collected with the handle, and
  *  the handle carries no reference back to it. */
 const MUTEXES = new WeakMap<GroupHandle, Mutex>()
+
+const HISTORICAL_REGISTRIES = new WeakMap<GroupHandle, Map<string, DeviceRegistry>>()
+
+export function registryAt(group: GroupHandle, head: Uint8Array): DeviceRegistry {
+  let cache = HISTORICAL_REGISTRIES.get(group)
+  if (cache == null) {
+    cache = new Map()
+    HISTORICAL_REGISTRIES.set(group, cache)
+  }
+  const key = toB64(head)
+  const cached = cache.get(key)
+  if (cached != null) return cached
+  let held = genesisHead(group.groupID)
+  let length = 0
+  for (const entry of group.ledger) {
+    if (headsMatch(held, head)) break
+    held = extendHead(held, [entry.entryID])
+    length++
+  }
+  if (!headsMatch(held, head)) throw new Error('Unknown epoch ledger head')
+  const registry = foldLedgerControl(
+    group.ledger.slice(0, length),
+    group.anchor,
+    group.groupID,
+  ).registry
+  cache.set(key, registry)
+  if (cache.size > 8) {
+    const oldest = cache.keys().next().value
+    if (oldest != null) cache.delete(oldest)
+  }
+  return registry
+}
 
 /** Leave half the configured receiver window unused. */
 const HANDSHAKE_WINDOW_DIVISOR = 2

@@ -304,8 +304,8 @@ export async function commitWithEntries(
       senderLeafIndex: sourceState.privatePath.leafIndex,
     })),
   ])
-  const clock = await preservationClock(group, tree, fold.registry)
-  if (clock != null) {
+  const clocks = await preservationClock(group, tree, fold.registry)
+  for (const clock of clocks) {
     const verified = await verifyLedgerEntry(clock)
     if (verified == null) throw new Error('Invalid preservation clock')
     enacted.push(clock)

@@ -57,6 +57,7 @@ export type DeviceValue = {
   survivors?: Array<string>
   revoked?: Array<RevokedEffect>
   time?: number
+  attest?: true
   /** Beacon only: the length of the controller's FULL log at announcement time. */
   logLength?: number
   /** Beacon only: the head digest of the controller's FULL log at announcement time. */
@@ -180,6 +181,7 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
   )
     return false
   if (v.op === 'clock' && typeof v.time !== 'number') return false
+  if (v.attest !== undefined && (v.op !== 'clock' || v.attest !== true)) return false
   if (
     !logBearing &&
     (v.op === 'reset' || v.proof !== undefined) &&
@@ -279,10 +281,29 @@ export function registryApply(
     const controller = normalizeDID(controllerID)
     const previous = controllers.get(controller) ?? controllerProjection()
     if (value.op === 'clock') {
-      controllers.set(controller, {
-        ...previous,
-        timeFloor: Math.max(previous.timeFloor, value.time as number),
-      })
+      if (value.attest === true) {
+        const folded =
+          previous.recordedLog == null
+            ? undefined
+            : foldControllerLog(controller, previous.recordedLog)
+        const member = folded?.ok
+          ? [...folded.head.members.values()].find(
+              (member) => normalizeDID(member.did) === normalizeDID(verified.issuer),
+            )
+          : undefined
+        if (member == null) throw new RevokeProofError('effects-mismatch')
+        const attestations = new Map(previous.attestations)
+        attestations.set(
+          member.key,
+          Math.max(attestations.get(member.key) ?? 0, value.time as number),
+        )
+        controllers.set(controller, { ...previous, attestations })
+      } else {
+        controllers.set(controller, {
+          ...previous,
+          timeFloor: Math.max(previous.timeFloor, value.time as number),
+        })
+      }
     } else {
       const effect = authenticateLifecycleProof(controller, verified, state)
       let projection = {

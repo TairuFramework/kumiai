@@ -1,5 +1,13 @@
 import { audienceConfirmation } from '@kokuin/capability'
-import { createControllerIdentity, createReset, createRotate } from '@kokuin/controller'
+import {
+  createControllerIdentity,
+  createRemove,
+  createRenew,
+  createReset,
+  createRotate,
+  epochHeads,
+  snapshotOf,
+} from '@kokuin/controller'
 import { createIdentity, stringifyToken } from '@kokuin/token'
 import {
   createProposal,
@@ -12,7 +20,7 @@ import {
 } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { asControllerLog } from '../src/controller-log.js'
+import { asControllerLog, foldControllerLog } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
@@ -22,7 +30,10 @@ import {
   CommitRejectedError,
   deriveGroup,
   type GroupHandle,
+  registryAt,
 } from '../src/group-handle.js'
+import { publishControllerLog, renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
+import { readLedgerHead } from '../src/head.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
 import {
@@ -38,10 +49,12 @@ import {
   DEVICE_ENTRY_TYPE,
 } from '../src/registry.js'
 import { denyEffects, revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import { joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
+  belowGateWelcome,
   controllerID,
   inception,
   lowLevelApply,
@@ -1192,4 +1205,81 @@ test('two revoke proofs cannot share a commit', async () => {
   await expect(
     commitWithEntries({ group, extraProposals: [], enacted: tokens, requireAdmin: false }),
   ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('delayed application frame gets the same verdict before and after a later renewal, removal and settlement', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const b = f.members[0]
+  if (b == null) throw new Error('Missing member')
+  const { group, identity, tokens } = await pipelineGroup({ controllerLog: f.log })
+  const peer = await belowGateWelcome(group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  vi.spyOn(Date, 'now').mockReturnValue(1_500_000)
+  const advanced = await renewLeaf(
+    peer.author,
+    await timedBinding({ identity, iat: 1500, exp: 2500 }),
+  )
+  for (const held of advanced.newGroup.ledger) tokens.set(held.entryID, held.token)
+  await peer.joined.processMessage(advanced.commitMessage)
+  const delayed = await rawApplication(peer.joined)
+  const epochHead = readLedgerHead(peer.joined)?.head
+  if (epochHead == null) throw new Error('Missing head')
+  const assertDelayed = async (receiver: GroupHandle) => {
+    const copy = deriveGroup(receiver, structuredClone(receiver.state))
+    await expect(copy.decrypt(delayed)).rejects.toMatchObject({ reason: 'lapsed' })
+  }
+  await assertDelayed(advanced.newGroup)
+  const renewal = createRenew({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: b.add,
+    lease: 2000,
+  })
+  const renewedLog = { chain: f.log.chain, events: [...f.log.events, renewal] }
+  const published = await publishControllerLog(advanced.newGroup, renewedLog)
+  if (published == null) throw new Error('Missing renewal')
+  await assertDelayed(published.newGroup)
+  const folded = foldControllerLog(f.did, renewedLog)
+  if (!folded.ok) throw new Error(folded.reason)
+  const removal = createRemove({
+    did: f.did,
+    head: folded.head,
+    parents: epochHeads(f.did, renewedLog),
+    signer: f.root,
+    add: b.add,
+  })
+  const removedLog = { chain: f.log.chain, events: [...renewedLog.events, removal] }
+  const removed = await revokeWithProof(published.newGroup, {
+    log: removedLog,
+    remove: [{ did: b.did, add: b.add }],
+  })
+  if (removed.status !== 'built') throw new Error('Missing removal')
+  await assertDelayed(removed.result.newGroup)
+  const finalFold = foldControllerLog(f.did, removedLog)
+  if (!finalFold.ok) throw new Error(finalFold.reason)
+  const settled = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: f.inception.event,
+    snapshot: snapshotOf(finalFold.head),
+  })
+  const settlement = await publishControllerLog(removed.result.newGroup, {
+    chain: [f.inception, settled],
+    events: [],
+  })
+  if (settlement == null) throw new Error('Missing settlement')
+  await assertDelayed(settlement.newGroup)
+  const historical = registryAt(settlement.newGroup, epochHead)
+  expect(registryAt(settlement.newGroup, epochHead)).toBe(historical)
+  expect(historical.controllers.get(f.did)?.recordedLog).toEqual(f.log)
+  expect(() => registryAt(settlement.newGroup, new Uint8Array(32))).toThrow(
+    'Unknown epoch ledger head',
+  )
 })

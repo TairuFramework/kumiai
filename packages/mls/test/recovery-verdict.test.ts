@@ -1,3 +1,4 @@
+import { encodeKey } from '@kokuin/controller'
 import { normalizeDID, randomIdentity } from '@kokuin/token'
 import { nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -229,4 +230,30 @@ test('opening checks signature, token kind and signed bindings even inside a val
       ephemeralPrivateKey: held.ephemeralPrivateKey,
     }),
   ).rejects.toThrow()
+})
+
+test('recovery eligibility uses attestedTreeTime over the known registry', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  const f = await buildEpoch({ members: 2 })
+  const a = f.members[0]
+  const b = f.members[1]
+  if (a == null || b == null) throw new Error('Missing member')
+  const { group } = await createGroup(b.identity, 'known-clock', {
+    controller: { id: f.did, prefix: f.log.chain, member: { add: b.add, g: 0 }, iat: 100 },
+    controllerLog: f.log,
+  })
+  const known = registryForLog(f.did, f.log)
+  const projection = known.controllers.get(f.did)
+  if (projection == null) throw new Error('Missing projection')
+  const attestations = new Map([[encodeKey(a.identity.publicKey, 'EdDSA'), 1200]])
+  const params = {
+    group,
+    known: { ...known, controllers: new Map([[f.did, { ...projection, attestations }]]) },
+    signer: b.identity.id,
+    now: 500,
+  }
+  expect(recoverySignerEligible(params)).toBe(true)
+  attestations.set(encodeKey(b.identity.publicKey, 'EdDSA'), 1100)
+  expect(recoverySignerEligible(params)).toBe(false)
+  expect(recoverySignerEligible({ ...params, known })).toBe(true)
 })

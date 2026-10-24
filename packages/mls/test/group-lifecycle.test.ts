@@ -2,10 +2,12 @@ import {
   type ControllerLog,
   createControllerIdentity,
   createInception,
+  createRemove,
   createReset,
   createRevoke,
   createRotate,
   digestOf,
+  encodeKey,
   epochHeads,
   type SignedEvent,
   snapshotOf,
@@ -17,15 +19,17 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { mintTrustedGrant } from '../src/capability.js'
 import { asControllerLog, foldChain, foldControllerLog } from '../src/controller-log.js'
 import { parseMLSCredentialIdentity } from '../src/credential.js'
-import { commitWithEntries } from '../src/group-commit.js'
+import { commitInvite, commitWithEntries, createInvite } from '../src/group-commit.js'
 import { createGroup } from '../src/group-create.js'
-import { deriveGroup } from '../src/group-handle.js'
+import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
 import {
+  attestTreeTime,
   publishControllerLog,
   removeLapsedLeaves,
   renewLeaf,
   revokeWithProof,
 } from '../src/group-lifecycle.js'
+import { processWelcome } from '../src/group-welcome.js'
 import { controllerLogSize, HISTORY_HORIZON, historySize } from '../src/history.js'
 import { isLapsed, leafAt, treeTime } from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
@@ -1007,4 +1011,203 @@ test('deny of a long-form did:peer:4 matches the short-form leaf', async () => {
     controller: controllerID,
     proofRef: { chainIndex: 1 },
   })
+})
+
+async function clockGroup(members = 2, onlyFirst = false) {
+  const f = await buildEpoch({ members })
+  const a = f.members[0]
+  if (a == null) throw new Error('Missing member')
+  const tokens = new Map<string, string>()
+  const log = onlyFirst ? { chain: f.log.chain, events: [a.event] } : f.log
+  const { group } = await createGroup(a.identity, 'membership-clocks', {
+    controller: { id: f.did, prefix: f.log.chain, member: { add: a.add, g: 0 }, iat: 100 },
+    controllerLog: log,
+    resolveLedgerEntries: async (ids) =>
+      ids.map((id) => {
+        const token = tokens.get(id)
+        if (token == null) throw new Error('Missing token')
+        return token
+      }),
+  })
+  return { ...f, a, group, tokens }
+}
+
+function rememberClocks(group: GroupHandle, tokens: Map<string, string>): void {
+  for (const held of group.ledger) tokens.set(held.entryID, held.token)
+}
+
+test('membership-only group advances through attest clocks from two members', async () => {
+  const f = await clockGroup()
+  const b = f.members[1]
+  if (b == null) throw new Error('Missing member')
+  const peer = await belowGateWelcome(f.group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  expect(await attestTreeTime(peer.author, 0)).toBeNull()
+  const first = await attestTreeTime(peer.author, 100)
+  if (first == null) throw new Error('Missing attestation')
+  expect(treeTime(first.newGroup, f.did)).toBe(0)
+  expect(first.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(0)
+  expect(
+    first.newGroup.registry.controllers
+      .get(f.did)
+      ?.attestations.get(encodeKey(f.a.identity.publicKey, 'EdDSA')),
+  ).toBe(100)
+  rememberClocks(first.newGroup, f.tokens)
+  await peer.joined.processMessage(first.commitMessage)
+  const second = await attestTreeTime(peer.joined, 120)
+  if (second == null) throw new Error('Missing second attestation')
+  expect(treeTime(second.newGroup, f.did)).toBe(100)
+  rememberClocks(second.newGroup, f.tokens)
+  await first.newGroup.processMessage(second.commitMessage)
+  expect(first.newGroup.registry).toEqual(second.newGroup.registry)
+  expect(await attestTreeTime(first.newGroup, 100)).toBeNull()
+  const newer = await attestTreeTime(first.newGroup)
+  expect(
+    newer?.newGroup.registry.controllers
+      .get(f.did)
+      ?.attestations.get(encodeKey(f.a.identity.publicKey, 'EdDSA')),
+  ).toBe(150)
+})
+
+test('preservation clock cannot exceed attestedTreeTime', async () => {
+  const f = await clockGroup()
+  await expect(
+    verifyLifecycleProof(f.group, {
+      issuer: f.a.identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: f.group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 1 },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('attest clock from a non-member device is refused', async () => {
+  const f = await buildEpoch({ members: 2 })
+  const { group, identity } = await pipelineGroup({ controllerLog: f.log })
+  expect(await attestTreeTime(group, 100)).toBeNull()
+  await expect(
+    verifyLifecycleProof(group, {
+      issuer: identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: group.groupID,
+        subject: controllerID,
+        value: { op: 'clock', time: 100, attest: true },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test("attest clock past the member's lease is refused", async () => {
+  const f = await clockGroup(1)
+  await expect(attestTreeTime(f.group, 1001)).rejects.toMatchObject({ reason: 'effects-mismatch' })
+  await expect(
+    verifyLifecycleProof(f.group, {
+      issuer: f.a.identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: f.group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 1001, attest: true },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('adding a second effective key keeps tree time', async () => {
+  const f = await clockGroup(2, true)
+  const attested = await attestTreeTime(f.group, 100)
+  if (attested == null) throw new Error('Missing attestation')
+  const published = await publishControllerLog(attested.newGroup, f.log)
+  if (published == null) throw new Error('Missing log commit')
+  expect(
+    published.newGroup.ledger.slice(-2).map(({ verified }) => verified.entry.value),
+  ).toMatchObject([{ op: 'log' }, { op: 'clock', time: 100 }])
+  expect(treeTime(published.newGroup, f.did)).toBe(100)
+  expect(published.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(100)
+  expect(published.newGroup.registry.controllers.get(f.did)?.recordedLog).toEqual(f.log)
+  expect(attested.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(0)
+})
+
+test("commitInvite bundling a second member's add keeps tree time", async () => {
+  const f = await clockGroup(2, true)
+  const b = f.members[1]
+  if (b == null) throw new Error('Missing member')
+  const attested = await attestTreeTime(f.group, 100)
+  if (attested == null) throw new Error('Missing attestation')
+  const group = attested.newGroup
+  const { invite } = await createInvite({
+    group,
+    identity: f.a.identity,
+    recipientDID: b.identity.id,
+    controllerLog: f.log,
+  })
+  const original = [...invite.ledgerEntries]
+  const bundle = await rawBundle(group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  const result = await commitInvite(group, bundle.publicPackage, invite)
+  expect(invite.ledgerEntries).toHaveLength(original.length + 1)
+  expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toEqual({ op: 'clock', time: 100 })
+  expect(treeTime(result.newGroup, f.did)).toBe(100)
+  const joined = await processWelcome({
+    identity: b.identity,
+    invite,
+    welcome: result.welcomeMessage,
+    keyPackageBundle: { ...bundle, ownerDID: b.identity.id },
+  })
+  expect(treeTime(joined.group, f.did)).toBe(100)
+  expect(joined.group.registry).toEqual(result.newGroup.registry)
+  expect(group.registry.controllers.get(f.did)?.timeFloor).toBe(0)
+})
+
+test('removing an attestor keeps tree time', async () => {
+  const f = await clockGroup(3)
+  const b = f.members[1]
+  if (b == null) throw new Error('Missing member')
+  const peer = await belowGateWelcome(f.group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  const first = await attestTreeTime(peer.author, 100)
+  if (first == null) throw new Error('Missing attestation')
+  rememberClocks(first.newGroup, f.tokens)
+  await peer.joined.processMessage(first.commitMessage)
+  const second = await attestTreeTime(peer.joined, 120)
+  if (second == null) throw new Error('Missing attestation')
+  rememberClocks(second.newGroup, f.tokens)
+  await first.newGroup.processMessage(second.commitMessage)
+  const removal = createRemove({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: { member: f.a },
+    add: b.add,
+  })
+  const built = await revokeWithProof(first.newGroup, {
+    log: { chain: f.log.chain, events: [...f.log.events, removal] },
+    remove: [{ did: b.did, add: b.add }],
+  })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing removal')
+  expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toEqual({
+    op: 'clock',
+    time: 100,
+  })
+  expect(treeTime(built.result.newGroup, f.did)).toBe(100)
+  rememberClocks(built.result.newGroup, f.tokens)
+  await second.newGroup.processMessage(built.result.commitMessage)
+  expect(second.newGroup.registry).toEqual(built.result.newGroup.registry)
 })

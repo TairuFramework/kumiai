@@ -13,14 +13,14 @@ import {
   readCapability,
 } from './capability.js'
 import { effectDelta, ingestControllerLog } from './controller-ingest.js'
-import { foldChain } from './controller-log.js'
+import { foldChain, foldControllerLog } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import { createRegistryControllerResolver } from './embedded-resolver.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
 import { controllerLogSize, HISTORY_HORIZON, historySize, proofSize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
-import { isLapsed, leafAt } from './lifecycle.js'
+import { attestedTreeTime, isLapsed, leafAt } from './lifecycle.js'
 import {
   cascadeOf,
   claimsFor,
@@ -239,35 +239,41 @@ export async function lifecycleProofEffects(
   const previous = group.registry.controllers.get(controller)
   const leaves = group.listMembers().map((member) => {
     const binding = group.bindingOfDID(member.id)
-    const capability =
-      binding?.member != null || binding?.capability == null
-        ? undefined
-        : readCapability(binding.capability)
-    const parent = capability?.payload.cap
-    const parentRaw = Array.isArray(parent) ? parent[0] : parent
-    const attested =
-      parentRaw == null ? (capability?.payload.iat ?? 0) : readCapability(parentRaw).payload.iat
     const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
     return {
       did: normalizeDID(member.id),
       leafIndex: member.leafIndex,
       generation: folded?.ok ? folded.states.at(-1)?.gen : undefined,
-      attested:
-        binding?.controller != null && normalizeDID(binding.controller) === controller
-          ? attested
-          : undefined,
       prefix: binding?.prefix ?? [],
     }
   })
   const timeFloor = previous?.timeFloor ?? 0
   if (value.op === 'clock') {
-    const treeTime = Math.max(timeFloor, ...leaves.map((leaf) => leaf.attested ?? 0))
     if (subject !== controller) throw new RevokeProofError('wrong-controller')
-    if (
-      value.time == null ||
-      !Number.isFinite(value.time) ||
+    if (value.time == null || !Number.isFinite(value.time))
+      throw new RevokeProofError('effects-mismatch')
+    if (value.attest === true) {
+      const folded =
+        previous?.recordedLog == null
+          ? undefined
+          : foldControllerLog(controller, previous.recordedLog)
+      const eligible =
+        folded?.ok &&
+        !folded.head.saturated &&
+        folded.head.gen >= (previous?.genFloor ?? 0) &&
+        [...folded.head.members].some(
+          ([add, member]) =>
+            member.effective &&
+            !member.removed &&
+            !previous?.removedMembers.has(add) &&
+            normalizeDID(member.did) === normalizeDID(verified.issuer) &&
+            (value.time as number) > (previous?.attestations.get(member.key) ?? 0) &&
+            (value.time as number) <= member.lease,
+        )
+      if (!eligible) throw new RevokeProofError('effects-mismatch')
+    } else if (
       value.time <= timeFloor ||
-      value.time > treeTime
+      value.time > attestedTreeTime(group.state.ratchetTree, group.registry, controller)
     ) {
       throw new RevokeProofError('effects-mismatch')
     }
@@ -275,7 +281,7 @@ export async function lifecycleProofEffects(
       controller,
       recordedLog: previous?.recordedLog ?? { chain: [], events: [] },
       genFloor: previous?.genFloor ?? 0,
-      timeFloor: value.time,
+      timeFloor: value.attest === true ? timeFloor : value.time,
       revoked: [],
       removed: [],
       removeLeafIndices: [],

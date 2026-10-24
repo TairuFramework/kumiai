@@ -16,7 +16,6 @@ import {
   nodeTypes,
 } from 'ts-mls'
 
-import { readCapability } from './capability.js'
 import { effectDelta, ingestControllerLog } from './controller-ingest.js'
 import { closureOf, foldControllerLog, isDetachedFoldReason } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
@@ -33,7 +32,7 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-import { isLapsed, leafAt, treeTime, validateEntry } from './lifecycle.js'
+import { attestedTreeTime, isLapsed, leafAt, treeTime, validateEntry } from './lifecycle.js'
 import {
   authenticateLifecycleProof,
   lifecycleProofEffects,
@@ -189,33 +188,52 @@ function ownIdentity(group: GroupHandle) {
 
 export async function preservationClock(
   group: GroupHandle,
-  tree: ClientState['ratchetTree'],
+  candidateTree: ClientState['ratchetTree'],
   candidateRegistry: DeviceRegistry,
-): Promise<string | null> {
+): Promise<Array<string>> {
   const controller = group.anchor.controller
-  if (controller == null) return null
+  if (controller == null) return []
   const before = treeTime(group, controller)
-  let after = candidateRegistry.controllers.get(normalizeDID(controller))?.timeFloor ?? 0
-  for (const node of tree) {
-    if (node?.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) continue
-    const binding = parseMLSCredentialIdentity(node.leaf.credential.identity).controller
-    if (
-      binding == null ||
-      binding.member != null ||
-      binding.capability == null ||
-      normalizeDID(binding.id) !== normalizeDID(controller)
+  if (attestedTreeTime(candidateTree, candidateRegistry, controller) >= before) return []
+  return [
+    await signLedgerEntry(ownIdentity(group), {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: controller,
+      value: { op: 'clock', time: before },
+    }),
+  ]
+}
+
+export async function attestTreeTime(
+  group: GroupHandle,
+  time: number = Date.now() / 1000,
+): Promise<DeviceWriteResult | null> {
+  return mutexFor(group).run(async () => {
+    const controller = group.anchor.controller
+    if (controller == null) return null
+    const projection = group.registry.controllers.get(normalizeDID(controller))
+    if (projection?.recordedLog == null) return null
+    const folded = foldControllerLog(controller, projection.recordedLog)
+    if (!folded.ok || folded.head.saturated) return null
+    const members = [...folded.head.members].filter(
+      ([add, member]) =>
+        member.effective &&
+        !member.removed &&
+        !projection.removedMembers.has(add) &&
+        folded.head.gen >= projection.genFloor &&
+        normalizeDID(member.did) === normalizeDID(group.credential.id),
     )
-      continue
-    const payload = readCapability(binding.capability).payload
-    const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
-    after = Math.max(after, parent == null ? payload.iat : readCapability(parent).payload.iat)
-  }
-  if (after >= before) return null
-  return signLedgerEntry(ownIdentity(group), {
-    type: DEVICE_ENTRY_TYPE,
-    groupID: group.groupID,
-    subject: controller,
-    value: { op: 'clock', time: before },
+    if (members.length === 0) return null
+    if (members.every(([, member]) => time <= (projection.attestations.get(member.key) ?? 0)))
+      return null
+    const token = await signLedgerEntry(ownIdentity(group), {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: controller,
+      value: { op: 'clock', time, attest: true },
+    })
+    return buildResult({ group, proposals: [], tokens: [token] })
   })
 }
 
