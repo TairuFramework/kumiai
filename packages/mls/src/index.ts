@@ -184,7 +184,7 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-export { type AssertRecoveryBindingParams, assertRecoveryBinding } from './lifecycle.js'
+export { type AssertRecoveryBindingParams, assertRecoveryBinding, leafExpiry } from './lifecycle.js'
 export {
   cascadeOf,
   claimsFor,

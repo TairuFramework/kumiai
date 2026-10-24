@@ -11,7 +11,7 @@ import {
   type SignedEvent,
   snapshotOf,
 } from '@kokuin/controller'
-import { stringifyToken } from '@kokuin/token'
+import { normalizeDID, stringifyToken } from '@kokuin/token'
 import type { Credential } from 'ts-mls'
 import { defaultCredentialTypes, nodeTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
@@ -21,6 +21,7 @@ import {
   type JudgingContext,
   verifyLeafCredential,
 } from '../src/authentication.js'
+import type { ControllerBinding } from '../src/credential.js'
 import { LeafBindingError } from '../src/errors.js'
 import { deviceDenyHolderFor } from '../src/group-context.js'
 import { makeMLSCredential } from '../src/group-credential.js'
@@ -35,7 +36,7 @@ import {
 import { type ControllerProjection, registryForLog, registrySeed } from '../src/registry.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
-import { buildEpoch, saturatedLog } from './fixtures/controller-epoch.js'
+import { buildEpoch, saturatedLog, saturatedRegistry } from './fixtures/controller-epoch.js'
 import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
 import { agent, pipelineGroup, rawBundle } from './fixtures/lifecycle-pipeline.js'
 
@@ -1010,3 +1011,85 @@ test.each(['retain', 'rejudge'] as const)(
     })
   },
 )
+
+async function membershipFixture() {
+  const f = await memberLeafFixture()
+  const binding: ControllerBinding = {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: f.member.add, g: f.head.gen },
+    iat: 100,
+  }
+  const verify = (judging: JudgingContext = f.judging, candidate = binding) =>
+    verifyLeafCredential(
+      makeMLSCredential(f.member.identity, candidate),
+      f.member.identity.publicKey,
+      { judging: () => judging },
+    )
+  return { ...f, binding, verify }
+}
+
+test('membership leaf authenticates when the signature key equals the pin', async () => {
+  const f = await membershipFixture()
+  await expect(f.verify()).resolves.toBeUndefined()
+  await expect(
+    verifyLeafCredential(
+      makeMLSCredential(f.member.identity, f.binding),
+      f.other.identity.publicKey,
+      {
+        judging: () => f.judging,
+      },
+    ),
+  ).rejects.toMatchObject({ reason: 'identity-change' })
+})
+
+test("membership leaf naming another member's incarnation is refused", async () => {
+  const f = await membershipFixture()
+  await expect(
+    f.verify(f.judging, { ...f.binding, member: { add: f.other.add, g: 0 } }),
+  ).rejects.toMatchObject({ reason: 'member-removed' })
+})
+
+test('membership leaf refused for a removed incarnation', async () => {
+  const f = await membershipFixture()
+  for (const mode of ['admit', 'retain', 'rejudge'] as const)
+    await expect(f.verify({ registry: f.removed, stage: 'full', mode })).rejects.toMatchObject({
+      reason: 'member-removed',
+    })
+})
+
+test('membership authority follows the judging mode when unavailable', async () => {
+  const f = await membershipFixture()
+  for (const registry of [registrySeed(), await saturatedRegistry()]) {
+    await expect(f.verify({ registry, stage: 'full', mode: 'retain' })).resolves.toBeUndefined()
+    for (const mode of ['admit', 'rejudge'] as const)
+      await expect(f.verify({ registry, stage: 'full', mode })).rejects.toMatchObject({
+        reason: 'member-unavailable',
+      })
+  }
+  await expect(f.verify({ stage: 'structural', mode: 'admit' })).resolves.toBeUndefined()
+  await expect(f.verify({ stage: 'full', mode: 'admit' })).rejects.toMatchObject({
+    reason: 'controller-mismatch',
+  })
+  for (const mode of ['retain', 'rejudge'] as const) {
+    const registry = registryForLog(f.did, f.log)
+    const projection = registry.controllers.get(normalizeDID(f.did))
+    if (projection == null) throw new Error('Missing projection')
+    ;(registry.controllers as Map<string, ControllerProjection>).set(f.did, {
+      ...projection,
+      genFloor: 1,
+    })
+    await expect(f.verify({ registry, stage: 'full', mode })).rejects.toMatchObject({
+      reason: 'generation-floor',
+    })
+  }
+})
+
+test('standard group refuses a membership binding', async () => {
+  const f = await membershipFixture()
+  const { group } = await pipelineGroup({ standard: true })
+  const bundle = await rawBundle(group, f.member.identity, f.binding)
+  await expect(validateEntry(group, bundle.publicPackage.leafNode)).rejects.toMatchObject({
+    reason: 'controller-mismatch',
+  })
+})

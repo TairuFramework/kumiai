@@ -222,13 +222,16 @@ export async function verifyLifecycleProof(
   const previous = group.registry.controllers.get(controller)
   const leaves = group.listMembers().map((member) => {
     const binding = group.bindingOfDID(member.id)
-    const capability = binding?.capability == null ? undefined : readCapability(binding.capability)
+    const capability =
+      binding?.member != null || binding?.capability == null
+        ? undefined
+        : readCapability(binding.capability)
     const parent = capability?.payload.cap
     const parentRaw = Array.isArray(parent) ? parent[0] : parent
     const issuer =
       parentRaw == null || capability == null ? undefined : normalizeDID(capability.payload.iss)
     const attested =
-      parentRaw == null ? capability?.payload.iat : readCapability(parentRaw).payload.iat
+      parentRaw == null ? (capability?.payload.iat ?? 0) : readCapability(parentRaw).payload.iat
     const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
     return {
       did: normalizeDID(member.id),

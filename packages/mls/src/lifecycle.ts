@@ -20,8 +20,9 @@ import {
   MAX_TRUSTED_GRANT_LIFETIME,
   readCapability,
 } from './capability.js'
-import { foldChain } from './controller-log.js'
+import { foldChain, foldControllerLog } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
+import { prefixRelation } from './embedded-resolver.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
 import type { GroupHandle } from './group-handle.js'
@@ -29,7 +30,7 @@ import { decodeLedgerHead, extendHead, genesisHead, headsMatch } from './head.js
 import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
-import { memberRootsOf } from './member-root.js'
+import { memberRootStatus, memberRootsOf } from './member-root.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
 import {
   DEVICE_ENTRY_TYPE,
@@ -38,7 +39,7 @@ import {
   denySetOf,
   mayReadmitResetDevice,
 } from './registry.js'
-import { assertNewerBinding, stalePairedAdd } from './stale-leaf.js'
+import { assertNewerBinding, bindingIssuedAt, stalePairedAdd } from './stale-leaf.js'
 
 export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
 
@@ -63,11 +64,7 @@ function identity(leaf: LeafNode) {
   ) {
     throw new LeafBindingError('identity-change')
   }
-  const parsed = parseMLSCredentialIdentity(leaf.credential.identity)
-  if (parsed.controller == null) return { ...parsed, controller: undefined }
-  const capability = parsed.controller.capability
-  if (capability == null) throw new LeafBindingError('controller-mismatch')
-  return { ...parsed, controller: { ...parsed.controller, capability } }
+  return parseMLSCredentialIdentity(leaf.credential.identity)
 }
 
 export function leafAt(tree: ClientState['ratchetTree'], index: number): LeafNode | undefined {
@@ -77,7 +74,13 @@ export function leafAt(tree: ClientState['ratchetTree'], index: number): LeafNod
 
 function attestedTime(leaf: LeafNode, controllerID: string): number {
   const binding = identity(leaf).controller
-  if (binding == null || normalizeDID(binding.id) !== normalizeDID(controllerID)) return 0
+  if (
+    binding == null ||
+    binding.member != null ||
+    binding.capability == null ||
+    normalizeDID(binding.id) !== normalizeDID(controllerID)
+  )
+    return 0
   const payload = readCapability(binding.capability).payload
   const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
   return parent == null ? payload.iat : readCapability(parent).payload.iat
@@ -104,9 +107,34 @@ export function isLapsed(group: GroupHandle, leaf: LeafNode): boolean {
   const controller = group.anchor.controller
   if (controller == null) return false
   const binding = identity(leaf).controller
-  return (
-    binding != null && readCapability(binding.capability).payload.exp < treeTime(group, controller)
-  )
+  const expiry = binding == null ? undefined : leafExpiry(binding, group.registry, controller)
+  return expiry != null && expiry < treeTime(group, controller)
+}
+
+export function leafExpiry(
+  binding: ControllerBinding,
+  registry: DeviceRegistry,
+  controller: string,
+): number | undefined {
+  if (binding.member == null) {
+    if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
+    return readCapability(binding.capability).payload.exp
+  }
+  const did = normalizeDID(controller)
+  if (normalizeDID(binding.id) !== did) return undefined
+  const log = registry.controllers.get(did)?.recordedLog
+  if (log == null || prefixRelation(log, binding.prefix) !== 'contained') return undefined
+  const folded = foldControllerLog(did, log)
+  if (!folded.ok) return undefined
+  const member = folded.head.members.get(binding.member.add)
+  if (member == null) return undefined
+  const status = memberRootStatus(registry, did, {
+    kind: 'member',
+    did: member.did,
+    add: binding.member.add,
+    gen: binding.member.g,
+  })
+  return status.status === 'effective' ? status.lease : undefined
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -138,8 +166,8 @@ function replacesRevokedIssuer(
 ): boolean {
   const controller = group.anchor.controller
   if (controller == null || normalizeDID(binding.id) !== normalizeDID(controller)) return false
-  if (binding.capability == null || old.capability == null)
-    throw new LeafBindingError('controller-mismatch')
+  if (binding.member != null || old.member != null || old.capability == null) return false
+  if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   if (readCapability(binding.capability).payload.cap !== undefined) return false
   const current = readCapability(old.capability).payload
   return (
@@ -195,14 +223,12 @@ function checkBinding(
     if (
       binding != null &&
       old.controller != null &&
-      readCapability(binding.capability).payload.iat <
-        readCapability(old.controller.capability).payload.iat &&
+      bindingIssuedAt(binding) < bindingIssuedAt(old.controller) &&
       !replacesRevokedIssuer(group, binding, old.controller)
     )
       throw new LeafBindingError('renewal-order')
   }
   if (binding == null) return
-  const payload = readCapability(binding.capability).payload
   checkHolderEvidence(
     parsed,
     leaf.signaturePublicKey,
@@ -210,24 +236,28 @@ function checkBinding(
       ? MAX_TRUSTED_GRANT_LIFETIME
       : (group.anchor.trustedGrantLifetime ?? 2_592_000),
   )
-  assertCapabilityLifetime(
-    payload,
-    controller == null ? MAX_LEAF_LIFETIME : (group.anchor.leafLifetime ?? 86_400),
-  )
-  const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
-  if (parent != null)
+  if (binding.member == null) {
+    if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
+    const payload = readCapability(binding.capability).payload
     assertCapabilityLifetime(
-      readCapability(parent).payload,
-      controller == null
-        ? MAX_TRUSTED_GRANT_LIFETIME
-        : (group.anchor.trustedGrantLifetime ?? 2_592_000),
+      payload,
+      controller == null ? MAX_LEAF_LIFETIME : (group.anchor.leafLifetime ?? 86_400),
     )
-  if (
-    payload.cap != null &&
-    denied.has(normalizeDID(payload.iss)) &&
-    !(welcome && isEvidencedChild(group, leaf, denied))
-  )
-    throw new LeafBindingError('denied-issuer')
+    const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
+    if (parent != null)
+      assertCapabilityLifetime(
+        readCapability(parent).payload,
+        controller == null
+          ? MAX_TRUSTED_GRANT_LIFETIME
+          : (group.anchor.trustedGrantLifetime ?? 2_592_000),
+      )
+    if (
+      payload.cap != null &&
+      denied.has(normalizeDID(payload.iss)) &&
+      !(welcome && isEvidencedChild(group, leaf, denied))
+    )
+      throw new LeafBindingError('denied-issuer')
+  }
   const folded = foldChain(binding.id, binding.prefix)
   if (!folded.ok) throw new LeafBindingError('controller-mismatch')
   if (
@@ -241,11 +271,10 @@ function checkBinding(
 
 function checkAdmissionExpiry(group: GroupHandle, leaf: LeafNode): void {
   const binding = identity(leaf).controller
-  if (
-    binding != null &&
-    readCapability(binding.capability).payload.exp <= treeTime(group, binding.id)
-  )
-    throw new LeafLapsedError('lapsed')
+  if (binding == null) return
+  const expiry = leafExpiry(binding, group.registry, binding.id)
+  if (expiry == null) throw new LeafBindingError('member-unavailable')
+  if (expiry <= treeTime(group, binding.id)) throw new LeafLapsedError('lapsed')
 }
 
 function checkEntry(
@@ -331,9 +360,12 @@ function checkSurvivors(
       continue
     }
     const binding = parsed.controller
-    const payload = readCapability(binding.capability).payload
+    const payload =
+      binding.member != null || binding.capability == null
+        ? undefined
+        : readCapability(binding.capability).payload
     if (
-      payload.cap != null &&
+      payload?.cap != null &&
       denied.has(normalizeDID(payload.iss)) &&
       !(
         (origin.kind === 'welcome' ||
@@ -408,8 +440,8 @@ export async function prepareLifecycleGate(
     for (let index = 0; index * 2 < before.length; index++) {
       const leaf = leafAt(before, index)
       const binding = leaf == null ? undefined : identity(leaf).controller
-      if (binding != null && readCapability(binding.capability).payload.exp < beforeTime)
-        lapsed.add(index)
+      const expiry = binding == null ? undefined : leafExpiry(binding, group.registry, controller)
+      if (expiry != null && expiry < beforeTime) lapsed.add(index)
     }
   }
   const opOf = ({ entry }: VerifiedLedgerEntry) => (entry.value as DeviceValue).op
@@ -655,12 +687,13 @@ export async function prepareLifecycleGate(
     if (controller != null && senderIndex != null) {
       const old = leafAt(before, senderIndex)
       const next = leafAt(state.ratchetTree, senderIndex)
+      const binding = next == null ? undefined : identity(next).controller
+      const expiry =
+        binding == null ? undefined : leafExpiry(binding, candidateRegistry, controller)
       if (
         old != null &&
         lapsed.has(senderIndex) &&
-        (next == null ||
-          credentialEqual(old, next) ||
-          readCapability(identity(next).controller?.capability ?? '').payload.exp < beforeTime)
+        (next == null || credentialEqual(old, next) || expiry == null || expiry < beforeTime)
       )
         throw new LeafLapsedError('lapsed')
     }
@@ -702,10 +735,8 @@ export function assertSenderNotLapsed(params: AssertSenderNotLapsedParams): void
   }
   if (!headsMatch(head, expected.head)) throw new Error('Unknown epoch ledger head')
   const binding = identity(leaf).controller
-  if (
-    binding != null &&
-    readCapability(binding.capability).payload.exp < timeOf(tree, controller, floor)
-  )
+  const expiry = binding == null ? undefined : leafExpiry(binding, group.registry, controller)
+  if (expiry != null && expiry < timeOf(tree, controller, floor))
     throw new LeafLapsedError('lapsed')
 }
 

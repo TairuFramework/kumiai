@@ -1,7 +1,8 @@
-import { createRotate } from '@kokuin/controller'
+import { createRenew, createRotate, epochHeads } from '@kokuin/controller'
 import { defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import type { ControllerBinding } from '../src/credential.js'
 import {
   commitInvite,
   createInvite,
@@ -14,9 +15,14 @@ import { makeMLSCredential } from '../src/group-credential.js'
 import { addDevice } from '../src/group-device.js'
 import { deriveGroup } from '../src/group-handle.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
+import { leafExpiry } from '../src/index.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
+import { isLapsed, treeTime, validateEntry } from '../src/lifecycle.js'
+import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
+import { DEVICE_ENTRY_TYPE } from '../src/registry.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 import { snapshotForChain } from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import { buildBoundKeyPackageBundle, joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
@@ -25,6 +31,7 @@ import {
   lowLevelWelcome,
   pipelineGroup,
   rawAdd,
+  rawBundle,
   rawCommit,
   timedBinding,
 } from './fixtures/lifecycle-pipeline.js'
@@ -510,4 +517,101 @@ test('the commit gate still refuses growing history above the horizon', async ()
     }),
   ).rejects.toMatchObject({ reason: 'history-horizon' })
   expect(group.state).toBe(previous)
+})
+
+async function membershipLeaf(lease = 1000) {
+  authorClock()
+  const epoch = await buildEpoch({ members: 1, renewEvery: lease })
+  const member = epoch.members[0]
+  if (member == null) throw new Error('Missing member')
+  const { group, identity } = await pipelineGroup()
+  await group.applyLedgerEntries([
+    await signLedgerEntry(identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: epoch.did,
+      value: { op: 'seed', proof: epoch.log },
+    }),
+  ])
+  const binding: ControllerBinding = {
+    id: epoch.did,
+    prefix: epoch.log.chain,
+    member: { add: member.add, g: epoch.head.gen },
+    iat: 9_000_000,
+  }
+  const leaf = (await rawBundle(group, member.identity, binding)).publicPackage.leafNode
+  group.state.ratchetTree.push(undefined, { nodeType: nodeTypes.leaf, leaf })
+  const floor = (time: number) => {
+    const projection = group.registry.controllers.get(epoch.did)
+    if (projection == null) throw new Error('Missing projection')
+    Object.assign(projection, { timeFloor: time })
+  }
+  return { ...epoch, group, identity, member, binding, leaf, floor }
+}
+
+test('membership leaf lapses at its lease end by tree time', async () => {
+  const f = await membershipLeaf()
+  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(1000)
+  f.floor(1000)
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({ reason: 'lapsed' })
+  f.floor(1001)
+  expect(isLapsed(f.group, f.leaf)).toBe(true)
+})
+
+test('renewal reaches a membership leaf through a log entry', async () => {
+  const f = await membershipLeaf()
+  const renew = createRenew({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: f.member.add,
+    lease: 2000,
+  })
+  await f.group.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: f.group.groupID,
+      subject: f.did,
+      value: { op: 'log', proof: { chain: [], events: [renew] } },
+    }),
+  ])
+  f.floor(1500)
+  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(2000)
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
+})
+
+test('phone member keeps its leaf 30 days on a 90-day lease', async () => {
+  const f = await membershipLeaf(7_776_000)
+  f.floor(2_592_000)
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
+})
+
+test('membership leaf attests no tree time', async () => {
+  const f = await membershipLeaf()
+  expect(treeTime(f.group, f.did)).toBe(100)
+  await expect(
+    verifyLifecycleProof(f.group, {
+      issuer: f.identity.id,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: f.group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 101 },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('an unavailable membership lease keeps existing leaves and refuses admission', async () => {
+  const f = await membershipLeaf()
+  ;(f.group.registry.controllers as Map<string, unknown>).clear()
+  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBeUndefined()
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({
+    reason: 'member-unavailable',
+  })
 })

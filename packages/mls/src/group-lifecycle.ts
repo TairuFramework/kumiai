@@ -110,8 +110,13 @@ async function clockEntries(
   for (const node of tree) {
     if (node?.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) continue
     const binding = parseMLSCredentialIdentity(node.leaf.credential.identity).controller
-    if (binding == null || normalizeDID(binding.id) !== normalizeDID(controller)) continue
-    if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
+    if (
+      binding == null ||
+      binding.member != null ||
+      binding.capability == null ||
+      normalizeDID(binding.id) !== normalizeDID(controller)
+    )
+      continue
     const payload = readCapability(binding.capability).payload
     const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
     after = Math.max(after, parent == null ? payload.iat : readCapability(parent).payload.iat)
@@ -302,7 +307,8 @@ function isFullyRevoked(group: GroupHandle, subject: string): boolean {
   if (record?.status !== 'revoked' || isResetOnly(record)) return false
   if (group.findMemberLeafIndex(subject) != null) return false
   return !group.listMembers().some((member) => {
-    const capability = group.bindingOfDID(member.id)?.capability
+    const binding = group.bindingOfDID(member.id)
+    const capability = binding?.member == null ? binding?.capability : undefined
     return (
       capability != null &&
       normalizeDID(readCapability(capability).payload.iss) === subject &&
@@ -340,7 +346,9 @@ export async function revokeWithProof(
       const leaves = group.listMembers().map((member) => {
         const binding = group.bindingOfDID(member.id)
         const payload =
-          binding?.capability == null ? undefined : readCapability(binding.capability).payload
+          binding?.member != null || binding?.capability == null
+            ? undefined
+            : readCapability(binding.capability).payload
         const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
         return {
           ...member,

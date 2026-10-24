@@ -18,6 +18,7 @@ import {
   getVerifier,
   isPeer4,
   normalizeDID,
+  type ResolvedMember,
   verifyToken,
 } from '@kokuin/token'
 import { fromB64U, fromUTF } from '@sozai/codec'
@@ -271,6 +272,7 @@ export function checkHolderEvidence(
 ): string | undefined {
   const binding = parsed.controller
   if (binding == null) return
+  if (binding.member != null) return
   if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   const leafPayload = readCapability(binding.capability).payload
   if (leafPayload.cap === undefined) {
@@ -318,7 +320,7 @@ export function hasHolderEvidence(
   trustedGrantLifetime?: number,
 ): boolean {
   const binding = parsed.controller
-  if (binding == null || isDenied(denied, parsed.id)) return false
+  if (binding == null || binding.member != null || isDenied(denied, parsed.id)) return false
   if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   try {
     if (readCapability(binding.capability).payload.cap === undefined) return false
@@ -353,7 +355,6 @@ export async function verifyLeafCredential(
     : denied
   const binding = parsed.controller
   if (binding == null) return
-  if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   if (!structural && registry != null) {
     const folded = foldChain(binding.id, binding.prefix)
     if (!folded.ok) throw new LeafBindingError('controller-mismatch')
@@ -373,6 +374,48 @@ export async function verifyLeafCredential(
       prefix: binding.prefix,
       registry: structural ? undefined : registry,
     }).frozen()
+    if (binding.member != null) {
+      if (!binding.id.startsWith('did:kokuin:') || !foldChain(binding.id, binding.prefix).ok)
+        throw new LeafBindingError('controller-mismatch')
+      if (structural) return
+      if (registry == null) throw new LeafBindingError('controller-mismatch')
+      const root = primary?.root
+      if (root == null) throw new LeafBindingError('member-unavailable')
+      const status = memberRootStatus(registry, binding.id, root)
+      if (status.status === 'removed') throw new LeafBindingError('member-removed')
+      const unavailable = () => {
+        if (judging.mode !== 'retain') throw new LeafBindingError('member-unavailable')
+      }
+      const projection = registry.controllers.get(normalizeDID(binding.id))
+      if (prefixRelation(projection?.recordedLog, binding.prefix) !== 'contained') {
+        unavailable()
+        return
+      }
+      let member: ResolvedMember | undefined
+      try {
+        member = await frozen.resolveMember?.(binding.id, {
+          did: parsed.id,
+          add: binding.member.add,
+          gen: binding.member.g,
+        })
+      } catch (cause) {
+        if (cause instanceof Error && cause.message.endsWith('is another DID')) {
+          const error = new LeafBindingError('member-removed')
+          error.cause = cause
+          throw error
+        }
+        unavailable()
+        return
+      }
+      if (member == null || status.status !== 'effective') {
+        unavailable()
+        return
+      }
+      if (!constantTimeEqual(member.key.publicKey, signaturePublicKey))
+        throw new LeafBindingError('confirmation-invalid')
+      return
+    }
+    if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
     const common = {
       prefix: binding.prefix,
       controllerID: binding.id,

@@ -11,7 +11,10 @@ import { sha256 } from '@noble/hashes/sha2.js'
 
 import { readCapability } from './capability.js'
 import { foldChain } from './controller-log.js'
+import type { ControllerBinding } from './credential.js'
 import type { GroupHandle } from './group-handle.js'
+import { leafExpiry } from './lifecycle.js'
+import { memberRootStatus } from './member-root.js'
 import {
   type OpenSealedGroupInfoParams,
   openSealedReply,
@@ -168,26 +171,46 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
   if (controller == null) return false
   try {
     const binding = group.bindingOfDID(signer)
-    if (binding?.controller !== controller || binding.capability == null || binding.prefix == null)
-      return false
-    const payload = readCapability(binding.capability).payload
+    if (binding?.controller !== controller || binding.prefix == null) return false
+    const payload =
+      binding.member != null || binding.capability == null
+        ? undefined
+        : readCapability(binding.capability).payload
     if (
       known.devices.get(normalizeDID(signer))?.status === 'revoked' ||
-      (payload.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
+      (payload?.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
     )
       return false
     const folded = foldChain(controller, binding.prefix)
     const projection = known.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
+    if (binding.member != null) {
+      const status = memberRootStatus(known, controller, {
+        kind: 'member',
+        did: signer,
+        add: binding.member.add,
+        gen: binding.member.g,
+      })
+      if (
+        status.status !== 'effective' ||
+        status.key.length !== binding.leafKey.length ||
+        status.key.some((byte, index) => byte !== binding.leafKey[index])
+      )
+        return false
+    }
+    const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
+    const expiry = leafExpiry(bound, known, controller)
+    if (expiry == null) return false
     let time = projection?.timeFloor ?? 0
     for (const member of group.listMembers()) {
       const leaf = group.bindingOfDID(member.id)
-      if (leaf?.controller !== controller || leaf.capability == null) continue
+      if (leaf?.controller !== controller || leaf.member != null || leaf.capability == null)
+        continue
       const capability = readCapability(leaf.capability).payload
       const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
       time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
     }
-    return payload.exp >= Math.max(time, now - 300)
+    return expiry >= Math.max(time, now - 300)
   } catch {
     return false
   }

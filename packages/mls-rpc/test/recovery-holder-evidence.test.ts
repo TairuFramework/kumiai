@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { OwnIdentity } from '@kokuin/token'
+import * as mls from '@kumiai/mls'
 import {
   type ControllerBinding,
   commitInvite,
@@ -14,11 +15,16 @@ import {
   processWelcome,
   restoreGroup,
 } from '@kumiai/mls'
+import { nodeTypes } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
-import type { RecoveryBinding, RecoveryBindingRequest } from '../src/recovery.js'
+import {
+  createRecoveryBindingState,
+  type RecoveryBinding,
+  type RecoveryBindingRequest,
+} from '../src/recovery.js'
 
 // Imported at collection, not inside the first test: transforming the cross-package fixture under
 // load overran that test's 5s timeout.
@@ -211,5 +217,59 @@ test('recoveryAfterRestartKeepsEvidence', async () => {
     await acceptRecovery(fixture, requester)
   } finally {
     await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('recovery binding state carries a membership binding', async () => {
+  const identity = fixture.agent(41)
+  const capability = await fixture.bindingFor(identity)
+  const { group } = await createGroup(identity, 'membership-binding-state', {
+    controller: capability,
+  })
+  const binding: ControllerBinding = {
+    id: capability.id,
+    prefix: capability.prefix,
+    member: { add: 'member-add', g: 0 },
+    iat: 100,
+  }
+  const own = group.state.ratchetTree[0]
+  if (own?.nodeType !== nodeTypes.leaf) throw new Error('Missing leaf')
+  own.leaf.credential = {
+    credentialType: 1,
+    identity: new TextEncoder().encode(JSON.stringify({ id: identity.id, controller: binding })),
+  }
+  let offered = binding
+  const host = vi.fn(async (_request: RecoveryBindingRequest) => offered)
+  const validation = vi.spyOn(mls, 'assertRecoveryBinding').mockResolvedValue()
+  const join = vi.spyOn(mls, 'joinGroupExternal').mockResolvedValue({
+    group,
+    commitMessage: new Uint8Array(),
+    sourceTree: group.state.ratchetTree,
+    sourceRegistry: group.registry,
+  })
+  try {
+    const state = createRecoveryBindingState(identity, host)
+    await expect(state.prepare(group)).resolves.toBe('ready')
+    expect(validation).toHaveBeenLastCalledWith({ group, identity, controller: binding })
+    const pending = await state.join(group, {
+      groupInfo: new Uint8Array(),
+      ledger: [],
+      signer: identity.id,
+    })
+    if (pending == null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    pending.markBindingUnusable()
+    await expect(state.prepare(group)).resolves.toBe('renewal-required')
+    expect(host).toHaveBeenLastCalledWith({
+      groupID: group.groupID,
+      controllerID: binding.id,
+      current: binding,
+    })
+    offered = { ...binding, iat: 101 }
+    await expect(state.prepare(group)).resolves.toBe('ready')
+    offered = { ...binding, member: { add: 'another-add', g: 0 } }
+    await expect(state.prepare(group)).resolves.toBe('ready')
+  } finally {
+    validation.mockRestore()
+    join.mockRestore()
   }
 })

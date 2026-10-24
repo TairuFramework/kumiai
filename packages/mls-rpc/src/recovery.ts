@@ -76,7 +76,14 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
   let prepared = false
   const unusable = new Set<string>()
   const bindingID = (value: ControllerBinding): string =>
-    JSON.stringify([value.id, value.prefix, value.capability, value.holderGrant])
+    JSON.stringify([
+      value.id,
+      value.prefix,
+      value.capability,
+      value.holderGrant,
+      value.member,
+      value.iat,
+    ])
   function markBindingUnusable(id?: string): void {
     if (id == null) return
     unusable.delete(id)
@@ -98,12 +105,14 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
   }
   function current(group: GroupHandle): ControllerBinding | undefined {
     const leaf = group.bindingOfDID(identity.id)
-    return leaf?.controller == null || leaf.prefix == null || leaf.capability == null
+    return leaf?.controller == null || leaf.prefix == null
       ? undefined
       : {
           id: leaf.controller,
           prefix: leaf.prefix,
-          capability: leaf.capability,
+          ...(leaf.member == null
+            ? { capability: leaf.capability }
+            : { member: leaf.member, iat: leaf.iat }),
           ...(leaf.holderGrant == null ? {} : { holderGrant: leaf.holderGrant }),
         }
   }

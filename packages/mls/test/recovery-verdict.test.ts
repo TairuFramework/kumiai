@@ -1,4 +1,5 @@
-import { randomIdentity } from '@kokuin/token'
+import { normalizeDID, randomIdentity } from '@kokuin/token'
+import { nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { revokeChain } from './fixtures/controller-chain.js'
@@ -6,13 +7,42 @@ import { revokeChain } from './fixtures/controller-chain.js'
 afterEach(() => vi.restoreAllMocks())
 
 import { createGroup } from '../src/group.js'
+import { makeMLSCredential } from '../src/group-credential.js'
 import { createRecoveryRequest, openSealedGroupInfo, sealGroupInfo } from '../src/recovery.js'
 import {
   confirmationKey,
   confirmationTag,
   openRecoveryVerdict,
+  recoverySignerEligible,
   sealRecoveryVerdict,
 } from '../src/recovery-verdict.js'
+import { registryForLog } from '../src/registry.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
+import { pipelineGroup } from './fixtures/lifecycle-pipeline.js'
+
+test('recovery signer with an effective membership leaf is eligible', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  const f = await buildEpoch({ members: 1, renewEvery: 1000 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const { group } = await pipelineGroup()
+  const own = group.state.ratchetTree[0]
+  if (own?.nodeType !== nodeTypes.leaf) throw new Error('Missing leaf')
+  own.leaf.credential = makeMLSCredential(member.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: member.add, g: 0 },
+    iat: 9000,
+  })
+  own.leaf.signaturePublicKey = member.identity.publicKey
+  const known = registryForLog(f.did, f.log)
+  const params = { group, known, signer: normalizeDID(member.did), now: 500 }
+  expect(recoverySignerEligible(params)).toBe(true)
+  expect(recoverySignerEligible({ ...params, now: 1301 })).toBe(false)
+  expect(recoverySignerEligible({ ...params, known: { ...known, controllers: new Map() } })).toBe(
+    false,
+  )
+})
 
 test('verdicts authenticate the signer and bind the signed request without consuming its key', async () => {
   const identity = randomIdentity()

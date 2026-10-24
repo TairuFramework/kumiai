@@ -1,3 +1,4 @@
+import { createAdd, digestOf, encodeKey, foldLog } from '@kokuin/controller'
 import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type DefaultProposal,
@@ -22,9 +23,10 @@ import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
 import { bindingIssuedAt } from '../src/index.js'
-import { ledgerEntryDigest } from '../src/ledger.js'
-import { leafAt } from '../src/lifecycle.js'
+import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
+import { leafAt, validateEntry } from '../src/lifecycle.js'
 import { assertNewerBinding } from '../src/stale-leaf.js'
+import { controllerID, controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
   lowLevelWelcome,
@@ -363,4 +365,63 @@ test('two leaves for the admitted DID are refused as ambiguous', async () => {
       enacted: [],
     }),
   ).rejects.toThrow('Unauthorised Remove')
+})
+
+async function staleMembership() {
+  const f = await staleGroup()
+  const folded = foldLog(controllerID, { chain: [inception], events: [] })
+  if (!folded.ok) throw new Error(folded.reason)
+  const add = createAdd({
+    seed: controllerSeed,
+    profile: 0,
+    did: controllerID,
+    head: folded.head,
+    parents: [folded.head.epoch],
+    member: { did: f.bob.id, key: encodeKey(f.bob.publicKey, 'EdDSA'), lease: 1000 },
+  })
+  await f.author.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: 'kumiai.device',
+      groupID: f.author.groupID,
+      subject: controllerID,
+      value: { op: 'seed', proof: { chain: [inception], events: [add] } },
+    }),
+  ])
+  const binding: ControllerBinding = {
+    id: controllerID,
+    prefix: [inception],
+    member: { add: digestOf(add.event), g: 0 },
+    iat: 100,
+  }
+  const old = leafAt(f.author.state.ratchetTree, f.staleIndex)
+  if (old == null) throw new Error('Missing stale leaf')
+  old.credential = makeMLSCredential(f.bob, binding)
+  const { invite } = await createInvite({
+    group: f.author,
+    identity: f.identity,
+    recipientDID: f.bob.id,
+  })
+  return { ...f, binding, old, invite }
+}
+
+test('membership key package replaces a stale leaf only when newer', async () => {
+  const f = await staleMembership()
+  for (const iat of [90, 100, 120]) {
+    const bundle = await rawBundle(f.author, f.bob, { ...f.binding, iat })
+    const result = commitInvite(f.author, bundle.publicPackage, f.invite)
+    if (iat <= 100) await expect(result).rejects.toMatchObject({ reason: 'renewal-order' })
+    else {
+      const { newGroup } = await result
+      expect(leavesOf(newGroup, f.bob.id)).toHaveLength(1)
+      expect(newGroup.bindingOfDID(f.bob.id)).toMatchObject({ member: f.binding.member, iat })
+    }
+  }
+})
+
+test('membership renewal with an older iat is refused', async () => {
+  const f = await staleMembership()
+  const leaf = (await rawBundle(f.author, f.bob, { ...f.binding, iat: 99 })).publicPackage.leafNode
+  await expect(validateEntry(f.author, leaf, f.old)).rejects.toMatchObject({
+    reason: 'renewal-order',
+  })
 })
