@@ -11,7 +11,7 @@ import { encode, mlsMessageEncoder } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
-import { foldControllerLog } from '../src/controller-log.js'
+import { asControllerLog, foldControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { createGroup } from '../src/group-create.js'
@@ -315,8 +315,8 @@ test('log and revoke entries still land at 33 events', async () => {
     snapshot: { ...snapshotOf(f.head), deny: [...f.head.deny, subject] },
   })
   const revoked = await api.revokeWithProof(f.group, {
-    subject,
-    log: [f.inception, rotation],
+    deny: [subject],
+    log: asControllerLog([f.inception, rotation]),
   })
   expect(revoked.status).toBe('built')
   if (revoked.status !== 'built') throw new Error('Missing revoke')

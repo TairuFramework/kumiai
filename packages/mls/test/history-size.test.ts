@@ -1,3 +1,5 @@
+import { asControllerLog } from '../src/controller-log.js'
+import { denyEffects } from './fixtures/controller-chain.js'
 // Set KUMIAI_PROBE_REPORT=1 to print measurement tables.
 
 import type { ControllerLog } from '@kokuin/controller'
@@ -68,13 +70,19 @@ test('historyCountsUtf8AndEveryCopy', async () => {
   const entries: Array<VerifiedLedgerEntry> = []
   const tokens: Array<string> = []
   for (const value of [
-    { op: 'revoke', proof: oldProof.slice(1), revoked: [{ did: agent(61).id }] },
-    { op: 'reset', proof: resetPrefix, revoked: [] },
+    {
+      effects: denyEffects(oldProof.slice(1), agent(61).id),
+      removed: [],
+      op: 'revoke',
+      proof: asControllerLog(oldProof.slice(1)),
+      revoked: [{ did: agent(61).id }],
+    },
+    { effects: [], removed: [], op: 'reset', proof: asControllerLog(resetPrefix), revoked: [] },
   ]) {
     const token = await signLedgerEntry(alice, {
       type: 'kumiai.device',
       groupID: initial.group.groupID,
-      subject: value.op === 'revoke' ? agent(61).id : controllerID,
+      subject: controllerID,
       value,
     })
     const verified = await verifyLedgerEntry(token)
@@ -147,7 +155,7 @@ test('history counts every proof copy', async () => {
   const each = history.controllerLogSize(log.chain) + history.controllerLogSize(log.events)
   expect(history.proofSize(log)).toBe(each)
   expect(history.historySize([], entries)).toBe(each + history.controllerLogSize(repeated.events))
-  expect(history.proofSize(log.chain)).toBe(history.controllerLogSize(log.chain))
+  expect(history.proofSize(asControllerLog(log.chain))).toBe(history.controllerLogSize(log.chain))
   for (const value of [null, {}, 'proof', { chain: [], events: null }]) {
     expect(history.proofSize(value)).toBe(0)
   }

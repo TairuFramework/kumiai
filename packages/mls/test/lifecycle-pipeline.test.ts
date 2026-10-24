@@ -37,7 +37,7 @@ import {
   controllerProjection,
   DEVICE_ENTRY_TYPE,
 } from '../src/registry.js'
-import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
+import { denyEffects, revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
 import { joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
@@ -85,8 +85,14 @@ test.each(['author', 'receiver'] as const)(
     const token = await signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: author.groupID,
-      subject: target.id,
-      value: { op: 'revoke', proof: [revoke], revoked: [{ did: target.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], target.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: target.id }],
+      },
     })
     const entryID = ledgerEntryDigest(token)
     tokens.set(entryID, token)
@@ -493,8 +499,14 @@ describe('path, clock and lapse gates', () => {
     const token = await signLedgerEntry(setup.identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: setup.author.groupID,
-      subject: setup.bobIdentity.id,
-      value: { op: 'revoke', proof: [revoke], revoked: [{ did: setup.bobIdentity.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], setup.bobIdentity.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: setup.bobIdentity.id }],
+      },
     })
     await expect(
       commitWithEntries({
@@ -525,8 +537,14 @@ describe('path, clock and lapse gates', () => {
     const token = await signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
-      subject: agent(81).id,
-      value: { op: 'revoke', proof: [revoke], revoked: [{ did: agent(81).id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], agent(81).id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: agent(81).id }],
+      },
     })
     const add = await rawAdd(
       group,
@@ -844,7 +862,7 @@ describe('consensus history and composition', () => {
       type: DEVICE_ENTRY_TYPE,
       groupID: author.groupID,
       subject: controllerID,
-      value: { op: 'reset', proof: prefix, revoked: [] },
+      value: { effects: [], removed: [], op: 'reset', proof: asControllerLog(prefix), revoked: [] },
     })
     const result = await commitWithEntries({
       group: author,
@@ -1036,8 +1054,14 @@ test('a lifecycle external replacement is refused when its subject is denied', a
   const token = await signLedgerEntry(identity, {
     type: DEVICE_ENTRY_TYPE,
     groupID: author.groupID,
-    subject: bob.id,
-    value: { op: 'revoke', proof: [revoke], revoked: [{ did: bob.id }] },
+    subject: controllerID,
+    value: {
+      effects: denyEffects([revoke], bob.id),
+      removed: [],
+      op: 'revoke',
+      proof: asControllerLog([revoke]),
+      revoked: [{ did: bob.id }],
+    },
   })
   // Seed a known revocation on the offered epoch to exercise admission independently of removal.
   await author.applyLedgerEntries([token])
@@ -1143,14 +1167,26 @@ test('two revoke proofs cannot share a commit', async () => {
     signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
-      subject: first.id,
-      value: { op: 'revoke', proof: [revoke], revoked: [{ did: first.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], first.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: first.id }],
+      },
     }),
     signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
-      subject: second.id,
-      value: { op: 'revoke', proof: [next], revoked: [{ did: second.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([next], second.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([next]),
+        revoked: [{ did: second.id }],
+      },
     }),
   ])
   await expect(

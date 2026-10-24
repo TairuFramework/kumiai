@@ -148,7 +148,10 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
     chain: [inception],
     subject: mallory.id,
   })
-  const removed = await revokeWithProof(s.group(), { subject: mallory.id, log: [inception, rev] })
+  const removed = await revokeWithProof(s.group(), {
+    deny: [mallory.id],
+    log: { chain: [inception, rev], events: [] },
+  })
   if (removed.status !== 'built') throw new Error('Expected revoke')
   s.install(removed.result.newGroup)
   expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')

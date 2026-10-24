@@ -2,7 +2,8 @@ import { normalizeDID, randomIdentity } from '@kokuin/token'
 import { nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { revokeChain } from './fixtures/controller-chain.js'
+import { asControllerLog } from '../src/controller-log.js'
+import { denyEffects, revokeChain } from './fixtures/controller-chain.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -150,8 +151,14 @@ test('external replacement reports denied subjects as invalid and tree-time regr
   const token = await signLedgerEntry(initial.identity, {
     groupID: author.groupID,
     type: 'kumiai.device',
-    subject: bob.id,
-    value: { op: 'revoke', proof: [revoke], revoked: [{ did: bob.id }] },
+    subject: controllerID,
+    value: {
+      effects: denyEffects([revoke], bob.id),
+      removed: [],
+      op: 'revoke',
+      proof: asControllerLog([revoke]),
+      revoked: [{ did: bob.id }],
+    },
   })
   await author.applyLedgerEntries([token])
   await expect(author.processMessage(message)).rejects.toMatchObject({ reason: 'invalid' })

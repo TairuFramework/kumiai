@@ -98,17 +98,21 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
     const result = await adapter.publishRevokeProof({
       peer: s.member.peer,
       mls: s.mls,
-      input: { subject: s.subject, log: s.log },
+      input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       options: { serializeJournal: encodeJournal },
     })
-    expect(result).toEqual({ status: 'committed', epoch: epoch + 1 })
+    expect(result).toEqual({
+      status: 'committed',
+      epoch: epoch + 1,
+      effects: [{ kind: 'deny', did: s.subject, ref: { chainIndex: 1 } }],
+    })
     expect(s.member.handle().registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(s.member.handle().findMemberLeafIndex(s.subject)).toBeUndefined()
     expect(
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
         options: { serializeJournal: encodeJournal },
       }),
     ).toEqual({ status: 'already-revoked' })
@@ -153,7 +157,7 @@ test('restart adopts the journalled derived state with its proof ledger entries'
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
         options: { serializeJournal: encodeJournal },
       }),
     ).rejects.toThrow('crash before adoption')
@@ -204,7 +208,7 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
     const result = await adapter.publishRevokeProof({
       peer: s.member.peer,
       mls: s.mls,
-      input: { subject: target, log: [...s.log, nextRev] },
+      input: { deny: [target], log: { chain: [...s.log, nextRev], events: [] } },
       options: {
         serializeJournal: async (candidate) => {
           derived.push(candidate)
@@ -212,7 +216,7 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
             await adapter.publishRevokeProof({
               peer: s.other.peer,
               mls: s.other.mls,
-              input: { subject: s.subject, log: s.log },
+              input: { deny: [s.subject], log: { chain: s.log, events: [] } },
               options: { serializeJournal: encodeJournal },
             })
           }
@@ -220,9 +224,13 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
         },
       },
     })
-    expect(result).toEqual({ status: 'committed', epoch: epoch + 2 })
+    expect(result).toEqual({
+      status: 'committed',
+      epoch: epoch + 2,
+      effects: [{ kind: 'deny', did: target, ref: { chainIndex: 2 } }],
+    })
     expect(derived).toHaveLength(2)
-    expect(derived[0]?.registry.devices.get(s.subject)?.status).not.toBe('revoked')
+    expect(derived[0]?.registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(derived[1]?.registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(derived[1]?.registry.devices.get(target)?.status).toBe('revoked')
     const topic = commitTopic(await s.mls.exportRecoverySecret())
@@ -247,14 +255,14 @@ test('a winning duplicate proof returns already revoked after the race', async (
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
         options: {
           serializeJournal: async (candidate) => {
             builds++
             await adapter.publishRevokeProof({
               peer: s.other.peer,
               mls: s.other.mls,
-              input: { subject: s.subject, log: s.log },
+              input: { deny: [s.subject], log: { chain: s.log, events: [] } },
               options: { serializeJournal: encodeJournal },
             })
             return encodeJournal(candidate)
@@ -292,7 +300,7 @@ test('non-building outcomes do not serialize or advance', async () => {
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: [fixture.inception] },
+        input: { deny: [s.subject], log: { chain: [fixture.inception], events: [] } },
         options: options,
       }),
     ).toMatchObject({ status: 'not-provable', reason: 'no-rev' })
@@ -307,7 +315,10 @@ test('non-building outcomes do not serialize or advance', async () => {
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.member.identity.id, log: [fixture.inception, selfRev] },
+        input: {
+          deny: [s.member.identity.id],
+          log: { chain: [fixture.inception, selfRev], events: [] },
+        },
         options: options,
       }),
     ).toEqual({ status: 'self-affected', subject: s.member.identity.id })
@@ -318,7 +329,7 @@ test('non-building outcomes do not serialize or advance', async () => {
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: { ...s.mls },
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
         options: options,
       }),
     ).rejects.toThrow('adapter-created GroupMLS')
@@ -339,7 +350,7 @@ test('a serializer failure publishes nothing and the caller can rerun', async ()
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
         options: {
           serializeJournal: () => {
             throw new Error('cannot persist journal')
@@ -353,10 +364,14 @@ test('a serializer failure publishes nothing and the caller can rerun', async ()
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
         options: { serializeJournal: encodeJournal },
       }),
-    ).toEqual({ status: 'committed', epoch: Number(epoch) + 1 })
+    ).toEqual({
+      status: 'committed',
+      epoch: Number(epoch) + 1,
+      effects: [{ kind: 'deny', did: s.subject, ref: { chainIndex: 1 } }],
+    })
   } finally {
     await s.member.peer.dispose()
     await s.member.peer.drained()

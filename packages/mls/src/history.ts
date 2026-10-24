@@ -39,7 +39,6 @@ export function controllerLogSize(events: ReadonlyArray<unknown>): number {
 }
 
 export function proofSize(value: unknown): number {
-  if (Array.isArray(value)) return controllerLogSize(value)
   return isControllerLog(value)
     ? controllerLogSize(value.chain) + controllerLogSize(value.events)
     : 0

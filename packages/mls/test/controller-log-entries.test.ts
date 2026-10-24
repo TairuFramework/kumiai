@@ -18,7 +18,7 @@ import { defaultProposalTypes, encode, joinGroup, mlsMessageEncoder, nodeTypes }
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { JudgingContext } from '../src/authentication.js'
-import { foldControllerLog } from '../src/controller-log.js'
+import { asControllerLog, foldControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { deviceDenyHolderFor, resolveMlsContext, withJudging } from '../src/group-context.js'
@@ -31,6 +31,7 @@ import * as lifecycle from '../src/lifecycle.js'
 import { leafAt, validateEntry } from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, recordedLogOf } from '../src/registry.js'
+import { denyEffects } from './fixtures/controller-chain.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
 import {
   agent,
@@ -428,8 +429,14 @@ test('log entry beside a proof is refused', async () => {
   const proof = await signLedgerEntry(f.identity, {
     type: DEVICE_ENTRY_TYPE,
     groupID: f.group.groupID,
-    subject: target,
-    value: { op: 'revoke', proof: [revoked], revoked: [{ did: target }] },
+    subject: f.did,
+    value: {
+      effects: denyEffects([revoked], target),
+      removed: [],
+      op: 'revoke',
+      proof: asControllerLog([revoked]),
+      revoked: [{ did: target }],
+    },
   })
   await expect(
     commitWithEntries({
@@ -559,8 +566,8 @@ test('an unchanged evidenced child retains its binding against the candidate reg
     snapshot: { ...snapshotOf(f.head), deny: [issuer.id] },
   })
   const result = await api.revokeWithProof(withChild.author, {
-    subject: issuer.id,
-    log: [f.inception, revoke],
+    deny: [issuer.id],
+    log: asControllerLog([f.inception, revoke]),
   })
   expect(result.status).toBe('built')
   if (result.status !== 'built') throw new Error('Missing revoke')
@@ -785,10 +792,23 @@ test.each(['completed', 'failed'] as const)(
     const token = await signLedgerEntry(f.identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: f.group.groupID,
-      subject: peer.id,
+      subject: f.did,
       value: {
+        effects: denyEffects(
+          [
+            createRotate({
+              seed: f.seed,
+              profile: 0,
+              did: f.did,
+              prior: f.inception.event,
+              snapshot: { ...snapshotOf(f.head), deny: [peer.id] },
+            }),
+          ],
+          peer.id,
+        ),
+        removed: [],
         op: 'revoke',
-        proof: [
+        proof: asControllerLog([
           createRotate({
             seed: f.seed,
             profile: 0,
@@ -796,7 +816,7 @@ test.each(['completed', 'failed'] as const)(
             prior: f.inception.event,
             snapshot: { ...snapshotOf(f.head), deny: [peer.id] },
           }),
-        ],
+        ]),
         revoked: [{ did: peer.id }],
       },
     })

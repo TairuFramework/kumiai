@@ -182,8 +182,8 @@ test('peer recovery and restore retain authenticated revocations, reset history 
     subject: revoked.id,
   })
   const revoke = await revokeWithProof(s.aliceGroup(), {
-    subject: revoked.id,
-    log: [ledger.inception, rev],
+    deny: [revoked.id],
+    log: { chain: [ledger.inception, rev], events: [] },
   })
   if (revoke.status !== 'built') throw new Error('Expected revoke')
   s.installAlice(revoke.result.newGroup)
@@ -205,7 +205,10 @@ test('peer recovery and restore retain authenticated revocations, reset history 
       )
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), { reset: true, log: prefix })
+  const reset = await revokeWithProof(s.aliceGroup(), {
+    reset: true,
+    log: { chain: prefix, events: [] },
+  })
   if (reset.status !== 'built') throw new Error('Expected reset')
   s.installAlice(reset.result.newGroup)
   vi.spyOn(Date, 'now').mockReturnValue(180_000)

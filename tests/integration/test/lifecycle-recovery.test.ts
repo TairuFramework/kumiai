@@ -636,7 +636,10 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
       )
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), { reset: true, log: prefix })
+  const reset = await revokeWithProof(s.aliceGroup(), {
+    reset: true,
+    log: { chain: prefix, events: [] },
+  })
   if (reset.status !== 'built') throw new Error('Expected reset commit')
   s.installAlice(reset.result.newGroup)
   expect(s.aliceGroup().registry.controllers.get(fixture.controllerID)?.genFloor).toBe(1)

@@ -174,7 +174,10 @@ test('deniedHolderGrantRefused', async () => {
     chain: [inception],
     subject: f.device.id,
   })
-  const revoked = await revokeWithProof(f.group, { subject: f.device.id, log: [inception, revoke] })
+  const revoked = await revokeWithProof(f.group, {
+    deny: [f.device.id],
+    log: asControllerLog([inception, revoke]),
+  })
   if (revoked.status !== 'built') throw new Error(`Revocation was not built: ${revoked.status}`)
   const group = revoked.result.newGroup
   expect(group.currentDenySet().has(f.device.id)).toBe(true)

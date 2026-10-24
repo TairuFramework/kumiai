@@ -3,6 +3,7 @@ import { normalizeDID } from '@kokuin/token'
 import { defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
+import { asControllerLog } from '../src/controller-log.js'
 import { restoreGroup } from '../src/group.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import {
@@ -150,15 +151,23 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
       subject: issuer.id,
     }),
   ]
-  const built = await revokeWithProof(fixture.author, { subject: issuer.id, log })
+  const built = await revokeWithProof(fixture.author, {
+    deny: [issuer.id],
+    log: asControllerLog(log),
+  })
   if (built.status !== 'built') throw new Error('Missing revoke candidate')
   expect(seen).toHaveLength(0)
   built.result.newGroup.confirmAdopted()
   built.result.newGroup.confirmAdopted()
   expect(seen).toEqual([
     [
-      { device: issuer.id, controller: controllerID, logPosition: 1 },
-      { device: child.id, controller: controllerID, logPosition: 1, cascadedFrom: issuer.id },
+      { device: issuer.id, controller: controllerID, proofRef: { chainIndex: 1 } },
+      {
+        device: child.id,
+        controller: controllerID,
+        proofRef: { chainIndex: 1 },
+        cascadedFrom: issuer.id,
+      },
     ],
   ])
   const restored = await restoreGroup({
@@ -234,7 +243,7 @@ test('admission is an epoch snapshot of lapse, independent of the wall clock', a
   }
 })
 
-test('an adopted reset reports its reason and log position only once', async () => {
+test('an adopted reset reports its reason and proof reference only once', async () => {
   const { group, identity } = await lifecycleGroup()
   const peer = agent(51)
   const fixture = await lowLevelWelcome(group, peer, await bindingFor(peer))
@@ -244,13 +253,13 @@ test('an adopted reset reports its reason and log position only once', async () 
   renewed.newGroup.events.on('deviceRevoked', (batch) => {
     seen.push(batch)
   })
-  const built = await revokeWithProof(renewed.newGroup, { reset: true, log })
+  const built = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
   if (built.status !== 'built') throw new Error('Missing reset candidate')
   expect(seen).toHaveLength(0)
   built.result.newGroup.confirmAdopted()
   built.result.newGroup.confirmAdopted()
   expect(seen).toEqual([
-    [{ device: peer.id, controller: controllerID, logPosition: 1, reason: 'reset' }],
+    [{ device: peer.id, controller: controllerID, proofRef: { snapshot: 1 }, reason: 'reset' }],
   ])
 })
 

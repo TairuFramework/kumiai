@@ -12,6 +12,7 @@ import { describe, expect, test } from 'vitest'
 
 import { MLS_DEVICES_ACT, MLS_DEVICES_RES } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
+import { asControllerLog } from '../src/controller-log.js'
 import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { RevokeProofError, type RevokeProofReason } from '../src/errors.js'
 import { commitLedgerEntries, commitWithEntries } from '../src/group-commit.js'
@@ -26,7 +27,7 @@ import { signLedgerEntry } from '../src/ledger.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
-import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
+import { denyEffects, revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
 import {
   buildBoundKeyPackageBundle,
   joinBoundDevice,
@@ -438,7 +439,13 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
           subject: controllerID,
-          value: { op: 'reset', proof: [inception, reset], revoked: [] },
+          value: {
+            effects: [],
+            removed: [],
+            op: 'reset',
+            proof: asControllerLog([inception, reset]),
+            revoked: [],
+          },
         })
         group = (await enact(group, [token])).group
       }
@@ -446,10 +453,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
         const first = await signLedgerEntry(setup.identity, {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
-          subject: firstSubject,
+          subject: controllerID,
           value: {
+            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
+            removed: [],
             op: 'revoke',
-            proof: [authorityRevoke(firstSubject)],
+            proof: asControllerLog([authorityRevoke(firstSubject)]),
             revoked: [{ did: firstSubject }],
           },
         })
@@ -458,10 +467,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       const token = await signLedgerEntry(setup.identity, {
         type: DEVICE_ENTRY_TYPE,
         groupID: group.groupID,
-        subject: target,
+        subject: controllerID,
         value: {
+          effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
+          removed: [],
           op: 'revoke',
-          proof: proof[0]?.event.t === 'icp' ? proof.slice(1) : proof,
+          proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
           revoked: revoked ?? [{ did: target }],
           ...(controller == null ? {} : { controller }),
         },
@@ -493,7 +504,13 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
           subject: controllerID,
-          value: { op: 'reset', proof: [inception, reset], revoked: [] },
+          value: {
+            effects: [],
+            removed: [],
+            op: 'reset',
+            proof: asControllerLog([inception, reset]),
+            revoked: [],
+          },
         })
         const accepted = await enact(group, [token])
         group = accepted.group
@@ -504,10 +521,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
         const first = await signLedgerEntry(setup.identity, {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
-          subject: firstSubject,
+          subject: controllerID,
           value: {
+            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
+            removed: [],
             op: 'revoke',
-            proof: [authorityRevoke(firstSubject)],
+            proof: asControllerLog([authorityRevoke(firstSubject)]),
             revoked: [{ did: firstSubject }],
           },
         })
@@ -519,10 +538,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       const token = await signLedgerEntry(setup.identity, {
         type: DEVICE_ENTRY_TYPE,
         groupID: group.groupID,
-        subject: target,
+        subject: controllerID,
         value: {
+          effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
+          removed: [],
           op: 'revoke',
-          proof: proof[0]?.event.t === 'icp' ? proof.slice(1) : proof,
+          proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
           revoked: revoked ?? [{ did: target }],
           ...(controller == null ? {} : { controller }),
         },

@@ -1,4 +1,3 @@
-import type { KeyState } from '@kokuin/controller'
 import {
   type ControllerLog,
   deviceRevokeIndices,
@@ -8,7 +7,6 @@ import {
   pruneLog,
   type SignedEvent,
 } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
 
 export const CHAIN_REVOKE_REFUSED = 'chain revoke refused'
 
@@ -93,18 +91,4 @@ export function closureOf(
 
 export function isDetachedFoldReason(reason: string): boolean {
   return /sequence|digest/.test(reason)
-}
-
-/** Requires a normalised subject DID. */
-export function revokesSubject(
-  chain: ReadonlyArray<SignedEvent>,
-  states: ReadonlyArray<KeyState>,
-  index: number,
-  subject: string,
-): boolean {
-  const state = states[index]
-  const prior = states[index - 1]
-  if (index <= 0 || chain[index]?.event.t !== 'rot' || state == null || prior == null) return false
-  const denies = (state: KeyState) => [...state.deny].some((did) => normalizeDID(did) === subject)
-  return state.gen === prior.gen && denies(state) && !denies(prior)
 }

@@ -131,7 +131,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
   known.devices.set(s.identity.id, {
     controller: fixture.controllerID,
     status: 'revoked',
-    logPosition: 1,
+    proofRef: { chainIndex: 1 },
   })
   expect(
     recoverySignerEligible({ group: s.group(), known: known, signer: s.identity.id, now: 150 }),
@@ -189,7 +189,14 @@ test('revocation in either registry is permanent in the union and stale refusals
   )
   const known = {
     devices: new Map([
-      [s.bob.id, { controller: fixture.controllerID, status: 'revoked' as const, logPosition: 1 }],
+      [
+        s.bob.id,
+        {
+          controller: fixture.controllerID,
+          status: 'revoked' as const,
+          proofRef: { chainIndex: 1 },
+        },
+      ],
     ]),
     controllers: new Map(),
   }
@@ -285,7 +292,10 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
     chain: [inception],
     subject: s.bob.id,
   })
-  const removed = await revokeWithProof(s.group(), { subject: s.bob.id, log: [inception, rev] })
+  const removed = await revokeWithProof(s.group(), {
+    deny: [s.bob.id],
+    log: { chain: [inception, rev], events: [] },
+  })
   if (removed.status !== 'built') throw new Error('Expected proof commit')
   // Keep the responder's old tree while installing the accepted proof on the requester.
   const access = simpleHandleAccess({

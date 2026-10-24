@@ -1,16 +1,22 @@
-import { type ControllerLog, digestOf, isControllerLog, type SignedEvent } from '@kokuin/controller'
+import { type ControllerLog, digestOf, isControllerLog } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
 import { ingestControllerLog } from './controller-ingest.js'
-import { foldChain, foldControllerLog } from './controller-log.js'
+import { foldChain, foldControllerLog, revokeIndices } from './controller-log.js'
 import type { MLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { FoldDrop, FoldInput } from './fold.js'
 import type { GroupHandle } from './group-handle.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { authenticateLifecycleProof } from './lifecycle-proof.js'
-import { claimsFor, type ProofRef, type RemovedMember } from './member-root.js'
+import {
+  claimsFor,
+  type EffectClaim,
+  type ProofRef,
+  type RemovedEffect,
+  type RemovedMember,
+} from './member-root.js'
 import {
   adminCount,
   ROLE_ENTRY_TYPE,
@@ -44,7 +50,10 @@ export type DeviceValue = {
   controller?: string
   label?: string
   capability?: string
-  proof?: ControllerLog | Array<SignedEvent>
+  proof?: ControllerLog
+  effects?: Array<EffectClaim>
+  removed?: Array<RemovedEffect>
+  survivors?: Array<string>
   revoked?: Array<RevokedEffect>
   time?: number
   /** Beacon only: the length of the controller's FULL log at announcement time. */
@@ -57,7 +66,7 @@ export type RevokedEffect = { did: string; cascadedFrom?: string }
 
 export type Revocation = {
   controller: string
-  logPosition: number
+  proofRef: ProofRef
   reason?: 'reset'
   cascadedFrom?: string
 }
@@ -67,7 +76,6 @@ export type DeviceRecord = {
   controller: string
   status: 'active' | 'revoked'
   label?: string
-  logPosition?: number
   proofRef?: ProofRef
   reason?: 'reset'
   cascadedFrom?: string
@@ -131,10 +139,19 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
   const logBearing = v.op === 'log' || v.op === 'seed'
   const proofBearing =
     logBearing || v.op === 'reset' || (v.op === 'revoke' && v.proof !== undefined)
-  if (!proofBearing && ('proof' in v || 'revoked' in v)) return false
+  if (
+    !proofBearing &&
+    ('proof' in v || 'revoked' in v || 'effects' in v || 'removed' in v || 'survivors' in v)
+  )
+    return false
   if (
     logBearing &&
-    (!isControllerLog(v.proof) || 'revoked' in v || 'effects' in v || 'capability' in v)
+    (!isControllerLog(v.proof) ||
+      'revoked' in v ||
+      'effects' in v ||
+      'removed' in v ||
+      'survivors' in v ||
+      'capability' in v)
   )
     return false
   if ((v.op === 'register' || v.op === 'add') && typeof v.controller !== 'string') return false
@@ -147,7 +164,7 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
   if (v.logLength !== undefined && typeof v.logLength !== 'number') return false
   if (v.headDigest !== undefined && typeof v.headDigest !== 'string') return false
   if (v.time !== undefined && (typeof v.time !== 'number' || !Number.isFinite(v.time))) return false
-  if (!logBearing && v.proof !== undefined && !Array.isArray(v.proof)) return false
+  if (v.proof !== undefined && !isControllerLog(v.proof)) return false
   if (
     v.revoked !== undefined &&
     (!Array.isArray(v.revoked) ||
@@ -165,7 +182,57 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
   if (
     !logBearing &&
     (v.op === 'reset' || v.proof !== undefined) &&
-    (!Array.isArray(v.proof) || !Array.isArray(v.revoked))
+    (!isControllerLog(v.proof) ||
+      !Array.isArray(v.revoked) ||
+      !Array.isArray(v.effects) ||
+      !Array.isArray(v.removed))
+  )
+    return false
+  if (
+    v.effects !== undefined &&
+    (!Array.isArray(v.effects) ||
+      v.effects.some((claim: unknown) => {
+        if (claim == null || typeof claim !== 'object') return true
+        const c = claim as Record<string, unknown>
+        if (
+          c.kind === 'deny'
+            ? typeof c.did !== 'string'
+            : c.kind !== 'remove' ||
+              c.member == null ||
+              typeof c.member !== 'object' ||
+              typeof (c.member as Record<string, unknown>).did !== 'string' ||
+              typeof (c.member as Record<string, unknown>).add !== 'string'
+        )
+          return true
+        if (c.ref == null || typeof c.ref !== 'object') return true
+        const ref = c.ref as Record<string, unknown>
+        const keys = Object.keys(ref)
+        return !(
+          (keys.length === 1 &&
+            ((Number.isInteger(ref.chainIndex) && (ref.chainIndex as number) >= 0) ||
+              (Number.isInteger(ref.snapshot) && (ref.snapshot as number) >= 0))) ||
+          (typeof ref.event === 'string' &&
+            keys.every((key) => key === 'event' || key === 'epoch') &&
+            (ref.epoch === undefined || typeof ref.epoch === 'string'))
+        )
+      }))
+  )
+    return false
+  if (
+    v.removed !== undefined &&
+    (!Array.isArray(v.removed) ||
+      v.removed.some(
+        (effect: unknown) =>
+          effect == null ||
+          typeof effect !== 'object' ||
+          typeof (effect as Record<string, unknown>).did !== 'string' ||
+          typeof (effect as Record<string, unknown>).cascadedFrom !== 'string',
+      ))
+  )
+    return false
+  if (
+    v.survivors !== undefined &&
+    (!Array.isArray(v.survivors) || v.survivors.some((raw: unknown) => typeof raw !== 'string'))
   )
     return false
   return true
@@ -224,20 +291,53 @@ export function registryApply(
       }
       if (value.op === 'seed') projection = seedEffects(controller, devices, projection)
       controllers.set(controller, projection)
+      const resetRef = effect.resetRef
+      const denials = new Map(
+        (value.effects ?? []).flatMap((claim) =>
+          claim.kind === 'deny' ? [[normalizeDID(claim.did), claim.ref] as const] : [],
+        ),
+      )
       for (const revoked of value.revoked ?? []) {
         const did = normalizeDID(revoked.did)
         const held = devices.get(did)
         if (held?.status === 'revoked' && (value.op === 'reset' || !isResetOnly(held))) continue
+        const proofRef =
+          resetRef == null ? denials.get(normalizeDID(revoked.cascadedFrom ?? did)) : resetRef
+        if (proofRef == null) throw new RevokeProofError('effects-mismatch')
         devices.set(did, {
           controller,
           status: 'revoked',
-          logPosition: effect.logPosition,
-          ...(effect.logPosition == null ? {} : { proofRef: { chainIndex: effect.logPosition } }),
-          ...(value.op === 'reset' ? { reason: 'reset' } : {}),
+          proofRef,
+          ...(value.op === 'reset' ? { reason: 'reset' as const } : {}),
           ...(revoked.cascadedFrom == null
             ? {}
             : { cascadedFrom: normalizeDID(revoked.cascadedFrom) }),
         })
+      }
+      for (const [did, proofRef] of denials) {
+        const held = devices.get(did)
+        if (held?.status === 'revoked' && !isResetOnly(held)) continue
+        devices.set(did, { controller, status: 'revoked', proofRef })
+      }
+      const removedMembers = new Map(projection.removedMembers)
+      for (const claim of value.effects ?? []) {
+        if (claim.kind !== 'remove') continue
+        removedMembers.set(claim.member.add, {
+          did: normalizeDID(claim.member.did),
+          gen: effect.genFloor,
+          proofRef: claim.ref,
+        })
+      }
+      controllers.set(controller, { ...projection, removedMembers })
+      for (const [did, held] of devices) {
+        if (held.controller !== controller || held.proofRef == null || !('event' in held.proofRef))
+          continue
+        const index = revokeIndices(
+          controller,
+          effect.recordedLog.chain,
+          held.cascadedFrom ?? did,
+        ).at(-1)
+        if (index != null) devices.set(did, { ...held, proofRef: { chainIndex: index } })
       }
     }
     return { devices, controllers }
@@ -494,10 +594,10 @@ export function foldControl(
 /** A ledger revocation, independent of the controller's current log deny set. */
 export function revocationOf(group: GroupHandle, did: string): Revocation | null {
   const record = group.registry.devices.get(normalizeDID(did))
-  if (record?.status !== 'revoked' || record.logPosition === undefined) return null
+  if (record?.status !== 'revoked' || record.proofRef === undefined) return null
   return {
     controller: record.controller,
-    logPosition: record.logPosition,
+    proofRef: record.proofRef,
     ...(record.reason === undefined ? {} : { reason: record.reason }),
     ...(record.cascadedFrom === undefined ? {} : { cascadedFrom: record.cascadedFrom }),
   }

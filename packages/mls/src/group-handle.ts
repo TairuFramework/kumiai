@@ -76,6 +76,7 @@ import {
   prepareLifecycleGate,
   rejectionReason,
 } from './lifecycle.js'
+import type { ProofRef } from './member-root.js'
 import { createMutex, type Mutex } from './mutex.js'
 import {
   type CommitPolicyContext,
@@ -123,7 +124,7 @@ export type GroupHandleEvents = {
   deviceRevoked: Array<{
     device: string
     controller: string
-    logPosition?: number
+    proofRef?: ProofRef
     reason?: 'reset'
     cascadedFrom?: string
   }>
@@ -686,7 +687,15 @@ export class GroupHandle {
       const value: DeviceValue = entry.value
       const subject = normalizeDID(entry.subject)
       if (this.#anchor.controller != null && (value.op === 'revoke' || value.op === 'reset')) {
-        for (const effect of value.revoked ?? []) {
+        for (const effect of [
+          ...(value.revoked ?? []),
+          ...(value.effects ?? []).flatMap((claim) =>
+            claim.kind === 'deny' &&
+            !value.revoked?.some(({ did }) => normalizeDID(did) === normalizeDID(claim.did))
+              ? [{ did: claim.did }]
+              : [],
+          ),
+        ]) {
           const device = normalizeDID(effect.did)
           const record = revocationOf(this, device)
           if (record != null) revoked.push({ device, ...record })

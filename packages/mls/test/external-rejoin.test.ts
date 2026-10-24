@@ -14,6 +14,7 @@ import {
 import { describe, expect, test, vi } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
+import { asControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import {
   commitInvite,
@@ -29,7 +30,7 @@ import {
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { rejectionReason } from '../src/lifecycle.js'
 import type { GroupOptions, Invite } from '../src/types.js'
-import { revokeChain } from './fixtures/controller-chain.js'
+import { denyEffects, revokeChain } from './fixtures/controller-chain.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
@@ -692,8 +693,14 @@ test('an external join authentication context follows the returned handle ledger
     const token = await signLedgerEntry(identity, {
       type: 'kumiai.device',
       groupID: group.groupID,
-      subject: bob.id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: bob.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([inception, revoke], bob.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([inception, revoke]),
+        revoked: [{ did: bob.id }],
+      },
     })
     await result.group.applyLedgerEntries([token])
     const own = result.group.state.ratchetTree[result.group.state.privatePath.leafIndex * 2]

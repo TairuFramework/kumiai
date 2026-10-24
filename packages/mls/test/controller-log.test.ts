@@ -20,7 +20,7 @@ import {
   type SignedEvent,
   verifyEpochSignature,
 } from '@kokuin/controller'
-import { createIdentity, normalizeDID } from '@kokuin/token'
+import { createIdentity } from '@kokuin/token'
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { bytesToNumberLE, concatBytes } from '@noble/curves/utils.js'
 import { sha512 } from '@noble/hashes/sha2.js'
@@ -36,7 +36,6 @@ import {
   hasChainRevoke,
   isDetachedFoldReason,
   revokeIndices,
-  revokesSubject,
 } from '../src/controller-log.js'
 import { createRegistryControllerResolver } from '../src/embedded-resolver.js'
 import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
@@ -111,7 +110,7 @@ test('foldControllerLog refuses a chain rev', () => {
   }
 })
 
-test('revokeIndices matches revokesSubject on every index', async () => {
+test('revokeIndices identifies denial gains across forms and generations', async () => {
   const { identity, member } = await memberLog()
   const short = identity.id
   const long = member.did
@@ -135,11 +134,7 @@ test('revokeIndices matches revokesSubject on every index', async () => {
   for (const { name, chain, subject, expected } of cases) {
     const folded = foldChain(did, chain)
     if (!folded.ok) throw new Error(folded.reason)
-    const accepted = chain.flatMap((_, index) => {
-      return revokesSubject(chain, folded.states, index, normalizeDID(subject)) ? [index] : []
-    })
-    expect(accepted, name).toEqual(expected)
-    expect(revokeIndices(did, chain, subject), name).toEqual(accepted)
+    expect(revokeIndices(did, chain, subject), name).toEqual(expected)
   }
 })
 
