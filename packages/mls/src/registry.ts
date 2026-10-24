@@ -1,4 +1,4 @@
-import { type ControllerLog, digestOf, isControllerLog } from '@kokuin/controller'
+import { type ControllerLog, digestOf, isControllerLog, resolveBranches } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
@@ -6,7 +6,7 @@ import { readCapability } from './capability.js'
 import { ingestControllerLog } from './controller-ingest.js'
 import { foldChain, foldControllerLog, memberDropIndices, revokeIndices } from './controller-log.js'
 import type { MLSCredentialIdentity } from './credential.js'
-import { RevokeProofError } from './errors.js'
+import { RecoveryKnowledgeError, RevokeProofError } from './errors.js'
 import type { FoldDrop, FoldInput } from './fold.js'
 import type { GroupHandle } from './group-handle.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
@@ -468,6 +468,60 @@ export function recordedLogOf(
   controller: string,
 ): ControllerLog | undefined {
   return registry.controllers.get(normalizeDID(controller))?.recordedLog
+}
+
+export function assertRetainsKnownEffects(
+  controller: string,
+  known: DeviceRegistry,
+  candidate: DeviceRegistry,
+): void {
+  const did = normalizeDID(controller)
+  const held = known.controllers.get(did)
+  const offered = candidate.controllers.get(did)
+  const before = held?.recordedLog == null ? undefined : foldControllerLog(did, held.recordedLog)
+  const after =
+    offered?.recordedLog == null ? undefined : foldControllerLog(did, offered.recordedLog)
+  if (held?.recordedLog != null && offered?.recordedLog != null) {
+    const branches = resolveBranches(did, [held.recordedLog.chain, offered.recordedLog.chain])
+    if (!branches.ok) throw new RecoveryKnowledgeError('forked')
+  }
+  if (
+    (offered?.timeFloor ?? 0) < (held?.timeFloor ?? 0) ||
+    (offered?.genFloor ?? 0) < (held?.genFloor ?? 0)
+  )
+    throw new RecoveryKnowledgeError('floor')
+  for (const [device, record] of known.devices) {
+    if (record.controller !== did || record.status !== 'revoked' || isResetOnly(record)) continue
+    const retained = candidate.devices.get(device)
+    if (retained?.controller !== did || retained.status !== 'revoked' || isResetOnly(retained))
+      throw new RecoveryKnowledgeError('revocation')
+  }
+  const resetPast = (generation: number): boolean =>
+    after?.ok === true && after.head.gen > generation && (offered?.genFloor ?? 0) > generation
+  for (const [add, member] of held?.removedMembers ?? []) {
+    if (!offered?.removedMembers.has(add) && !resetPast(member.gen))
+      throw new RecoveryKnowledgeError('removal')
+  }
+  if (before?.ok) {
+    const retained = new Set(after?.ok ? after.applied : [])
+    const settledAt = after?.ok
+      ? after.states.findIndex((state) => state.digest === before.head.epoch)
+      : -1
+    const settled = after?.ok === true && settledAt >= 0 && settledAt < after.states.length - 1
+    for (const event of before.applied) {
+      if (!retained.has(event) && !settled && !resetPast(before.head.gen))
+        throw new RecoveryKnowledgeError('epoch-event')
+    }
+  }
+  if (after?.ok) {
+    for (const member of after.head.members.values()) {
+      if (
+        member.effective &&
+        (offered?.attestations.get(member.key) ?? 0) < (held?.attestations.get(member.key) ?? 0)
+      )
+        throw new RecoveryKnowledgeError('attestation')
+    }
+  }
 }
 
 export function registryForLog(controller: string, log: ControllerLog): DeviceRegistry {

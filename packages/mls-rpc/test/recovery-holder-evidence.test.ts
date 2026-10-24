@@ -24,6 +24,7 @@ import {
   createRecoveryBindingState,
   type RecoveryBinding,
   type RecoveryBindingRequest,
+  type RecoveryCandidate,
 } from '../src/recovery.js'
 import { createRealBoundRecovery } from './fixtures/real-group.js'
 
@@ -165,6 +166,8 @@ async function recover(
   expect(pending).not.toHaveProperty('renewalRequired')
   if (pending == null || 'renewalRequired' in pending)
     throw new Error('Expected recovery candidate')
+  const candidate = pending as RecoveryCandidate
+  expect(candidate.knownRegistry).toBe(candidate.group.registry)
   return pending
 }
 

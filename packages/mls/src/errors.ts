@@ -39,6 +39,28 @@ export class LeafBindingError extends Error {
 
 export type LeafLapsedReason = 'lapsed'
 
+export type RecoveryKnowledgeReason =
+  | 'revocation'
+  | 'removal'
+  | 'epoch-event'
+  | 'attestation'
+  | 'floor'
+  | 'forked'
+
+export class RecoveryKnowledgeError extends Error {
+  #reason: RecoveryKnowledgeReason
+
+  constructor(reason: RecoveryKnowledgeReason) {
+    super(`Recovery drops known lifecycle knowledge: ${reason}`)
+    this.name = 'RecoveryKnowledgeError'
+    this.#reason = reason
+  }
+
+  get reason(): RecoveryKnowledgeReason {
+    return this.#reason
+  }
+}
+
 export class LeafLapsedError extends Error {
   #reason: LeafLapsedReason
 

@@ -1,4 +1,4 @@
-import { encodeKey } from '@kokuin/controller'
+import { createRemove, encodeKey, epochHeads } from '@kokuin/controller'
 import { normalizeDID, randomIdentity } from '@kokuin/token'
 import { nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -22,7 +22,7 @@ import { registryForLog } from '../src/registry.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
 import { pipelineGroup } from './fixtures/lifecycle-pipeline.js'
 
-test('recovery signer with an effective membership leaf is eligible', async () => {
+test('member-rooted signer judged on the candidate registry', async () => {
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
   const f = await buildEpoch({ members: 1, renewEvery: 1000 })
   const member = f.members[0]
@@ -38,12 +38,22 @@ test('recovery signer with an effective membership leaf is eligible', async () =
   })
   own.leaf.signaturePublicKey = member.identity.publicKey
   const known = registryForLog(f.did, f.log)
-  const params = { group, known, signer: normalizeDID(member.did), now: 500 }
+  const params = { group, registry: known, signer: normalizeDID(member.did), now: 500 }
   expect(recoverySignerEligible(params)).toBe(true)
+  const removed = createRemove({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: member.add,
+  })
+  const removedRegistry = registryForLog(f.did, { ...f.log, events: [...f.log.events, removed] })
+  expect(recoverySignerEligible({ ...params, registry: removedRegistry })).toBe(false)
+
   expect(recoverySignerEligible({ ...params, now: 1301 })).toBe(false)
-  expect(recoverySignerEligible({ ...params, known: { ...known, controllers: new Map() } })).toBe(
-    false,
-  )
+  expect(
+    recoverySignerEligible({ ...params, registry: { ...known, controllers: new Map() } }),
+  ).toBe(false)
 })
 
 test('verdicts authenticate the signer and bind the signed request without consuming its key', async () => {
@@ -248,12 +258,12 @@ test('recovery eligibility uses attestedTreeTime over the known registry', async
   const attestations = new Map([[encodeKey(a.identity.publicKey, 'EdDSA'), 1200]])
   const params = {
     group,
-    known: { ...known, controllers: new Map([[f.did, { ...projection, attestations }]]) },
+    registry: { ...known, controllers: new Map([[f.did, { ...projection, attestations }]]) },
     signer: b.identity.id,
     now: 500,
   }
   expect(recoverySignerEligible(params)).toBe(true)
   attestations.set(encodeKey(b.identity.publicKey, 'EdDSA'), 1100)
   expect(recoverySignerEligible(params)).toBe(false)
-  expect(recoverySignerEligible({ ...params, known })).toBe(true)
+  expect(recoverySignerEligible({ ...params, registry: known })).toBe(true)
 })

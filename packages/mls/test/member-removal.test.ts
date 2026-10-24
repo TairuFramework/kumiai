@@ -601,7 +601,7 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
   expect(
     recoverySignerEligible({
       group: result.newGroup,
-      known: result.newGroup.registry,
+      registry: result.newGroup.registry,
       signer: f.device.id,
       now: 150,
     }),
@@ -623,7 +623,7 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
   const late = await rawApplication(f.receiver)
   expect(isLapsed(group, leaf)).toBe(true)
   expect(
-    recoverySignerEligible({ group, known: group.registry, signer: f.device.id, now: 252 }),
+    recoverySignerEligible({ group, registry: group.registry, signer: f.device.id, now: 252 }),
   ).toBe(false)
   await expect(group.processMessage(early)).resolves.toBeDefined()
   await expect(group.processMessage(late)).rejects.toMatchObject({ reason: 'lapsed' })

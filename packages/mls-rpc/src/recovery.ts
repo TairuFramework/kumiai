@@ -1,6 +1,7 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   assertRecoveryBinding,
+  assertRetainsKnownEffects,
   type ClientState,
   type ControllerBinding,
   confirmationKey,
@@ -43,31 +44,6 @@ export type RecoveryCandidate = PendingRecovery & {
   knownRegistry: DeviceRegistry
   replyLedger: Array<string>
   signer: string
-}
-
-export function knownRecoveryRegistry(
-  known: DeviceRegistry,
-  reply: DeviceRegistry,
-): DeviceRegistry {
-  const devices = new Map(reply.devices)
-  for (const [did, record] of known.devices) {
-    if (record.status === 'revoked' || !devices.has(did)) devices.set(did, record)
-  }
-  const controllers = new Map(reply.controllers)
-  for (const [id, projection] of known.controllers) {
-    const offered = controllers.get(id)
-    controllers.set(
-      id,
-      offered == null
-        ? projection
-        : {
-            ...offered,
-            genFloor: Math.max(projection.genFloor, offered.genFloor),
-            timeFloor: Math.max(projection.timeFloor, offered.timeFloor),
-          },
-    )
-  }
-  return { devices, controllers }
 }
 
 export function createRecoveryBindingState(identity: OwnIdentity, host?: RecoveryBinding) {
@@ -145,6 +121,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
         binding = current(group)
       }
       let signerEligible = group.anchor.controller == null
+      let candidateSource: GroupHandle | undefined
       const build = (controller?: ControllerBinding) => {
         signerEligible = group.anchor.controller == null
         return joinGroupExternal({
@@ -155,16 +132,18 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
           controller,
           beforeBinding: async (pending, source) => {
             if (group.anchor.controller == null) return
+            assertRetainsKnownEffects(group.anchor.controller, group.registry, source.registry)
             if (
               !recoverySignerEligible({
                 group: pending,
-                known: knownRecoveryRegistry(group.registry, source.registry),
+                registry: source.registry,
                 signer: reply.signer,
               })
             )
               throw new Error('Ineligible recovery attestation signer')
             signerEligible = true
-            if (controller == null || !(await usable(group, controller)))
+            candidateSource = source
+            if (controller == null || !(await usable(source, controller)))
               throw new LeafBindingError('floating-refused')
           },
           options: {
@@ -195,7 +174,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
         )
           return null
         binding = await request(group)
-        if (binding == null || !(await usable(group, binding)))
+        if (binding == null || candidateSource == null || !(await usable(candidateSource, binding)))
           return { renewalRequired: true } as const
         try {
           return await candidate(binding)
@@ -241,7 +220,9 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       )
         return 'advisory'
       if (group.anchor.controller != null)
-        return recoverySignerEligible({ group, known, signer }) ? 'authoritative' : 'advisory'
+        return recoverySignerEligible({ group, registry: known, signer })
+          ? 'authoritative'
+          : 'advisory'
       if (verdict.verdict === 'confirmed') return 'authoritative'
       for (const node of sourceTree) {
         if (node == null || !('leaf' in node)) continue

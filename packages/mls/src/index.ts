@@ -82,6 +82,8 @@ export {
   type LeafBindingReason,
   LeafLapsedError,
   type LeafLapsedReason,
+  RecoveryKnowledgeError,
+  type RecoveryKnowledgeReason,
   RevokeProofError,
   type RevokeProofReason,
 } from './errors.js'
@@ -268,6 +270,7 @@ export {
   sealRecoveryVerdict,
 } from './recovery-verdict.js'
 export {
+  assertRetainsKnownEffects,
   authority,
   beaconOf,
   type ControllerBeacon,

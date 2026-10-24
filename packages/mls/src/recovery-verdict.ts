@@ -159,14 +159,14 @@ export async function openRecoveryVerdict(
 
 export type RecoverySignerEligibleParams = {
   group: GroupHandle
-  known: DeviceRegistry
+  registry: DeviceRegistry
   signer: string
   /** Seconds since epoch; defaults to the current time. */
   now?: number
 }
 
 export function recoverySignerEligible(params: RecoverySignerEligibleParams): boolean {
-  const { group, known, signer, now = Date.now() / 1000 } = params
+  const { group, registry, signer, now = Date.now() / 1000 } = params
   const controller = group.anchor.controller
   if (controller == null) return false
   try {
@@ -177,22 +177,23 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
         ? undefined
         : readCapability(binding.capability).payload
     if (
-      known.devices.get(normalizeDID(signer))?.status === 'revoked' ||
-      (payload?.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
+      registry.devices.get(normalizeDID(signer))?.status === 'revoked' ||
+      (payload?.cap != null &&
+        registry.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
     )
       return false
     const folded = foldChain(controller, binding.prefix)
-    const projection = known.controllers.get(normalizeDID(controller))
+    const projection = registry.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
     const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
     const authority = effectiveAuthorityOf(
       { did: signer, binding: bound, leafKey: binding.leafKey },
-      known,
+      registry,
       controller,
     )
     if ('status' in authority) return false
     if (binding.member != null && authority.slot === 'membership') {
-      const status = memberRootStatus(known, controller, {
+      const status = memberRootStatus(registry, controller, {
         kind: 'member',
         did: signer,
         add: binding.member.add,
@@ -205,9 +206,9 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
       )
         return false
     }
-    const expiry = leafExpiry(bound, known, controller)
+    const expiry = leafExpiry(bound, registry, controller)
     if (expiry == null) return false
-    const time = attestedTreeTime(group.state.ratchetTree, known, controller)
+    const time = attestedTreeTime(group.state.ratchetTree, registry, controller)
     return expiry >= Math.max(time, now - 300)
   } catch {
     return false
