@@ -7,6 +7,10 @@
   dir: packages/broadcast
   intents:
     - band-align-0-11
+"@kumiai/broadcast@0.12.0":
+  dir: packages/broadcast
+  intents:
+    - management-tier-0-12
 "@kumiai/broadcast@0.5.0":
   dir: packages/broadcast
   intents:
@@ -41,6 +45,10 @@
   dir: packages/hub-client
   intents:
     - band-align-0-11
+"@kumiai/hub-client@0.12.0":
+  dir: packages/hub-client
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-client@0.5.0":
   dir: packages/hub-client
   intents:
@@ -74,6 +82,11 @@
   dir: packages/hub-conformance
   intents:
     - band-align-0-11
+"@kumiai/hub-conformance@0.12.0":
+  dir: packages/hub-conformance
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-conformance@0.5.0":
   dir: packages/hub-conformance
   intents:
@@ -104,6 +117,11 @@
   dir: packages/hub-http
   intents:
     - band-align-0-11
+"@kumiai/hub-http@0.12.0":
+  dir: packages/hub-http
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-protocol@0.10.0":
   dir: packages/hub-protocol
   intents:
@@ -120,6 +138,10 @@
   dir: packages/hub-protocol
   intents:
     - band-align-0-11
+"@kumiai/hub-protocol@0.12.0":
+  dir: packages/hub-protocol
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -166,6 +188,11 @@
   dir: packages/hub-server
   intents:
     - band-align-0-11
+"@kumiai/hub-server@0.12.0":
+  dir: packages/hub-server
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -196,6 +223,11 @@
   dir: packages/hub-store
   intents:
     - band-align-0-11
+"@kumiai/hub-store@0.12.0":
+  dir: packages/hub-store
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-tunnel@0.10.0":
   dir: packages/hub-tunnel
   intents:
@@ -216,6 +248,10 @@
   dir: packages/hub-tunnel
   intents:
     - band-align-0-11
+"@kumiai/hub-tunnel@0.12.0":
+  dir: packages/hub-tunnel
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -245,6 +281,10 @@
   dir: packages/hub-wake
   intents:
     - band-align-0-11
+"@kumiai/hub-wake@0.12.0":
+  dir: packages/hub-wake
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-wake@0.6.0":
   dir: packages/hub-wake
   intents:
@@ -269,6 +309,10 @@
   dir: packages/mls-hub
   intents:
     - band-align-0-11
+"@kumiai/mls-hub@0.12.0":
+  dir: packages/mls-hub
+  intents:
+    - management-tier-0-12
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
@@ -310,6 +354,10 @@
   dir: packages/mls-rpc
   intents:
     - band-align-0-11
+"@kumiai/mls-rpc@0.12.0":
+  dir: packages/mls-rpc
+  intents:
+    - management-tier-0-12
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -361,6 +409,10 @@
   dir: packages/mls
   intents:
     - kokuin-0-2
+"@kumiai/mls@0.12.0":
+  dir: packages/mls
+  intents:
+    - management-tier-0-12
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -397,6 +449,10 @@
   dir: packages/rpc-conformance
   intents:
     - band-align-0-11
+"@kumiai/rpc-conformance@0.12.0":
+  dir: packages/rpc-conformance
+  intents:
+    - management-tier-0-12
 "@kumiai/rpc-conformance@0.5.0":
   dir: packages/rpc-conformance
   intents:
@@ -453,6 +509,10 @@
   dir: packages/rpc
   intents:
     - band-align-0-11
+"@kumiai/rpc@0.12.0":
+  dir: packages/rpc
+  intents:
+    - management-tier-0-12
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

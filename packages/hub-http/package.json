@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/hub-http",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Production HTTP server for Kumiai hubs",
   "keywords": [
     "hub",

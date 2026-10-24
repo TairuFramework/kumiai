@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/rpc-conformance",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Conformance test suite for the @kumiai/rpc GroupCrypto and GroupMLS consumer ports",
   "keywords": [
     "rpc",

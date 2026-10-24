@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/hub-store",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "SQL hub store for Kumiai hubs, backed by Hozon",
   "keywords": [
     "hub",
