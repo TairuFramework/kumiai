@@ -39,8 +39,9 @@ import { foldChain } from './controller-log.js'
 import { type MLSCredentialIdentity, parseMLSCredentialIdentity } from './credential.js'
 import { createRegistryControllerResolver, prefixRelation } from './embedded-resolver.js'
 import { LeafBindingError } from './errors.js'
+import { epochEventCount, MAX_EPOCH_EVENTS_FOR_LEAVES } from './history.js'
 import { effectiveAuthorityOf, memberRootStatus, memberRootsOf } from './member-root.js'
-import { type DeviceRegistry, denySetOf, mayReadmitResetDevice } from './registry.js'
+import { type DeviceRegistry, denySetOf, mayReadmitResetDevice, recordedLogOf } from './registry.js'
 
 export { MLS_LEAF_ACT, MLS_LEAF_RES } from './capability.js'
 
@@ -367,6 +368,12 @@ export async function verifyLeafCredential(
   try {
     const roots = memberRootsOf(binding, parsed.id)
     const primary = roots[0]
+    const checkEpochCap = () => {
+      if (judging.mode !== 'admit' || primary?.root.kind !== 'member' || registry == null) return
+      const log = recordedLogOf(registry, binding.id)
+      if (log != null && epochEventCount(log) > MAX_EPOCH_EVENTS_FOR_LEAVES)
+        throw new LeafBindingError('epoch-cap')
+    }
     if (!structural && registry == null && roots.some(({ root }) => root.kind === 'member'))
       throw new LeafBindingError('controller-mismatch')
     const frozen = createRegistryControllerResolver({
@@ -411,6 +418,7 @@ export async function verifyLeafCredential(
       }
       if (!constantTimeEqual(member.key.publicKey, signaturePublicKey))
         throw new LeafBindingError('confirmation-invalid')
+      checkEpochCap()
       return
     }
     if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
@@ -446,6 +454,7 @@ export async function verifyLeafCredential(
     const holderGrant = checkHolderEvidence(parsed, signaturePublicKey, common.trustedGrantLifetime)
     if (holderGrant != null) await verifyHolder(holderGrant, 'structural')
     if (structural) return
+    checkEpochCap()
 
     if (primary?.root.kind === 'member') {
       const status =

@@ -64,6 +64,7 @@ import {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
+import { settleAdvisory } from './history.js'
 import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from './ledger.js'
 import {
   assertSenderNotLapsed,
@@ -92,6 +93,7 @@ import {
   foldControl,
   isDeviceValue,
   mayReadmitResetDevice,
+  recordedLogOf,
   revocationOf,
 } from './registry.js'
 import type { RosterState } from './roster.js'
@@ -624,6 +626,12 @@ export class GroupHandle {
   /** The device registry folded from the anchor and every applied ledger entry. */
   get registry(): DeviceRegistry {
     return this.#registry
+  }
+
+  settleAdvisory(): 'ok' | 'prompt' | 'blocked' {
+    const controller = this.#anchor.controller
+    const log = controller == null ? undefined : recordedLogOf(this.#registry, controller)
+    return log == null ? 'ok' : settleAdvisory(log)
   }
 
   /**

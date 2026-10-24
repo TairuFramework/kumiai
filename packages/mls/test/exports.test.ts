@@ -11,10 +11,12 @@ import {
   effectDelta,
   effectiveAuthorityOf,
   effectOf,
+  epochEventCount,
   type FoldOk,
   ingestControllerLog,
   type JudgingContext,
   type LeafRef,
+  MAX_EPOCH_EVENTS_FOR_LEAVES,
   type MemberRootStatus,
   memberDropIndices,
   memberRootStatus,
@@ -22,6 +24,8 @@ import {
   proofSize,
   recordedLogOf,
   registryForLog,
+  SETTLE_PROMPT_EPOCH_EVENTS,
+  settleAdvisory,
 } from '../src/index.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
 
@@ -75,6 +79,13 @@ test('member authority and effect helpers are available through the package entr
 
 test('proof sizing is available through the package entry point', () => {
   expect(proofSize({ chain: [], events: [] })).toBe(0)
+})
+
+test('epoch cap helpers are available through the package entry point', async () => {
+  const { log } = await buildEpoch({ members: 0, revokes: SETTLE_PROMPT_EPOCH_EVENTS })
+  expect(epochEventCount(log)).toBe(24)
+  expect(settleAdvisory(log)).toBe('prompt')
+  expect(epochEventCount(log)).toBeLessThan(MAX_EPOCH_EVENTS_FOR_LEAVES)
 })
 
 test('registry controller resolution is available through the package entry point', async () => {

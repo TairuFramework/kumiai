@@ -171,7 +171,15 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
-export { HISTORY_HORIZON, historySize, proofSize } from './history.js'
+export {
+  epochEventCount,
+  HISTORY_HORIZON,
+  historySize,
+  MAX_EPOCH_EVENTS_FOR_LEAVES,
+  proofSize,
+  SETTLE_PROMPT_EPOCH_EVENTS,
+  settleAdvisory,
+} from './history.js'
 export {
   decodeKeyPackage,
   decodePrivateKeyPackage,
