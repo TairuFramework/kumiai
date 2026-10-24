@@ -32,6 +32,16 @@
   granularity is enough, because after a settle kumiai already downgrades `{ event }` refs to
   `{ chainIndex }`.
 - Re-check canonical DID handling on both sides wherever kumiai reads kokuin's deny or member state.
+- In 0.3, chain states may hold removed incarnations: either as tombstones in `members`, or in a
+  separate `removed` map, which kumiai asked kokuin for. If they land in `members`, rewrite two
+  snapshot-drop predicates to `!has(add) || get(add).removed`:
+  - `proofsFor` drops in `packages/mls/src/member-root.ts`;
+  - `memberDropIndices` in `packages/mls/src/controller-log.ts`.
+  Then re-audit the code that iterates chain-state members (`member-root.ts` claim and cascade
+  checks, `controller-ingest.ts` effect delta).
+- Tighten attest-clock attribution in `registryApply` (`packages/mls/src/registry.ts`) to effective
+  members of the previous projection. Today it matches any incarnation by DID. The admission gate
+  already refuses removed attestors.
 
 ## 3. Catch up the Spec P phase 2 worktree
 
