@@ -10,26 +10,31 @@ import {
   digestOf,
   encodeKey,
   epochHeads,
+  MAX_EPOCH_EVENTS,
+  MAX_LOG_EVENTS,
   pruneLog,
   snapshotOf,
 } from '@kokuin/controller'
 import { type OwnIdentity, stringifyToken } from '@kokuin/token'
-import { defaultProposalTypes } from 'ts-mls'
+import { ed25519 } from '@noble/curves/ed25519.js'
+import { toB64U } from '@sozai/codec'
+import { defaultProposalTypes, type LeafIndex } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
 import { foldControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
-import { RevokeProofError } from '../src/errors.js'
+import { LeafBindingError, RevokeProofError } from '../src/errors.js'
 import { commitLedgerEntries } from '../src/group.js'
 import { restoreGroup } from '../src/group-create.js'
+import { buildCommitPolicyContext } from '../src/group-handle.js'
 import * as api from '../src/group-lifecycle.js'
 import { processWelcome } from '../src/group-welcome.js'
 import { computeHead, readLedgerHead } from '../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import * as lifecycle from '../src/lifecycle.js'
-import { isLapsed, leafAt, leafExpiry } from '../src/lifecycle.js'
+import { isLapsed, leafAt, leafExpiry, prepareLifecycleGate } from '../src/lifecycle.js'
 import { authenticateLifecycleProof } from '../src/lifecycle-proof.js'
 import { effectiveAuthorityOf } from '../src/member-root.js'
 import { recoverySignerEligible } from '../src/recovery-verdict.js'
@@ -406,24 +411,123 @@ test('survivor grant minted by a member removed in the same window is refused', 
 })
 
 test.each([
-  { aud: agent(99).id },
-  { cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: agent(99).publicKey }) },
-  { act: 'manage' },
-  { res: 'kumiai/devices' },
-  { exp: 100 + 2_592_001 },
-  { mbr: undefined },
-  { cap: 'delegated' },
-])('survivor grant refuses invalid claims %j', async (extra) => {
+  { extra: { aud: agent(99).id }, error: new LeafBindingError('confirmation-invalid') },
+  {
+    extra: { cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: agent(99).publicKey }) },
+    error: new LeafBindingError('confirmation-invalid'),
+  },
+  { extra: { act: 'manage' }, error: new Error('Invalid capability: permission not granted') },
+  {
+    extra: { res: 'kumiai/devices' },
+    error: new Error('Invalid capability: permission not granted'),
+  },
+  { extra: { exp: 100 + 2_592_001 }, error: new LeafBindingError('lifetime-cap') },
+  { extra: { mbr: undefined }, error: new LeafBindingError('issuer-mismatch') },
+  { extra: { cap: 'delegated' }, error: new LeafBindingError('issuer-mismatch') },
+  {
+    extra: { exp: 2001 },
+    error: new Error("Invalid capability: member grant expires after the issuer's lease: 2000"),
+  },
+])('survivor grant refuses invalid claims $extra', async ({ extra, error }) => {
   const f = await fixture()
-  await expect(f.build([await f.grant(f.b, f.device, extra)])).rejects.not.toBeInstanceOf(TypeError)
+  const rejection = await f
+    .build([await f.grant(f.b, f.device, extra)])
+    .catch((cause: unknown) => cause)
+  expect(Object.getPrototypeOf(rejection)).toBe(Object.getPrototypeOf(error))
+  expect(rejection).toMatchObject({
+    message: error.message,
+    ...(error instanceof LeafBindingError ? { reason: error.reason } : {}),
+  })
 })
 
 test('survivor grant signature is authenticated', async () => {
   const f = await fixture()
   const valid = await f.grant(f.b, f.device)
-  const [header, payload] = valid.split('.')
-  const invalid = `${header}.${payload}.${'A'.repeat(86)}`
-  await expect(f.build([invalid])).rejects.not.toBeInstanceOf(TypeError)
+  const { data, header, payload } = readCapability(valid)
+  const invalid = stringifyToken({
+    header,
+    payload,
+    data,
+    signature: toB64U(ed25519.sign(new TextEncoder().encode(data), f.c.privateKey)),
+  })
+  expect(readCapability(invalid).payload).toEqual(payload)
+  const rejection = await f.build([invalid]).catch((cause: unknown) => cause)
+  expect(Object.getPrototypeOf(rejection)).toBe(Error.prototype)
+  expect(rejection).toMatchObject({ message: 'Invalid signature' })
+})
+
+test('removed membership with a registered survivor refuses admission but keeps retention and rejudging', async () => {
+  const f = await fixture('membership')
+  const survivor = await f.grant(f.b, f.device)
+  const { newGroup } = built(await f.build([survivor]))
+  const projection = newGroup.registry.controllers.get(f.did)
+  expect(projection?.removedMembers.has(f.a.add)).toBe(true)
+  expect(projection?.survivorGrants.get(f.device.id)).toBe(survivor)
+  const leaf = leafAt(newGroup.state.ratchetTree, newGroup.findMemberLeafIndex(f.device.id) ?? -1)
+  if (leaf == null) throw new Error('Missing membership survivor')
+  for (const mode of ['admit', 'retain', 'rejudge'] as const) {
+    const result = verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
+      judging: () => ({ registry: newGroup.registry, stage: 'full', mode }),
+    })
+    if (mode === 'admit') {
+      await expect(result).rejects.toBeInstanceOf(LeafBindingError)
+      await expect(result).rejects.toMatchObject({ reason: 'member-removed' })
+    } else await expect(result).resolves.toBeUndefined()
+  }
+})
+
+test.each(['direct', 'membership'] as const)(
+  'commit survivor check refuses a removed %s authority',
+  async (kind) => {
+    const f = await fixture(kind)
+    const { newGroup } = built(await f.build())
+    const candidateRegistry = newGroup.registry
+    expect(
+      effectiveAuthorityOf(
+        { did: f.device.id, binding: f.binding, leafKey: f.device.publicKey },
+        candidateRegistry,
+        f.did,
+      ),
+    ).toEqual({ status: 'removed' })
+    const gate = await prepareLifecycleGate({
+      group: f.group,
+      entries: [],
+      candidateRegistry,
+      context: buildCommitPolicyContext(f.group, {
+        baseRoster: f.group.roster,
+        candidateRoster: f.group.roster,
+        entryIDs: [],
+        enactedDeviceEntries: [],
+      }),
+    })
+    const check = () =>
+      gate.check({
+        kind: 'commit',
+        senderLeafIndex: f.group.state.privatePath.leafIndex as LeafIndex,
+        proposals: [],
+      })
+    expect(check).toThrow(LeafBindingError)
+    expect(check).toThrow(expect.objectContaining({ reason: 'member-removed' }))
+  },
+)
+
+test('oversized retained removal evidence refuses with too-large', async () => {
+  const f = await fixture()
+  const result = api.revokeWithProof(f.group, {
+    log: settle(f),
+    remove: f.remove,
+    evidence: [
+      {
+        controller: f.did,
+        epoch: f.rmv.event.e,
+        closure: {
+          chain: f.log.chain,
+          events: Array.from({ length: MAX_EPOCH_EVENTS + MAX_LOG_EVENTS + 2 }, () => f.rmv),
+        },
+      },
+    ],
+  })
+  await expect(result).resolves.toEqual({ status: 'not-provable', reason: 'too-large' })
 })
 
 test('a substituted capability expires at the earlier of its own and substitute expiry', async () => {

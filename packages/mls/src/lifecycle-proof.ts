@@ -1,5 +1,5 @@
 import { assertCapabilityToken, checkCapability } from '@kokuin/capability'
-import { type ControllerLog, isControllerLog, mergeLogs } from '@kokuin/controller'
+import { type ControllerLog, isControllerLog, LOG_TOO_LARGE, mergeLogs } from '@kokuin/controller'
 import { normalizeDID, verifyToken } from '@kokuin/token'
 import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes } from 'ts-mls'
 
@@ -56,6 +56,34 @@ type AuthenticatedProof = {
   resetRef?: { snapshot: number }
 }
 
+/** Keep controller merge limits inside the lifecycle proof error boundary. */
+export function mergeLifecycleProofLogs(
+  controller: string,
+  first: ControllerLog,
+  second: ControllerLog,
+): ControllerLog {
+  try {
+    return mergeLogs(controller, first, second)
+  } catch (cause) {
+    if (!(cause instanceof Error) || !cause.message.startsWith(LOG_TOO_LARGE)) throw cause
+    const error = new RevokeProofError('too-large')
+    error.cause = cause
+    throw error
+  }
+}
+
+/** Reattach historical closures without reviving unapplied current-epoch events. */
+export function lifecycleProofLog(
+  controller: string,
+  ingested: ReturnType<typeof ingestControllerLog>,
+  proof: ControllerLog,
+): ControllerLog {
+  return mergeLifecycleProofLogs(controller, ingested.log, {
+    chain: ingested.log.chain,
+    events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
+  })
+}
+
 /** Authenticate replayable log data without reading any membership state. */
 export function authenticateLifecycleProof(
   controllerID: string,
@@ -104,11 +132,7 @@ export function authenticateLifecycleProof(
     if (!delta.generation || ingested.after.head.gen <= floor)
       throw new RevokeProofError('generation-floor')
   } else if (delta.generation) throw new RevokeProofError('needs-reset')
-  // Historical closures stay in the ledger; the projection keeps only authoritative events.
-  const proofLog = mergeLogs(controller, ingested.log, {
-    chain: ingested.log.chain,
-    events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
-  })
+  const proofLog = lifecycleProofLog(controller, ingested, proof)
   const expected = claimsFor(controller, previous?.recordedLog, proofLog, floor)
   if (value.effects == null || (value.effects.length === 0 && value.op !== 'reset'))
     throw new RevokeProofError('no-rev')

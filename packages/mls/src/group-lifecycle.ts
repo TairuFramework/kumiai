@@ -3,7 +3,6 @@ import {
   didFromInception,
   digestOf,
   type InceptionEvent,
-  mergeLogs,
   pruneLog,
 } from '@kokuin/controller'
 import { createSigningIdentityForDID, type DIDString, normalizeDID } from '@kokuin/token'
@@ -38,6 +37,8 @@ import { isLapsed, leafAt, treeTime, validateEntry } from './lifecycle.js'
 import {
   authenticateLifecycleProof,
   lifecycleProofEffects,
+  lifecycleProofLog,
+  mergeLifecycleProofLogs,
   verifyLifecycleProof,
 } from './lifecycle-proof.js'
 import { claimsFor, type EffectClaim, effectiveAuthorityOf } from './member-root.js'
@@ -442,7 +443,7 @@ export async function revokeWithProof(
                 removals.some(({ add }) => event.add === add),
             ),
         )
-        const supplied = mergeLogs(
+        const supplied = mergeLifecycleProofLogs(
           controller,
           { chain: params.log.chain, events: proof.events },
           { chain: params.log.chain, events: evidence.flatMap(({ closure }) => closure.events) },
@@ -478,10 +479,7 @@ export async function revokeWithProof(
       const effects = claimsFor(
         controller,
         projection?.recordedLog,
-        mergeLogs(controller, ingested.log, {
-          chain: ingested.log.chain,
-          events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
-        }),
+        lifecycleProofLog(controller, ingested, proof),
         projection?.genFloor ?? 0,
       )
       if (
