@@ -14,7 +14,7 @@ import { foldChain } from './controller-log.js'
 import type { ControllerBinding } from './credential.js'
 import type { GroupHandle } from './group-handle.js'
 import { leafExpiry } from './lifecycle.js'
-import { memberRootStatus } from './member-root.js'
+import { effectiveAuthorityOf, memberRootStatus } from './member-root.js'
 import {
   type OpenSealedGroupInfoParams,
   openSealedReply,
@@ -184,7 +184,14 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
     const folded = foldChain(controller, binding.prefix)
     const projection = known.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
-    if (binding.member != null) {
+    const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
+    const authority = effectiveAuthorityOf(
+      { did: signer, binding: bound, leafKey: binding.leafKey },
+      known,
+      controller,
+    )
+    if ('status' in authority) return false
+    if (binding.member != null && authority.slot === 'membership') {
       const status = memberRootStatus(known, controller, {
         kind: 'member',
         did: signer,
@@ -198,7 +205,6 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
       )
         return false
     }
-    const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
     const expiry = leafExpiry(bound, known, controller)
     if (expiry == null) return false
     let time = projection?.timeFloor ?? 0

@@ -1,12 +1,21 @@
-import { type ControllerLog, isControllerLog } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { assertCapabilityToken, checkCapability } from '@kokuin/capability'
+import { type ControllerLog, isControllerLog, mergeLogs } from '@kokuin/controller'
+import { normalizeDID, verifyToken } from '@kokuin/token'
 import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes } from 'ts-mls'
 
 import { hasHolderEvidence } from './authentication.js'
-import { readCapability } from './capability.js'
+import {
+  assertCapabilityLifetime,
+  assertControllerGrant,
+  capabilityKey,
+  MLS_LEAF_ACT,
+  MLS_LEAF_RES,
+  readCapability,
+} from './capability.js'
 import { effectDelta, ingestControllerLog } from './controller-ingest.js'
 import { foldChain } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
+import { createRegistryControllerResolver } from './embedded-resolver.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
 import { controllerLogSize, HISTORY_HORIZON, historySize, proofSize } from './history.js'
@@ -17,6 +26,7 @@ import {
   claimsFor,
   type EffectClaim,
   effectOf,
+  memberRootStatus,
   type RemovedEffect,
 } from './member-root.js'
 import {
@@ -94,12 +104,17 @@ export function authenticateLifecycleProof(
     if (!delta.generation || ingested.after.head.gen <= floor)
       throw new RevokeProofError('generation-floor')
   } else if (delta.generation) throw new RevokeProofError('needs-reset')
-  const expected = claimsFor(controller, previous?.recordedLog, ingested.log, floor)
+  // Historical closures stay in the ledger; the projection keeps only authoritative events.
+  const proofLog = mergeLogs(controller, ingested.log, {
+    chain: ingested.log.chain,
+    events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
+  })
+  const expected = claimsFor(controller, previous?.recordedLog, proofLog, floor)
   if (value.effects == null || (value.effects.length === 0 && value.op !== 'reset'))
     throw new RevokeProofError('no-rev')
   for (const claim of value.effects) {
     if (value.op !== 'reset' && 'snapshot' in claim.ref) throw new RevokeProofError('no-rev')
-    effectOf(controller, ingested.log, claim, floor)
+    effectOf(controller, proofLog, claim, floor)
   }
   const target = (claim: EffectClaim) =>
     claim.kind === 'deny'
@@ -270,6 +285,48 @@ export async function lifecycleProofEffects(
     group.registry,
     controller,
   )
+  for (const raw of value.survivors ?? []) {
+    const { payload } = readCapability(raw)
+    assertControllerGrant(payload, controller)
+    if (payload.mbr == null || payload.cap != null) throw new LeafBindingError('issuer-mismatch')
+    assertCapabilityLifetime(payload, group.anchor.trustedGrantLifetime ?? 2_592_000)
+    const leaf = group.bindingOfDID(payload.aud)
+    const key = capabilityKey(payload).publicKey
+    if (
+      leaf?.controller !== controller ||
+      key.length !== leaf.leafKey.length ||
+      key.some((byte, index) => byte !== leaf.leafKey[index])
+    )
+      throw new LeafBindingError('confirmation-invalid')
+    const status = memberRootStatus(candidate, controller, {
+      kind: 'member',
+      did: payload.iss,
+      add: payload.mbr.add,
+      gen: payload.mbr.g,
+    })
+    if (status.status !== 'effective')
+      throw new LeafBindingError(
+        status.status === 'removed' ? 'member-removed' : 'member-unavailable',
+      )
+    const resolver = createRegistryControllerResolver({
+      controllerID: controller,
+      prefix: candidate.controllers.get(controller)?.recordedLog?.chain ?? [],
+      registry: candidate,
+    }).frozen()
+    const token = await verifyToken(raw, {
+      methods: [resolver],
+      historic: true,
+      atTime: payload.iat,
+      allowUnsigned: false,
+    })
+    assertCapabilityToken(token)
+    await checkCapability({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, payload, {
+      atTime: payload.iat,
+      methods: [resolver],
+      maxDepth: 1,
+      maxMemberGrantLifetime: group.anchor.trustedGrantLifetime ?? 2_592_000,
+    })
+  }
   const resetRef = authenticated.resetRef
   if (value.op === 'reset' && resetRef == null) throw new RevokeProofError('no-rev')
   const resetDIDs = new Set(

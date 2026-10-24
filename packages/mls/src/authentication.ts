@@ -389,7 +389,36 @@ export async function verifyLeafCredential(
       const root = primary?.root
       if (root == null) throw new LeafBindingError('member-unavailable')
       const status = memberRootStatus(registry, binding.id, root)
-      if (status.status === 'removed') throw new LeafBindingError('member-removed')
+      if (status.status === 'removed') {
+        if (judging.mode === 'admit') throw new LeafBindingError('member-removed')
+        const authority = effectiveAuthorityOf(
+          { did: parsed.id, binding, leafKey: signaturePublicKey },
+          registry,
+          binding.id,
+        )
+        if (!('root' in authority)) throw new LeafBindingError('member-removed')
+        const substitute =
+          authority.slot === 'holder'
+            ? binding.holderGrant
+            : registry.controllers
+                .get(normalizeDID(binding.id))
+                ?.survivorGrants.get(normalizeDID(parsed.id))
+        if (substitute == null) throw new LeafBindingError('member-removed')
+        await verifyPinnedCapability({
+          capability: substitute,
+          resolver: frozen,
+          prefix: binding.prefix,
+          controllerID: binding.id,
+          audience: parsed.id,
+          permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
+          leafKey: signaturePublicKey,
+          denySet,
+          directOnly: true,
+          trustedGrant: true,
+          trustedGrantLifetime: deps.trustedGrantLifetime?.(),
+        })
+        return
+      }
       const unavailable = () => {
         if (judging.mode !== 'retain') throw new LeafBindingError('member-unavailable')
       }

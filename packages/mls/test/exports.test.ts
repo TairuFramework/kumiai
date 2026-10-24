@@ -22,12 +22,24 @@ import {
   memberRootStatus,
   prefixRelation,
   proofSize,
+  type RemovalEvidence,
   recordedLogOf,
   registryForLog,
+  removalEvidence,
   SETTLE_PROMPT_EPOCH_EVENTS,
   settleAdvisory,
+  survivorTargets,
 } from '../src/index.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
+
+test('removal evidence and survivor targets are available through the package entry point', async () => {
+  const { did, log, members } = await buildEpoch({ members: 1 })
+  const member = members[0]
+  if (member == null) throw new Error('Missing member')
+  const evidence: RemovalEvidence | undefined = removalEvidence(did, log, member.add)
+  expect(evidence).toBeUndefined()
+  expect(survivorTargets).toEqual(expect.any(Function))
+})
 
 test('controller log helpers are available through the package entry point', async () => {
   const { did, log } = await buildEpoch({ members: 0 })

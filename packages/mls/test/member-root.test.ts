@@ -281,6 +281,7 @@ test("effectiveAuthorityOf uses the holder substitute when the parent's member i
   expect(api.effectiveAuthorityOf(leaf, f.after, f.did)).toEqual({
     root: { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 },
     slot: 'holder',
+    expiry: 900,
   })
 })
 
@@ -296,6 +297,7 @@ test('effectiveAuthorityOf uses a registered survivor grant', () => {
   expect(api.effectiveAuthorityOf(f.leaf, registry, f.did)).toEqual({
     root: { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 },
     slot: 'survivor',
+    expiry: 900,
   })
 })
 
@@ -526,6 +528,7 @@ test('registered survivor authority exempts a leaf when its former immediate iss
   const authority = {
     root: { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 },
     slot: 'survivor',
+    expiry: 900,
   }
   expect(api.effectiveAuthorityOf(leaf, before, f.did)).toEqual(authority)
   expect(api.effectiveAuthorityOf(leaf, after, f.did)).toEqual(authority)

@@ -2,8 +2,9 @@ import { type ControllerLog, digestOf, isControllerLog } from '@kokuin/controlle
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
+import { readCapability } from './capability.js'
 import { ingestControllerLog } from './controller-ingest.js'
-import { foldChain, foldControllerLog, revokeIndices } from './controller-log.js'
+import { foldChain, foldControllerLog, memberDropIndices, revokeIndices } from './controller-log.js'
 import type { MLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { FoldDrop, FoldInput } from './fold.js'
@@ -327,7 +328,16 @@ export function registryApply(
           proofRef: claim.ref,
         })
       }
-      controllers.set(controller, { ...projection, removedMembers })
+      for (const [add, member] of removedMembers) {
+        if (!('event' in member.proofRef)) continue
+        const index = memberDropIndices(controller, effect.recordedLog.chain, add).at(-1)
+        if (index != null) removedMembers.set(add, { ...member, proofRef: { chainIndex: index } })
+      }
+      const survivorGrants = new Map(projection.survivorGrants)
+      for (const raw of value.survivors ?? []) {
+        survivorGrants.set(normalizeDID(readCapability(raw).payload.aud), raw)
+      }
+      controllers.set(controller, { ...projection, removedMembers, survivorGrants })
       for (const [did, held] of devices) {
         if (held.controller !== controller || held.proofRef == null || !('event' in held.proofRef))
           continue

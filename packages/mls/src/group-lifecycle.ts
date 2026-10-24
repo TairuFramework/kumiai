@@ -3,6 +3,7 @@ import {
   didFromInception,
   digestOf,
   type InceptionEvent,
+  mergeLogs,
   pruneLog,
 } from '@kokuin/controller'
 import { createSigningIdentityForDID, type DIDString, normalizeDID } from '@kokuin/token'
@@ -18,7 +19,7 @@ import {
 
 import { readCapability } from './capability.js'
 import { effectDelta, ingestControllerLog } from './controller-ingest.js'
-import { foldControllerLog, isDetachedFoldReason } from './controller-log.js'
+import { closureOf, foldControllerLog, isDetachedFoldReason } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { foldEnvelope } from './envelope-fold.js'
 import { LeafBindingError, RevokeProofError, type RevokeProofReason } from './errors.js'
@@ -39,7 +40,7 @@ import {
   lifecycleProofEffects,
   verifyLifecycleProof,
 } from './lifecycle-proof.js'
-import { claimsFor, type EffectClaim } from './member-root.js'
+import { claimsFor, type EffectClaim, effectiveAuthorityOf } from './member-root.js'
 import {
   DEVICE_ENTRY_TYPE,
   type DeviceRegistry,
@@ -362,8 +363,52 @@ function alreadyApplied(group: GroupHandle, claims: ReadonlyArray<EffectClaim>):
   )
 }
 
+export type RemovalEvidence = { controller: string; epoch: string; closure: ControllerLog }
+
+export function removalEvidence(
+  controller: string,
+  log: ControllerLog,
+  rmv: string,
+): RemovalEvidence | undefined {
+  const signed = log.events.find(({ event }) => digestOf(event) === rmv)
+  if (signed?.event.t !== 'rmv') return undefined
+  const closure = closureOf(controller, log, [rmv])
+  if (closure == null) return undefined
+  return { controller: normalizeDID(controller), epoch: signed.event.e, closure }
+}
+
+export function survivorTargets(
+  group: GroupHandle,
+  add: string,
+): Array<{ did: string; leafKey: Uint8Array }> {
+  const controller = group.anchor.controller
+  if (controller == null) return []
+  return group.listMembers().flatMap(({ id }) => {
+    const binding = group.bindingOfDID(id)
+    if (binding?.controller !== normalizeDID(controller) || binding.prefix == null) return []
+    const authority = effectiveAuthorityOf(
+      {
+        did: id,
+        binding: { ...binding, id: binding.controller, prefix: binding.prefix },
+        leafKey: binding.leafKey,
+      },
+      group.registry,
+      controller,
+    )
+    return 'root' in authority && authority.root.kind === 'member' && authority.root.add === add
+      ? [{ did: id, leafKey: binding.leafKey.slice() }]
+      : []
+  })
+}
+
 export type RevokeWithProofParams =
-  | { log: ControllerLog; deny: Array<string> }
+  | {
+      log: ControllerLog
+      deny?: Array<string>
+      remove?: Array<{ did: string; add: string }>
+      survivors?: Array<string>
+      evidence?: Array<RemovalEvidence>
+    }
   | { reset: true; log: ControllerLog }
 
 export async function revokeWithProof(
@@ -375,26 +420,56 @@ export async function revokeWithProof(
       const controller = group.anchor.controller
       if (controller == null) throw new RevokeProofError('wrong-controller')
       const reset = 'reset' in params
-      const requested = reset ? [] : params.deny.map(normalizeDID)
-      if (!reset && requested.length === 0) throw new RevokeProofError('no-rev')
+      const requested = reset ? [] : (params.deny ?? []).map(normalizeDID)
+      const removals = reset
+        ? []
+        : (params.remove ?? []).map(({ did, add }) => ({ did: normalizeDID(did), add }))
+      if (!reset && requested.length === 0 && removals.length === 0)
+        throw new RevokeProofError('no-rev')
       if (params.log.chain.length === 0) throw new RevokeProofError('no-rev')
       const projection = group.registry.controllers.get(normalizeDID(controller))
       if (params.log.chain.every(({ event }) => event.g < (projection?.genFloor ?? 0)))
         throw new RevokeProofError('generation-floor')
-      const proof = controllerLogDelta(group, params.log)
+      let proof = controllerLogDelta(group, params.log)
+      if (!reset && params.evidence != null && proof != null) {
+        const evidence = params.evidence.filter(
+          (held) =>
+            normalizeDID(held.controller) === normalizeDID(controller) &&
+            held.closure.events.some(
+              ({ event }) =>
+                event.t === 'rmv' &&
+                event.e === held.epoch &&
+                removals.some(({ add }) => event.add === add),
+            ),
+        )
+        const supplied = mergeLogs(
+          controller,
+          { chain: params.log.chain, events: proof.events },
+          { chain: params.log.chain, events: evidence.flatMap(({ closure }) => closure.events) },
+        )
+        proof = { ...proof, events: supplied.events }
+      }
       const ingested =
         proof == null ? null : ingestControllerLog(controller, projection?.recordedLog, proof)
       if (!reset && ingested != null && ingested.after.head.gen !== ingested.before?.head.gen)
         throw new RevokeProofError('needs-reset')
       if (!reset) {
-        const requestedClaims = claimsFor(
-          controller,
-          undefined,
-          projection?.recordedLog ?? pruneLog(controller, params.log),
-          projection?.genFloor ?? 0,
-        ).filter((claim) => claim.kind === 'deny' && requested.includes(normalizeDID(claim.did)))
+        const requestedClaims: Array<EffectClaim> = [
+          ...(requested.length === 0 || projection?.recordedLog == null
+            ? []
+            : claimsFor(controller, undefined, projection.recordedLog, projection.genFloor).filter(
+                (claim) => claim.kind === 'deny' && requested.includes(normalizeDID(claim.did)),
+              )),
+          ...removals.flatMap((member): Array<EffectClaim> => {
+            const removed = projection?.removedMembers.get(member.add)
+            return removed?.did === member.did
+              ? [{ kind: 'remove', member, ref: removed.proofRef }]
+              : []
+          }),
+        ]
         if (
-          requestedClaims.length === new Set(requested).size &&
+          requestedClaims.length ===
+            new Set(requested).size + new Set(removals.map(({ add }) => add)).size &&
           alreadyApplied(group, requestedClaims)
         )
           return { status: 'already-revoked' }
@@ -403,15 +478,27 @@ export async function revokeWithProof(
       const effects = claimsFor(
         controller,
         projection?.recordedLog,
-        ingested.log,
+        mergeLogs(controller, ingested.log, {
+          chain: ingested.log.chain,
+          events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
+        }),
         projection?.genFloor ?? 0,
       )
       if (
         !reset &&
-        requested.some(
+        (requested.some(
           (did) =>
             !effects.some((claim) => claim.kind === 'deny' && normalizeDID(claim.did) === did),
-        )
+        ) ||
+          removals.some(
+            (member) =>
+              !effects.some(
+                (claim) =>
+                  claim.kind === 'remove' &&
+                  claim.member.add === member.add &&
+                  normalizeDID(claim.member.did) === member.did,
+              ),
+          ))
       )
         throw new RevokeProofError('no-rev')
       const value: DeviceValue = {
@@ -420,6 +507,7 @@ export async function revokeWithProof(
         effects,
         revoked: [],
         removed: [],
+        ...(!reset && params.survivors != null ? { survivors: [...params.survivors] } : {}),
       }
       const verified: VerifiedLedgerEntry<DeviceValue> = {
         issuer: group.credential.id,

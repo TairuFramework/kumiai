@@ -1,3 +1,4 @@
+import { decodeKey } from '@kokuin/controller'
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   type ClientState,
@@ -16,6 +17,7 @@ import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
 import { checkHolderEvidence, type JudgingContext, verifyLeafCredential } from './authentication.js'
 import {
   assertCapabilityLifetime,
+  capabilityKey,
   MAX_LEAF_LIFETIME,
   MAX_TRUSTED_GRANT_LIFETIME,
   readCapability,
@@ -120,21 +122,46 @@ export function leafExpiry(
   registry: DeviceRegistry,
   controller: string,
 ): number | undefined {
+  const did = normalizeDID(controller)
+  const projection = registry.controllers.get(did)
   if (binding.member == null) {
     if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
-    return readCapability(binding.capability).payload.exp
+    const { payload } = readCapability(binding.capability)
+    const authority = effectiveAuthorityOf(
+      { did: payload.aud, binding, leafKey: capabilityKey(payload).publicKey },
+      registry,
+      controller,
+    )
+    return 'root' in authority && authority.expiry != null
+      ? Math.min(payload.exp, authority.expiry)
+      : payload.exp
   }
-  const did = normalizeDID(controller)
   if (normalizeDID(binding.id) !== did) return undefined
-  const log = registry.controllers.get(did)?.recordedLog
+  const log = projection?.recordedLog
   if (log == null || prefixRelation(log, binding.prefix) !== 'contained') return undefined
   const folded = foldControllerLog(did, log)
   if (!folded.ok) return undefined
   const member = folded.head.members.get(binding.member.add)
-  if (member == null) return undefined
+  const memberDID = member?.did ?? projection?.removedMembers.get(binding.member.add)?.did
+  if (memberDID == null) return undefined
+  const survivor = projection?.survivorGrants.get(normalizeDID(memberDID))
+  const leafKey =
+    member == null
+      ? survivor == null
+        ? undefined
+        : capabilityKey(readCapability(survivor).payload).publicKey
+      : decodeKey(member.key).publicKey
+  if (leafKey != null) {
+    const authority = effectiveAuthorityOf(
+      { did: memberDID, binding, leafKey },
+      registry,
+      controller,
+    )
+    if ('root' in authority && authority.expiry != null) return authority.expiry
+  }
   const status = memberRootStatus(registry, did, {
     kind: 'member',
-    did: member.did,
+    did: memberDID,
     add: binding.member.add,
     gen: binding.member.g,
   })

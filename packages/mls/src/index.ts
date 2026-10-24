@@ -149,12 +149,15 @@ export {
   controllerLogDelta,
   proposeSelfRemoval,
   publishControllerLog,
+  type RemovalEvidence,
   type RemoveLapsedLeavesResult,
   type RevokeBuildResult,
   type RevokeWithProofParams,
+  removalEvidence,
   removeLapsedLeaves,
   renewLeaf,
   revokeWithProof,
+  survivorTargets,
 } from './group-lifecycle.js'
 export {
   assertHeadMatches,

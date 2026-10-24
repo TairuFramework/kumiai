@@ -350,7 +350,10 @@ export function effectiveAuthorityOf(
   leaf: LeafRef,
   registry: DeviceRegistry,
   controller: string,
-): { root: MemberRoot; slot: EvidenceSlot } | { status: 'removed' } | { status: 'unavailable' } {
+):
+  | { root: MemberRoot; slot: EvidenceSlot; expiry?: number }
+  | { status: 'removed' }
+  | { status: 'unavailable' } {
   const did = normalizeDID(controller)
   if (normalizeDID(leaf.binding.id) !== did) return { status: 'unavailable' }
   const roots = memberRootsOf(leaf.binding, leaf.did)
@@ -378,7 +381,8 @@ export function effectiveAuthorityOf(
     const root = substituteRoot(raw, leaf)
     if (root == null) continue
     const status = memberRootStatus(registry, did, root)
-    if (status.status === 'root' || status.status === 'effective') return { root, slot }
+    if (status.status === 'root' || status.status === 'effective')
+      return { root, slot, expiry: readCapability(raw).payload.exp }
   }
   return { status: 'removed' }
 }

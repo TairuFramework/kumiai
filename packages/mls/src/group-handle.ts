@@ -121,6 +121,11 @@ export function mutexFor(handle: GroupHandle): Mutex {
 /** Events a GroupHandle emits. Advisory notifications derived from the folded ledger; never
  *  a protocol input. Delivered via `fire` (a throwing listener never breaks a fold). */
 export type GroupHandleEvents = {
+  memberRemoved: Array<{
+    controller: string
+    member: { did: string; add: string }
+    removedLeaves: Array<string>
+  }>
   deviceRevoked: Array<{
     device: string
     controller: string
@@ -682,11 +687,24 @@ export class GroupHandle {
     }
     const emitter = emitterOf(this)
     const revoked: GroupHandleEvents['deviceRevoked'] = []
+    const removed: GroupHandleEvents['memberRemoved'] = []
     for (const { entry } of enacted) {
       if (entry.type !== DEVICE_ENTRY_TYPE || !isDeviceValue(entry.value)) continue
       const value: DeviceValue = entry.value
       const subject = normalizeDID(entry.subject)
       if (this.#anchor.controller != null && (value.op === 'revoke' || value.op === 'reset')) {
+        for (const claim of value.effects ?? []) {
+          if (claim.kind !== 'remove') continue
+          removed.push({
+            controller: subject,
+            member: { did: normalizeDID(claim.member.did), add: claim.member.add },
+            removedLeaves: (value.removed ?? [])
+              .filter(
+                ({ cascadedFrom }) => normalizeDID(cascadedFrom) === normalizeDID(claim.member.did),
+              )
+              .map(({ did }) => normalizeDID(did)),
+          })
+        }
         for (const effect of [
           ...(value.revoked ?? []),
           ...(value.effects ?? []).flatMap((claim) =>
@@ -712,6 +730,7 @@ export class GroupHandle {
       }
     }
     if (revoked.length > 0) emitter.fire('deviceRevoked', revoked)
+    if (removed.length > 0) emitter.fire('memberRemoved', removed)
   }
 
   /** Deliver independent host notifications after acceptance and any requested persist. */
