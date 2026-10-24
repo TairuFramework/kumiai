@@ -95,11 +95,15 @@ function timeOf(tree: ClientState['ratchetTree'], controllerID: string, floor: n
   return time
 }
 
-export function treeTime(group: GroupHandle, controllerID: string): number {
+export function treeTime(
+  group: GroupHandle,
+  controllerID: string,
+  registry: DeviceRegistry = group.registry,
+): number {
   const floor =
     group.anchor.controller == null
       ? 0
-      : (group.registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0)
+      : (registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0)
   return timeOf(group.state.ratchetTree, controllerID, floor)
 }
 
@@ -278,7 +282,7 @@ function checkAdmissionExpiry(
   if (binding == null) return
   const expiry = leafExpiry(binding, registry, binding.id)
   if (expiry == null) throw new LeafBindingError('member-unavailable')
-  if (expiry <= treeTime(group, binding.id)) throw new LeafLapsedError('lapsed')
+  if (expiry <= treeTime(group, binding.id, registry)) throw new LeafLapsedError('lapsed')
 }
 
 function checkEntry(
@@ -444,7 +448,8 @@ export async function prepareLifecycleGate(
       if (
         capability != null &&
         binding?.controller != null &&
-        readCapability(capability).payload.exp < treeTime(group, binding.controller)
+        readCapability(capability).payload.exp <
+          treeTime(group, binding.controller, candidateRegistry)
       )
         throw new LeafLapsedError('lapsed')
     }
@@ -738,7 +743,10 @@ export async function prepareLifecycleGate(
       if (
         old != null &&
         lapsed.has(senderIndex) &&
-        (next == null || credentialEqual(old, next) || expiry == null || expiry < beforeTime)
+        (next == null ||
+          credentialEqual(old, next) ||
+          expiry == null ||
+          expiry < treeTime(group, controller, candidateRegistry))
       )
         throw new LeafLapsedError('lapsed')
     }

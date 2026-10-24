@@ -17,11 +17,18 @@ import {
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { addDevice } from '../src/group-device.js'
-import { deriveGroup } from '../src/group-handle.js'
+import { buildCommitPolicyContext, deriveGroup } from '../src/group-handle.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { leafExpiry } from '../src/index.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
-import { isLapsed, treeTime, validateEntry } from '../src/lifecycle.js'
+import {
+  isLapsed,
+  leafAt,
+  prepareLifecycleGate,
+  treeTime,
+  validateEntry,
+  validateWelcomeTree,
+} from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE } from '../src/registry.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
@@ -694,6 +701,64 @@ async function stagedWelcome(membership = false, carriesAdd = true) {
     },
   }
 }
+
+test.each([
+  ['entry', 100, 1001, true],
+  ['entry', 1001, 100, false],
+  ['proposal', 100, 1001, true],
+  ['proposal', 1001, 100, false],
+  ['Welcome', 100, 1001, true],
+  ['Welcome', 1001, 100, false],
+] as const)(
+  '%s judges membership expiry with current floor %s and judging floor %s',
+  async (path, currentFloor, judgingFloor, lapsed) => {
+    const f = await stagedWelcome(true)
+    const { group } = await processWelcome(f.params)
+    const registry = structuredClone(group.registry)
+    const current = group.registry.controllers.get(f.did)
+    const judging = registry.controllers.get(f.did)
+    if (current == null || judging == null) throw new Error('Missing projection')
+    Object.assign(current, { timeFloor: currentFloor })
+    Object.assign(judging, { timeFloor: judgingFloor })
+    const leaf = leafAt(group.state.ratchetTree, group.state.privatePath.leafIndex)
+    if (leaf == null) throw new Error('Missing joiner')
+    expect(leafExpiry(f.binding, registry, f.did)).toBe(1000)
+    const validate = async () => {
+      if (path === 'entry')
+        return validateEntry(group, leaf, undefined, { registry, stage: 'full', mode: 'admit' })
+      if (path === 'Welcome')
+        return validateWelcomeTree(group, { registry, stage: 'full', mode: 'rejudge' })
+      const bundle = await rawBundle(group, f.member.identity, f.binding)
+      const gate = await prepareLifecycleGate({
+        group,
+        entries: [],
+        candidateRegistry: registry,
+        context: buildCommitPolicyContext(group, {
+          baseRoster: group.roster,
+          candidateRoster: group.roster,
+          entryIDs: [],
+          enactedDeviceEntries: [],
+        }),
+      })
+      gate.check({
+        kind: 'proposal',
+        proposal: {
+          senderLeafIndex: undefined,
+          proposal: {
+            proposalType: defaultProposalTypes.add,
+            add: { keyPackage: bundle.publicPackage },
+          },
+        },
+      })
+    }
+    const result = validate()
+    if (lapsed)
+      await expect(result).rejects.toMatchObject({ name: 'LeafLapsedError', reason: 'lapsed' })
+    else await expect(result).resolves.toBeUndefined()
+    expect(current.timeFloor).toBe(currentFloor)
+    expect(judging.timeFloor).toBe(judgingFloor)
+  },
+)
 
 test("Welcome with an mbr leaf joins once the ledger carries the member's add", async () => {
   const f = await stagedWelcome()
