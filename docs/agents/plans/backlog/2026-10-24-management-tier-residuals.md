@@ -21,3 +21,13 @@
 - **Revoke refusal after a concurrent advance is untested** (`packages/mls-rpc/src/revoke.ts`). If the
   live handle gains known effects between building a revoke and `onAccepted`, `guardedReplace` throws
   after hub acceptance. That is correct, but no test covers it.
+- **Drop proof-ref upgrade ignores the DID** (`memberDropIndices`, `packages/mls/src/registry.ts`).
+  It is the same shape as the tombstone upgrade that 0.12.1 fixed. It matters only if root
+  deliberately reuses one `add` under another DID across snapshots, which kokuin does not forbid.
+- **Attest replay in `registryApply` is narrower than admission.** It checks effectiveness, but not
+  the lease, saturation or floor conditions of `effectiveAttestingMembers`. Live admission applies
+  the full helper, so this is defence in depth only.
+- **The substitute deny set drops key-target entries** (`denySetOf`, `embedded-resolver.ts`,
+  `authentication.ts`). kumiai returns only device DIDs from `resolveDenySet`, so kokuin's
+  `namesADeniedKey` never sees `#key` denials. kokuin's own key resolution already refuses denied and
+  retired keys, but no test proves the gap is harmless.
