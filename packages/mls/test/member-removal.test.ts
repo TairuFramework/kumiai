@@ -59,7 +59,9 @@ function head(did: string, log: ControllerLog) {
   return folded.head
 }
 
-async function fixture(kind: 'direct' | 'parent' | 'membership' | 'holder' = 'direct') {
+async function fixture(
+  kind: 'direct' | 'parent' | 'membership' | 'holder' | 'root-holder' = 'direct',
+) {
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
   const epoch = await buildEpoch({ members: 3, renewEvery: 2000 })
   const [a, b, c] = epoch.members
@@ -83,9 +85,12 @@ async function fixture(kind: 'direct' | 'parent' | 'membership' | 'holder' = 'di
       ),
     )
   const device = kind === 'membership' ? a.identity : agent(61)
-  const parent = await grant(a, agent(71))
+  const parent =
+    kind === 'root-holder'
+      ? (await timedBinding({ identity: agent(71), iat: 100, exp: 900 })).capability
+      : await grant(a, agent(71))
   const capability =
-    kind === 'parent' || kind === 'holder'
+    kind === 'parent' || kind === 'holder' || kind === 'root-holder'
       ? stringifyToken(
           await agent(71).signToken({
             ...readCapability(await grant(a, device)).payload,
@@ -99,7 +104,9 @@ async function fixture(kind: 'direct' | 'parent' | 'membership' | 'holder' = 'di
     id: epoch.did,
     prefix: epoch.log.chain,
     ...(kind === 'membership' ? { member: { add: a.add, g: 0 }, iat: 100 } : { capability }),
-    ...(kind === 'holder' ? { holderGrant: await grant(b, device) } : {}),
+    ...(kind === 'holder' || kind === 'root-holder'
+      ? { holderGrant: await grant(kind === 'holder' ? b : a, device) }
+      : {}),
   }
   const joined = await belowGateWelcome(setup.group, device, binding)
   const rmv = createRemove({
@@ -869,5 +876,41 @@ test.each(['tombstoned', 're-added'] as const)(
     await expect(
       api.publishControllerLog(group, { ...settled, events: [renewal] }),
     ).rejects.toMatchObject({ reason: 'not-endorsed' })
+  },
+)
+
+test.each(['retain', 'Welcome rejudge'] as const)(
+  'a real member removal cascades a root-primary leaf with that holder grant at %s',
+  async (boundary) => {
+    const f = await fixture('root-holder')
+    const leaf = leafAt(f.group.state.ratchetTree, f.group.findMemberLeafIndex(f.device.id) ?? -1)
+    if (leaf == null) throw new Error('Missing child')
+    await expect(
+      verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
+        judging: () => ({ registry: f.group.registry, stage: 'full', mode: 'admit' }),
+      }),
+    ).resolves.toBeUndefined()
+    const result = built(await f.build())
+    expect(result.newGroup.registry.controllers.get(f.did)?.removedMembers.has(f.a.add)).toBe(true)
+    expect(result.newGroup.registry.devices.has(f.device.id)).toBe(false)
+    if (boundary === 'Welcome rejudge') {
+      const peer = agent(82)
+      const welcome = await welcomeBoundary(
+        result.newGroup,
+        peer,
+        await timedBinding({ identity: peer, iat: 100, exp: 900 }),
+      )
+      const joined = (await welcome.process()).group
+      expect(joined.findMemberLeafIndex(f.device.id)).toBeUndefined()
+    } else {
+      expect(result.newGroup.findMemberLeafIndex(f.device.id)).toBeUndefined()
+      const note = await signLedgerEntry(f.identity, {
+        type: 'test.note',
+        groupID: f.group.groupID,
+        subject: f.identity.id,
+        value: 'after removal',
+      })
+      await expect(commitLedgerEntries(result.newGroup, [note])).resolves.toBeDefined()
+    }
   },
 )

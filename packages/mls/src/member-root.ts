@@ -388,7 +388,14 @@ export function effectiveAuthorityOf(
     })
   )
     return { status: status.status === 'removed' ? 'removed' : 'unavailable' }
-  if (status.status === 'root' || status.status === 'effective') return primary
+  if (status.status === 'root' || status.status === 'effective') {
+    const holder = roots.find(({ slot }) => slot === 'holder')
+    if (holder != null) {
+      const held = memberRootStatus(registry, did, holder.root)
+      if (held.status === 'removed' || held.status === 'unavailable') return { status: held.status }
+    }
+    return primary
+  }
   if (status.status === 'unavailable') return { status: 'unavailable' }
   const substitutes: Array<{ slot: EvidenceSlot; raw: string | undefined }> = [
     { slot: 'holder', raw: leaf.binding.holderGrant },
@@ -450,7 +457,12 @@ export function cascadeOf(
     }
     if (!('status' in authority) || authority.status !== 'removed') continue
     const prior = effectiveAuthorityOf(leaf, before, controller)
-    const root = 'root' in prior ? prior.root : memberRootsOf(leaf.binding, leaf.did)[0]?.root
+    const roots = memberRootsOf(leaf.binding, leaf.did).map(({ root }) => root)
+    if ('root' in prior) roots.unshift(prior.root)
+    const root = roots.find(
+      (root) =>
+        root.kind === 'member' && memberRootStatus(after, controller, root).status === 'removed',
+    )
     if (root?.kind !== 'member') continue
     removed.push({ did, cascadedFrom: normalizeDID(root.did) })
     removeLeafIndices.push(leaf.leafIndex)

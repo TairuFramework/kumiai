@@ -24,3 +24,5 @@ Reject log events authored by tombstoned member incarnations after stale root se
 Reject unauthenticated no-op log updates and bound replay and effect-claim verification work.
 
 Verify lifecycle envelopes in order so renewal and attestation can share a commit.
+
+Cascade chained leaves when their required holder grant loses member authority.
