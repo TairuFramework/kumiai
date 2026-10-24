@@ -18,6 +18,11 @@ import type { ControllerProjection } from './registry.js'
 
 export type FoldOk = Extract<FoldResult, { ok: true }>
 
+const authenticatedFolds = new WeakMap<
+  ControllerLog,
+  { controller: string; digest: string; folded: FoldOk }
+>()
+
 export function ingestControllerLog(
   controller: string,
   recorded: ControllerLog | undefined,
@@ -27,7 +32,11 @@ export function ingestControllerLog(
   const did = normalizeDID(controller)
   let before: FoldOk | undefined
   if (recorded != null) {
-    const folded = foldControllerLog(did, recorded)
+    const cached = authenticatedFolds.get(recorded)
+    const folded =
+      cached?.controller === did && cached.digest === digestOf(recorded)
+        ? structuredClone(cached.folded)
+        : foldControllerLog(did, recorded)
     if (!folded.ok) throw new RevokeProofError('not-authority-signed')
     before = folded
   }
@@ -94,6 +103,12 @@ export function ingestControllerLog(
     )
       throw new RevokeProofError('not-endorsed')
   }
+  // Bind the authenticated prefix to its bytes, even if a caller mutates the returned log.
+  authenticatedFolds.set(log, {
+    controller: did,
+    digest: digestOf(log),
+    folded: structuredClone(after),
+  })
   return { log, ...(before == null ? {} : { before }), after, introduced }
 }
 

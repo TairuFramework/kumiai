@@ -106,6 +106,11 @@ export function authenticateLifecycleProof(
       throw new RevokeProofError('detached')
     const ingested = ingestControllerLog(controller, previous?.recordedLog, proof, previous)
     if (value.op === 'log') {
+      if (
+        ingested.introduced.length === 0 &&
+        ingested.before?.states.at(-1)?.digest === ingested.after.states.at(-1)?.digest
+      )
+        throw new RevokeProofError('effects-mismatch')
       const delta = effectDelta(ingested.before?.head, ingested.after.head)
       if (delta.generation) throw new RevokeProofError('needs-reset')
       if (delta.denied.length > 0 || delta.removed.length > 0)

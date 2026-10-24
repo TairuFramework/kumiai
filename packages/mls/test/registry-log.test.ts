@@ -16,6 +16,7 @@ import {
 import { normalizeDID } from '@kokuin/token'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import * as controllerLogModule from '../src/controller-log.js'
 import { foldControllerLog } from '../src/controller-log.js'
 import type { FoldDrop, FoldInput } from '../src/fold.js'
 import { authenticateLifecycleProof, verifyLifecycleProof } from '../src/lifecycle-proof.js'
@@ -221,14 +222,24 @@ test('log entry into an empty projection is refused', async () => {
   expect(registry.recordedLogOf(result.registry, did)).toBeUndefined()
 })
 
-test('foldControl keeps a log entry in a lifecycle group', async () => {
-  const { did, log } = await buildEpoch({ members: 1 })
-  const result = replay(did, [
-    entry(did, 'seed', log),
-    entry(did, 'log', { chain: [], events: [] }),
+test('foldControl keeps an authenticated renewal log entry in a lifecycle group', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const renewal = createRenew({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: member.add,
+    lease: 2000,
+  })
+  const result = replay(f.did, [
+    entry(f.did, 'seed', f.log),
+    entry(f.did, 'log', { chain: [], events: [renewal] }),
   ])
   expect(result.drops).toEqual([])
-  expect(registry.recordedLogOf(result.registry, did)).toEqual(log)
+  expect(registry.recordedLogOf(result.registry, f.did)?.events).toEqual([...f.log.events, renewal])
 })
 
 test('log entry with a chain suffix settles without a revoke', async () => {
@@ -479,7 +490,7 @@ test('chain fork is refused and the prior log is kept', async () => {
   expect(registry.recordedLogOf(result.registry, did)).toEqual(prior)
 })
 
-test('pending event is not stored', async () => {
+test('a log carrying only a pending event is refused', async () => {
   const { did, log, head, members, root } = await buildEpoch({ members: 1 })
   const [member] = members
   if (member == null) throw new Error('Missing member')
@@ -495,7 +506,7 @@ test('pending event is not stored', async () => {
     entry(did, 'seed', log),
     entry(did, 'log', { chain: [], events: [renew] }),
   ])
-  expect(result.drops).toEqual([])
+  expect(result.drops).toHaveLength(1)
   expect(registry.recordedLogOf(result.registry, did)).toEqual(log)
 })
 
@@ -612,4 +623,34 @@ test('seed tombstones a member dropped by settlement without denying its DID', a
     proofRef: { chainIndex: 2 },
   })
   expect(state.devices.size).toBe(0)
+})
+
+test('empty log entries introduce no authenticated data and are refused', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const seed = entry(f.did, 'seed', f.log)
+  const empty = entry(f.did, 'log', { chain: [], events: [] })
+  const result = replay(f.did, [seed, empty])
+  expect(result.drops).toHaveLength(1)
+  expect(registry.recordedLogOf(result.registry, f.did)).toEqual(f.log)
+  expect(() =>
+    authenticateLifecycleProof(f.did, empty.verified, registry.registryForLog(f.did, f.log)),
+  ).toThrow()
+})
+
+test('sixteen renewal entries replay with linear authenticated event folding', async () => {
+  const count = 16
+  const f = await buildEpoch({ members: 1, renewEvery: 100, until: count * 100 })
+  const entries = [
+    entry(f.did, 'seed', f.genesis),
+    ...f.deltas.map((delta) => entry(f.did, 'log', delta)),
+  ]
+  const fold = vi.spyOn(controllerLogModule, 'foldControllerLog')
+  const result = replay(f.did, entries)
+  const checks = fold.mock.calls.reduce((count, [, log]) => count + log.events.length, 0)
+  expect(result.drops).toEqual([])
+  expect(checks).toBeGreaterThan(0)
+  expect(checks).toBeLessThanOrEqual(2 * count + 2)
+  const log = registry.recordedLogOf(result.registry, f.did)
+  if (log == null) throw new Error('Missing log')
+  expect(folded(f.did, log).head).toEqual(f.head)
 })

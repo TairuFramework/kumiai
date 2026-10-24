@@ -20,3 +20,5 @@ Introduce the breaking 0.12 management tier across all fourteen packages. Lifecy
 Recheck lifecycle knowledge atomically when adopting recovery candidates, including adoption retries.
 
 Reject log events authored by tombstoned member incarnations after stale root settlements.
+
+Reject unauthenticated no-op log updates and bound replay and effect-claim verification work.
