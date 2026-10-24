@@ -16,6 +16,7 @@ import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
 import type { OwnershipContextPort } from '../../src/persistence-types.js'
 import { registryLiveSend } from '../../src/registry/live-send.js'
 import { createRegistryFixture, type RegistryFixture } from './registry.js'
+import { retireStoredSource } from './retired-source.js'
 
 export async function createAppPublicationFixture(
   mode: 'real-mls' | 'double',
@@ -230,7 +231,7 @@ export async function createAppPublicationFixture(
       },
       counts: () => ({ ...counts }),
       async reopenFrozen(hold) {
-        if (hold === 'retired') await result.change('incarnation')
+        if (hold === 'retired') await retireStoredSource(fixture, key, mode)
         else if (hold === 'spent-set-corrupt')
           await fixture.corruptTrust(key.groupID, 'empty-spent')
         else if (hold === 'rotation-required' || hold === 'terminal') {

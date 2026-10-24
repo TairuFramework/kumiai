@@ -2,6 +2,7 @@ import { randomIdentity } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   APP_TOPIC_LABEL,
+  asLogPosition,
   createOpenedAppHandler,
   encodeAppAAD,
   type GroupCrypto,
@@ -20,6 +21,8 @@ import { drainStoredOpened } from '../src/opened-delivery.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
 import type { PendingAppFrame } from '../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
+import { registryRetirement } from '../src/registry/retirement.js'
+import { retireToSuccessor } from '../src/successor.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture, registryFixtureForceOwnerMarker } from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
@@ -465,6 +468,11 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       'registry disposal',
       'registry peer disposal',
       'registry peer drained',
+      'lifecycle retirement',
+      'lifecycle switch',
+      'lifecycle readmission',
+      'lifecycle deletion',
+      'lifecycle successor',
     ] as const)('live handler refuses its own %s after an await', async (entry) => {
       const env = await setup(mode, supplied)
       await env.plant([env.record('live-reentry')])
@@ -472,6 +480,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       const invoke = Promise.withResolvers<void>()
       const checked = Promise.withResolvers<void>()
       const release = Promise.withResolvers<void>()
+      const beginnings = vi.spyOn(registryRetirement(env.fixture.registry), 'beginRetirement')
       let result: unknown
       const running = await startLeaseRotationPeer({
         mode,
@@ -482,18 +491,55 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           entered.resolve()
           await invoke.promise
           try {
-            const nested =
-              entry === 'registry drain'
-                ? env.fixture.registry.drainOpened(env.key)
-                : entry === 'registry disposal'
-                  ? env.fixture.registry.dispose()
-                  : entry === 'registry peer disposal'
-                    ? running.owner.dispose()
-                    : running.owner.drained()
-            if (nested !== undefined)
-              void nested.catch((error: unknown) => {
-                result = error
+            let nested: Promise<unknown>
+            if (entry === 'lifecycle retirement')
+              nested = Promise.resolve().then(() => {
+                registryRetirement(env.fixture.registry).beginRetirement(env.key)
               })
+            else if (entry === 'lifecycle deletion') nested = env.fixture.registry.delete(env.key)
+            else if (entry === 'lifecycle readmission')
+              nested = env.fixture.registry.seed(await env.fixture.makeHandle(2), {
+                replace: true,
+                packageUse: null,
+              })
+            else if (entry === 'lifecycle successor')
+              nested = retireToSuccessor({
+                registry: env.fixture.registry,
+                persistence: env.fixture.device.groups,
+                source: env.key,
+                successor: { groupID: 'other', incarnation: 1 },
+              })
+            else if (entry === 'lifecycle switch')
+              nested = env.fixture.registry.switchIncarnation(await env.fixture.makeHandle(2), {
+                source: await env.fixture.registry.recoverySource(env.key.groupID),
+                rejoinID: 'absent',
+                proof: {
+                  targetID: 'hub',
+                  topicID: 'commits',
+                  groupInfoEpoch: 2,
+                  captureHead: null,
+                  position: asLogPosition('1'),
+                  payloadDigest: 'digest',
+                  verdict: new Uint8Array(),
+                },
+                write: {
+                  mutationID: 'forbidden',
+                  source: { rejoinID: 'absent' },
+                  destination: { control: { cursor: { position: asLogPosition('1'), epoch: 2 } } },
+                },
+              })
+            else
+              nested =
+                entry === 'registry drain'
+                  ? env.fixture.registry.drainOpened(env.key)
+                  : entry === 'registry disposal'
+                    ? env.fixture.registry.dispose()
+                    : entry === 'registry peer disposal'
+                      ? Promise.resolve(running.owner.dispose())
+                      : running.owner.drained()
+            void nested.catch((error: unknown) => {
+              result = error
+            })
           } catch (error) {
             result = error
           }
@@ -507,6 +553,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       await checked.promise
       try {
         expect(result).toBeInstanceOf(OpenedDeliveryReentryError)
+        if (entry === 'lifecycle deletion') expect(beginnings).not.toHaveBeenCalled()
       } finally {
         release.resolve()
       }
@@ -704,147 +751,191 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       expect(liveCalls).toBe(1)
     })
 
-    test('cold drain joins live cursor finalisation after pending removal', async () => {
-      const { createAppLane } = (await import(
-        new URL('../../rpc/src/app-lane.ts', import.meta.url).href
-      )) as { createAppLane: typeof CreateAppLane }
-      const { createHubMux } = (await import(
-        new URL('../../rpc/src/hub-mux.ts', import.meta.url).href
-      )) as { createHubMux: typeof CreateHubMux }
-      const { DurableFakeHub } = (await import(
-        new URL('../../rpc/test/fixtures/durable-fake-hub.ts', import.meta.url).href
-      )) as { DurableFakeHub: new () => LogHub }
-      const { createFakeCrypto } = (await import(
-        new URL('../../rpc/test/fixtures/fake-crypto.ts', import.meta.url).href
-      )) as {
-        createFakeCrypto(params: {
-          epoch: number
-          localDID: string
-          pending?: {
-            persistOpened(state: Uint8Array, record: RpcPendingAppFrame): Promise<void>
-            list(): Promise<Array<RpcPendingAppFrame>>
-            complete(id: string): Promise<void>
-          }
-        }): GroupCrypto
-      }
-      const env = await setup(mode, supplied)
-      const access = await env.fixture.registry.access(env.key.groupID)
-      const binding = openedDeliveryBinding(access.pending)
-      if (binding === undefined) throw new Error('Missing opened binding')
-      const hub = new DurableFakeHub()
-      const localDID = env.fixture.identity.id
-      const mux = createHubMux({ hub, localDID, onReceiveEnded() {} })
-      const entered = Promise.withResolvers<void>()
-      const releaseHandler = Promise.withResolvers<void>()
-      const reading = Promise.withResolvers<void>()
-      const releaseRead = Promise.withResolvers<void>()
-      const saving = Promise.withResolvers<void>()
-      const releaseSave = Promise.withResolvers<void>()
-      const receiver = createFakeCrypto({
-        epoch: 1,
-        localDID,
-        pending: {
-          async persistOpened(_state, record) {
-            await env.plant([
-              {
-                ...record,
-                frame: { ...record.frame, ...env.key, procedure: 'posted' },
-                epoch: 1,
-                idempotencyKey: record.frame.id,
-              },
-            ])
-          },
-          list: env.pending,
-          complete: (id) => binding.complete(id),
-        },
-      })
-      const anchor = await receiver.exportSecret(APP_TOPIC_LABEL)
-      const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
-      const cursor = env.fixture.device.groups.ports(env.key).cursor
-      const save = cursor.save
-      cursor.save = async (topicID, position) => {
-        saving.resolve()
-        await releaseSave.promise
-        await save(topicID, position)
-      }
-      const lane = createAppLane({
-        mux,
-        crypto: receiver,
-        localDID,
-        protocols,
-        eventHandlers: new Map(),
-        retentionSeconds: 60,
-        appliedEpoch: () => 1,
-        anchor: () => anchor,
-        groupID: () => env.key.groupID,
-        appCursorStore: cursor,
-        claimOpened: (record, fn) => binding.claim(record, fn),
-        completeOpenedRecord: (id) => binding.complete(id),
-        deliverOpened: async () => {
-          entered.resolve()
-          await releaseHandler.promise
-        },
-      })
-      const detach = binding.attach(env.context, {
-        handoff: () => lane.handoffOpened(),
-        completed: (id) => lane.acknowledgeOpened(id),
-      })
-      const read = env.capability.read
-      let drain: Promise<void> | undefined
-      let settled = false
-      let coldCalls = 0
-      try {
-        const senderDID = randomIdentity().id
-        const sender = createFakeCrypto({ epoch: 1, localDID: senderDID })
-        const payload = await sender.wrap(encodeEventFrame('posted', { text: 'retained' }), {
-          aad: encodeAppAAD({ topicID, intent: 'log' }),
-        })
-        const published = await hub.publish({ topicID, senderDID, payload, retain: 'log' })
-        await lane.deliver()
-        await entered.promise
-        let firstRead = true
-        env.capability.read = async (...args) => {
-          if (firstRead) {
-            firstRead = false
-            reading.resolve()
-            await releaseRead.promise
-          }
-          return read(...args)
+    test.each(['drain', 'delete', 'readmit', 'switch'] as const)(
+      'late cursor save is awaited before lifecycle handoff: %s',
+      async (entry) => {
+        const { createAppLane } = (await import(
+          new URL('../../rpc/src/app-lane.ts', import.meta.url).href
+        )) as { createAppLane: typeof CreateAppLane }
+        const { createHubMux } = (await import(
+          new URL('../../rpc/src/hub-mux.ts', import.meta.url).href
+        )) as { createHubMux: typeof CreateHubMux }
+        const { DurableFakeHub } = (await import(
+          new URL('../../rpc/test/fixtures/durable-fake-hub.ts', import.meta.url).href
+        )) as { DurableFakeHub: new () => LogHub }
+        const { createFakeCrypto } = (await import(
+          new URL('../../rpc/test/fixtures/fake-crypto.ts', import.meta.url).href
+        )) as {
+          createFakeCrypto(params: {
+            epoch: number
+            localDID: string
+            pending?: {
+              persistOpened(state: Uint8Array, record: RpcPendingAppFrame): Promise<void>
+              list(): Promise<Array<RpcPendingAppFrame>>
+              complete(id: string): Promise<void>
+            }
+          }): GroupCrypto
         }
-        drain = env.drain(async () => {
-          coldCalls++
+        const env = await setup(mode, supplied)
+        const access = await env.fixture.registry.access(env.key.groupID)
+        const binding = openedDeliveryBinding(access.pending)
+        if (binding === undefined) throw new Error('Missing opened binding')
+        const hub = new DurableFakeHub()
+        const localDID = env.fixture.identity.id
+        const mux = createHubMux({ hub, localDID, onReceiveEnded() {} })
+        const entered = Promise.withResolvers<void>()
+        const releaseHandler = Promise.withResolvers<void>()
+        const reading = Promise.withResolvers<void>()
+        const releaseRead = Promise.withResolvers<void>()
+        const saving = Promise.withResolvers<void>()
+        const releaseSave = Promise.withResolvers<void>()
+        const receiver = createFakeCrypto({
+          epoch: 1,
+          localDID,
+          pending: {
+            async persistOpened(_state, record) {
+              await env.plant([
+                {
+                  ...record,
+                  frame: { ...record.frame, ...env.key, procedure: 'posted' },
+                  epoch: 1,
+                  idempotencyKey: record.frame.id,
+                },
+              ])
+            },
+            list: env.pending,
+            complete: (id) => binding.complete(id),
+          },
         })
-        void drain.then(() => {
-          settled = true
+        const anchor = await receiver.exportSecret(APP_TOPIC_LABEL)
+        const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+        const cursor = env.fixture.device.groups.ports(env.key).cursor
+        const save = cursor.save
+        cursor.save = async (topicID, position) => {
+          saving.resolve()
+          await releaseSave.promise
+          await save(topicID, position)
+        }
+        const lane = createAppLane({
+          mux,
+          crypto: receiver,
+          localDID,
+          protocols,
+          eventHandlers: new Map(),
+          retentionSeconds: 60,
+          appliedEpoch: () => 1,
+          anchor: () => anchor,
+          groupID: () => env.key.groupID,
+          appCursorStore: cursor,
+          claimOpened: (record, fn) => binding.claim(record, fn),
+          completeOpenedRecord: (id) => binding.complete(id),
+          deliverOpened: async () => {
+            entered.resolve()
+            await releaseHandler.promise
+          },
         })
-        await reading.promise
-        releaseHandler.resolve()
-        await saving.promise
-        expect(await env.pending()).toEqual([])
-        releaseRead.resolve()
-        await new Promise((resolve) => setTimeout(resolve, 100))
-        expect({ settled, cursor: await cursor.load(topicID), coldCalls }).toEqual({
-          settled: false,
-          cursor: null,
-          coldCalls: 0,
+        const detach = binding.attach(env.context, {
+          handoff: () => lane.handoffOpened(),
+          completed: (id) => lane.acknowledgeOpened(id),
         })
-        releaseSave.resolve()
-        await drain
-        expect(await cursor.load(topicID)).toBe(published.sequenceID)
-        expect(coldCalls).toBe(0)
-      } finally {
-        releaseHandler.resolve()
-        releaseRead.resolve()
-        releaseSave.resolve()
-        env.capability.read = read
-        if (drain !== undefined) await drain
-        lane.dispose()
-        await lane.idle()
-        detach()
-        mux.dispose()
-        await env.fixture.close()
-      }
-    })
+        let lifecycle: () => Promise<unknown> = () => env.fixture.registry.delete(env.key)
+        if (entry === 'readmit') {
+          const candidate = await env.fixture.makeHandle(2)
+          lifecycle = () =>
+            env.fixture.registry.seed(candidate, {
+              replace: true,
+              packageUse: { kind: 'ordinary', ref: 'cursor-readmit', sourceID: 'hub' },
+            })
+        } else if (entry === 'switch') {
+          const recovery = await env.fixture.confirmedRecovery(env.key, {
+            confirm: true,
+            format: 'legacy',
+          })
+          lifecycle = async () =>
+            env.fixture.registry.switchIncarnation(recovery.candidate, {
+              source: await env.fixture.registry.recoverySource(env.key.groupID),
+              rejoinID: recovery.record.id,
+              proof: recovery.proof,
+              write: {
+                mutationID: crypto.randomUUID(),
+                source: { rejoinID: recovery.record.id },
+                destination: {
+                  control: {
+                    cursor: {
+                      position: recovery.proof.position,
+                      epoch: Number(recovery.candidate.epoch),
+                    },
+                  },
+                },
+              },
+            })
+        }
+        const read = env.capability.read
+        let drain: Promise<void> | undefined
+        let settled = false
+        let coldCalls = 0
+        try {
+          const senderDID = randomIdentity().id
+          const sender = createFakeCrypto({ epoch: 1, localDID: senderDID })
+          const payload = await sender.wrap(encodeEventFrame('posted', { text: 'retained' }), {
+            aad: encodeAppAAD({ topicID, intent: 'log' }),
+          })
+          const published = await hub.publish({ topicID, senderDID, payload, retain: 'log' })
+          await lane.deliver()
+          await entered.promise
+          let firstRead = true
+          env.capability.read = async (...args) => {
+            if (firstRead) {
+              firstRead = false
+              reading.resolve()
+              await releaseRead.promise
+            }
+            return read(...args)
+          }
+          drain =
+            entry === 'drain'
+              ? env.drain(async () => {
+                  coldCalls++
+                })
+              : lifecycle().then(() => {})
+          void drain.then(() => {
+            settled = true
+          })
+          await reading.promise
+          releaseHandler.resolve()
+          await saving.promise
+          expect(await env.pending()).toEqual([])
+          releaseRead.resolve()
+          await new Promise((resolve) => setTimeout(resolve, 100))
+          expect({ settled, cursor: await cursor.load(topicID), coldCalls }).toEqual({
+            settled: false,
+            cursor: null,
+            coldCalls: 0,
+          })
+          releaseSave.resolve()
+          await drain
+          expect(await cursor.load(topicID)).toBe(entry === 'delete' ? null : published.sequenceID)
+          if (entry === 'readmit' || entry === 'switch')
+            expect(
+              await env.fixture.device.groups
+                .ports({ ...env.key, incarnation: 2 })
+                .cursor.load(topicID),
+            ).toBeNull()
+          expect(coldCalls).toBe(0)
+        } finally {
+          releaseHandler.resolve()
+          releaseRead.resolve()
+          releaseSave.resolve()
+          env.capability.read = read
+          if (drain !== undefined) await drain
+          lane.dispose()
+          await lane.idle()
+          detach()
+          mux.dispose()
+          await env.fixture.close()
+        }
+      },
+    )
 
     test('failed old anchor blocks newer work in the same protocol only after live handoff', async () => {
       const env = await setup(mode, supplied)

@@ -39,6 +39,7 @@ import {
   registryFixtureForceOwnerMarker,
 } from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
+import { retireStoredSource } from './fixtures/retired-source.js'
 import {
   createStorageFixture as createStorage,
   type RegistryStorageFixture,
@@ -531,28 +532,8 @@ for (const mode of ['real-mls', 'double'] as const) {
     try {
       const key = await fixture.registry.seed(await fixture.makeHandle(0), { packageUse: null })
       await certifyRegistry(fixture, key)
-      const recovery = await fixture.confirmedRecovery(key, { confirm: true })
-      const mutationID =
-        'format' in recovery.record ? recovery.record.switchMutationID : crypto.randomUUID()
-      if (mutationID === null) throw new Error('Missing switch mutation')
-      const next = await fixture.registry.switchIncarnation(recovery.candidate, {
-        source: recovery.source,
-        rejoinID: recovery.record.id,
-        proof: recovery.proof,
-        write: {
-          mutationID,
-          source: { rejoinID: recovery.record.id },
-          destination: {
-            control: {
-              cursor: {
-                position: recovery.proof.position,
-                epoch: Number(recovery.candidate.epoch),
-              },
-            },
-          },
-        },
-      })
-      expect(next.incarnation).toBe(2)
+      await retireStoredSource(fixture, key, mode)
+      expect((await fixture.device.groups.load(key.groupID))?.activeIncarnation).toBe(2)
       fixture = await fixture.reopen()
       const registry = fixture.registry
       const access = vi.spyOn(registry, 'access')

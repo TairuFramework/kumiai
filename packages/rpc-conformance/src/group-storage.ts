@@ -906,6 +906,10 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               } else if (action === 'retire') {
                 await writeStorageInstall(stores, seed, 'preserve-safety', 2)
               } else {
+                const pending = await rows.pending.list()
+                if (pending.length !== 0) {
+                  await rows.pending.complete(pending.map((record) => record.frame.id))
+                }
                 await rows.clearTransport()
                 if (action === 'delete') {
                   const life = await stores.lifetime.load()

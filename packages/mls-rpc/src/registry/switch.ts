@@ -29,6 +29,7 @@ import {
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from '../persistence-types.js'
+import { inspectRecoveryCapture } from '../recovery.js'
 import { decodeCapturedRecoveryCandidate } from '../recovery-codec.js'
 import { recoveryTrustDigest } from '../recovery-trust-digest.js'
 import { clearGroupCondition } from '../safety-conditions.js'
@@ -42,7 +43,12 @@ import {
   restoreCaptured,
 } from './reserve.js'
 import { retireIncarnation } from './retired.js'
-import type { RegistryRetirement } from './retirement.js'
+import {
+  assertRetirementDrained,
+  type RegistryRetirement,
+  RetirementWorkChangedError,
+} from './retirement.js'
+import { accountedAdministrativeVersion } from './runtime-facts.js'
 import { readRecoverySource } from './source.js'
 import { recoveryTrustFor } from './trust.js'
 import type {
@@ -53,6 +59,9 @@ import type {
 } from './types.js'
 import { type RecoveryEnvironment, validateRegistryHandle } from './validation.js'
 import { verifyRegistryResync } from './verdict.js'
+
+// Explicit host requests and automatic recovery carry separate retirement authority.
+export const automaticRegistrySwitches = new WeakSet<GroupHandle>()
 
 function exactFields(
   value: unknown,
@@ -137,6 +146,8 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
 ) => Promise<{ key: GroupKey; reservation: Reservation | null }> {
   const { persistence, capability, retirement } = environment
   return async (input: GroupHandle, params) => {
+    retirement.assertEntry(() => params.source.key)
+    const automatic = automaticRegistrySwitches.delete(input)
     const captured = await relinquishSend(input)
     validateWrite(params.write)
     const { source, rejoinID, proof, write } = copyStoredValue(params)
@@ -203,10 +214,48 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
 
     retirement.assertAvailable(groupID)
     await environment.start()
-    const control = await capability.read(groupID, (reads) => reads.control(source.key.incarnation))
+    const { control, initialSource } = await capability.read(groupID, async (reads) => ({
+      initialSource: await readRecoverySource(reads, groupID),
+      control: await reads.control(source.key.incarnation),
+    }))
     assertSafety(control)
+    if (automatic && control.commitOnce !== null) {
+      matchSource(initialSource, source)
+      const confirmed = confirmedRecord(control.rejoin, rejoinID)
+      if (
+        authorisationID !== undefined ||
+        !('format' in confirmed) ||
+        confirmed.trigger !== 'automatic'
+      )
+        throw new RegistryResyncRefusedError({ reason: 'tuple' })
+      const saved = decodeCapturedRecoveryCandidate(confirmed.candidate, confirmed.requestKey)
+      const inspected = await inspectRecoveryCapture({
+        source: source as RegistryRecoverySource,
+        reply: {
+          sealed: saved.attestedReply,
+          requestID: saved.requestID,
+          requestKey: confirmed.requestKey,
+          epochFloor: null,
+        },
+        environment: environment.recovery,
+      })
+      if (
+        inspected === null ||
+        inspected.groupID !== groupID ||
+        inspected.epoch <= (source.identity?.epoch ?? 0) ||
+        inspected.epoch !== confirmed.target.groupInfoEpoch ||
+        !sameStoredValue(inspected.authenticator, confirmed.target.groupInfoAuthenticator)
+      )
+        throw new RegistryResyncRefusedError({ reason: 'tuple' })
+      await verifyRegistryResync({ source, candidate, record: confirmed, proof })
+    }
     // A losing attempt never obtains a settlement capable of lifting the winner's fence.
     const attempt = retirement.beginRetirement(source.key)
+    let drainedStateVersion = initialSource.stateVersion
+    const stopDrainObservation = capability.observe(groupID, (observation) => {
+      const version = accountedAdministrativeVersion(observation, source.key)
+      if (version === drainedStateVersion + 1) drainedStateVersion = version
+    })
     let stopObservation = () => {}
     let hooked = false
     function settle(outcome: 'committed' | 'rolled-back'): void {
@@ -215,244 +264,281 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     }
     try {
       await attempt.drain()
-      // The registry projection runs first, retaining listener dispatch until owner release.
-      stopObservation = capability.observe(groupID, (observation) => {
-        if (observation.mutationID === write.mutationID) settle('committed')
-      })
-      return await capability.run(
-        { groupID, mutationID: write.mutationID },
-        async (reads) => {
-          assertChoice(await reads.checkpoints())
-          assertSafety(await reads.control(source.key.incarnation))
-          const current = await readRecoverySource(reads, groupID)
-          matchSource(current, source)
-          const lifetime = await reads.lifetime()
-          if (lifetime === null || lifetime.latestIncarnation !== source.key.incarnation)
-            throw new GroupStateConflictError('Registry switch incarnation moved')
-          const manual =
-            authorisationID === undefined
-              ? null
-              : manualRecoveryAttempt(await reads.checkpoints(), source.key, authorisationID)
-          if (manual !== null && manual.stage !== 'authorised')
-            throw new GroupStateConflictError('Manual recovery already completed')
-          const record = confirmedRecord(
-            manual === null ? (await reads.control(source.key.incarnation)).rejoin : manual.attempt,
-            rejoinID,
-          )
-          if ('format' in record) {
-            if (manual !== null && record.target.groupInfoEpoch < (manual.epochFloor ?? 0))
-              throw new RecoveryTargetBehindError('Manual recovery capture is target-behind')
-            const snapshot = await reads.control(source.key.incarnation)
-            const floor = effectiveRecoveryEpochFloor(snapshot, {
-              id: record.id,
-              source: source.key,
-            })
-            if (record.forkRecovery !== undefined) {
-              const attempt = snapshot.forkRecoveryAttempt
-              const captured = decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
-              if (
-                attempt == null ||
-                attempt.id !== record.id ||
-                !sameStoredValue(attempt.forkRecovery, record.forkRecovery) ||
-                !(await checkForkRecoveryCaptureInReads(
-                  reads,
-                  attempt,
-                  {
-                    sealed: captured.attestedReply,
-                    requestID: captured.requestID,
-                    requestKey: record.requestKey,
-                    epochFloor: floor,
-                  },
-                  environment.recovery,
-                ))
-              )
-                throw new RecoveryTargetBehindError('Fork recovery capture is target-behind')
-            } else if (
-              authorisationID === undefined &&
-              record.target.groupInfoEpoch < Math.max(floor ?? 0, current.identity?.epoch ?? 0)
-            )
-              throw new RecoveryTargetBehindError('Recovery capture is target-behind')
-          }
-          if ('format' in record && record.switchMutationID !== write.mutationID)
-            throw new RegistryResyncRefusedError({ reason: 'tuple' })
-          await verifyRegistryResync({ source: current, candidate, record, proof, authorisationID })
-          // Spent admission is independent of provider CAS and candidate epoch ordering.
-          if (
-            current.trust.spentEpochAuthenticators.some((spent) =>
-              sameStoredValue(spent, candidate.state.keySchedule.epochAuthenticator),
-            )
-          )
-            throw new GroupStateConflictError('Epoch authenticator already spent')
-          validateRegistryHandle({
-            handle: candidate,
-            key: destination,
-            trust: current.trust,
-            environment: environment.recovery,
-            ownerDID: environment.ownerDID,
+      assertSafety(await capability.read(groupID, (reads) => reads.control(source.key.incarnation)))
+      matchSource(initialSource, source)
+      for (;;) {
+        await retirement.drainOpened(source.key)
+        const drainedSource = await capability.read(groupID, (reads) =>
+          readRecoverySource(reads, groupID),
+        )
+        matchSource(
+          { ...drainedSource, lifetimeRevision: source.lifetimeRevision },
+          { ...source, stateVersion: drainedStateVersion },
+        )
+        try {
+          // The registry projection runs first, retaining listener dispatch until owner release.
+          stopObservation = capability.observe(groupID, (observation) => {
+            if (observation.mutationID === write.mutationID) settle('committed')
           })
-          const reserved = await reserveFromBytes(
-            { ...environment.cold, restore: async () => candidate },
-            { ...capturedState, senderHWM: 0 },
-            0,
-          )
-          const state = {
-            ...destination,
-            version: 1,
-            deleted: false as const,
-            terminal: candidate.state.groupActiveState.kind === 'removedFromGroup',
-            epoch: Number(candidate.epoch),
-            epochAuthenticator: candidate.state.keySchedule.epochAuthenticator.slice(),
-            state: reserved.state,
-            credential: captured.credential,
-            ledger: captured.ledgerTokens,
-            senderHWM: reserved.senderHWM,
-          }
-          const trust = recoveryTrustFor(candidate, destination, current.trust)
-          assertSafety(await reads.control(source.key.incarnation))
-          const anchor = {
-            anchor: {
-              epoch: Number(candidate.epoch),
-              secret: await candidate.exportSecret(APP_TOPIC_LABEL, new Uint8Array(), 32),
-            },
-          }
-          return {
-            expected: {
-              revision: lifetime.revision,
-              activeIncarnation: lifetime.activeIncarnation,
-            },
-            value: {
-              current,
-              abandonment: await branchAbandonmentPreparer(reads)({
-                source: source.key,
-                destination,
-                mutationID: write.mutationID,
-                record,
-              }),
-              branchFacts: await reads.checkpoints(),
-              manual,
-              recoveryEpochFloor: (await reads.control(source.key.incarnation)).recoveryEpochFloor,
-              lifetime,
-              record,
-              state,
-              reservation:
-                reserved.reservation === null
+          return await capability.run(
+            { groupID, mutationID: write.mutationID },
+            async (reads) => {
+              await assertRetirementDrained(reads)
+              assertChoice(await reads.checkpoints())
+              assertSafety(await reads.control(source.key.incarnation))
+              const current = await readRecoverySource(reads, groupID)
+              matchSource(current, drainedSource)
+              const lifetime = await reads.lifetime()
+              if (lifetime === null || lifetime.latestIncarnation !== source.key.incarnation)
+                throw new GroupStateConflictError('Registry switch incarnation moved')
+              const manual =
+                authorisationID === undefined
                   ? null
-                  : { ...reserved.reservation, envelope: reservationEnvelope(state) },
-              trust,
-              anchor,
-              checkpoint: await prepareCheckpointInstallation({
-                key: destination,
+                  : manualRecoveryAttempt(await reads.checkpoints(), source.key, authorisationID)
+              if (manual !== null && manual.stage !== 'authorised')
+                throw new GroupStateConflictError('Manual recovery already completed')
+              const record = confirmedRecord(
+                manual === null
+                  ? (await reads.control(source.key.incarnation)).rejoin
+                  : manual.attempt,
+                rejoinID,
+              )
+              if ('format' in record) {
+                if (manual !== null && record.target.groupInfoEpoch < (manual.epochFloor ?? 0))
+                  throw new RecoveryTargetBehindError('Manual recovery capture is target-behind')
+                const snapshot = await reads.control(source.key.incarnation)
+                const floor = effectiveRecoveryEpochFloor(snapshot, {
+                  id: record.id,
+                  source: source.key,
+                })
+                if (record.forkRecovery !== undefined) {
+                  const attempt = snapshot.forkRecoveryAttempt
+                  const captured = decodeCapturedRecoveryCandidate(
+                    record.candidate,
+                    record.requestKey,
+                  )
+                  if (
+                    attempt == null ||
+                    attempt.id !== record.id ||
+                    !sameStoredValue(attempt.forkRecovery, record.forkRecovery) ||
+                    !(await checkForkRecoveryCaptureInReads(
+                      reads,
+                      attempt,
+                      {
+                        sealed: captured.attestedReply,
+                        requestID: captured.requestID,
+                        requestKey: record.requestKey,
+                        epochFloor: floor,
+                      },
+                      environment.recovery,
+                    ))
+                  )
+                    throw new RecoveryTargetBehindError('Fork recovery capture is target-behind')
+                } else if (
+                  authorisationID === undefined &&
+                  record.target.groupInfoEpoch < Math.max(floor ?? 0, current.identity?.epoch ?? 0)
+                )
+                  throw new RecoveryTargetBehindError('Recovery capture is target-behind')
+              }
+              if ('format' in record && record.switchMutationID !== write.mutationID)
+                throw new RegistryResyncRefusedError({ reason: 'tuple' })
+              await verifyRegistryResync({
+                source: current,
+                candidate,
+                record,
+                proof,
+                authorisationID,
+              })
+              // Spent admission is independent of provider CAS and candidate epoch ordering.
+              if (
+                current.trust.spentEpochAuthenticators.some((spent) =>
+                  sameStoredValue(spent, candidate.state.keySchedule.epochAuthenticator),
+                )
+              )
+                throw new GroupStateConflictError('Epoch authenticator already spent')
+              validateRegistryHandle({
                 handle: candidate,
-                mutationID: write.mutationID,
-                stateVersion: state.version,
-                previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
-              }),
+                key: destination,
+                trust: current.trust,
+                environment: environment.recovery,
+                ownerDID: environment.ownerDID,
+              })
+              const reserved = await reserveFromBytes(
+                { ...environment.cold, restore: async () => candidate },
+                { ...capturedState, senderHWM: 0 },
+                0,
+              )
+              const state = {
+                ...destination,
+                version: 1,
+                deleted: false as const,
+                terminal: candidate.state.groupActiveState.kind === 'removedFromGroup',
+                epoch: Number(candidate.epoch),
+                epochAuthenticator: candidate.state.keySchedule.epochAuthenticator.slice(),
+                state: reserved.state,
+                credential: captured.credential,
+                ledger: captured.ledgerTokens,
+                senderHWM: reserved.senderHWM,
+              }
+              const trust = recoveryTrustFor(candidate, destination, current.trust)
+              assertSafety(await reads.control(source.key.incarnation))
+              const anchor = {
+                anchor: {
+                  epoch: Number(candidate.epoch),
+                  secret: await candidate.exportSecret(APP_TOPIC_LABEL, new Uint8Array(), 32),
+                },
+              }
+              return {
+                expected: {
+                  revision: lifetime.revision,
+                  activeIncarnation: lifetime.activeIncarnation,
+                },
+                value: {
+                  current,
+                  abandonment: await branchAbandonmentPreparer(reads)({
+                    source: source.key,
+                    destination,
+                    mutationID: write.mutationID,
+                    record,
+                  }),
+                  branchFacts: await reads.checkpoints(),
+                  manual,
+                  recoveryEpochFloor: (await reads.control(source.key.incarnation))
+                    .recoveryEpochFloor,
+                  lifetime,
+                  record,
+                  state,
+                  reservation:
+                    reserved.reservation === null
+                      ? null
+                      : { ...reserved.reservation, envelope: reservationEnvelope(state) },
+                  trust,
+                  anchor,
+                  checkpoint: await prepareCheckpointInstallation({
+                    key: destination,
+                    handle: candidate,
+                    mutationID: write.mutationID,
+                    stateVersion: state.version,
+                    previousFact:
+                      currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+                  }),
+                },
+              }
             },
-          }
-        },
-        async (stores, prepared) => {
-          assertChoice(await stores.checkpoints.list())
-          assertSafety(await stores.incarnation(source.key.incarnation).control.load())
-          const lifetime = await stores.lifetime.load()
-          const metadata = await stores.incarnation(source.key.incarnation).state.loadMetadata()
-          const trust = await stores.trust.load()
-          if (
-            lifetime === null ||
-            metadata === null ||
-            metadata.deleted ||
-            trust === null ||
-            lifetime.activeIncarnation !== source.key.incarnation ||
-            lifetime.latestIncarnation !== source.key.incarnation
+            async (stores, prepared) => {
+              assertChoice(await stores.checkpoints.list())
+              assertSafety(await stores.incarnation(source.key.incarnation).control.load())
+              const lifetime = await stores.lifetime.load()
+              const metadata = await stores.incarnation(source.key.incarnation).state.loadMetadata()
+              const trust = await stores.trust.load()
+              if (
+                lifetime === null ||
+                metadata === null ||
+                metadata.deleted ||
+                trust === null ||
+                lifetime.activeIncarnation !== source.key.incarnation ||
+                lifetime.latestIncarnation !== source.key.incarnation
+              )
+                throw new GroupStateConflictError('Registry switch source moved in work')
+              const current = {
+                key: { groupID, incarnation: lifetime.activeIncarnation },
+                stateVersion: metadata.version,
+                identity: trust.installed,
+                lifetimeRevision: lifetime.revision,
+                trust,
+                trustDigest: recoveryTrustDigest(trust),
+              }
+              matchSource(current, prepared.current)
+              matchSource(current, drainedSource)
+              if (!sameStoredValue(lifetime, prepared.lifetime))
+                throw new GroupStateConflictError('Registry switch lifetime changed in work')
+              const manual =
+                authorisationID === undefined
+                  ? null
+                  : manualRecoveryAttempt(
+                      await stores.checkpoints.list(),
+                      source.key,
+                      authorisationID,
+                    )
+              if (!sameStoredValue(manual, prepared.manual))
+                throw new GroupStateConflictError('Manual authorisation moved')
+              const record = confirmedRecord(
+                manual === null
+                  ? (await stores.incarnation(source.key.incarnation).control.load()).rejoin
+                  : manual.attempt,
+                rejoinID,
+              )
+              if (!sameStoredValue(record, prepared.record))
+                throw new GroupStateConflictError('Registry switch confirmed record moved')
+              assertSafety(await stores.incarnation(source.key.incarnation).control.load())
+              stores.tx.onRollback(() => settle('rolled-back'))
+              hooked = true
+              await retireIncarnation(stores, {
+                source: source.key,
+                nextIncarnation: destination.incarnation,
+                ...(authorisationID === undefined
+                  ? { switchedRejoinID: rejoinID }
+                  : { manualRejoinID: rejoinID }),
+                mutationID: write.mutationID,
+                at: Date.now(),
+              })
+              if (manual !== null && 'format' in record)
+                await saveManualRecovery(stores, {
+                  ...manual,
+                  stage: 'completed',
+                  destination,
+                  mutationID: write.mutationID,
+                  attempt: { ...record, stage: 'adopted', destinationKey: destination },
+                })
+              await stores.lifetime.save({
+                ...lifetime,
+                latestIncarnation: destination.incarnation,
+                activeIncarnation: destination.incarnation,
+                revision: lifetime.revision + 1,
+                mutationID: write.mutationID,
+                restorePending: false,
+              })
+              const rows = stores.incarnation(destination.incarnation)
+              await rows.state.save(prepared.state)
+              await stores.trust.save(prepared.trust)
+              await clearGroupCondition(stores.checkpoints, source.key)
+              if (prepared.abandonment !== null)
+                await writeBranchAbandonment(
+                  stores.checkpoints,
+                  prepared.abandonment,
+                  prepared.branchFacts,
+                )
+              await stores.checkpoints.put(prepared.checkpoint)
+              if (!prepared.state.terminal)
+                await stores.checkpoints.put({
+                  kind: 'publication',
+                  id: `publication:${prepared.checkpoint.id}`,
+                  key: destination,
+                  factID: prepared.checkpoint.id,
+                  frame: null,
+                  publishID: null,
+                  accepted: false,
+                  nextHeartbeatAt: null,
+                })
+              await rows.control.apply(
+                { cursor, recoveryEpochFloor: prepared.recoveryEpochFloor },
+                write.mutationID,
+              )
+              await rows.anchor.save(prepared.anchor)
+              return { key: destination, reservation: prepared.reservation }
+            },
           )
-            throw new GroupStateConflictError('Registry switch source moved in work')
-          const current = {
-            key: { groupID, incarnation: lifetime.activeIncarnation },
-            stateVersion: metadata.version,
-            identity: trust.installed,
-            lifetimeRevision: lifetime.revision,
-            trust,
-            trustDigest: recoveryTrustDigest(trust),
-          }
-          matchSource(current, prepared.current)
-          matchSource(current, source)
-          if (!sameStoredValue(lifetime, prepared.lifetime))
-            throw new GroupStateConflictError('Registry switch lifetime changed in work')
-          const manual =
-            authorisationID === undefined
-              ? null
-              : manualRecoveryAttempt(await stores.checkpoints.list(), source.key, authorisationID)
-          if (!sameStoredValue(manual, prepared.manual))
-            throw new GroupStateConflictError('Manual authorisation moved')
-          const record = confirmedRecord(
-            manual === null
-              ? (await stores.incarnation(source.key.incarnation).control.load()).rejoin
-              : manual.attempt,
-            rejoinID,
-          )
-          if (!sameStoredValue(record, prepared.record))
-            throw new GroupStateConflictError('Registry switch confirmed record moved')
-          assertSafety(await stores.incarnation(source.key.incarnation).control.load())
-          stores.tx.onRollback(() => settle('rolled-back'))
-          hooked = true
-          await retireIncarnation(stores, {
-            source: source.key,
-            nextIncarnation: destination.incarnation,
-            ...(authorisationID === undefined
-              ? { switchedRejoinID: rejoinID }
-              : { manualRejoinID: rejoinID }),
-            mutationID: write.mutationID,
-            at: Date.now(),
-          })
-          if (manual !== null && 'format' in record)
-            await saveManualRecovery(stores, {
-              ...manual,
-              stage: 'completed',
-              destination,
-              mutationID: write.mutationID,
-              attempt: { ...record, stage: 'adopted', destinationKey: destination },
-            })
-          await stores.lifetime.save({
-            ...lifetime,
-            latestIncarnation: destination.incarnation,
-            activeIncarnation: destination.incarnation,
-            revision: lifetime.revision + 1,
-            mutationID: write.mutationID,
-            restorePending: false,
-          })
-          const rows = stores.incarnation(destination.incarnation)
-          await rows.state.save(prepared.state)
-          await stores.trust.save(prepared.trust)
-          await clearGroupCondition(stores.checkpoints, source.key)
-          if (prepared.abandonment !== null)
-            await writeBranchAbandonment(
-              stores.checkpoints,
-              prepared.abandonment,
-              prepared.branchFacts,
-            )
-          await stores.checkpoints.put(prepared.checkpoint)
-          if (!prepared.state.terminal)
-            await stores.checkpoints.put({
-              kind: 'publication',
-              id: `publication:${prepared.checkpoint.id}`,
-              key: destination,
-              factID: prepared.checkpoint.id,
-              frame: null,
-              publishID: null,
-              accepted: false,
-              nextHeartbeatAt: null,
-            })
-          await rows.control.apply(
-            { cursor, recoveryEpochFloor: prepared.recoveryEpochFloor },
-            write.mutationID,
-          )
-          await rows.anchor.save(prepared.anchor)
-          return { key: destination, reservation: prepared.reservation }
-        },
-      )
+        } catch (error) {
+          if (!(error instanceof RetirementWorkChangedError)) throw error
+          stopObservation()
+        }
+      }
     } catch (error) {
       // Outcome hooks own ambiguous settlement; a rejected host call does not prove rollback.
       if (!(hooked && error instanceof StorageOutcomeUnknownError)) settle('rolled-back')
       throw error
+    } finally {
+      stopDrainObservation()
     }
   }
 }

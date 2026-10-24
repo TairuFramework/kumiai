@@ -913,9 +913,17 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
         prc: 'posted',
         data: new Uint8Array([13]),
         status: 'accepted' as const,
-        lastAttempt: null,
+        lastAttempt: {
+          incarnation: key.incarnation,
+          epoch: access.epoch(),
+          segment: 0,
+          floor: null,
+          attempts: 1,
+          publishID: 'owed-certified-attempt',
+          topicID: 'owed-app-topic',
+        },
       }
-      const uncertified = { ...certified, seq: 42, data: new Uint8Array([14]) }
+      const uncertified = { ...certified, seq: 42, data: new Uint8Array([14]), lastAttempt: null }
       const settlement = {
         attemptID: 'owed-certified-attempt',
         topicID: 'owed-app-topic',
@@ -954,7 +962,9 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
       access.onRetire(async () => {
         order.push(`hook:${(await fixture.device.groups.load(key.groupID))?.activeIncarnation}`)
       })
-      await fixture.safety().recover(key, { mode: 'successor', successor })
+      await expect(
+        fixture.safety().recover(key, { mode: 'successor', successor }),
+      ).resolves.toEqual(successor)
       order.push(`after:${(await fixture.device.groups.load(key.groupID))?.activeIncarnation}`)
       expect(order).toEqual([`hook:${key.incarnation}`, 'after:null'])
       const control = await fixture.device.groups.ports(key).control.load()
@@ -968,11 +978,21 @@ export function runGroupSafetyContract<THandle extends ConformanceRegistryHandle
       )
       expect(control.forkHalt).not.toBeNull()
       const ports = fixture.device.groups.ports(key)
-      expect(await ports.outbox.list()).toEqual([certified])
-      expect(await ports.outbox.loadSettlement(certified.seq)).toEqual(settlement)
+      expect(await ports.outbox.list()).toEqual([])
+      expect(await ports.outbox.loadSettlement(certified.seq)).toBeNull()
       const events = await ports.outbox.events()
       expect(events).toEqual(
         expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'published',
+            entry: certified,
+            occurrence: {
+              incarnation: key.incarnation,
+              segment: 0,
+              topicID: 'owed-app-topic',
+              position: 'owed-certified-position',
+            },
+          }),
           expect.objectContaining({ kind: 'failed', entry: { ...uncertified, status: 'failed' } }),
         ]),
       )

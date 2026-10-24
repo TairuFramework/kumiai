@@ -1,3 +1,4 @@
+import type { EntryReads } from '../entry-capability.js'
 import {
   DisplacedGroupHandleError,
   RegistryRetireHookError,
@@ -17,6 +18,8 @@ export type RetirementSlot = {
 }
 export type RegistryRetirement = {
   beginRetirement(key: GroupKey): RetirementAttempt
+  assertEntry(key: GroupKey | (() => GroupKey)): void
+  drainOpened(key: GroupKey): Promise<void>
   assertAvailable(groupID: string): void
   assertGeneration(groupID: string, generation: number): void
 }
@@ -38,6 +41,9 @@ export function registryRetirement(registry: GroupHandleRegistry): RegistryRetir
 
 export function createRegistryRetirement(params: {
   slot(groupID: string): RetirementSlot
+  assertEntry(key: GroupKey | (() => GroupKey)): void
+  handoff(key: GroupKey): Promise<void>
+  drainOpened(key: GroupKey): Promise<void>
   drain(groupID: string): Promise<void>
   displace(slot: RetirementSlot, key: GroupKey): void
   failureSignal?: AbortSignal
@@ -49,6 +55,8 @@ export function createRegistryRetirement(params: {
   }
   return {
     assertAvailable,
+    assertEntry: params.assertEntry,
+    drainOpened: params.drainOpened,
     assertGeneration(groupID, generation) {
       if (params.failureSignal?.aborted) throw params.failureSignal.reason
       const slot = params.slot(groupID)
@@ -56,6 +64,7 @@ export function createRegistryRetirement(params: {
         throw new RegistryRetiringError({ key: slot.lastRetirementKey })
     },
     beginRetirement(requestedKey) {
+      params.assertEntry(requestedKey)
       const key = { ...requestedKey }
       const slot = params.slot(key.groupID)
       assertAvailable(key.groupID)
@@ -84,7 +93,7 @@ export function createRegistryRetirement(params: {
       const attempt: RetirementAttempt = {
         generation,
         settle,
-        drain() {
+        drain(options) {
           if (round !== null) return round
           if (slot.retirement?.attempt !== attempt)
             return Promise.reject(new DisplacedGroupHandleError('Retirement attempt has ended'))
@@ -98,13 +107,15 @@ export function createRegistryRetirement(params: {
             signal?.addEventListener('abort', onFailure, { once: true })
             try {
               if (signal?.aborted) throw signal.reason
+              await Promise.race([handoff, failed])
+              if (options?.opened !== false) await Promise.race([params.drainOpened(key), failed])
               await Promise.race([params.drain(key.groupID), failed])
               if (signal?.aborted) throw signal.reason
               if (slot.retirement?.attempt !== attempt)
                 throw new DisplacedGroupHandleError('Retirement attempt has ended')
               const results = await Promise.race([
                 Promise.allSettled(
-                  [...hooks].map(async (hook) => {
+                  (options?.hooks === false ? [] : [...hooks]).map(async (hook) => {
                     await hook()
                   }),
                 ),
@@ -137,8 +148,24 @@ export function createRegistryRetirement(params: {
         },
       }
       slot.retirement = { key, attempt }
+      // Freeze callback/open admission before any retirement waiter can join live work.
+      const handoff = params.handoff(key)
+      void handoff.catch(() => {})
       params.failureSignal?.addEventListener('abort', onFailStop, { once: true })
       return attempt
     },
+  }
+}
+
+export class RetirementWorkChangedError extends Error {}
+
+export async function assertRetirementDrained(reads: EntryReads): Promise<void> {
+  const lifetime = await reads.lifetime()
+  for (let incarnation = 1; incarnation <= (lifetime?.latestIncarnation ?? 0); incarnation++) {
+    if ((await reads.pendingFrames(incarnation)).length !== 0)
+      throw new RetirementWorkChangedError('Opened application work changed during retirement')
+    for (const entry of await reads.outbox(incarnation))
+      if ((await reads.settlement(incarnation, entry.seq)) !== null)
+        throw new RetirementWorkChangedError('Publication settlement changed during retirement')
   }
 }

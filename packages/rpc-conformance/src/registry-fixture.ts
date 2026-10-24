@@ -38,6 +38,12 @@ export type ConformanceRecoveryPendingReason =
   | 'target-unresolved'
 export type ConformanceRegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
+  | {
+      kind: 'switch-blocked'
+      key: ConformanceGroupKey
+      reason: 'opened-records' | 'publication-settlement'
+      pending: number
+    }
   | { kind: 'pending'; reason?: ConformanceRecoveryPendingReason; authorisationID?: string }
   | { kind: 'spent-set-corrupt'; eventID: string }
   | {

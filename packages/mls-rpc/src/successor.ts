@@ -11,6 +11,7 @@ import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js
 import { GroupStateConflictError, ManualRecoveryUnavailableError } from './persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from './persistence-types.js'
 import { retireIncarnation } from './registry/retired.js'
+import { registryRetirement } from './registry/retirement.js'
 import { registrySafety } from './registry/safety.js'
 import type { GroupHandleRegistry } from './registry/types.js'
 
@@ -74,6 +75,7 @@ export async function retireToSuccessor<TTx extends GroupTransaction>(params: {
 }): Promise<GroupKey> {
   const { registry } = params
   const source = { ...params.source }
+  registryRetirement(registry).assertEntry(source)
   const successor = { groupID: params.successor.groupID, incarnation: params.successor.incarnation }
   const capability = registrySafety<TTx>(registry)
   if (capability === null || capability.binding !== coordinatorBinding(params.persistence))

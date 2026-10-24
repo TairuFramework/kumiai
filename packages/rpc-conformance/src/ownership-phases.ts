@@ -398,6 +398,10 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
               await within(storageChange(groups, groupID, 'delete-effect')),
               async (stores) => {
                 supplied = stores
+                const pending = await within(stores.incarnation(1).pending.list())
+                await within(
+                  stores.incarnation(1).pending.complete(pending.map((record) => record.frame.id)),
+                )
                 await within(
                   stores.lifetime.save({
                     ...seed.lifetime,

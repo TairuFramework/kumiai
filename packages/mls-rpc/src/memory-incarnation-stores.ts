@@ -610,6 +610,8 @@ export function createUnlockedIncarnationStores(params: {
       const previous = await control.load('current')
       if (previous?.snapshot.commitOnce != null)
         throw new GroupStateConflictError('Live control build prevents transport clearing')
+      if (pending.ids().length !== 0)
+        throw new GroupStateConflictError('Pending application records prevent transport clearing')
       for (const id of meta.ids())
         if (JSON.parse(id)[0] === 'settlement')
           throw new GroupStateConflictError('Unresolved settlement obligation')

@@ -1153,6 +1153,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           const rows = stores.incarnation(1)
           await rows.anchor.save(anchor)
           await rows.pending.put([pending])
+          await rows.pending.complete([pending.frame.id])
           await rows.cursor.save(topicID, '10')
           await rows.outbox.put([entry])
           await rows.control.apply({ putOutcomes: [outcome] }, 'prepare-delete')
@@ -1560,6 +1561,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         await nextChange(groups, groupID, 'clear-transport'),
         async (stores) => {
           const rows = stores.incarnation(1)
+          await rows.pending.complete([pending.frame.id])
           await rows.clearTransport()
           expect(await rows.anchor.load()).toBeNull()
           expect(await rows.pending.list()).toEqual([])

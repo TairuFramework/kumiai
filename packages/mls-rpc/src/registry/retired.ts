@@ -53,6 +53,8 @@ export async function deleteIncarnations<TTx extends GroupTransaction>(
     throw new DisplacedGroupHandleError('Inactive deletion source')
   for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++) {
     const rows = stores.incarnation(incarnation)
+    if ((await rows.pending.list()).length !== 0)
+      throw new GroupControlUnsettledError('Opened application records prevent deletion')
     if (!controlSettled(await consumeInternalOutcomes(rows.control, mutationID)))
       throw new GroupControlUnsettledError('Group control remains unsettled')
     for (const entry of await rows.outbox.list())
@@ -112,6 +114,8 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
     throw new GroupStateConflictError('Retirement destination mismatch')
 
   const rows = stores.incarnation(source.incarnation)
+  if ((await rows.pending.list()).length !== 0)
+    throw new GroupControlUnsettledError('Opened application records prevent retirement')
   const control = await rows.control.load()
   const rejoin = control.rejoin
   if (

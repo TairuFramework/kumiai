@@ -140,7 +140,7 @@ export type ReadableGroupState = GroupStateRecord & { deleted: false; state: Uin
 
 export type RetirementAttempt = {
   generation: number
-  drain(): Promise<void>
+  drain(options?: { opened?: boolean; hooks?: boolean }): Promise<void>
   settle(outcome: 'committed' | 'rolled-back'): void
 }
 

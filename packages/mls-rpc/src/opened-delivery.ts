@@ -152,6 +152,11 @@ export function bindRegistryOpenedDelivery<TTx extends GroupTransaction>(params:
   bindOpenedDelivery(params.pending, binding)
 }
 
+export function handoffStoredOpened(binding: object, key: GroupKey): Promise<void> {
+  const state = deliveryState(binding, key)
+  return Promise.all([...state.sources].map((source) => source.handoff())).then(() => {})
+}
+
 export async function drainStoredOpened<TTx extends GroupTransaction>(params: {
   persistence: GroupPersistence<TTx>
   key: GroupKey

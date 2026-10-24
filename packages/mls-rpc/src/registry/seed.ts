@@ -10,6 +10,7 @@ import {
   GroupStateConflictError,
   SeedAdmissionRefusedError,
   SpentSetCorruptError,
+  StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
 import { assertTrustTransition } from '../persistence-guards.js'
 import type {
@@ -30,7 +31,11 @@ import {
   restoreCaptured,
 } from './reserve.js'
 import { retireIncarnation } from './retired.js'
-import type { RegistryRetirement } from './retirement.js'
+import {
+  assertRetirementDrained,
+  type RegistryRetirement,
+  RetirementWorkChangedError,
+} from './retirement.js'
 import { recoveryTrustFor } from './trust.js'
 import type { RetirementAttempt } from './types.js'
 import { validateRegistryHandle } from './validation.js'
@@ -191,6 +196,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
     group: GroupHandle,
     options: { replace?: boolean; packageUse: PackageUse | null },
   ): Promise<{ key: GroupKey; reservation: Reservation | null }> => {
+    params.retirement.assertEntry(() => ({ groupID: group.groupID, incarnation: 1 }))
     const captured = await relinquishSend(group)
     const groupID = captured.credential.groupID
     const base = capturedRecord(captured, { groupID, incarnation: 1 }, 1)
@@ -235,7 +241,10 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
     }
     const decision = judge(admission)
     const activeIncarnation = admission.lifetime?.activeIncarnation ?? null
-    const source = activeIncarnation === null ? null : { groupID, incarnation: activeIncarnation }
+    const source =
+      admission.lifetime === null
+        ? null
+        : { groupID, incarnation: activeIncarnation ?? admission.lifetime.latestIncarnation }
     if (decision === 'alreadyJoined' && source === null)
       throw new SeedAdmissionRefusedError({ reason: 'invalid-active-metadata' })
     const key = {
@@ -260,17 +269,24 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
     if (decision === 'alreadyJoined') return { key, reservation: null }
     const mutationID = crypto.randomUUID()
     let attempt: RetirementAttempt | null = null
+    let stopObservation = () => {}
+    let hooked = false
+    function settle(outcome: 'committed' | 'rolled-back'): void {
+      attempt?.settle(outcome)
+      stopObservation()
+    }
     let expectedAdmission = admission
     try {
-      if (decision === 'readmit' && source !== null) {
+      if (source !== null) {
         attempt = params.retirement.beginRetirement(source)
-        await attempt.drain()
+        await attempt.drain({ hooks: activeIncarnation !== null })
+        await params.retirement.drainOpened(source)
         const drained = await params.capability.read(groupID, (reads) =>
           readAdmission(reads, params.held),
         )
         if (
           judge(drained) !== decision ||
-          drained.lifetime?.activeIncarnation !== source.incarnation ||
+          drained.lifetime?.activeIncarnation !== admission.lifetime?.activeIncarnation ||
           drained.lifetime?.latestIncarnation !== admission.lifetime?.latestIncarnation
         )
           throw new GroupStateConflictError('Seed admission moved')
@@ -281,105 +297,130 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
         if (current !== decision || !sameStoredValue(inputs, expectedAdmission))
           throw new GroupStateConflictError('Seed admission moved')
       }
-      const result = await params.capability.run(
-        { groupID, mutationID },
-        async (reads) => {
-          const current = await readAdmission(reads, params.held)
-          recheck(current)
-          validateRegistryHandle({
-            handle: installed,
-            key,
-            trust: current.trust,
-            environment: params.environment.recovery,
-            ownerDID: params.environment.ownerDID,
+      for (;;) {
+        try {
+          stopObservation = params.capability.observe(groupID, (observation) => {
+            if (observation.mutationID === mutationID) settle('committed')
           })
-          const record = {
-            ...key,
-            version: 1,
-            deleted: false as const,
-            terminal: false,
-            epoch: Number(installed.epoch),
-            epochAuthenticator: installed.state.keySchedule.epochAuthenticator.slice(),
-            state: reserved.state,
-            credential: captured.credential,
-            ledger: captured.ledgerTokens,
-            senderHWM: reserved.senderHWM,
-          }
-          return {
-            expected: current.lifetime,
-            value: {
-              // Staged for the later combined package-install boundary; no provider package hook here.
-              packageUse,
-              checkpoint: await prepareCheckpointInstallation({
-                key,
+          const result = await params.capability.run(
+            { groupID, mutationID },
+            async (reads) => {
+              if (source !== null) await assertRetirementDrained(reads)
+              const current = await readAdmission(reads, params.held)
+              recheck(current)
+              validateRegistryHandle({
                 handle: installed,
+                key,
+                trust: current.trust,
+                environment: params.environment.recovery,
+                ownerDID: params.environment.ownerDID,
+              })
+              const record = {
+                ...key,
+                version: 1,
+                deleted: false as const,
+                terminal: false,
+                epoch: Number(installed.epoch),
+                epochAuthenticator: installed.state.keySchedule.epochAuthenticator.slice(),
+                state: reserved.state,
+                credential: captured.credential,
+                ledger: captured.ledgerTokens,
+                senderHWM: reserved.senderHWM,
+              }
+              return {
+                expected: current.lifetime,
+                value: {
+                  // Staged for the later combined package-install boundary; no provider package hook here.
+                  packageUse,
+                  checkpoint: await prepareCheckpointInstallation({
+                    key,
+                    handle: installed,
+                    mutationID,
+                    stateVersion: 1,
+                    previousFact:
+                      currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+                  }),
+                  record,
+                  reservation:
+                    reserved.reservation === null
+                      ? null
+                      : {
+                          ...reserved.reservation,
+                          envelope: reservationEnvelope(record),
+                        },
+                  trust: recoveryTrustFor(installed, key, current.trust),
+                },
+              }
+            },
+            async (stores, prepared) => {
+              const current = await readAdmission(
+                {
+                  lifetime: stores.lifetime.load,
+                  trust: stores.trust.load,
+                  metadata: (incarnation) => stores.incarnation(incarnation).state.loadMetadata(),
+                  control: (incarnation) => stores.incarnation(incarnation).control.load(),
+                  checkpoints: stores.checkpoints.list,
+                },
+                params.held,
+              )
+              recheck(current)
+              stores.tx.onRollback(() => settle('rolled-back'))
+              hooked = true
+              if (decision === 'readmit' && source !== null)
+                await retireIncarnation(stores, {
+                  source,
+                  nextIncarnation: key.incarnation,
+                  mutationID,
+                  at: Date.now(),
+                })
+              await stores.lifetime.save({
+                groupID,
+                latestIncarnation: key.incarnation,
+                activeIncarnation: key.incarnation,
+                revision: (current.lifetime?.revision ?? 0) + 1,
                 mutationID,
-                stateVersion: 1,
-                previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
-              }),
-              record,
-              reservation:
-                reserved.reservation === null
-                  ? null
-                  : {
-                      ...reserved.reservation,
-                      envelope: reservationEnvelope(record),
-                    },
-              trust: recoveryTrustFor(installed, key, current.trust),
+                restorePending: false,
+              })
+              const rows = stores.incarnation(key.incarnation)
+              await rows.state.save(prepared.record)
+              await stores.trust.save(prepared.trust)
+              if (source !== null) await clearGroupCondition(stores.checkpoints, source)
+              await stores.checkpoints.put(prepared.checkpoint)
+              await stores.checkpoints.put({
+                kind: 'publication',
+                id: `publication:${prepared.checkpoint.id}`,
+                key,
+                factID: prepared.checkpoint.id,
+                frame: null,
+                publishID: null,
+                accepted: false,
+                nextHeartbeatAt: null,
+              })
+              await rows.control.apply({ cursor: null }, mutationID)
+              await rows.anchor.save(null)
+              return { key, reservation: prepared.reservation }
             },
-          }
-        },
-        async (stores, prepared) => {
-          const current = await readAdmission(
-            {
-              lifetime: stores.lifetime.load,
-              trust: stores.trust.load,
-              metadata: (incarnation) => stores.incarnation(incarnation).state.loadMetadata(),
-              control: (incarnation) => stores.incarnation(incarnation).control.load(),
-              checkpoints: stores.checkpoints.list,
-            },
-            params.held,
           )
-          recheck(current)
-          if (decision === 'readmit' && source !== null)
-            await retireIncarnation(stores, {
-              source,
-              nextIncarnation: key.incarnation,
-              mutationID,
-              at: Date.now(),
-            })
-          await stores.lifetime.save({
-            groupID,
-            latestIncarnation: key.incarnation,
-            activeIncarnation: key.incarnation,
-            revision: (current.lifetime?.revision ?? 0) + 1,
-            mutationID,
-            restorePending: false,
-          })
-          const rows = stores.incarnation(key.incarnation)
-          await rows.state.save(prepared.record)
-          await stores.trust.save(prepared.trust)
-          if (source !== null) await clearGroupCondition(stores.checkpoints, source)
-          await stores.checkpoints.put(prepared.checkpoint)
-          await stores.checkpoints.put({
-            kind: 'publication',
-            id: `publication:${prepared.checkpoint.id}`,
-            key,
-            factID: prepared.checkpoint.id,
-            frame: null,
-            publishID: null,
-            accepted: false,
-            nextHeartbeatAt: null,
-          })
-          await rows.control.apply({ cursor: null }, mutationID)
-          await rows.anchor.save(null)
-          return { key, reservation: prepared.reservation }
-        },
-      )
-      attempt?.settle('committed')
-      return result
+          settle('committed')
+          return result
+        } catch (error) {
+          if (!(error instanceof RetirementWorkChangedError) || source === null) throw error
+          stopObservation()
+          await params.retirement.drainOpened(source)
+          const drained = await params.capability.read(groupID, (reads) =>
+            readAdmission(reads, params.held),
+          )
+          if (
+            judge(drained) !== decision ||
+            drained.lifetime?.activeIncarnation !== admission.lifetime?.activeIncarnation ||
+            drained.lifetime?.latestIncarnation !== admission.lifetime?.latestIncarnation
+          )
+            throw new GroupStateConflictError('Seed admission moved', { cause: error })
+          expectedAdmission = drained
+        }
+      }
     } catch (error) {
-      attempt?.settle('rolled-back')
+      if (!(hooked && error instanceof StorageOutcomeUnknownError)) settle('rolled-back')
       throw error
     }
   }

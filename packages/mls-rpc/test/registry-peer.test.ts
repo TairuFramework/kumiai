@@ -1,4 +1,5 @@
 import { randomIdentity } from '@kokuin/token'
+import { encodeEventFrame } from '@kumiai/broadcast'
 import * as mlsAPI from '@kumiai/mls'
 import {
   commitInvite,
@@ -14,6 +15,7 @@ import type {
   GroupPeer,
   GroupProtocolDefinition,
   LogHub,
+  PendingAppFrame,
   RecoveryEvent,
 } from '@kumiai/rpc'
 import {
@@ -30,6 +32,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { createRegistryAppPublication } from '../src/app-publication.js'
 import type { EntryReads } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
+import * as recoveryAPI from '../src/recovery.js'
 import {
   createVerdictJudge,
   RecoveryCandidateError,
@@ -45,6 +48,7 @@ import { registryRecoveryCoordinator } from '../src/registry/recovery-coordinato
 import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
+import * as verdictAPI from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import {
@@ -93,8 +97,19 @@ function peerDouble(onDrain: () => Promise<void> = async () => {}): Peer {
   }
 }
 
-async function setup(confirmed = true) {
-  const f = await createRegistryFixture({ mode: 'real-mls', setup: 'empty', groupID })
+async function setup(
+  confirmed = true,
+  deliverOpened?: (record: PendingAppFrame) => Promise<void>,
+  gated = false,
+) {
+  const f = await createRegistryFixture({
+    mode: 'real-mls',
+    setup: 'empty',
+    groupID,
+    deliverOpened,
+    openedDeliveryContext,
+    backgroundMaintenance: gated ? 'gated' : undefined,
+  })
   const responderIdentity = randomIdentity()
   const genesis = (await createGroup(f.identity, groupID, f.environment.options)).group
   const bundle = await createKeyPackageBundle(responderIdentity)
@@ -208,6 +223,184 @@ test('an ordinary registry peer receives a private rotation producer that stops 
 })
 
 describe('registry peer recovery coordination', () => {
+  test('publication settlement blocks switching with its durable obligation count', async () => {
+    const s = await setup(true, undefined, true)
+    const release = deferred<void>()
+    const capability = registrySafety(s.f.registry)?.entry
+    if (capability === undefined) throw new Error('Missing capability')
+    const finalise = capability.finaliseCertifiedApp
+    let owner: api.RegistryPeer | undefined
+    try {
+      const state = await s.f.device.groups.loadState(source)
+      if (state === null || state.deleted) throw new Error('Missing source')
+      const outbox = s.f.device.groups.ports(source).outbox
+      await outbox.put({
+        seq: 70,
+        protocol: 'chat',
+        prc: 'posted',
+        data: encodeEventFrame('posted', {}),
+        status: 'accepted',
+        lastAttempt: {
+          incarnation: 1,
+          epoch: state.epoch,
+          segment: 0,
+          floor: null,
+          attempts: 1,
+          publishID: 'original',
+          topicID: 'original-topic',
+        },
+      })
+      const current = await s.f.device.groups.loadState(source)
+      if (current === null || current.deleted) throw new Error('Missing source')
+      expect(
+        await outbox.recordSettlement(
+          70,
+          {
+            sequenceID: '42',
+            attemptID: 'original',
+            topicID: 'original-topic',
+            outcome: 'published',
+          },
+          {
+            identity: { ...source, epoch: state.epoch, authenticator: state.epochAuthenticator },
+            stateVersion: current.version,
+            attemptID: 'original',
+          },
+        ),
+      ).toEqual({ recorded: true })
+      capability.finaliseCertifiedApp = async (...args) => {
+        await release.promise
+        await finalise(...args)
+      }
+      owner = await s.start()
+      await vi.waitFor(() =>
+        expect(owner?.status()).toEqual({
+          kind: 'switch-blocked',
+          key: source,
+          reason: 'publication-settlement',
+          pending: 1,
+        }),
+      )
+      expect(owner.installedKey()).toEqual(source)
+      expect(s.created).toEqual([])
+      release.resolve()
+      await owner.ready
+      expect(owner.installedKey()).toEqual(destination)
+      const events = await capability.read(groupID, (reads) => reads.events(1))
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          kind: 'published',
+          occurrence: expect.objectContaining({ position: '42', topicID: 'original-topic' }),
+        }),
+      )
+    } finally {
+      release.resolve()
+      capability.finaliseCertifiedApp = finalise
+      owner?.dispose()
+      await owner?.drained()
+      await s.f.close()
+    }
+  })
+
+  test('automatic retirement consumes authenticated advancing-state authority before fencing a live build', async () => {
+    const s = await setup(false, undefined, true)
+    let owner: api.RegistryPeer | undefined
+    try {
+      const access = await s.f.registry.access(groupID)
+      await s.f.acceptedOrdinary(access)
+      await s.f.installRows({ key: source, control: { putRejoin: s.recovery.record } })
+      const control = await s.f.device.groups.ports(source).control.load()
+      expect(control.commitOnce).not.toBeNull()
+      const before = await s.f.inspectRows()
+      const inspection = vi.spyOn(recoveryAPI, 'inspectRecoveryCapture').mockResolvedValue({
+        groupID,
+        epoch: s.recovery.record.target.groupInfoEpoch,
+        authenticator: Uint8Array.from(s.recovery.record.target.groupInfoAuthenticator),
+      })
+      const confirmation = vi.spyOn(verdictAPI, 'verifyRegistryResync')
+      const retirement = vi.spyOn(registryRetirement(s.f.registry), 'beginRetirement')
+      owner = await s.start()
+      await owner.ready
+      expect(inspection).toHaveBeenCalledTimes(1)
+      expect(confirmation).not.toHaveBeenCalled()
+      expect(retirement).not.toHaveBeenCalled()
+      expect(await s.f.inspectRows()).toEqual(before)
+      expect(await s.f.device.groups.ports(source).control.load()).toEqual(control)
+      expect(owner.installedKey()).toEqual(source)
+    } finally {
+      owner?.dispose()
+      await owner?.drained().catch(() => {})
+      vi.restoreAllMocks()
+      await s.f.close()
+    }
+  })
+
+  test('cold opened work blocks switching without starting an old peer', async () => {
+    const release = deferred<void>()
+    const delivered: Array<PendingAppFrame> = []
+    const s = await setup(true, async (record) => {
+      delivered.push(record)
+      await release.promise
+    })
+    let owner: api.RegistryPeer | undefined
+    try {
+      const entry = registrySafety(s.f.registry)?.entry
+      if (entry === undefined) throw new Error('Missing capability')
+      const records = ['one', 'two'].map((id) => ({
+        frame: {
+          ...source,
+          id,
+          protocol: 'chat',
+          procedure: 'posted',
+          topicID: 'original-topic',
+          segment: 1,
+          position: id,
+        },
+        payload: encodeEventFrame('posted', { text: id }),
+        senderDID: randomIdentity().id,
+        epoch: 1,
+        idempotencyKey: id,
+      }))
+      await entry.run(
+        { groupID, mutationID: crypto.randomUUID() },
+        async (reads) => ({ expected: await reads.lifetime(), value: null }),
+        async (stores) => {
+          await stores.incarnation(1).pending.put(records)
+        },
+      )
+      const access = vi.spyOn(s.f.registry, 'access')
+      owner = await s.start()
+      let ready = false
+      void owner.ready.then(() => {
+        ready = true
+      })
+      await vi.waitFor(() =>
+        expect(owner?.status()).toEqual({
+          kind: 'switch-blocked',
+          key: source,
+          reason: 'opened-records',
+          pending: 2,
+        }),
+      )
+      expect(owner.peer()).toBeNull()
+      expect(s.created).toEqual([])
+      expect(access).not.toHaveBeenCalled()
+      expect(ready).toBe(false)
+      expect(owner.installedKey()).toEqual(source)
+      release.resolve()
+      await owner.ready
+      expect(delivered).toEqual(records)
+      expect(owner.installedKey()).toEqual(destination)
+      expect(s.created.map(({ key }) => key)).toEqual([destination])
+      expect(owner.status()).toEqual({ kind: 'running' })
+    } finally {
+      release.resolve()
+      owner?.dispose()
+      await owner?.drained()
+      await s.f.close()
+    }
+  })
+
   test('peer factories receive the registry-bound checkpoint service', async () => {
     const s = await setup(false)
     const owner = await s.start()
@@ -1412,7 +1605,7 @@ describe('registry peer recovery coordination', () => {
   )
 
   test.each(['drain', 'construction'] as const)(
-    'a hanging source %s releases retirement without writes and the coordinator retries',
+    'a hanging source %s retains retirement without writes beyond five seconds',
     async (phase) => {
       const s = await setup(false)
       const entered = deferred<void>()
@@ -1444,16 +1637,15 @@ describe('registry peer recovery coordination', () => {
         await vi.waitFor(() => expect(calls).toHaveBeenCalledTimes(1))
         await entered.promise
         await vi.advanceTimersByTimeAsync(5_000)
-        await expect(s.f.registry.access(groupID)).resolves.toMatchObject({ key: source })
+        await expect(s.f.registry.access(groupID)).rejects.toBeInstanceOf(api.RegistryRetiringError)
         expect(await s.f.inspectRows()).toEqual(before)
         expect(calls).toHaveBeenCalledTimes(1)
         release.resolve()
         await vi.advanceTimersByTimeAsync(100)
         await switchOwner.ready
         expect(switchOwner.installedKey()).toEqual(destination)
-        expect(calls).toHaveBeenCalledTimes(2)
+        expect(calls).toHaveBeenCalledTimes(1)
         expect(calls.mock.calls.map(([, input]) => input.write.mutationID)).toEqual([
-          s.recovery.record.switchMutationID,
           s.recovery.record.switchMutationID,
         ])
       } finally {
@@ -1840,7 +2032,7 @@ describe('registry peer recovery coordination', () => {
     },
   )
 
-  test('an aggregate retirement timeout retries the same saved switch', async () => {
+  test('a rejecting hook waits for the suspended source then refuses without writes', async () => {
     const s = await setup(false)
     const entered = deferred<void>()
     const release = deferred<void>()
@@ -1871,14 +2063,14 @@ describe('registry peer recovery coordination', () => {
       await entered.promise
       await vi.advanceTimersByTimeAsync(5_000)
       expect(await s.f.inspectRows()).toEqual(before)
-      await expect(s.f.registry.access(groupID)).resolves.toMatchObject({ key: source })
+      await expect(s.f.registry.access(groupID)).rejects.toBeInstanceOf(api.RegistryRetiringError)
       unregister()
       release.resolve()
       await vi.advanceTimersByTimeAsync(100)
-      await switchOwner.ready
-      expect(switchOwner.installedKey()).toEqual(destination)
+      await expect(switchOwner.ready).rejects.toBeInstanceOf(api.RegistryRetireHookError)
+      expect(await s.f.inspectRows()).toEqual(before)
+      await expect(s.f.registry.access(groupID)).resolves.toMatchObject({ key: source })
       expect(calls.mock.calls.map(([, input]) => input.write.mutationID)).toEqual([
-        s.recovery.record.switchMutationID,
         s.recovery.record.switchMutationID,
       ])
     } finally {

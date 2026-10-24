@@ -22,7 +22,14 @@ import type { RegistryConsumers } from './consumers.js'
 import { assertRecoverySourceTrust } from './source-trust.js'
 import type { GroupHandleRegistry } from './types.js'
 
+export type RegistrySwitchBlock = {
+  key: GroupKey
+  reason: 'opened-records' | 'publication-settlement'
+  pending: number
+}
+
 export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryConsumers & {
+  onSwitchBlocked(key: GroupKey, sink: (block: RegistrySwitchBlock | null) => void): () => void
   onAdmissionChanged(key: GroupKey, listener: (committedNext: number) => void): () => void
   settleAppPublications(groupID: string): Promise<void>
   binding: object

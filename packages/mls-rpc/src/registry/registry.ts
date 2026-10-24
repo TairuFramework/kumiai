@@ -1,7 +1,11 @@
 import { normalizeDID } from '@kokuin/token'
 import { decodeClientState, type GroupHandle, restrictCommitAuthoring } from '@kumiai/mls'
 import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
-import { requireOpenedDeliveryContext } from '@kumiai/rpc'
+import {
+  assertOpenedDeliveryEntry,
+  OpenedDeliveryReentryError,
+  requireOpenedDeliveryContext,
+} from '@kumiai/rpc'
 
 import { finaliseAppSettlements } from '../app-settlement.js'
 import { bindRegistryCheckpoint } from '../checkpoint.js'
@@ -15,6 +19,7 @@ import { sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   assertStoredOpenedEntry,
   bindRegistryOpenedContext,
+  handoffStoredOpened,
   joinStoredOpened,
   storedOpenedDeliveryContext,
 } from '../opened-delivery.js'
@@ -50,14 +55,17 @@ import { bindRegistryRecoveryCoordinator } from './recovery-coordinator.js'
 import { eligibilityOf, type Reservation } from './reserve.js'
 import { deleteIncarnations } from './retired.js'
 import {
+  assertRetirementDrained,
   bindRegistryRetirement,
   createRegistryRetirement,
   type RetirementSlot,
+  RetirementWorkChangedError,
 } from './retirement.js'
 import { createRegistryRuntime, createRegistrySafetyLatch } from './runtime.js'
 import { accountedAdministrativeVersion, accountedRuntime } from './runtime-facts.js'
 import {
   bindRegistrySafety,
+  type RegistrySwitchBlock,
   RetainedTrustUnavailableError,
   readRetainedTrust,
   trustUnavailableWriter,
@@ -548,8 +556,104 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     if (previous !== null && previous !== slot.owner) previous.runtime.publish(null)
     if (slot.owner !== null) slot.owner.runtime.publish(slot.owner.snapshot)
   }
+  const switchBlockListeners = new Map<string, Set<(block: RegistrySwitchBlock | null) => void>>()
+  function assertLifecycleEntry(key: GroupKey | (() => GroupKey)): void {
+    if (typeof key === 'function') {
+      // Ordinary acceptance must not read candidate identity before relinquishment.
+      try {
+        assertOpenedDeliveryEntry(params.openedDeliveryContext)
+        assertStoredOpenedEntry(registryBinding)
+      } catch (error) {
+        if (!(error instanceof OpenedDeliveryReentryError)) throw error
+        assertLifecycleEntry(key())
+      }
+      return
+    }
+    assertOpenedDeliveryEntry(params.openedDeliveryContext, { key })
+    assertStoredOpenedEntry(registryBinding, key)
+  }
+  function publishSwitchBlock(groupID: string, block: RegistrySwitchBlock | null): void {
+    for (const sink of switchBlockListeners.get(groupID) ?? []) sink(block)
+  }
+  async function readSwitchBlock(key: GroupKey): Promise<RegistrySwitchBlock | null> {
+    return capability.read(key.groupID, async (reads) => {
+      const lifetime = await reads.lifetime()
+      for (
+        let incarnation = 1;
+        incarnation <= Math.min(lifetime?.latestIncarnation ?? key.incarnation, key.incarnation);
+        incarnation++
+      ) {
+        const source = { groupID: key.groupID, incarnation }
+        const pending = (await reads.pendingFrames(incarnation)).length
+        if (pending !== 0) return { key: source, reason: 'opened-records', pending }
+        let publications = 0
+        for (const entry of await reads.outbox(incarnation))
+          if ((await reads.settlement(incarnation, entry.seq)) !== null) publications++
+        if (publications !== 0)
+          return { key: source, reason: 'publication-settlement', pending: publications }
+      }
+      return null
+    })
+  }
+  async function drainOpened(key: GroupKey): Promise<void> {
+    const context =
+      params.openedDeliveryContext ?? storedOpenedDeliveryContext(registryBinding, key)
+    if (context === undefined) {
+      // A missing dispatcher retains durable work until another exact-key service completes it.
+      while (
+        (await capability.read(key.groupID, (reads) => reads.pendingFrames(key.incarnation)))
+          .length !== 0
+      ) {
+        if (capability.failureSignal?.aborted) throw capability.failureSignal.reason
+        await new Promise<void>((resolve) => setTimeout(resolve, 100))
+      }
+      return
+    }
+    await joinStoredOpened({
+      persistence: persistence.groups,
+      key,
+      openedDeliveryContext: context,
+      deliver:
+        params.deliverOpened ??
+        (async () => {
+          throw new Error('Missing opened delivery handler')
+        }),
+    })
+  }
+  async function drainRetirementOpened(key: GroupKey): Promise<void> {
+    let refresh = Promise.resolve()
+    const update = () => {
+      refresh = refresh.then(async () =>
+        publishSwitchBlock(key.groupID, await readSwitchBlock(key)),
+      )
+      void refresh.catch(() => {})
+    }
+    const unsubscribe = capability.observe(key.groupID, () => {}, update)
+    try {
+      update()
+      await refresh
+      const lifetime = await capability.read(key.groupID, (reads) => reads.lifetime())
+      for (
+        let incarnation = 1;
+        incarnation <= Math.min(lifetime?.latestIncarnation ?? key.incarnation, key.incarnation);
+        incarnation++
+      ) {
+        const source = { groupID: key.groupID, incarnation }
+        await drainOpened(source)
+        await finaliseAppSettlements({ persistence: persistence.groups, key: source })
+      }
+      await settleAppPublications(key.groupID)
+      update()
+      await refresh
+    } finally {
+      unsubscribe()
+    }
+  }
   const retirement = createRegistryRetirement({
     slot: groupSlot,
+    assertEntry: assertLifecycleEntry,
+    handoff: (key) => handoffStoredOpened(registryBinding, key),
+    drainOpened: drainRetirementOpened,
     async drain(groupID) {
       await settleAppPublications(groupID)
       const slot = groupSlot(groupID)
@@ -752,6 +856,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   ): Promise<TResult> {
     assertOpen()
     const key = { ...requestedKey }
+    assertLifecycleEntry(key)
     retirement.assertAvailable(key.groupID)
     await start()
     const slot = groupSlot(key.groupID)
@@ -765,6 +870,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     try {
       for (let round = 0; round < 3; round++) {
         await attempt.drain()
+        await retirement.drainOpened(key)
         await afterDrain?.()
         const activity = capability.activity(key.groupID)
         const generation = slot.generation
@@ -780,6 +886,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               const lifetime = await reads.lifetime()
               if (lifetime?.activeIncarnation !== key.incarnation)
                 throw new DisplacedGroupHandleError(inactive)
+              await assertRetirementDrained(reads)
               return { expected: lifetime, value: null }
             },
             async (stores) => {
@@ -796,7 +903,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             },
           )
         } catch (error) {
-          if (error instanceof DeleteDrainChanged) {
+          if (error instanceof DeleteDrainChanged || error instanceof RetirementWorkChangedError) {
             stopObservation()
             continue
           }
@@ -836,7 +943,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             const attempt = slot.retirement?.attempt ?? retirement.beginRetirement(key)
             try {
               try {
-                await attempt.drain()
+                await attempt.drain({ opened: false })
               } finally {
                 // Even a rejecting hook may have submitted completion work.
                 await capability.read(groupID, async () => {})
@@ -923,28 +1030,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       } catch (error) {
         return Promise.reject(error)
       }
-      return track(
-        (async () => {
-          const context =
-            params.openedDeliveryContext ?? storedOpenedDeliveryContext(registryBinding, key)
-          if (context === undefined) {
-            const pending = await capability.read(key.groupID, (reads) =>
-              reads.pendingFrames(key.incarnation),
-            )
-            if (pending.length === 0) return
-          }
-          await joinStoredOpened({
-            persistence: persistence.groups,
-            key,
-            openedDeliveryContext: requireOpenedDeliveryContext(context),
-            deliver:
-              params.deliverOpened ??
-              (async () => {
-                throw new Error('Missing opened delivery handler')
-              }),
-          })
-        })(),
-      )
+      return track(drainOpened({ ...key }))
     },
     dispose,
     async recoverySource(groupID) {
@@ -1021,6 +1107,15 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     },
   }
   bindRegistrySafety(registry, {
+    onSwitchBlocked(key, sink) {
+      let listeners = switchBlockListeners.get(key.groupID)
+      if (listeners === undefined) {
+        listeners = new Set()
+        switchBlockListeners.set(key.groupID, listeners)
+      }
+      listeners.add(sink)
+      return () => listeners.delete(sink)
+    },
     binding: registryBinding,
     entry: capability,
     settleAppPublications,

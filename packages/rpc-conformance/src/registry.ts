@@ -1091,6 +1091,7 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
         async (outcome) => {
           let fixture = await create()
           let finished = false
+          let submitted = false
           let fault:
             | { rejected: Promise<void>; finish(outcome: 'commit' | 'rollback'): Promise<void> }
             | undefined
@@ -1155,9 +1156,22 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
               prc: 'posted',
               data: new Uint8Array([13]),
               status: 'accepted' as const,
+              lastAttempt: {
+                incarnation: key.incarnation,
+                epoch: sourceEpoch,
+                segment: 0,
+                floor: null,
+                attempts: 1,
+                publishID: 'old-certified-attempt',
+                topicID: 'old-app-topic',
+              },
+            }
+            const uncertified = {
+              ...certified,
+              seq: 42,
+              data: new Uint8Array([14]),
               lastAttempt: null,
             }
-            const uncertified = { ...certified, seq: 42, data: new Uint8Array([14]) }
             const settlement = {
               attemptID: 'old-certified-attempt',
               topicID: 'old-app-topic',
@@ -1220,6 +1234,27 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
             const source = await owner.recoverySource(groupID)
             const write = switchWrite(recovery)
             const snapshot = sourceAccess.runtime.snapshot()
+            if (snapshot === null) throw new Error('Missing source snapshot')
+            const publicationSnapshot = { ...snapshot, stateVersion: snapshot.stateVersion + 1 }
+            const published = {
+              ...key,
+              id: expect.any(String),
+              kind: 'published',
+              entry: certified,
+              occurrence: {
+                incarnation: key.incarnation,
+                segment: 0,
+                topicID: settlement.topicID,
+                position: settlement.sequenceID,
+              },
+            }
+            let publicationDrained = false
+            sourceAccess.onRetire(async () => {
+              expect(await sourcePorts.outbox.list()).toEqual([uncertified])
+              expect(await sourcePorts.outbox.loadSettlement(certified.seq)).toBeNull()
+              expect(await sourcePorts.outbox.events()).toEqual([published])
+              publicationDrained = true
+            })
             let notifications = 0
             sourceAccess.runtime.onEpochChanged(() => {
               notifications++
@@ -1234,12 +1269,21 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
                 write,
               }),
             )
-            await pending.rejected
+            await Promise.race([
+              pending.rejected.then(() => {
+                submitted = true
+              }),
+              operation.then((result) => {
+                if ('error' in result) throw result.error
+                throw new Error('Switch completed before pending proof')
+              }),
+            ])
             await expect(sourceAccess.read(() => {})).rejects.toMatchObject({
               name: 'RegistryRetiringError',
             })
-            expect(sourceAccess.runtime.snapshot()).toEqual(snapshot)
-            expect(notifications).toBe(0)
+            expect(publicationDrained).toBe(true)
+            expect(sourceAccess.runtime.snapshot()).toEqual(publicationSnapshot)
+            expect(notifications).toBe(1)
             const other = await fixture.makeHandle(0, `${groupID}-B`)
             expect(await owner.seed(other, { packageUse: null })).toEqual({
               groupID: other.groupID,
@@ -1324,15 +1368,13 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
                 ...('format' in recovery.record ? { destinationKey: destination } : {}),
               })
               const retiredPorts = fixture.device.groups.ports(key)
-              expect(
-                await retiredPorts.outbox.list(),
-                'source retains certified outbox obligation',
-              ).toEqual([certified])
-              expect(await retiredPorts.outbox.loadSettlement(certified.seq)).toEqual(settlement)
+              expect(await retiredPorts.outbox.list()).toEqual([])
+              expect(await retiredPorts.outbox.loadSettlement(certified.seq)).toBeNull()
               expect(
                 await retiredPorts.outbox.events(),
                 'source retains uncertified failure event',
               ).toEqual([
+                published,
                 {
                   ...key,
                   id: JSON.stringify(['incarnation-abandoned', groupID, 1, uncertified.seq]),
@@ -1349,11 +1391,8 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
                 ...sourceControl,
                 rejoin: recovery.record,
               })
-              expect(await fixture.device.groups.ports(key).outbox.list()).toEqual([
-                certified,
-                uncertified,
-              ])
-              expect(await fixture.device.groups.ports(key).outbox.events()).toEqual([])
+              expect(await fixture.device.groups.ports(key).outbox.list()).toEqual([uncertified])
+              expect(await fixture.device.groups.ports(key).outbox.events()).toEqual([published])
               expect(await fixture.device.groups.ports(key).cursor.load('old-app-topic')).toBe(
                 'old-app-position',
               )
@@ -1370,7 +1409,7 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
               outcome === 'commit' ? destination : key,
             )
           } finally {
-            if (!finished && fault !== undefined) await fault.finish('rollback')
+            if (!finished && submitted && fault !== undefined) await fault.finish('rollback')
             await fixture.close()
           }
         },
@@ -1437,17 +1476,17 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
           data: new Uint8Array([seq]),
           status: 'accepted' as const,
           lastAttempt:
-            seq === 2
-              ? {
+            seq === 1
+              ? null
+              : {
                   incarnation: 1,
                   epoch: Number(history.exact.epoch),
                   floor: null,
                   attempts: 1,
-                  publishID: 'unproven-attempt',
+                  publishID: seq === 2 ? 'unproven-attempt' : 'certified-attempt',
                   segment: 1,
                   topicID: 'old-topic',
-                }
-              : null,
+                },
         }))
         const settlement = {
           sequenceID: 'published-position',
@@ -1465,8 +1504,19 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
           packageUse: history.packageUse,
         })
         const events = await fixture.device.groups.ports(key).outbox.events()
-        expect(events).toHaveLength(2)
-        expect(events).toMatchObject([
+        expect(events).toHaveLength(3)
+        expect(events[0]).toMatchObject({
+          ...key,
+          kind: 'published',
+          entry: entries[2],
+          occurrence: {
+            incarnation: key.incarnation,
+            segment: 1,
+            topicID: settlement.topicID,
+            position: settlement.sequenceID,
+          },
+        })
+        expect(events.slice(1)).toMatchObject([
           { reason: 'incarnation-abandoned', nextIncarnation: 2 },
           { reason: 'incarnation-abandoned', nextIncarnation: 2 },
         ])
@@ -1474,12 +1524,16 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
         expect(fixture.restoreCount(groupID)).toBe(0)
         const ports = fixture.device.groups.ports(key)
         expect(await ports.outbox.events()).toEqual(events)
-        expect(await ports.outbox.list()).toEqual(entries.slice(2))
-        const event = events[0]
+        expect(await ports.outbox.list()).toEqual([])
+        expect(await ports.outbox.loadSettlement(3)).toBeNull()
+        const event = events[1]
         if (event === undefined) throw new Error('Missing retirement event')
         await ports.outbox.ackEvent(event.id)
         fixture = await fixture.reopen()
-        expect(await fixture.device.groups.ports(key).outbox.events()).toEqual(events.slice(1))
+        expect(await fixture.device.groups.ports(key).outbox.events()).toEqual([
+          events[0],
+          ...events.slice(2),
+        ])
         expect(fixture.restoreCount(groupID)).toBe(0)
       } finally {
         await fixture.close()

@@ -62,6 +62,7 @@ import {
   readRetainedTrust,
   registrySafety,
 } from './registry/safety.js'
+import { automaticRegistrySwitches } from './registry/switch.js'
 import { createRecoverySwitchFactory, toRegistrySwitchWrite } from './registry/switch-write.js'
 import type { GroupHandleRegistry, RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
@@ -73,16 +74,7 @@ import {
   groupCondition,
 } from './safety-conditions.js'
 
-const SOURCE_RETIREMENT_TIMEOUT_MS = 5_000
-class PeerRetirementTimeoutError extends RegistryRetireHookError {}
 class AcceptedRecoveryOriginMovedError extends GroupStateConflictError {}
-
-function retirementTimedOut(cause: unknown): boolean {
-  return (
-    cause instanceof PeerRetirementTimeoutError ||
-    (cause instanceof AggregateError && cause.errors.some(retirementTimedOut))
-  )
-}
 
 type Peer = GroupPeer<Record<string, GroupProtocolDefinition>>
 type RotationProducer = InternalOperations & { stop(): void }
@@ -121,6 +113,12 @@ export type RegistryPeerOptions = {
 }
 export type RegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
+  | {
+      kind: 'switch-blocked'
+      key: GroupKey
+      reason: 'opened-records' | 'publication-settlement'
+      pending: number
+    }
   | { kind: 'pending'; reason?: RecoveryPendingReason; authorisationID?: string }
   | { kind: 'spent-set-corrupt'; eventID: string }
   | {
@@ -316,6 +314,11 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       record.candidate.fill(0)
     })
   let status: RegistryPeerStatus = { kind: 'starting' }
+  const stopSwitchBlock = capability.onSwitchBlocked(key, (block) => {
+    if (disposed || status.kind === 'failed') return
+    if (block !== null) status = { kind: 'switch-blocked', ...copyStoredValue(block) }
+    else if (status.kind === 'switch-blocked') status = { kind: 'switching' }
+  })
   let conditionTimer: ReturnType<typeof setTimeout> | undefined
   let pendingReason: RecoveryPendingReason | undefined
   async function refreshCondition(): Promise<void> {
@@ -423,6 +426,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
   function fail(error: unknown, record = recoveryAttempt): void {
     if (status.kind === 'failed') return
     status = { kind: 'failed', error }
+    if (current !== null) void track(stopPeer(current)).catch(() => {})
     if (!preparingManual) manualCompletion?.reject(error)
     if (!disposed && record !== undefined) {
       const event: RecoveryEvent = {
@@ -512,26 +516,12 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     unregister = capability.onRetire(requested, async () => {
       retirementGeneration++
       startingScheduler?.stop()
-      let timeout: ReturnType<typeof setTimeout> | undefined
-      const drain = track(
+      await track(
         (async () => {
           const source = creating === null ? current : await creating
           if (source !== null) await stopPeer(source)
         })(),
       )
-      try {
-        await Promise.race([
-          drain,
-          new Promise<never>((_resolve, reject) => {
-            timeout = setTimeout(
-              () => reject(new PeerRetirementTimeoutError('Source retirement timed out')),
-              SOURCE_RETIREMENT_TIMEOUT_MS,
-            )
-          }),
-        ])
-      } finally {
-        if (timeout !== undefined) clearTimeout(timeout)
-      }
     })
   }
   async function start(requested: GroupKey): Promise<void> {
@@ -749,12 +739,17 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
             removed: candidate.state.groupActiveState.kind === 'removedFromGroup',
             epochAuthenticator: candidate.state.keySchedule.epochAuthenticator.slice(),
           }
-          await registry.switchIncarnation(candidate, {
-            source: input.source,
-            rejoinID: record.id,
-            proof: input.proof,
-            write: toRegistrySwitchWrite({ record, staged, write: input.write(staged) }),
-          })
+          if (record.trigger === 'automatic') automaticRegistrySwitches.add(candidate)
+          try {
+            await registry.switchIncarnation(candidate, {
+              source: input.source,
+              rejoinID: record.id,
+              proof: input.proof,
+              write: toRegistrySwitchWrite({ record, staged, write: input.write(staged) }),
+            })
+          } finally {
+            automaticRegistrySwitches.delete(candidate)
+          }
         },
       },
     })
@@ -888,7 +883,6 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
             (capability.held(key) !== null || controlSafetyHeld(control) !== null)
           )
             throw new GroupStateConflictError('Recovery source is held')
-          if (current !== null) await stopPeer(current)
           const source = await registry.recoverySource(key.groupID)
           // Reread after source callbacks and completion writes have drained.
           record = await coordinator.readRecoveryRecord(manual?.source ?? key, manualID())
@@ -935,7 +929,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           !(error instanceof RegistrySourceMovedError) &&
           (error instanceof GroupStateConflictError ||
             error instanceof RegistryResyncRefusedError ||
-            (error instanceof RegistryRetireHookError && !retirementTimedOut(error.cause)) ||
+            error instanceof RegistryRetireHookError ||
             error instanceof RecoveryCandidateError ||
             error instanceof GroupUnavailableError)
         )
@@ -960,7 +954,6 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     const running = Promise.resolve().then(async () => {
       await completion
       await ready
-      if (!disposed && current !== null) await stopPeer(current)
       if (!disposed) await resume()
     })
     worker = running
@@ -1026,7 +1019,10 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     },
     peer: () => current,
     installedKey: () => ({ ...key }),
-    status: () => (status.kind === 'not-member' ? copyStoredValue(status) : { ...status }),
+    status: () =>
+      status.kind === 'not-member' || status.kind === 'switch-blocked'
+        ? copyStoredValue(status)
+        : { ...status },
     ready,
     dispose() {
       assertOpenedDeliveryEntry(openedDeliveryContext, { key })
@@ -1034,6 +1030,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       disposed = true
       startingScheduler?.stop()
       for (const scheduler of schedulers.values()) scheduler.stop()
+      stopSwitchBlock()
       if (status.kind !== 'failed') status = { kind: 'disposed' }
       if (timer !== undefined) clearTimeout(timer)
       wake?.()
