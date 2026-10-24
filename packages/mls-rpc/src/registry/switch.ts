@@ -479,6 +479,19 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                 ...(authorisationID === undefined
                   ? { switchedRejoinID: rejoinID }
                   : { manualRejoinID: rejoinID }),
+                abandonedAttempts: [
+                  ...new Set(
+                    (await stores.checkpoints.list()).flatMap((row) =>
+                      row.kind === 'manual-recovery' &&
+                      sameStoredValue(row.key, source.key) &&
+                      row.value.stage === 'authorised' &&
+                      row.value.attempt !== null &&
+                      row.value.attempt.id !== rejoinID
+                        ? [row.value.attempt.id]
+                        : [],
+                    ),
+                  ),
+                ],
                 mutationID: write.mutationID,
                 at: Date.now(),
               })

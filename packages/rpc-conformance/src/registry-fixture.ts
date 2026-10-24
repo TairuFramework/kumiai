@@ -12,7 +12,10 @@ import type {
   ConformanceWelcomeObligation,
 } from './control-store.js'
 import type { ConformanceSendAdmission } from './group-mls.js'
-import type { ConformanceManualRecoveryStore } from './manual-recovery.js'
+import type {
+  ConformanceManualRecoveryRecord,
+  ConformanceManualRecoveryStore,
+} from './manual-recovery.js'
 import type {
   ConformanceAppSettlementObligation,
   ConformanceDevicePersistence,
@@ -181,6 +184,7 @@ type RegistryFixtureRows = {
   outbox?: Array<ConformanceStorageAppOutboxEntry>
   events?: Array<ConformancePersistenceEvent>
   settlements?: Array<{ seq: number; value: ConformanceAppSettlementObligation }>
+  manualRecoveries?: Array<ConformanceManualRecoveryRecord>
 }
 type RegistryFixturePendingFault = {
   rejected: Promise<void>

@@ -23,6 +23,7 @@ import {
   type ControlSlot,
   type ControlSnapshot,
   type LogPosition,
+  type ManualRecoveryRecord,
   type WelcomeObligation,
 } from '@kumiai/rpc'
 import type { ForkNoticeFixture } from '@kumiai/rpc-conformance'
@@ -38,7 +39,11 @@ import {
   type EntryReads,
   entryCapability,
 } from '../../src/entry-capability.js'
-import { createManualRecoveryStore, type ManualRecoveryStore } from '../../src/manual-recovery.js'
+import {
+  createManualRecoveryStore,
+  type ManualRecoveryStore,
+  saveManualRecovery,
+} from '../../src/manual-recovery.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
 import {
   decodeStoredValue,
@@ -100,6 +105,7 @@ export type RegistryRowSetup = {
   outbox?: Array<AppOutboxEntry>
   events?: Array<PersistenceEvent>
   settlements?: Array<{ seq: number; value: AppSettlementObligation }>
+  manualRecoveries?: Array<ManualRecoveryRecord>
 }
 export type RegistryFixture = Omit<RegistryFixtureBase, 'reopen'> & {
   registry: GroupHandleRegistry
@@ -698,6 +704,7 @@ async function assemble(
         if (setup.events !== undefined) await target.meta.putEvents(setup.events)
         for (const value of setup.settlements ?? [])
           await target.meta.putSettlement(value.seq, value.value)
+        for (const record of setup.manualRecoveries ?? []) await saveManualRecovery(stores, record)
       })
     },
     inspectRows: storage.inspectRows,

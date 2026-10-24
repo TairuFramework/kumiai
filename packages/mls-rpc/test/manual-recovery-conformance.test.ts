@@ -1880,7 +1880,7 @@ test('saved manual authority fences late ordinary switch ID assignment', async (
 test.each(['successor only', 'superseded resync'] as const)(
   'pending successor choice leaves ordinary recovery to heal the source / %s',
   async (rows) => {
-    const fixture = await createRegistryFixture({
+    let fixture = await createRegistryFixture({
       mode: 'real-mls',
       groupID: 'manual-recovery',
       setup: 'seeded',
@@ -1893,13 +1893,27 @@ test.each(['successor only', 'superseded resync'] as const)(
       // An accepted ordinary X whose switch ID is still unassigned.
       const record = { ...recovery.record, switchMutationID: null }
       await fixture.installRows({ key, control: { putRejoin: record } })
-      if (rows === 'superseded resync')
-        await fixture.manualRecovery().authoriseManualRecovery(key, {
+      let abandonedID: string | undefined
+      if (rows === 'superseded resync') {
+        const manual = await fixture.confirmedRecovery(key)
+        if (!('format' in manual.record)) throw new Error('Missing manual candidate')
+        const saved = await fixture.manualRecovery().authoriseManualRecovery(key, {
           mode: 'resync',
-          targetID: 'superseded-hub',
-          commitTopicID: 'superseded-commits',
+          targetID: manual.record.target.targetID,
+          commitTopicID: manual.record.target.topicID,
           allowOpenFork: false,
         })
+        await fixture
+          .manualRecovery()
+          .manualRecoveryControl(saved.id)
+          .apply(
+            {
+              putRejoin: { ...manual.record, trigger: 'manual', authorisationID: saved.id },
+            },
+            'save-abandoned-manual',
+          )
+        abandonedID = manual.record.id
+      }
       // The successor choice committed but its retirement never ran.
       await fixture.manualRecovery().authoriseManualRecovery(key, {
         mode: 'successor',
@@ -1917,6 +1931,31 @@ test.each(['successor only', 'superseded resync'] as const)(
       await owner.ready
       expect(owner.status().kind).not.toBe('failed')
       expect(owner.installedKey()).toEqual({ ...key, incarnation: 2 })
+      const outcomes = await api.listRetiredOutcomes({ persistence: fixture.device.groups, key })
+      expect(outcomes).toEqual(
+        abandonedID === undefined
+          ? []
+          : [
+              {
+                id: abandonedID,
+                opID: null,
+                kind: 'unknown',
+                at: expect.any(Number),
+              },
+            ],
+      )
+      owner.dispose()
+      await owner.drained()
+      fixture = await fixture.reopen()
+      expect(await api.listRetiredOutcomes({ persistence: fixture.device.groups, key })).toEqual(
+        outcomes,
+      )
+      if (abandonedID !== undefined) {
+        await api.ackRetiredOutcome({ persistence: fixture.device.groups, key, id: abandonedID })
+        expect(await api.listRetiredOutcomes({ persistence: fixture.device.groups, key })).toEqual(
+          [],
+        )
+      }
     } finally {
       owner?.dispose()
       await owner?.drained()

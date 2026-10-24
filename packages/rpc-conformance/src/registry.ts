@@ -54,6 +54,169 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
     const create = (setup: 'empty' | 'seeded' = 'seeded') =>
       params.createFixture({ groupID, setup })
 
+    test.each(['missing', 'owed', 'adopted ID'] as const)(
+      'ordinary switch preserves the unknown outcome of a superseded manual attempt / %s',
+      async (outcome) => {
+        let fixture = await create()
+        try {
+          const manual = await fixture.confirmedRecovery(key)
+          const ordinary = await fixture.confirmedRecovery(key, { confirm: true })
+          if (!('format' in manual.record) || !('format' in ordinary.record))
+            throw new Error('Captured recovery required')
+          const selected = outcome === 'adopted ID' ? ordinary.record : manual.record
+          const saved = await fixture.manualRecovery().authoriseManualRecovery(key, {
+            mode: 'resync',
+            targetID: selected.target.targetID,
+            commitTopicID: selected.target.topicID,
+            allowOpenFork: false,
+          })
+          await fixture
+            .manualRecovery()
+            .manualRecoveryControl(saved.id)
+            .apply(
+              {
+                putRejoin: { ...selected, trigger: 'manual', authorisationID: saved.id },
+              },
+              'save-superseded-candidate',
+            )
+          const accepted = await fixture.manualRecovery().readManualRecovery(saved.id)
+          if (accepted?.attempt == null) throw new Error('Missing manual attempt')
+          await fixture.manualRecovery().authoriseManualRecovery(key, {
+            mode: 'successor',
+            successor: { groupID: 'unexecuted-successor', incarnation: 1 },
+          })
+          const prior = { id: 'independent-outcome', opID: null, at: 17, kind: 'unknown' as const }
+          const owed = { id: selected.id, opID: null, at: 42, kind: 'unknown' as const }
+          const welcome = {
+            opID: 'independent-invite',
+            welcome: new Uint8Array([7, 8, 9]),
+            recipients: ['recipient'],
+          }
+          const otherIncarnation = { ...key, incarnation: key.incarnation + 1 }
+          await fixture.installRows({
+            key,
+            control: {
+              putOutcomes: outcome === 'owed' ? [prior, owed] : [prior],
+              putWelcomes: [welcome],
+              putSettledRejoins: [
+                {
+                  id: 'prior-accepted-candidate',
+                  origin: {
+                    sourceKey: key,
+                    target: ordinary.record.target,
+                    searchFrom: ordinary.record.searchFrom,
+                  },
+                  kind: 'accepted-unadoptable',
+                  acceptedEpoch: ordinary.record.epochAfter,
+                  epochAfter: ordinary.record.epochAfter,
+                  digest: ordinary.record.digest,
+                  payloadDigest: ordinary.record.payloadDigest,
+                  leafDigest: 'prior-accepted-leaf',
+                  ledgerBefore: ordinary.record.ledgerBefore,
+                },
+              ],
+            },
+            manualRecoveries: [
+              {
+                ...accepted,
+                id: 'other-incarnation-authorisation',
+                source: otherIncarnation,
+                attempt: {
+                  ...accepted.attempt,
+                  id: 'other-incarnation-attempt',
+                  authorisationID: 'other-incarnation-authorisation',
+                  source: { ...accepted.attempt.source, key: otherIncarnation },
+                },
+              },
+              {
+                ...accepted,
+                id: 'completed-authorisation',
+                stage: 'completed',
+                destination: otherIncarnation,
+                attempt: {
+                  ...accepted.attempt,
+                  id: 'completed-attempt',
+                  authorisationID: 'completed-authorisation',
+                  stage: 'adopted',
+                  destinationKey: otherIncarnation,
+                },
+              },
+            ],
+          })
+          const otherGroup = { groupID: 'other-manual-group', incarnation: key.incarnation }
+          await fixture.registry.seed(await fixture.makeHandle(0, otherGroup.groupID), {
+            packageUse: null,
+          })
+          await fixture.installRows({
+            key: otherGroup,
+            manualRecoveries: [
+              {
+                ...accepted,
+                id: 'other-group-authorisation',
+                source: otherGroup,
+                attempt: {
+                  ...accepted.attempt,
+                  id: 'other-group-attempt',
+                  authorisationID: 'other-group-authorisation',
+                  source: { ...accepted.attempt.source, key: otherGroup },
+                },
+              },
+            ],
+          })
+          const before = await fixture.device.groups.ports(key).control.load()
+          const source = await fixture.registry.recoverySource(groupID)
+          const input = {
+            source,
+            rejoinID: ordinary.record.id,
+            proof: ordinary.proof,
+            write: switchWrite(ordinary),
+          }
+          await fixture.registry.switchIncarnation(ordinary.candidate, input)
+          const expected =
+            outcome === 'adopted ID'
+              ? [prior]
+              : [
+                  prior,
+                  {
+                    ...owed,
+                    at: outcome === 'owed' ? owed.at : expect.any(Number),
+                  },
+                ]
+          const retired = await fixture.device.groups.ports(key).control.load()
+          expect(
+            retired.outcomes,
+            'exactly one unknown is owed for the abandoned manual ID',
+          ).toEqual(expected)
+          expect(retired.rejoin).toEqual({
+            ...ordinary.record,
+            stage: 'adopted',
+            destinationKey: otherIncarnation,
+          })
+          expect(retired.welcomes).toEqual(before.welcomes)
+          expect(retired.settledRejoins).toEqual(before.settledRejoins)
+          expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual(accepted)
+          expect((await fixture.device.groups.ports(otherGroup).control.load()).outcomes).toEqual(
+            [],
+          )
+          fixture = await fixture.reopen()
+          await fixture.registry.switchIncarnation(ordinary.candidate, input)
+          expect(await fixture.device.groups.ports(key).control.load()).toEqual(retired)
+          await fixture.device.groups
+            .ports(key)
+            .control.apply({ deleteOutcomes: [selected.id] }, 'ack-superseded-manual')
+          expect((await fixture.device.groups.ports(key).control.load()).outcomes).toEqual([prior])
+          expect(
+            (await fixture.device.groups.ports(otherIncarnation).control.load()).outcomes,
+          ).toEqual([])
+          expect(await fixture.manualRecovery().readManualRecovery(saved.id)).toEqual(accepted)
+          fixture = await fixture.reopen()
+          expect((await fixture.device.groups.ports(key).control.load()).outcomes).toEqual([prior])
+        } finally {
+          await fixture.close()
+        }
+      },
+    )
+
     test('confirmed abandonment is replayable and acknowledged independently after retirement', async () => {
       let fixture = await create()
       try {

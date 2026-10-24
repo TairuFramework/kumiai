@@ -553,6 +553,30 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
+    test('retirement preserves existing manual outcome IDs and timestamps', async () => {
+      let fixture = await create()
+      try {
+        const owed = { id: 'manual-attempt', opID: null, at: 42, kind: 'unknown' as const }
+        await fixture.installRows({ key: source, control: { putOutcomes: [owed] } })
+        const candidate = await destination(fixture)
+        const groups = fixture.device.groups
+        await groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
+          await retireIncarnation(stores, {
+            source,
+            nextIncarnation: 2,
+            abandonedAttempts: [owed.id, owed.id],
+            mutationID,
+            at: 1234,
+          })
+          await install(stores, candidate)
+        })
+        fixture = await fixture.reopen()
+        expect((await fixture.device.groups.ports(source).control.load()).outcomes).toEqual([owed])
+      } finally {
+        await fixture.close()
+      }
+    })
+
     test('adopted rejoin blocks deletion after transport cleanup', async () => {
       let fixture = await create()
       try {
