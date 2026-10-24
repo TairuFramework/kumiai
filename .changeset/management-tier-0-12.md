@@ -26,3 +26,5 @@ Reject unauthenticated no-op log updates and bound replay and effect-claim verif
 Verify lifecycle envelopes in order so renewal and attestation can share a commit.
 
 Cascade chained leaves when their required holder grant loses member authority.
+
+Use one effective-member clock predicate and skip attestations beyond the author’s lease.

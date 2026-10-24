@@ -40,7 +40,12 @@ import {
   mergeLifecycleProofLogs,
   verifyLifecycleProof,
 } from './lifecycle-proof.js'
-import { claimsFor, type EffectClaim, effectiveAuthorityOf } from './member-root.js'
+import {
+  claimsFor,
+  type EffectClaim,
+  effectiveAttestingMembers,
+  effectiveAuthorityOf,
+} from './member-root.js'
 import {
   DEVICE_ENTRY_TYPE,
   type DeviceRegistry,
@@ -217,13 +222,8 @@ export async function attestTreeTime(
     if (projection?.recordedLog == null) return null
     const folded = foldControllerLog(controller, projection.recordedLog)
     if (!folded.ok || folded.head.saturated) return null
-    const members = [...folded.head.members].filter(
-      ([add, member]) =>
-        member.effective &&
-        !member.removed &&
-        !projection.removedMembers.has(add) &&
-        folded.head.gen >= projection.genFloor &&
-        normalizeDID(member.did) === normalizeDID(group.credential.id),
+    const members = effectiveAttestingMembers(folded.head, projection, time).filter(
+      ([, member]) => normalizeDID(member.did) === normalizeDID(group.credential.id),
     )
     if (members.length === 0) return null
     if (members.every(([, member]) => time <= (projection.attestations.get(member.key) ?? 0)))

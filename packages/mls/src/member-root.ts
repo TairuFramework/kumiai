@@ -4,6 +4,7 @@ import {
   digestOf,
   type FoldResult,
   type KeyState,
+  type MemberState,
 } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
@@ -320,6 +321,21 @@ function projectionFold(controller: string, projection: ControllerProjection | u
     projectionFolds.set(projection, folded)
   }
   return folded
+}
+
+export function effectiveAttestingMembers(
+  head: KeyState | undefined,
+  projection: ControllerProjection | undefined,
+  time?: number,
+): Array<[string, MemberState]> {
+  if (head == null || head.saturated || head.gen < (projection?.genFloor ?? 0)) return []
+  return [...head.members].filter(
+    ([add, member]) =>
+      member.effective &&
+      !member.removed &&
+      !projection?.removedMembers.has(add) &&
+      (time == null || time <= member.lease),
+  )
 }
 
 export function memberRootStatus(

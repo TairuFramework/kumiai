@@ -19,6 +19,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import * as controllerLogModule from '../src/controller-log.js'
 import { foldControllerLog } from '../src/controller-log.js'
 import type { FoldDrop, FoldInput } from '../src/fold.js'
+import { attestTreeTime } from '../src/group-lifecycle.js'
 import { authenticateLifecycleProof, verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { memberRootStatus } from '../src/member-root.js'
 import * as registry from '../src/registry.js'
@@ -653,4 +654,23 @@ test('sixteen renewal entries replay with linear authenticated event folding', a
   const log = registry.recordedLogOf(result.registry, f.did)
   if (log == null) throw new Error('Missing log')
   expect(folded(f.did, log).head).toEqual(f.head)
+})
+
+test('attestTreeTime does not author a clock beyond the member lease', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  const f = await buildEpoch({ members: 1 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const setup = await pipelineGroup({ controllerLog: f.log })
+  const { joined } = await belowGateWelcome(setup.group, member.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: member.add, g: 0 },
+    iat: 100,
+  })
+  const state = joined.state
+  const ledger = joined.ledgerTokens
+  await expect(attestTreeTime(joined, 1001)).resolves.toBeNull()
+  expect(joined.state).toBe(state)
+  expect(joined.ledgerTokens).toEqual(ledger)
 })

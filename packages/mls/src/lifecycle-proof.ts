@@ -24,6 +24,7 @@ import { attestedTreeTime, isLapsed, leafAt } from './lifecycle.js'
 import {
   cascadeOf,
   type EffectClaim,
+  effectiveAttestingMembers,
   effectProofContext,
   memberRootStatus,
   type RemovedEffect,
@@ -263,19 +264,15 @@ export async function lifecycleProofEffects(
         previous?.recordedLog == null
           ? undefined
           : foldControllerLog(controller, previous.recordedLog)
-      const eligible =
-        folded?.ok &&
-        !folded.head.saturated &&
-        folded.head.gen >= (previous?.genFloor ?? 0) &&
-        [...folded.head.members].some(
-          ([add, member]) =>
-            member.effective &&
-            !member.removed &&
-            !previous?.removedMembers.has(add) &&
-            normalizeDID(member.did) === normalizeDID(verified.issuer) &&
-            (value.time as number) > (previous?.attestations.get(member.key) ?? 0) &&
-            (value.time as number) <= member.lease,
-        )
+      const eligible = effectiveAttestingMembers(
+        folded?.ok ? folded.head : undefined,
+        previous,
+        value.time,
+      ).some(
+        ([, member]) =>
+          normalizeDID(member.did) === normalizeDID(verified.issuer) &&
+          (value.time as number) > (previous?.attestations.get(member.key) ?? 0),
+      )
       if (!eligible) throw new RevokeProofError('effects-mismatch')
     } else if (
       value.time <= timeFloor ||

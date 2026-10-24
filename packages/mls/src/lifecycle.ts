@@ -32,7 +32,12 @@ import { decodeLedgerHead } from './head.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
-import { effectiveAuthorityOf, memberRootStatus, memberRootsOf } from './member-root.js'
+import {
+  effectiveAttestingMembers,
+  effectiveAuthorityOf,
+  memberRootStatus,
+  memberRootsOf,
+} from './member-root.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
 import {
   DEVICE_ENTRY_TYPE,
@@ -87,15 +92,7 @@ export function attestedTreeTime(
       ? undefined
       : foldControllerLog(controller, projection.recordedLog)
   const head = folded?.ok && !folded.head.saturated ? folded.head : undefined
-  const effective = new Map(
-    [...(head?.members ?? [])].filter(
-      ([add, member]) =>
-        member.effective &&
-        !member.removed &&
-        !projection?.removedMembers.has(add) &&
-        (head?.gen ?? 0) >= (projection?.genFloor ?? 0),
-    ),
-  )
+  const effective = new Map(effectiveAttestingMembers(head, projection))
   const attestations = new Map<string, number>()
   for (const member of effective.values())
     attestations.set(member.key, projection?.attestations.get(member.key) ?? 0)

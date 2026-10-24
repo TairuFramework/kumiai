@@ -1107,7 +1107,11 @@ test('attest clock from a non-member device is refused', async () => {
 
 test("attest clock past the member's lease is refused", async () => {
   const f = await clockGroup(1)
-  await expect(attestTreeTime(f.group, 1001)).rejects.toMatchObject({ reason: 'effects-mismatch' })
+  const state = f.group.state
+  const ledger = f.group.ledgerTokens
+  await expect(attestTreeTime(f.group, 1001)).resolves.toBeNull()
+  expect(f.group.state).toBe(state)
+  expect(f.group.ledgerTokens).toEqual(ledger)
   await expect(
     verifyLifecycleProof(f.group, {
       issuer: f.a.identity.id,
