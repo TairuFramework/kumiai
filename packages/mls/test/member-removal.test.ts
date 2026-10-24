@@ -23,7 +23,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
-import { foldControllerLog } from '../src/controller-log.js'
+import { foldControllerLog, memberTombstoneIndices } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import { LeafBindingError, RevokeProofError } from '../src/errors.js'
 import { commitLedgerEntries } from '../src/group.js'
@@ -36,7 +36,7 @@ import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import * as lifecycle from '../src/lifecycle.js'
 import { isLapsed, leafAt, leafExpiry, prepareLifecycleGate } from '../src/lifecycle.js'
 import { authenticateLifecycleProof } from '../src/lifecycle-proof.js'
-import { effectiveAuthorityOf, effectOf } from '../src/member-root.js'
+import { claimsFor, effectiveAuthorityOf, effectOf } from '../src/member-root.js'
 import { recoverySignerEligible } from '../src/recovery-verdict.js'
 import { DEVICE_ENTRY_TYPE, denySetOf, registryForLog } from '../src/registry.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
@@ -294,6 +294,22 @@ test('evidence takes precedence over the tombstone', async () => {
   expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
     effects: [{ kind: 'remove', ref: { event: digestOf(f.rmv.event) } }],
   })
+})
+
+test('seeding from a settled log learns no removal from tombstones alone, as 0.12.0', async () => {
+  const f = await fixture()
+  const log = settle(f)
+  expect(registryForLog(f.did, log).controllers.get(f.did)?.removedMembers.has(f.a.add)).toBe(false)
+  // A pre-reset tombstone must not block claims at the new generation.
+  const reset = { chain: [...log.chain, createReset(f.seed, 0, 1)], events: [] }
+  expect(() => claimsFor(f.did, undefined, reset, 1)).not.toThrow()
+})
+
+test('the tombstone upgrade index is bound to the removed DID', async () => {
+  const f = await fixture()
+  const { chain } = settle(f)
+  expect(memberTombstoneIndices(f.did, chain, f.a.add, f.a.identity.id)).toEqual([1])
+  expect(memberTombstoneIndices(f.did, chain, f.a.add, f.b.identity.id)).toEqual([])
 })
 
 test('a tombstone proof is checked against the tombstoned DID and the generation floor', async () => {

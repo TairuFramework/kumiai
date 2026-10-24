@@ -265,10 +265,6 @@ function claimsWithProofs(
         if (member.removed || proofs.drops.has(add))
           removed.set(add, { did: normalizeDID(member.did), add })
       }
-      for (const [add, member] of state.tombstones ?? []) {
-        if (!after.head.members.get(add)?.effective)
-          removed.set(add, { did: normalizeDID(member.did), add })
-      }
     }
   }
   const claims: Array<EffectTarget> = [
@@ -316,7 +312,6 @@ function claimsWithProofs(
       before != null &&
       !after.head.members.get(claim.member.add)?.removed &&
       !proofs.drops.has(claim.member.add) &&
-      !proofs.tombstones.has(claim.member.add) &&
       !eventClaims.has(target) &&
       (before.head.gen !== after.head.gen || denies(after.head, claim.member.did))
     )

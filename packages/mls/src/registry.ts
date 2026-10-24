@@ -362,7 +362,7 @@ export function registryApply(
         const chain = effect.recordedLog.chain
         const index =
           memberDropIndices(controller, chain, add).at(-1) ??
-          memberTombstoneIndices(controller, chain, add).at(-1)
+          memberTombstoneIndices(controller, chain, add, member.did).at(-1)
         if (index != null) removedMembers.set(add, { ...member, proofRef: { chainIndex: index } })
       }
       const survivorGrants = new Map(projection.survivorGrants)
