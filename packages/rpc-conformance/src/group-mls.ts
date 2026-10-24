@@ -836,6 +836,35 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         },
       )
 
+      test('recovery refuses a stale reply that drops a known denial', async () => {
+        const { requester, responder, buildManagementCommit, buildAdmission } =
+          await params.createBoundRecovery()
+        expect(await requester.prepareRecovery()).toBe('ready')
+        const request = await requester.createRecoveryRequest('retain-denial')
+        const staleReply = await responder.sealGroupInfo(request)
+        const denial = await buildManagementCommit('deny')
+        expect(await requester.processCommit(denial.commit, denial.context)).toMatchObject({
+          advanced: true,
+        })
+        const epoch = await requester.readEpoch()
+        const roster = await requester.rosterEntries()
+        const ledger = await requester.getLedger()
+        const admission = await buildAdmission('effective')
+        expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+          advanced: false,
+          refusal: 'invalid',
+        })
+
+        expect(await requester.applyRecovery(staleReply, 'retain-denial')).toBeNull()
+        expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+          advanced: false,
+          refusal: 'invalid',
+        })
+        expect(await requester.readEpoch()).toBe(epoch)
+        expect(await requester.rosterEntries()).toEqual(roster)
+        expect(await requester.getLedger()).toEqual(ledger)
+      })
+
       test("another member's incarnation is refused on membership admission", async () => {
         const { requester, buildAdmission } = await params.createBoundRecovery('membership')
         const epoch = await requester.readEpoch()

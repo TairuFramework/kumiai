@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { encodeMultibase, normalizeDID } from '@kokuin/token'
 import { x25519 } from '@noble/curves/ed25519.js'
 import { hmac } from '@noble/hashes/hmac.js'
@@ -1116,6 +1117,20 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     ): Promise<PendingRecovery | { renewalRequired: true } | null> {
       const info = open(sealed, requestID)
       if (info == null) return null
+      if (controllerLog != null) {
+        if (info.controllerLog == null) return null
+        const { events: knownEvents, ...knownState } = controllerLog
+        const { events: offeredEvents, ...offeredState } = info.controllerLog
+        // This model cannot verify settlement or resets. Retain full events and other state exactly.
+        if (
+          !isDeepStrictEqual(knownState, offeredState) ||
+          !Array.isArray(offeredEvents) ||
+          !knownEvents.every((known) => {
+            return offeredEvents.some((event) => isDeepStrictEqual(known, event))
+          })
+        )
+          return null
+      }
       if (!prepared) await prepare()
       if (
         (binding != null || info.controllerLog != null) &&
