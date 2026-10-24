@@ -1,4 +1,5 @@
-import { createIdentity, now, randomIdentity } from '@kokuin/token'
+import { audienceConfirmation } from '@kokuin/capability'
+import { createIdentity, now, randomIdentity, stringifyToken } from '@kokuin/token'
 import {
   decode,
   defaultExtensionTypes,
@@ -13,6 +14,7 @@ import {
 import { describe, expect, test, vi } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
+import type { ControllerBinding } from '../src/credential.js'
 import {
   commitInvite,
   createGroup,
@@ -25,17 +27,113 @@ import {
   removeMember,
 } from '../src/group.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
+import { rejectionReason } from '../src/lifecycle.js'
 import type { GroupOptions, Invite } from '../src/types.js'
 import { revokeChain } from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
+  belowGateWelcome,
   controllerID,
   lowLevelExternal,
   lowLevelWelcome,
   pipelineGroup,
   timedBinding,
 } from './fixtures/lifecycle-pipeline.js'
+
+async function membershipRecovery(carriesAdd = true) {
+  const epoch = await buildEpoch({ members: 1 })
+  const member = epoch.members[0]
+  if (member == null) throw new Error('Missing member')
+  const { group } = await pipelineGroup({
+    controllerLog: { chain: epoch.log.chain, events: carriesAdd ? epoch.log.events : [] },
+  })
+  const binding: ControllerBinding = {
+    id: epoch.did,
+    prefix: epoch.log.chain,
+    member: { add: member.add, g: epoch.head.gen },
+    iat: 100,
+  }
+  let { author } = await belowGateWelcome(group, member.identity, binding)
+  if (carriesAdd) {
+    const child = agent(61)
+    const capability = stringifyToken(
+      await member.identity.signToken(
+        {
+          sub: epoch.did,
+          aud: child.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: child.publicKey }),
+          iat: 100,
+          exp: 200,
+          mbr: { add: member.add, g: epoch.head.gen },
+        },
+        { embedLongForm: true },
+      ),
+    )
+    const source = await belowGateWelcome(author, child, {
+      id: epoch.did,
+      prefix: epoch.log.chain,
+      capability,
+    })
+    author = source.author
+  }
+  const { groupInfo } = await exportGroupInfo({ group: author })
+  return {
+    author,
+    params: {
+      identity: member.identity,
+      groupInfo,
+      credential: { id: member.identity.id, groupID: author.groupID },
+      controller: { ...binding, iat: 150 },
+      ledgerEntries: author.ledgerTokens,
+      resync: true as const,
+    },
+  }
+}
+
+test('external rejoin judges an mbr source tree after the ledger bootstrap', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150000)
+  try {
+    const f = await membershipRecovery()
+    let bootstrapped = false
+    const { group, commitMessage } = await joinGroupExternal({
+      ...f.params,
+      beforeBinding: async (pending, source) => {
+        expect(source.ledgerTokens).toEqual(f.params.ledgerEntries)
+        expect(pending.ledgerTokens).toEqual(f.params.ledgerEntries)
+        bootstrapped = true
+      },
+    })
+    expect(bootstrapped).toBe(true)
+    expect(group.sendAdmission()).toMatchObject({ admissible: true })
+    await f.author.processMessage(commitMessage)
+    expect(f.author.epoch).toBe(group.epoch)
+  } finally {
+    clock.mockRestore()
+  }
+})
+
+test('external rejoin whose membership binding the reply ledger cannot support is refused', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150000)
+  try {
+    const f = await membershipRecovery(false)
+    let bootstrapped = false
+    const error: unknown = await joinGroupExternal({
+      ...f.params,
+      beforeBinding: async () => {
+        bootstrapped = true
+      },
+    }).catch((error: unknown) => error)
+    expect(error).toMatchObject({ name: 'LeafBindingError', reason: 'member-unavailable' })
+    expect(rejectionReason(error)).toBe('binding')
+    expect(bootstrapped).toBe(true)
+  } finally {
+    clock.mockRestore()
+  }
+})
 
 describe('external rejoin codec round-trip', () => {
   test('mlsMessage(GroupInfo) encode → decode preserves version + wireformat', async () => {

@@ -15,6 +15,8 @@ import { readCapability } from './capability.js'
 import type { ControllerBinding, MLSCredentialIdentity } from './credential.js'
 import { LeafBindingError } from './errors.js'
 import { resolveMlsContext } from './group-context.js'
+import { memberRootsOf } from './member-root.js'
+import { registryForLog } from './registry.js'
 import type { GroupOptions, KeyPackageBundle } from './types.js'
 
 export function makeMLSCredential(
@@ -74,7 +76,20 @@ async function buildBundle(
 ): Promise<KeyPackageBundle> {
   assertBindingAuthorTime(options?.controller)
   const credential = makeMLSCredential(identity, options?.controller)
-  if (options?.controller != null) await verifyLeafCredential(credential, identity.publicKey)
+  if (options?.controller != null) {
+    const memberRooted = memberRootsOf(options.controller, identity.id).some(
+      ({ root }) => root.kind === 'member',
+    )
+    if (memberRooted && options.controllerLog == null)
+      throw new LeafBindingError('member-unavailable')
+    const registry =
+      memberRooted && options.controllerLog != null
+        ? registryForLog(options.controller.id, options.controllerLog)
+        : undefined
+    await verifyLeafCredential(credential, identity.publicKey, {
+      judging: () => ({ registry, stage: 'full', mode: 'admit' }),
+    })
+  }
   const { cipherSuite } = await resolveMlsContext(options)
   const result = await generateKeyPackageWithKey({
     credential,

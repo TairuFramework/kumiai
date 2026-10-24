@@ -1,4 +1,6 @@
+import { audienceConfirmation } from '@kokuin/capability'
 import { createRenew, createRotate, epochHeads } from '@kokuin/controller'
+import { stringifyToken } from '@kokuin/token'
 import { defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -6,6 +8,8 @@ import type { ControllerBinding } from '../src/credential.js'
 import {
   commitInvite,
   createInvite,
+  createKeyPackageBundle,
+  createLastResortKeyPackageBundle,
   exportGroupInfo,
   joinGroupExternal,
   processWelcome,
@@ -619,4 +623,145 @@ test('an unavailable membership lease keeps existing leaves and refuses admissio
   await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({
     reason: 'member-unavailable',
   })
+})
+
+async function stagedWelcome(membership = false, carriesAdd = true) {
+  authorClock()
+  const epoch = await buildEpoch({ members: 1 })
+  const member = epoch.members[0]
+  if (member == null) throw new Error('Missing member')
+  const { group, identity } = await pipelineGroup({
+    controllerLog: { chain: epoch.log.chain, events: [] },
+  })
+  const joiner = membership ? member.identity : agent(61)
+  const binding: ControllerBinding = {
+    id: epoch.did,
+    prefix: epoch.log.chain,
+    ...(membership
+      ? { member: { add: member.add, g: epoch.head.gen }, iat: 100 }
+      : {
+          capability: stringifyToken(
+            await member.identity.signToken(
+              {
+                sub: epoch.did,
+                aud: joiner.id,
+                act: 'authenticate',
+                res: 'kumiai/mls-leaf',
+                cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: joiner.publicKey }),
+                iat: 100,
+                exp: 200,
+                mbr: { add: member.add, g: epoch.head.gen },
+              },
+              { embedLongForm: true },
+            ),
+          ),
+        }),
+  }
+  const entries = carriesAdd
+    ? [
+        await signLedgerEntry(identity, {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: epoch.did,
+          value: { op: 'log', proof: { chain: [], events: epoch.log.events } },
+        }),
+      ]
+    : []
+  const { invite } = await createInvite({
+    group,
+    identity,
+    recipientDID: joiner.id,
+  })
+  const bundle = await rawBundle(group, joiner, binding)
+  const result = await rawCommit({
+    group,
+    proposals: [
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+    ],
+    tokens: entries,
+  })
+  if (result.welcome == null) throw new Error('Missing Welcome')
+  return {
+    ...epoch,
+    member,
+    identity,
+    binding,
+    params: {
+      identity: joiner,
+      invite: { ...invite, ledgerEntries: [...invite.ledgerEntries, ...entries] },
+      welcome: result.welcome.welcome,
+      keyPackageBundle: { ...bundle, ownerDID: joiner.id },
+    },
+  }
+}
+
+test("Welcome with an mbr leaf joins once the ledger carries the member's add", async () => {
+  const f = await stagedWelcome()
+  const entries = [...f.params.invite.ledgerEntries]
+  const { group } = await processWelcome(f.params)
+  expect(group.memberCount).toBe(2)
+  expect(group.ledgerTokens).toEqual(entries)
+  expect(f.params.invite.ledgerEntries).toEqual(entries)
+  expect(group.sendAdmission()).toMatchObject({ admissible: true })
+})
+
+test('Welcome with an mbr leaf whose member the ledger lacks is refused', async () => {
+  const f = await stagedWelcome(false, false)
+  await expect(processWelcome(f.params)).rejects.toMatchObject({
+    name: 'LeafBindingError',
+    reason: 'member-unavailable',
+  })
+})
+
+test('Welcome joiner with a membership leaf takes admission from the folded registry', async () => {
+  const f = await stagedWelcome(true)
+  const { group } = await processWelcome(f.params)
+  expect(group.sendAdmission()).toMatchObject({ admissible: true })
+  await group.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: f.did,
+      value: { op: 'clock', time: 1000 },
+    }),
+  ])
+  expect(group.sendAdmission()).toMatchObject({ admissible: true })
+  await group.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: f.did,
+      value: { op: 'clock', time: 1001 },
+    }),
+  ])
+  expect(group.sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
+  await expect(group.encrypt(new Uint8Array([1]))).rejects.toMatchObject({ reason: 'lapsed' })
+})
+
+test('membership key package needs controllerLog', async () => {
+  const f = await stagedWelcome(true)
+  for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
+    await expect(build(f.member.identity, { controller: f.binding })).rejects.toMatchObject({
+      reason: 'member-unavailable',
+    })
+    const bundle = await build(f.member.identity, { controller: f.binding, controllerLog: f.log })
+    expect(bundle.ownerDID).toBe(f.member.identity.id)
+  }
+})
+
+test('mbr key package verifies against controllerLog', async () => {
+  const f = await stagedWelcome()
+  for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
+    await expect(build(f.params.identity, { controller: f.binding })).rejects.toMatchObject({
+      reason: 'member-unavailable',
+    })
+    const bundle = await build(f.params.identity, { controller: f.binding, controllerLog: f.log })
+    expect(bundle.ownerDID).toBe(f.params.identity.id)
+    await expect(
+      build(f.params.identity, {
+        controller: f.binding,
+        controllerLog: { chain: f.log.chain, events: [] },
+      }),
+    ).rejects.toMatchObject({ reason: 'member-unavailable' })
+  }
 })

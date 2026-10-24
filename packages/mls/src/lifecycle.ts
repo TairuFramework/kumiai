@@ -30,7 +30,7 @@ import { decodeLedgerHead, extendHead, genesisHead, headsMatch } from './head.js
 import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
-import { memberRootStatus, memberRootsOf } from './member-root.js'
+import { effectiveAuthorityOf, memberRootStatus, memberRootsOf } from './member-root.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
 import {
   DEVICE_ENTRY_TYPE,
@@ -388,17 +388,31 @@ function checkSurvivors(
         (registry.controllers.get(normalizeDID(controller))?.genFloor ?? 0)
       )
         throw new LeafBindingError('generation-floor')
+      const authority = effectiveAuthorityOf(
+        { did: parsed.id, binding, leafKey: node.leaf.signaturePublicKey },
+        registry,
+        controller,
+      )
+      if ('status' in authority && authority.status === 'removed')
+        throw new LeafBindingError('member-removed')
     }
   }
 }
 
-export async function validateWelcomeTree(group: GroupHandle): Promise<void> {
+export async function validateWelcomeTree(
+  group: GroupHandle,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'rejudge' },
+): Promise<void> {
   for (const [index, node] of group.state.ratchetTree.entries()) {
     if (node?.nodeType !== nodeTypes.leaf) continue
-    await validateBoundLeaf(group, node.leaf, undefined, true)
-    if (index === group.state.privatePath.leafIndex * 2) checkAdmissionExpiry(group, node.leaf)
+    await validateBoundLeaf(group, node.leaf, undefined, true, judging)
+    if (judging.stage === 'full' && index === group.state.privatePath.leafIndex * 2)
+      checkAdmissionExpiry(group, node.leaf, judging.registry)
   }
-  checkSurvivors(group, group.state.ratchetTree, group.registry, { kind: 'welcome' })
+  if (judging.stage === 'full')
+    checkSurvivors(group, group.state.ratchetTree, judging.registry ?? group.registry, {
+      kind: 'welcome',
+    })
 }
 
 type IncomingMessage = Parameters<IncomingMessageCallback>[0]
