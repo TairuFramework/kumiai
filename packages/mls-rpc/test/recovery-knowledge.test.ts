@@ -561,3 +561,32 @@ test('known removal survives adoption and restore', async () => {
     f.group().registry.controllers.get(f.did)?.removedMembers.get(f.a.add),
   )
 })
+
+test('recovery adoption refuses knowledge bootstrapped after preparation, including retries', async () => {
+  const f = await removal()
+  const r = await recoveryGroup(f)
+  const request = await r.requester.createRecoveryRequest('adoption-race')
+  const sealed = await r.responder.sealGroupInfo(request)
+  const partialLedger = r.group().ledgerTokens
+  const removed = await mls.revokeWithProof(r.group(), {
+    log: f.removedLog,
+    remove: [{ did: f.a.identity.id, add: f.a.add }],
+  })
+  if (removed.status !== 'built') throw new Error('Expected removal')
+  const completeLedger = removed.result.newGroup.ledgerTokens
+  const partial = await mls.restoreGroup({
+    state: removed.result.newGroup.state,
+    credential: removed.result.newGroup.credential,
+    ledgerEntries: partialLedger,
+  })
+  r.adopt(partial)
+  expect(await partial.isLedgerComplete()).toBe(false)
+  const pending = await r.requester.applyRecovery(sealed, 'adoption-race')
+  if (pending == null || 'renewalRequired' in pending) throw new Error('Expected candidate')
+  await partial.bootstrapLedger(completeLedger)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(pending.onAccepted()).rejects.toThrow(new mls.RecoveryKnowledgeError('removal'))
+    expect(r.group()).toBe(partial)
+    expect(r.group().registry.controllers.get(f.did)?.removedMembers.size).toBe(1)
+  }
+}, 30_000)

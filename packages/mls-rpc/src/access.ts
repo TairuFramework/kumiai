@@ -12,7 +12,8 @@ export type HandleAccess = {
   mutate<TValue>(
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
   ): Promise<TValue>
-  replace(next: GroupHandle): Promise<void>
+  /** Run the guard under the replacement lock, before persistence. */
+  replace(next: GroupHandle, guard?: (live: GroupHandle) => void): Promise<void>
   open<TValue>(
     fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
     persistOpened: PersistOpened,
@@ -62,8 +63,9 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         publishedAdmission = handle.sendAdmission()
         return result
       }),
-    replace: (next) =>
+    replace: (next, guard) =>
       serialise(async () => {
+        guard?.(params.handle())
         await save(next)
         await params.adopt(next)
         publishedAdmission = next.sendAdmission()
