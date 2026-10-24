@@ -68,7 +68,7 @@ test('historyCountsUtf8AndEveryCopy', async () => {
   const entries: Array<VerifiedLedgerEntry> = []
   const tokens: Array<string> = []
   for (const value of [
-    { op: 'revoke', proof: oldProof, revoked: [{ did: agent(61).id }] },
+    { op: 'revoke', proof: oldProof.slice(1), revoked: [{ did: agent(61).id }] },
     { op: 'reset', proof: resetPrefix, revoked: [] },
   ]) {
     const token = await signLedgerEntry(alice, {
@@ -82,7 +82,7 @@ test('historyCountsUtf8AndEveryCopy', async () => {
     entries.push(verified)
     tokens.push(token)
   }
-  const proofUtf8Bytes = historyBytes(oldProof) + historyBytes(resetPrefix)
+  const proofUtf8Bytes = historyBytes(oldProof.slice(1)) + historyBytes(resetPrefix)
   expect(historyBytes(prefix)).toBeGreaterThan(
     prefix.reduce((size, event) => size + JSON.stringify(event).length, 0),
   )
@@ -97,7 +97,7 @@ test('historyCountsUtf8AndEveryCopy', async () => {
   )
   const revoked = await enact(renewed.group, [tokens[0] as string])
   const recorded = await enact(revoked.group, [tokens[1] as string])
-  expect(recorded.group.ledgerTokens).toEqual(tokens)
+  expect(recorded.group.ledgerTokens).toEqual([...renewed.group.ledgerTokens, ...tokens])
   expect(history.historySize(recorded.group.state.ratchetTree, entries)).toBe(
     historyBytes(resetPrefix) * 2 + proofUtf8Bytes,
   )

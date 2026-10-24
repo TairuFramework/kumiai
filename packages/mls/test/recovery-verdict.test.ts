@@ -151,7 +151,7 @@ test('external replacement reports denied subjects as invalid and tree-time regr
     groupID: author.groupID,
     type: 'kumiai.device',
     subject: bob.id,
-    value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: bob.id }] },
+    value: { op: 'revoke', proof: [revoke], revoked: [{ did: bob.id }] },
   })
   await author.applyLedgerEntries([token])
   await expect(author.processMessage(message)).rejects.toMatchObject({ reason: 'invalid' })

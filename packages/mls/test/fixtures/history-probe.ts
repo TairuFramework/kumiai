@@ -235,6 +235,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     }
     const { group } = await createGroup(alice, groupID, {
       controller: await binding(alice, prefix),
+      controllerLog: { chain: prefix, events: [] },
       commitPolicy: () => 'accept',
     })
     const bundle = await createKeyPackageBundle(bob, { controller: await binding(bob, prefix) })

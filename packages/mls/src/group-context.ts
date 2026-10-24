@@ -10,6 +10,7 @@ import {
 import type { GroupAnchor } from './anchor.js'
 import { createDIDAuthenticationService, type JudgingContext } from './authentication.js'
 import { nobleCryptoProvider } from './crypto.js'
+import { denySetOf } from './registry.js'
 import type { GroupOptions } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
@@ -29,6 +30,26 @@ const DENY_HOLDERS = new WeakMap<MlsContext, DeviceDenyHolder>()
 /** The deny holder for an internally built context, or undefined for others. */
 export function deviceDenyHolderFor(context: MlsContext): DeviceDenyHolder | undefined {
   return DENY_HOLDERS.get(context)
+}
+
+export async function withJudging<T>(
+  context: MlsContext,
+  judging: JudgingContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const holder = deviceDenyHolderFor(context)
+  if (holder == null) throw new Error('Missing judging holder')
+  const previous = holder.judging
+  const previousProvider = holder.provider
+  const registry = judging.registry
+  if (registry != null) holder.provider = () => denySetOf(registry)
+  holder.judging = () => judging
+  try {
+    return await fn()
+  } finally {
+    holder.judging = previous
+    holder.provider = previousProvider
+  }
 }
 
 export async function resolveMlsContext(
@@ -55,6 +76,7 @@ export function createMlsContext(
   const authService = createDIDAuthenticationService({
     deviceDenySet: () => holder.provider(),
     judging: () => holder.judging?.() ?? { stage: 'full', mode: 'admit' },
+    mayKeepDeniedIssuer: () => holder.judging?.().mode === 'retain',
     leafLifetime: () => holder.leafLifetime,
     trustedGrantLifetime: () => holder.trustedGrantLifetime,
   })

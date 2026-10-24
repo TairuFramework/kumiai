@@ -270,7 +270,7 @@ describe('revocation cascade', () => {
       type: DEVICE_ENTRY_TYPE,
       groupID: setup.publisher.groupID,
       subject: setup.issuer.id,
-      value: { op: 'revoke', proof: setup.log, revoked: [{ did: setup.issuer.id }] },
+      value: { op: 'revoke', proof: setup.log.slice(1), revoked: [{ did: setup.issuer.id }] },
     })
     const forged = await rawCommit({
       group: setup.publisher,

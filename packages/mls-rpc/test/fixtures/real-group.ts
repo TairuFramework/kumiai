@@ -51,6 +51,7 @@ export async function createRealBoundRecovery(
   let source = (
     await createGroup(alice, 'bound-conformance', {
       controller: await fixture.timedBinding({ identity: alice, iat: now - 20, exp: now + 1000 }),
+      controllerLog: { chain: cached.prefix, events: [] },
     })
   ).group
   const bundle = await createKeyPackageBundle(bob, { controller: cached })

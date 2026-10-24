@@ -3332,7 +3332,10 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   })
   const controller = parseMLSCredentialIdentity(leaf.identity).controller
   if (controller == null) throw new Error('fixture has no controller binding')
-  const { group } = await createGroup(identity, 'lifecycle-genesis', { controller })
+  const { group } = await createGroup(identity, 'lifecycle-genesis', {
+    controller,
+    controllerLog: { chain: controller.prefix, events: [] },
+  })
   const anchor = readGroupAnchor(group)
   if (anchor == null) throw new Error('group has no anchor')
   expect(anchor.controller).toBe(leaf.controllerID)
@@ -3343,6 +3346,7 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   expect(group.listMembers()[0]?.controller).toBe(leaf.controllerID)
   const { group: maximum } = await createGroup(identity, 'maximum-genesis', {
     controller,
+    controllerLog: { chain: controller.prefix, events: [] },
     leafLifetime: 604_800,
     trustedGrantLifetime: 31_536_000,
   })
@@ -3359,12 +3363,20 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   ] as const) {
     for (const value of [0, maximum + 1, Number.POSITIVE_INFINITY, Number.NaN, 1.5]) {
       await expect(
-        createGroup(identity, 'invalid-genesis', { controller, [field]: value }),
+        createGroup(identity, 'invalid-genesis', {
+          controller,
+          controllerLog: { chain: controller.prefix, events: [] },
+          [field]: value,
+        }),
       ).rejects.toThrow()
     }
   }
   await expect(
-    createGroup(identity, 'short-genesis', { controller, leafLifetime: 3599 }),
+    createGroup(identity, 'short-genesis', {
+      controller,
+      controllerLog: { chain: controller.prefix, events: [] },
+      leafLifetime: 3599,
+    }),
   ).rejects.toThrow()
 })
 
@@ -3377,7 +3389,10 @@ test('lifecycle authentication uses anchored lifetimes after creation and restor
   const leaf = await buildBoundLeaf()
   const controller = parseMLSCredentialIdentity(leaf.identity).controller
   if (controller == null) throw new Error('fixture has no controller binding')
-  const created = await createGroup(identity, 'anchored-auth', { controller })
+  const created = await createGroup(identity, 'anchored-auth', {
+    controller,
+    controllerLog: { chain: controller.prefix, events: [] },
+  })
   const restored = await restoreGroup({
     state: created.group.state,
     credential: created.credential,

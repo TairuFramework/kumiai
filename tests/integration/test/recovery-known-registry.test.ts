@@ -18,6 +18,7 @@ import { revokeChain } from './fixtures/controller-chain.js'
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
+  inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
   lowLevelExternal: (params: {
@@ -46,7 +47,10 @@ async function setup(
     await createGroup(identity, 'lifecycle-verdict', {
       ...(options.standard
         ? {}
-        : { controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }) }),
+        : {
+            controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }),
+            controllerLog: { chain: [fixture.inception], events: [] },
+          }),
     })
   ).group
   const bob = fixture.agent(61)

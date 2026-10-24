@@ -295,8 +295,8 @@ describe('attack: history hidden in advisory or clock entries', () => {
       await expect(
         commitWithEntries({ group, extraProposals: [], enacted: [token], requireAdmin: false }),
       ).rejects.toThrow()
-      expect(group.ledgerTokens).toEqual([])
-      expect(group.registry.controllers.size).toBe(0)
+      expect(group.ledgerTokens).toHaveLength(1)
+      expect(group.registry.controllers.size).toBe(1)
     }
   })
 
@@ -329,7 +329,7 @@ describe('attack: history hidden in advisory or clock entries', () => {
         await expect(members.joined.processMessage(message)).rejects.toThrow()
         expect(members.joined.epoch).toBe(epoch)
         expect(members.joined.registry).toBe(registry)
-        expect(members.joined.ledgerTokens).toEqual([])
+        expect(members.joined.ledgerTokens).toHaveLength(1)
       }
     },
   )
@@ -439,7 +439,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           subject: firstSubject,
           value: {
             op: 'revoke',
-            proof: [inception, authorityRevoke(firstSubject)],
+            proof: [authorityRevoke(firstSubject)],
             revoked: [{ did: firstSubject }],
           },
         })
@@ -451,7 +451,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
         subject: target,
         value: {
           op: 'revoke',
-          proof,
+          proof: proof[0]?.event.t === 'icp' ? proof.slice(1) : proof,
           revoked: revoked ?? [{ did: target }],
           ...(controller == null ? {} : { controller }),
         },
@@ -497,7 +497,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           subject: firstSubject,
           value: {
             op: 'revoke',
-            proof: [inception, authorityRevoke(firstSubject)],
+            proof: [authorityRevoke(firstSubject)],
             revoked: [{ did: firstSubject }],
           },
         })
@@ -512,7 +512,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
         subject: target,
         value: {
           op: 'revoke',
-          proof,
+          proof: proof[0]?.event.t === 'icp' ? proof.slice(1) : proof,
           revoked: revoked ?? [{ did: target }],
           ...(controller == null ? {} : { controller }),
         },
@@ -559,7 +559,7 @@ describe('attack: reserved lifecycle entries', () => {
       await expect(members.joined.processMessage(message)).rejects.toThrow()
       expect(members.joined.epoch).toBe(epoch)
       expect(members.joined.roster.roles).toEqual(new Map([[controllerID, 'admin']]))
-      expect(members.joined.ledgerTokens).toEqual([])
+      expect(members.joined.ledgerTokens).toHaveLength(1)
     },
   )
 })

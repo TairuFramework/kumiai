@@ -13,6 +13,7 @@ import {
   type IncomingMessageAction,
   type IncomingMessageCallback,
   isDefaultCredential,
+  isDefaultProposal,
   type LeafNode,
   leafNodeSources,
   type MlsContext,
@@ -237,6 +238,7 @@ type CommitCapture = {
 }
 
 type CommitPipeline = {
+  candidateRegistry: DeviceRegistry
   callback: IncomingMessageCallback | undefined
   capture: CommitCapture
   applyOnAccept: (notify?: boolean) => () => void
@@ -1651,6 +1653,7 @@ export class GroupHandle {
     }
 
     return {
+      candidateRegistry,
       callback: wrapCommitPolicy(combined, capture),
       capture,
       applyOnAccept,
@@ -1889,10 +1892,8 @@ export class GroupHandle {
           : undefined)
       // Past proposals cannot be enacted at this epoch and need no ratchet or ledger work.
       if (proposalEpoch != null && proposalEpoch < this.epoch) return null
-      const { callback, capture, applyOnAccept, postApply } = await this.#prepareCommitPipeline(
-        decoded,
-        opts,
-      )
+      const { callback, capture, applyOnAccept, postApply, candidateRegistry } =
+        await this.#prepareCommitPipeline(decoded, opts)
       const previousState = this.#state
       const previousAdmission = this.#admission
       const application = readPrivateFrame(decoded, contentTypes.application)
@@ -1918,23 +1919,41 @@ export class GroupHandle {
             authService: {
               validateCredential: async (credential, key) => {
                 try {
+                  // Referenced Updates authenticate before the commit callback runs.
+                  const proposed = (
+                    capture.rejected?.proposals ?? Object.values(this.#state.unappliedProposals)
+                  ).find(({ proposal }) => {
+                    if (!isDefaultProposal(proposal)) return false
+                    if (proposal.proposalType === defaultProposalTypes.add)
+                      return proposal.add.keyPackage.leafNode.credential === credential
+                    return (
+                      proposal.proposalType === defaultProposalTypes.update &&
+                      proposal.update.leafNode.credential === credential
+                    )
+                  })
+                  const index =
+                    proposed == null
+                      ? capture.committerLeafIndex
+                      : proposed.proposal.proposalType === defaultProposalTypes.update
+                        ? proposed.senderLeafIndex
+                        : undefined
+                  const retained =
+                    index != null &&
+                    isUnchangedLeaf(this.#state.ratchetTree, index, {
+                      credential,
+                      signaturePublicKey: key,
+                    })
                   await verifyLeafCredential(credential, key, {
-                    deviceDenySet: () => this.currentDenySet(),
+                    deviceDenySet: () => denySetOf(candidateRegistry),
                     judging: () => ({
-                      registry: this.#anchor.controller == null ? undefined : this.registry,
+                      registry: this.#anchor.controller == null ? undefined : candidateRegistry,
                       stage: 'full',
-                      mode: 'admit',
+                      mode: retained ? 'retain' : 'admit',
                     }),
                     // MLS re-validates the committer's path leaf after its proposals are judged:
                     // an evidenced child keeps a denied issuer only with the credential it
                     // already holds at that leaf.
-                    mayKeepDeniedIssuer: (leafCredential, leafKey) =>
-                      this.#anchor.controller != null &&
-                      capture.committerLeafIndex != null &&
-                      isUnchangedLeaf(this.#state.ratchetTree, capture.committerLeafIndex, {
-                        credential: leafCredential,
-                        signaturePublicKey: leafKey,
-                      }),
+                    mayKeepDeniedIssuer: () => this.#anchor.controller != null && retained,
                     leafLifetime: () =>
                       this.#anchor.controller == null
                         ? undefined

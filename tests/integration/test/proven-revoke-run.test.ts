@@ -51,6 +51,7 @@ async function setup() {
   const entrySlot = createLedgerEntrySlot()
   let group = (
     await createGroup(identity, 'proven-revoke', {
+      controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }),
       resolveLedgerEntries: entrySlot.resolve,
     })

@@ -268,7 +268,12 @@ test('renewal and proof growth fail at the exact history horizon boundary, while
   ]
   proofLog.push(revoke(proofLog, target))
   expect(eventBytes(proofLog)).toBe(2_048)
-  expect(await revokeWithProof(near.newGroup, { subject: target, log: proofLog })).toEqual({
+  expect(
+    await revokeWithProof(near.newGroup, {
+      subject: target,
+      log: [...large, revoke(large, target)],
+    }),
+  ).toEqual({
     status: 'not-provable',
     reason: 'too-large',
   })
@@ -604,6 +609,7 @@ test('peer:4 members sign self-verifying proof entries using their leaf long for
   })
   const { group } = await createGroup(identity, 'peer-proof', {
     controller: await timedBinding({ identity, iat: 100, exp: 200 }),
+    controllerLog: { chain: [inception], events: [] },
   })
   const target = agent(61).id
   const built = await revokeWithProof(group, {
@@ -635,6 +641,10 @@ test.each(['revoke', 'reset'] as const)(
       renewed.newGroup,
       op === 'reset' ? { reset: true, log } : { subject: target, log },
     )
+    if (op === 'revoke') {
+      expect(built).toEqual({ status: 'not-provable', reason: 'needs-reset' })
+      return
+    }
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
     const expected = JSON.parse(JSON.stringify([inception, reset, currentRevoke]))
@@ -645,12 +655,7 @@ test.each(['revoke', 'reset'] as const)(
       chain: expected,
       events: [],
     })
-    if (op === 'revoke') {
-      expect(revocationOf(built.result.newGroup, target)?.logPosition).toBe(2)
-      expect(built.result.newGroup.registry.devices.get(target)?.proofRef).toEqual({
-        chainIndex: 2,
-      })
-    } else expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
+    expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
     expect(renewed.newGroup.state).toEqual(before)
     expect(log).toEqual(originalLog)
   },
@@ -662,9 +667,9 @@ test('a first proof cannot use a subject revoke before the latest reset', async 
   const log = [inception, revoke([inception], target), createReset(controllerSeed, 0, 1)]
   expect(await revokeWithProof(group, { subject: target, log })).toEqual({
     status: 'not-provable',
-    reason: 'no-rev',
+    reason: 'needs-reset',
   })
-  expect(group.ledger).toEqual([])
+  expect(group.ledger).toHaveLength(1)
 })
 
 test('proof construction ends at the deny gain before a retaining rotate', async () => {
@@ -678,16 +683,16 @@ test('proof construction ends at the deny gain before a retaining rotate', async
   if (built.status !== 'built') throw new Error('Missing proof')
   expect(revocationOf(built.result.newGroup, subject)?.logPosition).toBe(1)
   expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
-    proof: JSON.parse(JSON.stringify(chain.slice(0, 2))),
+    proof: JSON.parse(JSON.stringify(chain.slice(1, 2))),
   })
 })
 
-test('proof construction refuses a reset snapshot denial as a revoke', async () => {
+test('proof construction requires reset for a reset snapshot denial', async () => {
   const { group } = await pipelineGroup()
   const subject = agent(61).id
   const log = [inception, createReset(controllerSeed, 0, 1, { members: [], deny: [subject] })]
   expect(await revokeWithProof(group, { subject, log })).toEqual({
     status: 'not-provable',
-    reason: 'no-rev',
+    reason: 'needs-reset',
   })
 })

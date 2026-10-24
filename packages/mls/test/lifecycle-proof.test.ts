@@ -79,8 +79,19 @@ function proofEntry(
   issuer: string,
   subject: string,
   value: DeviceValue,
+  seeded = true,
 ): VerifiedLedgerEntry<DeviceValue> {
-  return { issuer, entry: { type: DEVICE_ENTRY_TYPE, groupID: 'lifecycle-ledger', subject, value } }
+  const attached =
+    seeded &&
+    value.op === 'revoke' &&
+    Array.isArray(value.proof) &&
+    value.proof[0]?.event.t === 'icp'
+      ? { ...value, proof: value.proof.slice(1) }
+      : value
+  return {
+    issuer,
+    entry: { type: DEVICE_ENTRY_TYPE, groupID: 'lifecycle-ledger', subject, value: attached },
+  }
 }
 
 async function recordFirst() {
@@ -323,21 +334,20 @@ describe('authenticated proof attachment', () => {
     ).rejects.toMatchObject({ reason: 'too-large' })
   })
 
-  test('allows a first chain re-parented on a reset', async () => {
+  test('a seeded group requires reset before a re-parented revoke', async () => {
     const { group, identity } = await lifecycleGroup()
     const reset = createReset(controllerSeed, 0, 1)
     const log = [inception, reset, revoke([inception, reset], target)]
-    const effects = await verifyLifecycleProof(
-      group,
-      proofEntry(identity.id, target, {
-        op: 'revoke',
-        proof: log,
-        revoked: [{ did: target }],
-      }),
-    )
-    expect(effects.recordedLog).toEqual({ chain: log, events: [] })
-    expect(effects.logPosition).toBe(2)
-    expect(effects.genFloor).toBe(0)
+    await expect(
+      verifyLifecycleProof(
+        group,
+        proofEntry(identity.id, target, {
+          op: 'revoke',
+          proof: log,
+          revoked: [{ did: target }],
+        }),
+      ),
+    ).rejects.toMatchObject({ reason: 'needs-reset' })
   })
 })
 
@@ -589,7 +599,7 @@ describe('proof boundary cases', () => {
     } finally {
       fold.mockRestore()
     }
-    expect(group.ledgerTokens).toEqual([])
+    expect(group.ledgerTokens).toHaveLength(1)
     expect(group.registry).toEqual(registry)
     expect(group.roster).toEqual(roster)
     await expect(group.applyLedgerEntries([])).resolves.toEqual([])
@@ -663,11 +673,16 @@ describe('proof boundary cases', () => {
     await expect(
       verifyLifecycleProof(
         group,
-        proofEntry(identity.id, target, {
-          op: 'revoke',
-          proof: full,
-          revoked: [{ did: target }],
-        }),
+        proofEntry(
+          identity.id,
+          target,
+          {
+            op: 'revoke',
+            proof: full,
+            revoked: [{ did: target }],
+          },
+          false,
+        ),
       ),
     ).rejects.toMatchObject({ reason: 'detached' })
   })
@@ -844,7 +859,7 @@ describe('lifecycle ledger pipeline', () => {
     const result = await enact(members.group, [token])
     publish(tokens, [token])
     await members.joined.processMessage(result.message)
-    expect(members.joined.ledgerTokens).toEqual([token])
+    expect(members.joined.ledgerTokens).toEqual([...group.ledgerTokens, token])
     expect(members.joined.registry).toEqual(result.group.registry)
     const absentToken = await signLedgerEntry(agent(61), {
       type: 'consumer.event',
@@ -877,7 +892,7 @@ describe('lifecycle ledger pipeline', () => {
     await expect(members.joined.processMessage(message)).rejects.toThrow()
     expect(members.joined.epoch).toBe(epoch)
     expect(members.joined.registry).toBe(before)
-    expect(members.joined.ledgerTokens).toEqual([])
+    expect(members.joined.ledgerTokens).toHaveLength(1)
   })
 
   test('the receiver rejects a lifecycle register even if its self-attestation would otherwise pass', async () => {
@@ -946,10 +961,15 @@ describe('deny-gaining rotate proofs', () => {
     const registry = registrySeed()
     return authenticateLifecycleProof(
       controllerID,
-      proofEntry(agent(41).id, subject, {
-        op: 'revoke',
-        proof,
-      }),
+      proofEntry(
+        agent(41).id,
+        subject,
+        {
+          op: 'revoke',
+          proof,
+        },
+        false,
+      ),
       {
         ...registry,
         controllers: new Map([

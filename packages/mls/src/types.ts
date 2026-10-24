@@ -1,3 +1,4 @@
+import type { ControllerLog } from '@kokuin/controller'
 import type {
   Capabilities,
   CryptoProvider,
@@ -13,6 +14,8 @@ import type { VerifiedLedgerEntry } from './ledger.js'
 export type GroupOptions = {
   /** Creator or key-package leaf binding. Creates a lifecycle group when passed to createGroup. */
   controller?: ControllerBinding
+  /** Authoritative creator log. Required when creating a lifecycle group. */
+  controllerLog?: ControllerLog
   /** Lifecycle leaf lifetime in seconds. Defaults to 86,400; maximum 604,800. */
   leafLifetime?: number
   /** Lifecycle trusted grant lifetime in seconds. Defaults to 2,592,000; maximum 31,536,000. */

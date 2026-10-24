@@ -86,7 +86,7 @@ test.each(['author', 'receiver'] as const)(
       type: DEVICE_ENTRY_TYPE,
       groupID: author.groupID,
       subject: target.id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: target.id }] },
+      value: { op: 'revoke', proof: [revoke], revoked: [{ did: target.id }] },
     })
     const entryID = ledgerEntryDigest(token)
     tokens.set(entryID, token)
@@ -494,7 +494,7 @@ describe('path, clock and lapse gates', () => {
       type: DEVICE_ENTRY_TYPE,
       groupID: setup.author.groupID,
       subject: setup.bobIdentity.id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: setup.bobIdentity.id }] },
+      value: { op: 'revoke', proof: [revoke], revoked: [{ did: setup.bobIdentity.id }] },
     })
     await expect(
       commitWithEntries({
@@ -526,7 +526,7 @@ describe('path, clock and lapse gates', () => {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
       subject: agent(81).id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: agent(81).id }] },
+      value: { op: 'revoke', proof: [revoke], revoked: [{ did: agent(81).id }] },
     })
     const add = await rawAdd(
       group,
@@ -1037,7 +1037,7 @@ test('a lifecycle external replacement is refused when its subject is denied', a
     type: DEVICE_ENTRY_TYPE,
     groupID: author.groupID,
     subject: bob.id,
-    value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: bob.id }] },
+    value: { op: 'revoke', proof: [revoke], revoked: [{ did: bob.id }] },
   })
   // Seed a known revocation on the offered epoch to exercise admission independently of removal.
   await author.applyLedgerEntries([token])
@@ -1144,7 +1144,7 @@ test('two revoke proofs cannot share a commit', async () => {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
       subject: first.id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: first.id }] },
+      value: { op: 'revoke', proof: [revoke], revoked: [{ did: first.id }] },
     }),
     signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,

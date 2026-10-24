@@ -12,10 +12,11 @@ import { readCapability } from './capability.js'
 import { effectDelta, ingestControllerLog } from './controller-ingest.js'
 import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
-import { RevokeProofError } from './errors.js'
+import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
 import { controllerLogSize, HISTORY_HORIZON, historySize, proofSize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
+import { isLapsed, leafAt } from './lifecycle.js'
 import {
   type DeviceRegistry,
   type DeviceValue,
@@ -268,6 +269,20 @@ export async function verifyLifecycleProof(
     }
   }
   const authenticated = authenticateLifecycleProof(controller, verified, group.registry)
+  if (value.op === 'log') {
+    const index = group.findMemberLeafIndex(verified.issuer)
+    const leaf = index == null ? undefined : leafAt(group.state.ratchetTree, index)
+    if (leaf == null) throw new RevokeProofError('wrong-controller')
+    if (denySetOf(group.registry).has(normalizeDID(verified.issuer)))
+      throw new LeafBindingError('denied-id')
+    if (isLapsed(group, leaf)) throw new LeafLapsedError('lapsed')
+    const before = historySize(
+      group.state.ratchetTree,
+      group.ledger.map(({ verified }) => verified),
+    )
+    if (before + proofSize(value.proof) > HISTORY_HORIZON) throw new RevokeProofError('too-large')
+    return { controller, ...authenticated, timeFloor, revoked: [], removeLeafIndices: [] }
+  }
   const revoked: Array<RevokedEffect> = []
   if (value.op === 'revoke') {
     const record = group.registry.devices.get(subject)

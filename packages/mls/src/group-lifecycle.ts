@@ -1,4 +1,11 @@
-import { didFromInception, type InceptionEvent, type SignedEvent } from '@kokuin/controller'
+import {
+  type ControllerLog,
+  didFromInception,
+  digestOf,
+  type InceptionEvent,
+  pruneLog,
+  type SignedEvent,
+} from '@kokuin/controller'
 import { createSigningIdentityForDID, type DIDString, normalizeDID } from '@kokuin/token'
 import {
   type ClientState,
@@ -11,24 +18,92 @@ import {
 } from 'ts-mls'
 
 import { readCapability } from './capability.js'
+import { effectDelta, ingestControllerLog } from './controller-ingest.js'
 import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
+import { foldEnvelope } from './envelope-fold.js'
 import { LeafBindingError, RevokeProofError, type RevokeProofReason } from './errors.js'
 import { commitWithEntries } from './group-commit.js'
 import { assertBindingAuthorTime } from './group-credential.js'
 import type { DeviceWriteResult } from './group-device.js'
 import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
-import { signLedgerEntry, type VerifiedLedgerEntry } from './ledger.js'
+import {
+  ledgerEntryDigest,
+  signLedgerEntry,
+  type VerifiedLedgerEntry,
+  verifyLedgerEntry,
+} from './ledger.js'
 import { isLapsed, leafAt, treeTime, validateEntry } from './lifecycle.js'
 import {
   authenticateLifecycleProof,
   isExemptMember,
   verifyLifecycleProof,
 } from './lifecycle-proof.js'
-import { DEVICE_ENTRY_TYPE, type DeviceValue, isResetOnly, type RevokedEffect } from './registry.js'
+import {
+  DEVICE_ENTRY_TYPE,
+  type DeviceRegistry,
+  type DeviceValue,
+  isResetOnly,
+  type RevokedEffect,
+  recordedLogOf,
+} from './registry.js'
 
 export type CommitResult = DeviceWriteResult
+
+export function controllerLogDelta(group: GroupHandle, log: ControllerLog): ControllerLog | null {
+  const controller = group.anchor.controller
+  if (controller == null) throw new RevokeProofError('wrong-controller')
+  const recorded = recordedLogOf(group.registry, controller)
+  if (recorded == null) throw new RevokeProofError('detached')
+  const pruned = pruneLog(controller, log)
+  const incoming = ingestControllerLog(controller, undefined, pruned)
+  const previous = ingestControllerLog(controller, undefined, recorded)
+  const reset = incoming.after.head.gen > previous.after.head.gen
+  const merged = incoming.log
+  const common = reset ? 1 : Math.min(recorded.chain.length, merged.chain.length)
+  for (let index = 0; index < common; index++) {
+    const prior = recorded.chain[index]
+    const next = merged.chain[index]
+    if (prior == null || next == null || digestOf(prior.event) !== digestOf(next.event))
+      throw new RevokeProofError('detached')
+  }
+  const seen = new Set(recorded.events.map(({ event }) => digestOf(event)))
+  const delta = {
+    chain: reset ? merged.chain : merged.chain.slice(recorded.chain.length),
+    events: merged.events.filter(({ event }) => !seen.has(digestOf(event))),
+  }
+  if (delta.chain.length === 0 && delta.events.length === 0) return null
+  ingestControllerLog(controller, recorded, delta)
+  return delta
+}
+
+export async function publishControllerLog(
+  group: GroupHandle,
+  log: ControllerLog,
+): Promise<DeviceWriteResult | null> {
+  return mutexFor(group).run(async () => {
+    const delta = controllerLogDelta(group, log)
+    if (delta == null) return null
+    const controller = group.anchor.controller
+    if (controller == null) throw new RevokeProofError('wrong-controller')
+    const ingested = ingestControllerLog(
+      controller,
+      recordedLogOf(group.registry, controller),
+      delta,
+    )
+    const effects = effectDelta(ingested.before?.head, ingested.after.head)
+    if (effects.generation || effects.denied.length > 0 || effects.removed.length > 0)
+      throw new RevokeProofError('effects-mismatch')
+    const token = await signLedgerEntry(ownIdentity(group), {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: controller,
+      value: { op: 'log', proof: delta },
+    })
+    return buildResult({ group, proposals: [], tokens: [token] })
+  })
+}
 
 /**
  * Author a by-reference Remove for this handle's own leaf at its current epoch.
@@ -59,12 +134,7 @@ export async function commitSelfRemovals(group: GroupHandle): Promise<CommitResu
       ),
     )
     if (Object.keys(pendingProposals).length === 0) return null
-    const tree = group.state.ratchetTree.slice()
-    for (const { proposal } of Object.values(pendingProposals)) {
-      if (isDefaultProposal(proposal) && proposal.proposalType === defaultProposalTypes.remove)
-        tree[proposal.remove.removed * 2] = undefined
-    }
-    const tokens = await clockEntries(group, tree)
+    const tokens: Array<string> = []
     const result = await commitWithEntries({
       group,
       extraProposals: [],
@@ -99,14 +169,15 @@ function ownIdentity(group: GroupHandle) {
   )
 }
 
-async function clockEntries(
+export async function preservationClock(
   group: GroupHandle,
   tree: ClientState['ratchetTree'],
-): Promise<Array<string>> {
+  candidateRegistry: DeviceRegistry,
+): Promise<string | null> {
   const controller = group.anchor.controller
-  if (controller == null) return []
+  if (controller == null) return null
   const before = treeTime(group, controller)
-  let after = group.registry.controllers.get(normalizeDID(controller))?.timeFloor ?? 0
+  let after = candidateRegistry.controllers.get(normalizeDID(controller))?.timeFloor ?? 0
   for (const node of tree) {
     if (node?.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) continue
     const binding = parseMLSCredentialIdentity(node.leaf.credential.identity).controller
@@ -121,15 +192,13 @@ async function clockEntries(
     const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
     after = Math.max(after, parent == null ? payload.iat : readCapability(parent).payload.iat)
   }
-  if (after >= before) return []
-  return [
-    await signLedgerEntry(ownIdentity(group), {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: controller,
-      value: { op: 'clock', time: before },
-    }),
-  ]
+  if (after >= before) return null
+  return signLedgerEntry(ownIdentity(group), {
+    type: DEVICE_ENTRY_TYPE,
+    groupID: group.groupID,
+    subject: controller,
+    value: { op: 'clock', time: before },
+  })
 }
 
 type BuildResultParams = {
@@ -164,6 +233,7 @@ async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult
 export async function renewLeaf(
   group: GroupHandle,
   binding: ControllerBinding,
+  options?: { controllerLog?: ControllerLog },
 ): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
     assertBindingAuthorTime(binding)
@@ -179,14 +249,48 @@ export async function renewLeaf(
       JSON.stringify({ v: 1, ...parsed, controller: binding }),
     )
     tree[index] = own
-    await validateEntry(group, own.leaf, original.leaf)
+    const tokens: Array<string> = []
+    let candidate = group.registry
+    if (options?.controllerLog != null) {
+      const delta = controllerLogDelta(group, options.controllerLog)
+      if (delta != null) {
+        const token = await signLedgerEntry(ownIdentity(group), {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: binding.id,
+          value: { op: 'log', proof: delta },
+        })
+        const verified = await verifyLedgerEntry(token)
+        if (verified == null) throw new Error('Invalid authored log entry')
+        const folded = foldEnvelope({
+          baseRoster: group.roster,
+          baseRegistry: group.registry,
+          entries: [{ verified, entryID: ledgerEntryDigest(token) }],
+          groupID: group.groupID,
+          context:
+            group.anchor.controller == null
+              ? undefined
+              : {
+                  controllerID: group.anchor.controller,
+                  memberController: (did) => group.bindingOfDID(did)?.controller,
+                },
+        })
+        if (!folded.ok) throw folded.error ?? new Error(folded.reason)
+        candidate = folded.registry
+        tokens.push(token)
+      }
+    }
+    await validateEntry(group, own.leaf, original.leaf, {
+      registry: candidate,
+      stage: 'full',
+      mode: 'admit',
+    })
     if (group.anchor.controller != null) {
       const entries = group.ledger.map(({ verified }) => verified)
       const before = historySize(group.state.ratchetTree, entries)
       const after = historySize(tree, entries)
       if (after > HISTORY_HORIZON && after > before) throw new LeafBindingError('history-horizon')
     }
-    const tokens = await clockEntries(group, tree)
     return buildResult({
       group,
       proposals: [],
@@ -206,19 +310,17 @@ export async function removeLapsedLeaves(group: GroupHandle): Promise<RemoveLaps
   return mutexFor(group).run(async () => {
     const removed: Array<string> = []
     const proposals: Array<DefaultProposal> = []
-    const tree = group.state.ratchetTree.slice()
     for (const member of group.listMembers()) {
-      const leaf = leafAt(tree, member.leafIndex)
+      const leaf = leafAt(group.state.ratchetTree, member.leafIndex)
       if (leaf == null || !isLapsed(group, leaf)) continue
       removed.push(member.id)
-      tree[member.leafIndex * 2] = undefined
       proposals.push({
         proposalType: defaultProposalTypes.remove,
         remove: { removed: member.leafIndex },
       })
     }
     if (removed.length === 0) return { removed }
-    const tokens = await clockEntries(group, tree)
+    const tokens: Array<string> = []
     return { removed, result: await buildResult({ group, proposals, tokens }) }
   })
 }
@@ -376,15 +478,11 @@ export async function revokeWithProof(
       if (revoked.some(({ did }) => did === normalizeDID(group.credential.id)))
         return { status: 'self-affected', subject: group.credential.id }
       const effects = await verifyLifecycleProof(group, verified)
-      const tree = group.state.ratchetTree.slice()
-      const proposals: Array<DefaultProposal> = effects.removeLeafIndices.map((removed) => {
-        tree[removed * 2] = undefined
-        return { proposalType: defaultProposalTypes.remove, remove: { removed } }
-      })
-      const tokens = [
-        await signLedgerEntry(ownIdentity(group), verified.entry),
-        ...(await clockEntries(group, tree)),
-      ]
+      const proposals: Array<DefaultProposal> = effects.removeLeafIndices.map((removed) => ({
+        proposalType: defaultProposalTypes.remove,
+        remove: { removed },
+      }))
+      const tokens = [await signLedgerEntry(ownIdentity(group), verified.entry)]
       return { status: 'built', result: await buildResult({ group, proposals, tokens }) }
     } catch (error) {
       if (error instanceof RevokeProofError) return { status: 'not-provable', reason: error.reason }

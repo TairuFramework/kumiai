@@ -1,3 +1,4 @@
+import { pruneLog } from '@kokuin/controller'
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import { type ClientState, generateKeyPackageWithKey, createGroup as mlsCreateGroup } from 'ts-mls'
 
@@ -12,10 +13,12 @@ import {
 import { verifyLeafCredential } from './authentication.js'
 import type { MemberCredential } from './credential.js'
 import { LeafBindingError } from './errors.js'
-import { buildLeafCapabilities, resolveMlsContext } from './group-context.js'
+import { buildLeafCapabilities, resolveMlsContext, withJudging } from './group-context.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
 import { GroupHandle } from './group-handle.js'
-import { buildLedgerHeadExtension, genesisHead } from './head.js'
+import { buildLedgerHeadExtension, extendHead, genesisHead } from './head.js'
+import { ledgerEntryDigest, signLedgerEntry } from './ledger.js'
+import { DEVICE_ENTRY_TYPE, registryForLog } from './registry.js'
 import type { GroupOptions } from './types.js'
 
 export type CreateGroupResult = {
@@ -109,17 +112,38 @@ export async function createGroup(
   } else if (options?.controller != null) {
     throw new LeafBindingError('controller-mismatch')
   }
+  if (anchor.controller != null && options?.controllerLog == null)
+    throw new LeafBindingError('member-unavailable')
+  const registry =
+    anchor.controller == null || options?.controllerLog == null
+      ? undefined
+      : registryForLog(anchor.controller, options.controllerLog)
+  const tokens: Array<string> = []
+  if (anchor.controller != null && options?.controllerLog != null) {
+    tokens.push(
+      await signLedgerEntry(identity, {
+        type: DEVICE_ENTRY_TYPE,
+        groupID,
+        subject: anchor.controller,
+        value: { op: 'seed', proof: pruneLog(anchor.controller, options.controllerLog) },
+      }),
+    )
+  }
   const context = await resolveMlsContext(options, anchor)
   const mlsCredential = makeMLSCredential(identity, options?.controller)
   if (options?.controller != null) {
     await verifyLeafCredential(mlsCredential, identity.publicKey, {
+      judging: () => ({ registry, stage: 'full', mode: 'admit' }),
       leafLifetime: () => anchor.leafLifetime ?? 86_400,
       trustedGrantLifetime: () => anchor.trustedGrantLifetime ?? 2_592_000,
     })
   }
-  if (!extensions.some((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)) {
-    extensions.push(buildLedgerHeadExtension(genesisHead(groupID)))
-  }
+  const head = buildLedgerHeadExtension(
+    extendHead(genesisHead(groupID), tokens.map(ledgerEntryDigest)),
+  )
+  const headIndex = extensions.findIndex((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)
+  if (tokens.length > 0 && headIndex >= 0) extensions[headIndex] = head
+  else if (headIndex < 0) extensions.push(head)
   const statePromise = generateKeyPackageWithKey({
     credential: mlsCredential,
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
@@ -134,7 +158,11 @@ export async function createGroup(
       extensions,
     })
   })
-  const state = await statePromise
+  const state = await withJudging(
+    context,
+    { registry, stage: 'full', mode: 'admit' },
+    () => statePromise,
+  )
 
   const credential: MemberCredential = {
     id: identity.id,
@@ -149,6 +177,7 @@ export async function createGroup(
     onLedgerEntries: options?.onLedgerEntries,
   })
 
+  await group.applyLedgerEntries(tokens)
   return { group, credential }
 }
 

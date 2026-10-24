@@ -384,7 +384,7 @@ async function staleMembership() {
       type: 'kumiai.device',
       groupID: f.author.groupID,
       subject: controllerID,
-      value: { op: 'seed', proof: { chain: [inception], events: [add] } },
+      value: { op: 'log', proof: { chain: [], events: [add] } },
     }),
   ])
   const binding: ControllerBinding = {

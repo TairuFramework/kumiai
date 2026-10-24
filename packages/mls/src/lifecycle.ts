@@ -254,7 +254,7 @@ function checkBinding(
     if (
       payload.cap != null &&
       denied.has(normalizeDID(payload.iss)) &&
-      !(welcome && isEvidencedChild(group, leaf, denied))
+      !((welcome || judging.mode === 'retain') && isEvidencedChild(group, leaf, denied))
     )
       throw new LeafBindingError('denied-issuer')
   }
@@ -269,10 +269,14 @@ function checkBinding(
     throw new LeafBindingError('generation-floor')
 }
 
-function checkAdmissionExpiry(group: GroupHandle, leaf: LeafNode): void {
+function checkAdmissionExpiry(
+  group: GroupHandle,
+  leaf: LeafNode,
+  registry: DeviceRegistry = group.registry,
+): void {
   const binding = identity(leaf).controller
   if (binding == null) return
-  const expiry = leafExpiry(binding, group.registry, binding.id)
+  const expiry = leafExpiry(binding, registry, binding.id)
   if (expiry == null) throw new LeafBindingError('member-unavailable')
   if (expiry <= treeTime(group, binding.id)) throw new LeafLapsedError('lapsed')
 }
@@ -284,7 +288,7 @@ function checkEntry(
   judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): void {
   checkBinding(group, leaf, previous, false, judging)
-  checkAdmissionExpiry(group, leaf)
+  if (judging.mode === 'admit') checkAdmissionExpiry(group, leaf, judging.registry)
 }
 
 async function validateBoundLeaf(
@@ -301,7 +305,8 @@ async function validateBoundLeaf(
       registry: group.anchor.controller == null ? undefined : judging.registry,
     }),
     deviceDenySet: () => (judging.registry == null ? new Set() : denySetOf(judging.registry)),
-    mayKeepDeniedIssuer: () => welcome && group.anchor.controller != null,
+    mayKeepDeniedIssuer: () =>
+      (welcome || judging.mode === 'retain') && group.anchor.controller != null,
     leafLifetime: () =>
       group.anchor.controller == null ? undefined : (group.anchor.leafLifetime ?? 86_400),
     trustedGrantLifetime: () =>
@@ -318,7 +323,7 @@ export async function validateEntry(
   judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): Promise<void> {
   await validateBoundLeaf(group, leaf, previous, false, judging)
-  checkAdmissionExpiry(group, leaf)
+  if (judging.mode === 'admit') checkAdmissionExpiry(group, leaf, judging.registry)
 }
 
 /** The same credential and key a tree already holds at that leaf index. */
@@ -448,24 +453,40 @@ export async function prepareLifecycleGate(
   const lifecycleEntries = entries.filter(
     (verified) =>
       verified.entry.type === DEVICE_ENTRY_TYPE &&
-      ['revoke', 'reset', 'clock'].includes(opOf(verified)),
+      ['revoke', 'reset', 'clock', 'log', 'seed'].includes(opOf(verified)),
   )
-  const proofs = lifecycleEntries.filter((verified) => opOf(verified) !== 'clock')
+  const logs = lifecycleEntries.filter((verified) => opOf(verified) === 'log')
+  if (controller != null && lifecycleEntries.some((verified) => opOf(verified) === 'seed'))
+    throw new RevokeProofError('detached')
+  const proofs = lifecycleEntries.filter((verified) => ['revoke', 'reset'].includes(opOf(verified)))
   const clocks = lifecycleEntries.filter((verified) => opOf(verified) === 'clock')
   // A proof commit enacts its proof and at most one clock, nothing else.
   const proofCarriesOtherEntries =
     proofs.length > 0 && entries.length !== proofs.length + clocks.length
-  if (controller != null && (proofs.length > 1 || clocks.length > 1 || proofCarriesOtherEntries))
+  if (
+    controller != null &&
+    (proofs.length > 1 ||
+      logs.length > 1 ||
+      clocks.length > 1 ||
+      (logs.length > 0 && proofs.length > 0) ||
+      proofCarriesOtherEntries)
+  )
     throw new RevokeProofError('effects-mismatch')
   const expectedRemoves = new Set<number>()
   if (controller != null) {
     for (const entry of lifecycleEntries) {
       const effects = await verifyLifecycleProof(group, entry as VerifiedLedgerEntry<DeviceValue>)
-      if (opOf(entry) !== 'clock')
+      if (['revoke', 'reset'].includes(opOf(entry)))
         for (const index of effects.removeLeafIndices) expectedRemoves.add(index)
     }
   }
-  if (externalLeaf != null) await validateEntry(group, externalLeaf)
+  const judging = (index: number | undefined, leaf: LeafNode): JudgingContext => ({
+    registry: candidateRegistry,
+    stage: 'full',
+    mode: index != null && isUnchangedLeaf(before, index, leaf) ? 'retain' : 'admit',
+  })
+  if (externalLeaf != null)
+    await validateEntry(group, externalLeaf, undefined, judging(undefined, externalLeaf))
   let incomingCommit: Extract<IncomingMessage, { kind: 'commit' }> | undefined
 
   function checkSize(tree: ClientState['ratchetTree']): void {
@@ -531,7 +552,7 @@ export async function prepareLifecycleGate(
         throw new Error('Missing replacement target')
       const old = leafAt(before, remove.remove.removed)
       if (old == null) throw new LeafBindingError('identity-change')
-      checkEntry(group, externalLeaf, old)
+      checkEntry(group, externalLeaf, old, judging(remove.remove.removed, externalLeaf))
       const tree = before.slice()
       tree[remove.remove.removed * 2] = { nodeType: nodeTypes.leaf, leaf: externalLeaf }
       checkTime(tree)
@@ -574,7 +595,12 @@ export async function prepareLifecycleGate(
         throw new RevokeProofError('effects-mismatch')
       switch (proposal.proposalType) {
         case defaultProposalTypes.add: {
-          checkEntry(group, proposal.add.keyPackage.leafNode)
+          checkEntry(
+            group,
+            proposal.add.keyPackage.leafNode,
+            undefined,
+            judging(undefined, proposal.add.keyPackage.leafNode),
+          )
           const parsed = identity(proposal.add.keyPackage.leafNode)
           const record = candidateRegistry.devices.get(normalizeDID(parsed.id))
           if (
@@ -588,7 +614,12 @@ export async function prepareLifecycleGate(
         case defaultProposalTypes.update: {
           const old = sender == null ? undefined : leafAt(before, sender)
           if (old == null || sender == null) throw new LeafBindingError('identity-change')
-          checkEntry(group, proposal.update.leafNode, old)
+          checkEntry(
+            group,
+            proposal.update.leafNode,
+            old,
+            judging(sender, proposal.update.leafNode),
+          )
           tree[sender * 2] = { nodeType: nodeTypes.leaf, leaf: proposal.update.leafNode }
           break
         }
@@ -616,7 +647,7 @@ export async function prepareLifecycleGate(
                   denied: [denySetOf(group.registry), denySetOf(candidateRegistry)],
                 })
           if (replacement != null && old != null) {
-            checkEntry(group, replacement, old)
+            checkEntry(group, replacement, old, judging(target, replacement))
             assertNewerBinding(replacement, old)
           }
           if (controller != null && (old == null || !(authorised || replacement != null)))
@@ -681,7 +712,7 @@ export async function prepareLifecycleGate(
       ) {
         if (controller != null && (hasRemoves || proofs.length > 0))
           throw new LeafBindingError('identity-change')
-        await validateEntry(group, next, old)
+        await validateEntry(group, next, old, judging(senderIndex, next))
       }
     }
     if (controller != null && senderIndex != null) {

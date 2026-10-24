@@ -63,6 +63,7 @@ async function chainedRecovery() {
   let source = (
     await createGroup(alice, 'recovery-holder-evidence', {
       controller: await fixture.bindingFor(alice),
+      controllerLog: { chain: binding.prefix, events: [] },
       leafLifetime: 604_800,
       trustedGrantLifetime: 31_536_000,
     })
@@ -225,6 +226,7 @@ test('recovery binding state carries a membership binding', async () => {
   const capability = await fixture.bindingFor(identity)
   const { group } = await createGroup(identity, 'membership-binding-state', {
     controller: capability,
+    controllerLog: { chain: capability.prefix, events: [] },
   })
   const binding: ControllerBinding = {
     id: capability.id,

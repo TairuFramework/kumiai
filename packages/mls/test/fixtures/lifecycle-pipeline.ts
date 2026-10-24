@@ -1,5 +1,6 @@
 import { audienceConfirmation } from '@kokuin/capability'
 import {
+  type ControllerLog,
   createControllerIdentity,
   createReset,
   createRotate,
@@ -80,6 +81,7 @@ export async function timedBinding(params: TimedBindingParams): Promise<Controll
 }
 
 export type PipelineGroupOptions = {
+  controllerLog?: ControllerLog
   leafLifetime?: number
   trustedGrantLifetime?: number
   /** Create a group with no lifecycle controller. */
@@ -92,7 +94,10 @@ export async function pipelineGroup(options: PipelineGroupOptions = {}) {
   const { group } = await createGroup(identity, 'lifecycle-pipeline', {
     ...(options.standard
       ? {}
-      : { controller: await timedBinding({ identity, iat: 100, exp: 200 }) }),
+      : {
+          controller: await timedBinding({ identity, iat: 100, exp: 200 }),
+          controllerLog: options.controllerLog ?? asControllerLog([inception]),
+        }),
     leafLifetime: options.leafLifetime,
     trustedGrantLifetime: options.trustedGrantLifetime,
     commitPolicy: () => 'accept',

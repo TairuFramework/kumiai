@@ -59,7 +59,7 @@ async function admission(entries: Array<string> = []) {
 test('membership and Welcome require a recipient and no role token', async () => {
   const { group, bob, invite, bundle } = await admission()
   expect(invite.recipientDID).toBe(bob.id)
-  expect(invite.ledgerEntries).toHaveLength(0)
+  expect(invite.ledgerEntries).toHaveLength(1)
   const result = await commitInvite(group, bundle.publicPackage, invite)
   const { group: joined } = await processWelcome({
     identity: bob,
@@ -69,7 +69,7 @@ test('membership and Welcome require a recipient and no role token', async () =>
   })
   expect(joined.listMembers()).toHaveLength(2)
   expect(joined.listMembers().every((member) => member.controller === controllerID)).toBe(true)
-  expect(joined.ledgerTokens).toHaveLength(0)
+  expect(joined.ledgerTokens).toHaveLength(1)
   await expect(
     createInvite({ group: joined, identity: bob, recipientDID: agent(62).id }),
   ).resolves.toBeDefined()
@@ -131,7 +131,7 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
     welcome: first.welcomeMessage,
     keyPackageBundle: { ...bundle, ownerDID: bob.id },
   })
-  expect(consumer.group.ledgerTokens).toEqual([token])
+  expect(consumer.group.ledgerTokens).toEqual([...group.ledgerTokens, token])
   await receiver.processMessage(first.commitMessage)
   await expect(receiver.processMessage(second.commitMessage)).rejects.toThrow()
   const consentConsumptions = receiver.ledger.filter(
@@ -139,9 +139,9 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
   ).length
   expect(consentConsumptions).toBe(1)
   expect(receiver.findMemberLeafIndex(bob.id)).toBeDefined()
-  expect(first.newGroup.ledgerTokens).toEqual([token])
+  expect(first.newGroup.ledgerTokens).toEqual([...group.ledgerTokens, token])
   const retry = await createInvite({ group: receiver, identity: carol, recipientDID: bob.id })
-  expect(retry.invite.ledgerEntries).toEqual([token])
+  expect(retry.invite.ledgerEntries).toEqual([...group.ledgerTokens, token])
 })
 
 test('an inviter and consumer issuer need a pre-commit leaf', async () => {
@@ -157,9 +157,12 @@ test('an inviter and consumer issuer need a pre-commit leaf', async () => {
     value: 'consent-id',
   })
   await expect(
-    commitInvite(group, bundle.publicPackage, { ...invite, ledgerEntries: [token] }),
+    commitInvite(group, bundle.publicPackage, {
+      ...invite,
+      ledgerEntries: [...group.ledgerTokens, token],
+    }),
   ).rejects.toThrow(/pre-commit/)
-  expect(group.ledgerTokens).toEqual([])
+  expect(group.ledgerTokens).toHaveLength(1)
   expect(group.findMemberLeafIndex(identity.id)).toBeDefined()
 })
 
@@ -524,15 +527,7 @@ async function membershipLeaf(lease = 1000) {
   const epoch = await buildEpoch({ members: 1, renewEvery: lease })
   const member = epoch.members[0]
   if (member == null) throw new Error('Missing member')
-  const { group, identity } = await pipelineGroup()
-  await group.applyLedgerEntries([
-    await signLedgerEntry(identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: epoch.did,
-      value: { op: 'seed', proof: epoch.log },
-    }),
-  ])
+  const { group, identity } = await pipelineGroup({ controllerLog: epoch.log })
   const binding: ControllerBinding = {
     id: epoch.did,
     prefix: epoch.log.chain,

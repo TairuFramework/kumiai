@@ -146,7 +146,9 @@ export {
 export {
   type CommitResult,
   commitSelfRemovals,
+  controllerLogDelta,
   proposeSelfRemoval,
+  publishControllerLog,
   type RemoveLapsedLeavesResult,
   type RevokeBuildResult,
   type RevokeWithProofParams,

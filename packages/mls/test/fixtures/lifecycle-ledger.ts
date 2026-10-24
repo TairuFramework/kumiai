@@ -79,6 +79,7 @@ export async function lifecycleGroup(prefix: Array<SignedEvent> = [inception]) {
   const tokens = new Map<string, string>()
   const { group } = await createGroup(identity, 'lifecycle-ledger', {
     controller: await bindingFor(identity, prefix),
+    controllerLog: asControllerLog([inception]),
     // Isolate ledger checks from the proposal rules supplied by the later consensus gate.
     commitPolicy: () => 'accept',
     resolveLedgerEntries: async (ids) =>
