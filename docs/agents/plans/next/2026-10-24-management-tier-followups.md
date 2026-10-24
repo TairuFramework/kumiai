@@ -28,17 +28,13 @@
   - `deviceRevokeIndices`, which is unchanged.
 - kumiai's `removedMembers` judges by incarnation (`add`), not by removal time. A settled tombstone
   maps to its first carrying chain state with
-  `foldLog(did, log).states.findIndex((s) => s.members.get(add)?.removed === true)`. Snapshot
+  `foldLog(did, log).states.findIndex((s) => s.tombstones.has(add))`. Snapshot
   granularity is enough, because after a settle kumiai already downgrades `{ event }` refs to
   `{ chainIndex }`.
 - Re-check canonical DID handling on both sides wherever kumiai reads kokuin's deny or member state.
-- In 0.3, chain states may hold removed incarnations: either as tombstones in `members`, or in a
-  separate `removed` map, which kumiai asked kokuin for. If they land in `members`, rewrite two
-  snapshot-drop predicates to `!has(add) || get(add).removed`:
-  - `proofsFor` drops in `packages/mls/src/member-root.ts`;
-  - `memberDropIndices` in `packages/mls/src/controller-log.ts`.
-  Then re-audit the code that iterates chain-state members (`member-root.ts` claim and cascade
-  checks, `controller-ingest.ts` effect delta).
+- In 0.3, chain-state and head `members` are unchanged from 0.2: they hold only live snapshot members.
+  Removed incarnations from `u` move to a separate `KeyState.tombstones` map, keyed by `add`, so
+  kumiai's snapshot-drop predicates keep working.
 - Tighten attest-clock attribution in `registryApply` (`packages/mls/src/registry.ts`) to effective
   members of the previous projection. Today it matches any incarnation by DID. The admission gate
   already refuses removed attestors.
