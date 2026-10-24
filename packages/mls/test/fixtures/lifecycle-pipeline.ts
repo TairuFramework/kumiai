@@ -9,7 +9,7 @@ import {
   epochHeads,
   type SignedEvent,
 } from '@kokuin/controller'
-import { type OwnIdentity, stringifyToken } from '@kokuin/token'
+import { createIdentity, type OwnIdentity, stringifyToken } from '@kokuin/token'
 import {
   createApplicationMessage,
   createCommit,
@@ -52,6 +52,12 @@ export async function managementFixture(kind: 'root' | 'mbr' | 'membership') {
   const [member, unknown] = epoch.members
   if (member == null || unknown == null) throw new Error('Missing members')
   let log: ControllerLog = { chain: epoch.log.chain, events: [member.event] }
+  const newcomer = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(63) }],
+    didMethod: 'peer:4',
+  })
+  const newcomerLongForm = newcomer.longForm
+  if (newcomerLongForm == null) throw new Error('Missing admission long form')
   const alice = agent(41)
   const bob = kind === 'membership' ? member.identity : agent(61)
   const binding = async (iat: number, pin = member): Promise<ControllerBinding> => {
@@ -86,8 +92,10 @@ export async function managementFixture(kind: 'root' | 'mbr' | 'membership') {
     creatorBinding: await timedBinding({ identity: alice, iat: now - 20, exp: now + 1000 }),
     binding,
     member: { did: member.identity.id, add: member.add },
-    deniedDID: agent(63).id,
-    nextLog: (op: 'log' | 'deny' | 'remove') => {
+    newcomer,
+    deniedDID: newcomer.id,
+    denialAliases: { long: newcomerLongForm, short: newcomer.id },
+    nextLog: (op: 'log' | 'deny' | 'deny-alias' | 'remove') => {
       const folded = foldControllerLog(epoch.did, log)
       if (!folded.ok) throw new Error(folded.reason)
       const params = {
@@ -100,13 +108,17 @@ export async function managementFixture(kind: 'root' | 'mbr' | 'membership') {
         op === 'log'
           ? unknown.event
           : op === 'deny'
-            ? createRevoke({ ...params, target: agent(63).id })
-            : createRemove({ ...params, add: member.add })
+            ? createRevoke({ ...params, target: newcomer.id })
+            : op === 'deny-alias'
+              ? createRevoke({ ...params, target: newcomerLongForm })
+              : createRemove({ ...params, add: member.add })
       log = { chain: log.chain, events: [...log.events, event] }
       return log
     },
-    admissionBinding: (authority: 'effective' | 'removed' | 'unavailable') =>
-      grant(agent(63), authority === 'unavailable' ? unknown : member),
+    admissionBinding: (authority: 'effective' | 'removed' | 'unavailable' | 'foreign') =>
+      authority === 'foreign'
+        ? binding(now - 20)
+        : grant(newcomer, authority === 'unavailable' ? unknown : member),
   }
 }
 

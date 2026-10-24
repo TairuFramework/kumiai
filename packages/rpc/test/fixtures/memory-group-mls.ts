@@ -1,4 +1,4 @@
-import { encodeMultibase } from '@kokuin/token'
+import { encodeMultibase, normalizeDID } from '@kokuin/token'
 import { x25519 } from '@noble/curves/ed25519.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -80,8 +80,15 @@ export type MemoryControllerEvent = {
   id: string
   op: 'add' | 'deny' | 'remove'
   target: string
+  member?: { did: string; key: string }
+  /** Explicitly verified grants supported by this model. Unknown grants fail closed. */
+  grants?: Array<{ capability: string; did: string; key: string }>
 }
-export type MemoryControllerLog = { chain: Array<string>; events: Array<MemoryControllerEvent> }
+export type MemoryControllerLog = {
+  chain: Array<string>
+  events: Array<MemoryControllerEvent>
+  grants?: Array<{ capability: string; did: string; key: string }>
+}
 
 function memberOf(binding: MemoryRecoveryBinding) {
   if (binding.member != null) return binding.member
@@ -153,6 +160,7 @@ export type MemoryGroupMLSOptions = {
   /** This member's DID — the committer stamped into the Commits it builds, and the modelled
    *  recipient of GroupInfo sealed to its leaf. */
   localDID?: string
+  signatureKey?: string
   /** Signed tokens whose BODIES this member holds — a joiner's Welcome carries them, and a
    *  member that resolved them from a commit frame keeps them. Holding a body is not the
    *  same as having enacted it: the ledger is what a commit enacted, and it starts empty. */
@@ -267,6 +275,7 @@ type MemoryCommit = {
    */
   adds?: Array<string>
   bindings?: Record<string, MemoryRecoveryBinding>
+  signatureKeys?: Record<string, string>
   removes?: Array<string>
 }
 
@@ -289,6 +298,7 @@ export function encodeMemoryCommit(
     external?: boolean
     adds?: Array<string>
     bindings?: Record<string, MemoryRecoveryBinding>
+    signatureKeys?: Record<string, string>
     removes?: Array<string>
     /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
     signerDID?: string
@@ -310,6 +320,7 @@ export function encodeMemoryCommit(
     signerDID: options.signerDID ?? committerDID,
     ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
     ...(options.bindings == null ? {} : { bindings: options.bindings }),
+    ...(options.signatureKeys == null ? {} : { signatureKeys: options.signatureKeys }),
     ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
   return fromUTF(JSON.stringify(commit))
@@ -348,6 +359,7 @@ type MemoryGroupInfo = {
   epoch: number
   head: string
   members: Array<string>
+  controllerLog?: MemoryControllerLog
 }
 
 /**
@@ -592,29 +604,76 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       value.member,
       value.iat,
     ])
-  const usable = (value?: MemoryRecoveryBinding): boolean => {
-    if (value == null || unusable.has(bindingID(value))) return false
-    const member = memberOf(value)
-    return (
-      member === undefined ||
-      (member != null &&
-        effectiveMember(controllerLog, member) &&
-        JSON.stringify(value.prefix) === JSON.stringify(controllerLog?.chain))
+  const bindingRefusal = (
+    value: MemoryRecoveryBinding | undefined,
+    did: string | undefined,
+    key: string | undefined,
+    log: MemoryControllerLog | undefined,
+  ): 'invalid' | 'binding' | undefined => {
+    if (did == null) return 'binding'
+    if (
+      log?.events.some(
+        (event) => event.op === 'deny' && normalizeDID(event.target) === normalizeDID(did),
+      )
     )
+      return 'invalid'
+    if (
+      value == null ||
+      normalizeDID(value.id) !== normalizeDID(options.binding?.id ?? '') ||
+      JSON.stringify(value.prefix) !== JSON.stringify(log?.chain) ||
+      (log?.events.length ?? 0) > 32
+    )
+      return 'binding'
+    const member = memberOf(value)
+    if (member === undefined) {
+      return log?.grants?.some(
+        (grant) =>
+          grant.capability === value.capability &&
+          normalizeDID(grant.did) === normalizeDID(did) &&
+          grant.key === key,
+      )
+        ? undefined
+        : 'binding'
+    }
+    if (member == null || !effectiveMember(log, member) || key == null) return 'binding'
+    const admission = log?.events.find((event) => event.op === 'add' && event.target === member.add)
+    if (admission?.member == null) return 'binding'
+    if (value.member != null) {
+      return normalizeDID(admission.member.did) === normalizeDID(did) &&
+        admission.member.key === key
+        ? undefined
+        : 'binding'
+    }
+    // A grant's signature is outside this model. Only explicitly recorded verified grants qualify.
+    return admission.grants?.some(
+      (grant) =>
+        grant.capability === value.capability &&
+        normalizeDID(grant.did) === normalizeDID(did) &&
+        grant.key === key,
+    )
+      ? undefined
+      : 'binding'
+  }
+  const usable = (
+    value: MemoryRecoveryBinding | undefined,
+    log: MemoryControllerLog | undefined,
+  ): boolean => {
+    if (value == null || unusable.has(bindingID(value))) return false
+    return bindingRefusal(value, localDID, options.signatureKey, log) == null
   }
   const askBinding = async (): Promise<MemoryRecoveryBinding | undefined> => {
     if (asked) return
     asked = true
     const offered = await options.recoveryBinding?.()
-    return offered != null && usable(offered) ? offered : undefined
+    return offered != null && usable(offered, controllerLog) ? offered : undefined
   }
   const prepare = async (): Promise<'ready' | 'renewal-required'> => {
     prepared = true
     asked = false
     preparedBinding = binding
-    if (binding == null || usable(preparedBinding)) return 'ready'
+    if (binding == null || usable(preparedBinding, controllerLog)) return 'ready'
     preparedBinding = await askBinding()
-    return usable(preparedBinding) ? 'ready' : 'renewal-required'
+    return usable(preparedBinding, controllerLog) ? 'ready' : 'renewal-required'
   }
 
   const advance = (to: number): void => {
@@ -843,26 +902,21 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (parsed.epoch !== epoch) {
         return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
-      if (parsed.adds != null && (controllerLog != null || parsed.bindings != null)) {
-        for (const did of parsed.adds) {
-          const binding = parsed.bindings?.[did]
-          const denied = controllerLog?.events.some(
-            (event) => event.op === 'deny' && event.target === did,
+      const admissions = [...(parsed.adds ?? []), ...(parsed.external ? [parsed.committerDID] : [])]
+      if (controllerLog != null || binding != null || parsed.bindings != null) {
+        for (const did of admissions) {
+          const refusal = bindingRefusal(
+            parsed.bindings?.[did],
+            did,
+            parsed.signatureKeys?.[did],
+            controllerLog,
           )
-          const member = binding == null ? undefined : memberOf(binding)
-          const effective = member != null && effectiveMember(controllerLog, member)
-          if (
-            denied ||
-            binding?.id !== options.binding?.id ||
-            JSON.stringify(binding?.prefix) !== JSON.stringify(controllerLog?.chain) ||
-            !effective ||
-            (controllerLog?.events.length ?? 0) > 32
-          )
+          if (refusal != null)
             return {
               advanced: false,
               epochBefore: epoch,
               epochAfter: epoch,
-              refusal: denied ? ('invalid' as const) : ('binding' as const),
+              refusal,
             }
         }
       }
@@ -1028,6 +1082,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             // will hold, and why its empty ledger reads incomplete rather than
             // complete-and-empty.
             head: ledgerHead,
+            controllerLog,
           } satisfies MemoryGroupInfo),
         ),
       )
@@ -1062,9 +1117,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       const info = open(sealed, requestID)
       if (info == null) return null
       if (!prepared) await prepare()
-      if (binding != null && !usable(preparedBinding)) {
+      if (
+        (binding != null || info.controllerLog != null) &&
+        !usable(preparedBinding, info.controllerLog)
+      ) {
         preparedBinding = await askBinding()
-        if (!usable(preparedBinding)) return { renewalRequired: true }
+        if (!usable(preparedBinding, info.controllerLog)) return { renewalRequired: true }
       }
       const candidateBinding =
         preparedBinding == null ? undefined : structuredClone(preparedBinding)
@@ -1079,6 +1137,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       const commit = encodeMemoryCommit(info.epoch, localDID ?? '', [], {
         head: info.head,
         external: true,
+        ...(candidateBinding == null || localDID == null
+          ? {}
+          : {
+              bindings: { [localDID]: candidateBinding },
+              signatureKeys:
+                options.signatureKey == null ? undefined : { [localDID]: options.signatureKey },
+            }),
       })
       return {
         commit,
@@ -1133,6 +1198,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           }
           advance(info.epoch + 1)
           binding = candidateBinding
+          controllerLog = structuredClone(info.controllerLog)
           accepted = true
         },
       }

@@ -55,12 +55,22 @@ export async function createRealBoundRecovery(
       creatorBinding: ControllerBinding
       binding: (iat: number) => Promise<ControllerBinding>
       member: { did: string; add: string }
+      newcomer: OwnIdentity
       deniedDID: string
-      nextLog: (op: 'log' | 'deny' | 'remove') => Parameters<typeof publishControllerLog>[1]
+      denialAliases: { long: string; short: string }
+      nextLog: (
+        op: 'log' | 'deny' | 'deny-alias' | 'remove',
+      ) => Parameters<typeof publishControllerLog>[1]
       admissionBinding: (
-        authority: 'effective' | 'removed' | 'unavailable',
+        authority: 'effective' | 'removed' | 'unavailable' | 'foreign',
       ) => Promise<ControllerBinding>
     }>
+    lowLevelExternal: (params: {
+      group: GroupHandle
+      identity: OwnIdentity
+      binding: ControllerBinding
+      resync: boolean
+    }) => Promise<Uint8Array>
     rawAdd: (
       group: GroupHandle,
       identity: OwnIdentity,
@@ -129,6 +139,16 @@ export async function createRealBoundRecovery(
   })
   return {
     requesterDID: bob.id,
+    denialAliases: management.denialAliases,
+    buildRecoveryCommit: async () => ({
+      commit: await fixture.lowLevelExternal({
+        group: source,
+        identity: bob,
+        binding: cached,
+        resync: source.findMemberLeafIndex(bob.id) != null,
+      }),
+      context: {},
+    }),
     requester,
     responder,
     ratchet: async () => {
@@ -138,14 +158,32 @@ export async function createRealBoundRecovery(
     replaceBinding: async () => {
       offered = await management.binding(now - 10)
     },
-    buildManagementCommit: async (op: 'log' | 'deny' | 'remove') => {
+    buildManagementCommit: async (op: 'log' | 'deny' | 'deny-alias' | 'remove') => {
+      if (op === 'remove' && bindingKind !== 'root') {
+        // Preserve a root-bound peer leaf so recovery reaches candidate validation after removal.
+        const current = await access.read((handle) => handle)
+        const renewed = await renewLeaf(
+          current,
+          await fixture.timedBinding({
+            identity: bob,
+            iat: now - 10,
+            exp: now + 1000,
+          }),
+        )
+        const entries = renewed.newGroup.ledgerTokens.slice(current.ledgerTokens.length)
+        const applied = await responder.processCommit(renewed.commitMessage, {
+          senderDID: bob.id,
+          resolveLedgerEntries: async () => entries,
+        })
+        if (!applied.advanced) throw new Error('Root-bound requester leaf was not installed')
+      }
       const log = management.nextLog(op)
       const result =
         op === 'log'
           ? await publishControllerLog(source, log)
           : await revokeWithProof(source, {
               log,
-              ...(op === 'deny'
+              ...(op === 'deny' || op === 'deny-alias'
                 ? { deny: [management.deniedDID] }
                 : { remove: [management.member] }),
             }).then((built) => {
@@ -164,11 +202,11 @@ export async function createRealBoundRecovery(
         },
       }
     },
-    buildAdmission: async (authority: 'effective' | 'removed' | 'unavailable') => ({
+    buildAdmission: async (authority: 'effective' | 'removed' | 'unavailable' | 'foreign') => ({
       commit: (
         await fixture.rawAdd(
           source,
-          fixture.agent(63),
+          management.newcomer,
           await management.admissionBinding(authority),
         )
       ).message,

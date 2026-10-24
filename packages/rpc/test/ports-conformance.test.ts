@@ -1,3 +1,4 @@
+import { createIdentity } from '@kokuin/token'
 import {
   type ConformanceAppOutbox,
   type ConformanceCryptoMember,
@@ -176,9 +177,56 @@ test.each([
   expect(receiver.leaves()).toEqual(['alice', 'bob'])
 })
 
+test.each([
+  { name: 'an unknown incarnation owner', member: undefined, key: 'newcomer-key' },
+  {
+    name: 'a different pinned key',
+    member: { did: 'newcomer', key: 'pinned-key' },
+    key: 'other-key',
+  },
+  {
+    name: 'an unavailable signature key',
+    member: { did: 'newcomer', key: 'pinned-key' },
+    key: undefined,
+  },
+])('membership double admission refuses $name', async ({ member, key }) => {
+  const binding: MemoryRecoveryBinding = {
+    id: 'controller',
+    prefix: ['inception'],
+    member: { add: 'member-add', g: 0 },
+    iat: 100,
+  }
+  const receiver = createMemoryGroupMLS({
+    binding,
+    controllerLog: {
+      chain: ['inception'],
+      events: [{ id: 'member-add', op: 'add', target: 'member-add', member }],
+    },
+    localDID: 'bob',
+    members: ['alice', 'bob'],
+  })
+  const commit = encodeMemoryCommit(0, 'alice', [], {
+    adds: ['newcomer'],
+    bindings: { newcomer: binding },
+    signatureKeys: key == null ? undefined : { newcomer: key },
+  })
+  expect(await receiver.processCommit(commit, {})).toMatchObject({
+    advanced: false,
+    refusal: 'binding',
+  })
+  expect(await receiver.readEpoch()).toBe(0)
+  expect(receiver.leaves()).toEqual(['alice', 'bob'])
+})
+
 testGroupMLSConformance({
   label: 'createMemoryGroupMLS',
   createBoundRecovery: async (kind = 'root') => {
+    const newcomer = await createIdentity({
+      keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(63) }],
+      didMethod: 'peer:4',
+    })
+    const newcomerLongForm = newcomer.longForm
+    if (newcomerLongForm == null) throw new Error('Missing admission long form')
     const binding: MemoryRecoveryBinding = {
       id: 'controller',
       prefix: ['inception'],
@@ -192,13 +240,40 @@ testGroupMLSConformance({
           }),
     }
     let offered = binding
+    const admissionCapability = (add: string) =>
+      JSON.stringify({ mbr: { add, g: 0 }, iat: 100, aud: newcomer.id })
     const controllerLog: MemoryControllerLog = {
       chain: ['inception'],
-      events: [{ id: 'member-add', op: 'add', target: 'member-add' }],
+      grants: ['initial-capability', 'renewed-capability'].map((capability) => ({
+        capability,
+        did: 'bob',
+        key: 'bob-key',
+      })),
+      events: [
+        {
+          id: 'member-add',
+          op: 'add',
+          target: 'member-add',
+          member: { did: 'bob', key: 'bob-key' },
+          grants: [
+            ...[100, 110].map((iat) => ({
+              capability: JSON.stringify({ mbr: { add: 'member-add', g: 0 }, iat }),
+              did: 'bob',
+              key: 'bob-key',
+            })),
+            {
+              capability: admissionCapability('member-add'),
+              did: newcomer.id,
+              key: 'newcomer-key',
+            },
+          ],
+        },
+      ],
     }
     const options = {
       binding,
       controllerLog,
+      signatureKey: 'bob-key',
       recoveryBinding: async () => offered,
       members: ['alice', 'bob'],
     }
@@ -206,6 +281,15 @@ testGroupMLSConformance({
     const responder = createMemoryGroupMLS({ ...options, localDID: 'alice' })
     return {
       requesterDID: 'bob',
+      denialAliases: { long: newcomerLongForm, short: newcomer.id },
+      buildRecoveryCommit: async () => ({
+        commit: encodeMemoryCommit(await responder.readEpoch(), 'bob', [], {
+          external: true,
+          bindings: { bob: binding },
+          signatureKeys: { bob: 'bob-key' },
+        }),
+        context: {},
+      }),
       requester,
       responder,
       ratchet: async () => {
@@ -226,10 +310,24 @@ testGroupMLSConformance({
       buildManagementCommit: async (op) => {
         const event =
           op === 'log'
-            ? { id: 'new-add', op: 'add', target: 'unknown-add' }
+            ? {
+                id: 'new-add',
+                op: 'add',
+                target: 'unknown-add',
+                member: { did: newcomer.id, key: 'newcomer-key' },
+                grants: [
+                  {
+                    capability: admissionCapability('unknown-add'),
+                    did: newcomer.id,
+                    key: 'newcomer-key',
+                  },
+                ],
+              }
             : op === 'deny'
-              ? { id: 'denial', op: 'deny', target: 'newcomer' }
-              : { id: 'removal', op: 'remove', target: 'member-add' }
+              ? { id: 'denial', op: 'deny', target: newcomer.id }
+              : op === 'deny-alias'
+                ? { id: 'alias-denial', op: 'deny', target: newcomerLongForm }
+                : { id: 'removal', op: 'remove', target: 'member-add' }
         const token = `management:${JSON.stringify({ op: op === 'log' ? 'log' : 'revoke', proof: { chain: [], events: [event] }, effects: op === 'log' ? [] : [event] })}`
         const commit = responder.buildCommit([token])
         responder.adopt(commit)
@@ -237,14 +335,19 @@ testGroupMLSConformance({
       },
       buildAdmission: async (authority) => ({
         commit: encodeMemoryCommit(await responder.readEpoch(), 'alice', [], {
-          adds: ['newcomer'],
+          adds: [newcomer.id],
+          signatureKeys: { [newcomer.id]: 'newcomer-key' },
           bindings: {
-            newcomer: {
-              id: binding.id,
-              prefix: binding.prefix,
-              member: { add: authority === 'unavailable' ? 'unknown-add' : 'member-add', g: 0 },
-              iat: 100,
-            },
+            [newcomer.id]:
+              authority === 'foreign'
+                ? binding
+                : {
+                    id: binding.id,
+                    prefix: binding.prefix,
+                    capability: admissionCapability(
+                      authority === 'unavailable' ? 'unknown-add' : 'member-add',
+                    ),
+                  },
           },
         }),
         context: {},
