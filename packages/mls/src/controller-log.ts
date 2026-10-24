@@ -7,6 +7,7 @@ import {
   pruneLog,
   type SignedEvent,
 } from '@kokuin/controller'
+import { normalizeDID } from '@kokuin/token'
 
 export const CHAIN_REVOKE_REFUSED = 'chain revoke refused'
 
@@ -62,6 +63,32 @@ export function memberDropIndices(
       prior.members.has(add) &&
       !prior.members.get(add)?.removed &&
       !state.members.has(add)
+    )
+      indices.push(index)
+  }
+  return indices
+}
+
+/** Same-generation `rot` indices whose snapshot newly carries `add` as `member`'s removed incarnation. */
+export function memberTombstoneIndices(
+  did: string,
+  chain: ReadonlyArray<SignedEvent>,
+  add: string,
+  member: string,
+): Array<number> {
+  const folded = foldChain(did, chain)
+  if (!folded.ok) return []
+  const indices: Array<number> = []
+  for (let index = 1; index < chain.length; index++) {
+    const state = folded.states[index]
+    const prior = folded.states[index - 1]
+    if (
+      chain[index]?.event.t === 'rot' &&
+      state != null &&
+      prior != null &&
+      state.gen === prior.gen &&
+      prior.tombstones?.has(add) !== true &&
+      normalizeDID(state.tombstones?.get(add)?.did ?? '') === normalizeDID(member)
     )
       indices.push(index)
   }

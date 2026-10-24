@@ -4,7 +4,13 @@ import { normalizeDID } from '@kokuin/token'
 import type { GroupAnchor } from './anchor.js'
 import { readCapability } from './capability.js'
 import { ingestControllerLog } from './controller-ingest.js'
-import { foldChain, foldControllerLog, memberDropIndices, revokeIndices } from './controller-log.js'
+import {
+  foldChain,
+  foldControllerLog,
+  memberDropIndices,
+  memberTombstoneIndices,
+  revokeIndices,
+} from './controller-log.js'
 import type { MLSCredentialIdentity } from './credential.js'
 import { RecoveryKnowledgeError, RevokeProofError } from './errors.js'
 import type { FoldDrop, FoldInput } from './fold.js'
@@ -286,9 +292,11 @@ export function registryApply(
           previous.recordedLog == null
             ? undefined
             : foldControllerLog(controller, previous.recordedLog)
+        // Only an effective incarnation attests; the head also holds removed and denied ones.
         const member = folded?.ok
           ? [...folded.head.members.values()].find(
-              (member) => normalizeDID(member.did) === normalizeDID(verified.issuer),
+              (member) =>
+                member.effective && normalizeDID(member.did) === normalizeDID(verified.issuer),
             )
           : undefined
         if (member == null) throw new RevokeProofError('effects-mismatch')
@@ -351,7 +359,10 @@ export function registryApply(
       }
       for (const [add, member] of removedMembers) {
         if (!('event' in member.proofRef)) continue
-        const index = memberDropIndices(controller, effect.recordedLog.chain, add).at(-1)
+        const chain = effect.recordedLog.chain
+        const index =
+          memberDropIndices(controller, chain, add).at(-1) ??
+          memberTombstoneIndices(controller, chain, add, member.did).at(-1)
         if (index != null) removedMembers.set(add, { ...member, proofRef: { chainIndex: index } })
       }
       const survivorGrants = new Map(projection.survivorGrants)

@@ -461,16 +461,26 @@ test('claimsFor keeps no-rev for an explicit removal without an admissible ref',
   expect(() => api.claimsFor(f.did, f.log, reset, 1)).toThrow(
     expect.objectContaining({ reason: 'no-rev' }),
   )
-  const settle = createRotate({
-    seed: f.seed,
-    profile: 0,
-    did: f.did,
-    prior: f.inception.event,
-    snapshot: snapshotOf(fold(f.did, f.merged).head),
-  })
+  const settle = (drop: Array<string>) =>
+    createRotate({
+      seed: f.seed,
+      profile: 0,
+      did: f.did,
+      prior: f.inception.event,
+      snapshot: snapshotOf(fold(f.did, f.merged).head, { members: drop }),
+    })
   expect(() =>
-    api.claimsFor(f.did, f.log, { chain: [...f.log.chain, settle], events: [] }, 0),
+    api.claimsFor(
+      f.did,
+      f.log,
+      { chain: [...f.log.chain, settle([f.rmv.event.add])], events: [] },
+      0,
+    ),
   ).toThrow(expect.objectContaining({ reason: 'no-rev' }))
+  // Keeping the tombstone (the default) proves the removal from the chain.
+  expect(
+    api.claimsFor(f.did, f.log, { chain: [...f.log.chain, settle([])], events: [] }, 0),
+  ).toContainEqual(expect.objectContaining({ kind: 'remove', ref: { chainIndex: 1 } }))
 })
 
 test('claimsFor folds a refused historical epoch once and still uses an authenticated snapshot', async () => {
