@@ -21,13 +21,14 @@ import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
 import { asControllerLog, foldChain, foldControllerLog } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
-import { LeafBindingError } from '../src/errors.js'
+import { LeafBindingError, RevokeProofError } from '../src/errors.js'
 import { restoreGroup } from '../src/group-create.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup } from '../src/group-handle.js'
 import type { VerifiedLedgerEntry } from '../src/ledger.js'
 import { signLedgerEntry } from '../src/ledger.js'
 import { authenticateLifecycleProof, verifyLifecycleProof } from '../src/lifecycle-proof.js'
+import { effectOf } from '../src/member-root.js'
 import * as registryModule from '../src/registry.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue, registrySeed, revocationOf } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
@@ -1259,7 +1260,9 @@ describe('controller-log deny proofs', () => {
   test('partial closure refused', async () => {
     const f = await fixture()
     const registry = registryModule.registryForLog(f.did, asControllerLog(f.log.chain))
-    expect(() => authenticateLifecycleProof(f.did, f.entry, registry)).toThrow()
+    expect(() => authenticateLifecycleProof(f.did, f.entry, registry)).toThrow(
+      expect.objectContaining({ constructor: RevokeProofError, reason: 'no-rev' }),
+    )
   })
 
   test('saturated proof refused', async () => {
@@ -1369,6 +1372,51 @@ test('reset snapshot denial evicts a leaf with a current-generation prefix', asy
   const effects = await verifyLifecycleProof(added.group, entry)
   expect(effects.revoked).toEqual([{ did: identity.id }])
   expect(effects.removeLeafIndices).toEqual([0, 1])
+})
+
+test('a denial after reset gives its current-generation cascade the denial reference', async () => {
+  const current = [inception, createReset(controllerSeed, 0, 1)]
+  const { group, identity } = await lifecycleGroup(current)
+  const issuer = agent(51)
+  const child = agent(61)
+  const first = await addMember(group, issuer, await bindingFor(issuer, current))
+  const added = await addUnevidenced(
+    first.group,
+    child,
+    await bindingFor(child, current, {
+      identity: issuer,
+      parent: await trustedGrant(issuer, current),
+    }),
+  )
+  const log = asControllerLog([...current, revoke(current, issuer.id)])
+  const entry = proofEntry(identity.id, controllerID, {
+    op: 'reset',
+    proof: log,
+    effects: [{ kind: 'deny', did: issuer.id, ref: { chainIndex: 2 } }],
+    revoked: [{ did: child.id, cascadedFrom: issuer.id }],
+    removed: [],
+  })
+  await expect(verifyLifecycleProof(added.group, entry)).resolves.toMatchObject({
+    genFloor: 1,
+    revoked: [{ did: child.id, cascadedFrom: issuer.id }],
+    removeLeafIndices: [1, 2],
+  })
+  const token = await signLedgerEntry(identity, entry.entry)
+  const replay = deriveGroup(added.group, added.group.state)
+  await replay.applyLedgerEntries([token])
+  expect(replay.registry.devices.get(child.id)?.proofRef).toEqual({ chainIndex: 2 })
+  const revocation = revocationOf(replay, child.id)
+  expect(revocation).toEqual({
+    controller: controllerID,
+    proofRef: { chainIndex: 2 },
+    reason: 'reset',
+    cascadedFrom: issuer.id,
+  })
+  if (revocation?.cascadedFrom == null) throw new Error('Missing cascade revocation')
+  const { cascadedFrom, proofRef } = revocation
+  expect(() =>
+    effectOf(controllerID, log, { kind: 'deny', did: cascadedFrom, ref: proofRef }, 1),
+  ).not.toThrow()
 })
 
 test('deny cascade keeps evidenced children', async () => {

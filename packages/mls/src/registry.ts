@@ -301,8 +301,7 @@ export function registryApply(
         const did = normalizeDID(revoked.did)
         const held = devices.get(did)
         if (held?.status === 'revoked' && (value.op === 'reset' || !isResetOnly(held))) continue
-        const proofRef =
-          resetRef == null ? denials.get(normalizeDID(revoked.cascadedFrom ?? did)) : resetRef
+        const proofRef = denials.get(normalizeDID(revoked.cascadedFrom ?? did)) ?? resetRef
         if (proofRef == null) throw new RevokeProofError('effects-mismatch')
         devices.set(did, {
           controller,

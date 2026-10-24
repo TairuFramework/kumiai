@@ -20,7 +20,12 @@ import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { createGroup } from '../src/group-create.js'
 import { deriveGroup } from '../src/group-handle.js'
-import { removeLapsedLeaves, renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
+import {
+  publishControllerLog,
+  removeLapsedLeaves,
+  renewLeaf,
+  revokeWithProof,
+} from '../src/group-lifecycle.js'
 import { controllerLogSize, HISTORY_HORIZON, historySize } from '../src/history.js'
 import { isLapsed, leafAt, treeTime } from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
@@ -842,6 +847,30 @@ test('replayed deny is already-revoked', async () => {
   expect(await revokeWithProof(built.result.newGroup, { log, deny: [target] })).toEqual({
     status: 'already-revoked',
   })
+})
+
+test('a recorded deny with an unrelated retaining rotate is already-revoked', async () => {
+  const { group } = await pipelineGroup()
+  const target = agent(51).id
+  const chain = [inception, revoke([inception], target)]
+  const built = await revokeWithProof(group, { log: asControllerLog(chain), deny: [target] })
+  if (built.status !== 'built') throw new Error('Missing proof')
+  const recorded = built.result.newGroup
+  const ledger = [...recorded.ledger]
+  const state = structuredClone(recorded.state)
+  const log = asControllerLog([...chain, rotation(chain)])
+  const snapshot = structuredClone(log)
+  expect(await revokeWithProof(recorded, { log, deny: [target] })).toEqual({
+    status: 'already-revoked',
+  })
+  expect(recorded.registry.controllers.get(controllerID)?.recordedLog).toEqual(
+    asControllerLog(chain),
+  )
+  expect(recorded.ledger).toEqual(ledger)
+  expect(recorded.state).toEqual(state)
+  expect(log).toEqual(snapshot)
+  const published = await publishControllerLog(recorded, log)
+  expect(published?.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual(log)
 })
 
 test('revokeWithProof declares both denials carried by the closure', async () => {

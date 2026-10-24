@@ -382,24 +382,24 @@ export async function revokeWithProof(
       if (params.log.chain.every(({ event }) => event.g < (projection?.genFloor ?? 0)))
         throw new RevokeProofError('generation-floor')
       const proof = controllerLogDelta(group, params.log)
-      if (proof == null) {
+      const ingested =
+        proof == null ? null : ingestControllerLog(controller, projection?.recordedLog, proof)
+      if (!reset && ingested != null && ingested.after.head.gen !== ingested.before?.head.gen)
+        throw new RevokeProofError('needs-reset')
+      if (!reset) {
         const requestedClaims = claimsFor(
           controller,
           undefined,
-          pruneLog(controller, params.log),
+          projection?.recordedLog ?? pruneLog(controller, params.log),
           projection?.genFloor ?? 0,
         ).filter((claim) => claim.kind === 'deny' && requested.includes(normalizeDID(claim.did)))
         if (
-          !reset &&
           requestedClaims.length === new Set(requested).size &&
           alreadyApplied(group, requestedClaims)
         )
           return { status: 'already-revoked' }
-        throw new RevokeProofError('no-rev')
       }
-      const ingested = ingestControllerLog(controller, projection?.recordedLog, proof)
-      if (!reset && ingested.after.head.gen !== ingested.before?.head.gen)
-        throw new RevokeProofError('needs-reset')
+      if (proof == null || ingested == null) throw new RevokeProofError('no-rev')
       const effects = claimsFor(
         controller,
         projection?.recordedLog,
