@@ -1,6 +1,4 @@
 import { readFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { deserialize } from 'node:v8'
 import {
   authorityPath,
@@ -114,14 +112,10 @@ type SaturatedFixture = { log: ControllerLog; registry: DeviceRegistry }
 
 let saturated: Promise<SaturatedFixture> | undefined
 
-export const SATURATED_LOG_VERSION = 2
-export const SATURATED_LOG_PATH = join(
-  tmpdir(),
-  `kumiai-mls-saturated-log-v${SATURATED_LOG_VERSION}.bin`,
-)
-
 function saturatedFixture(): Promise<SaturatedFixture> {
-  saturated ??= readFile(SATURATED_LOG_PATH).then((raw) => deserialize(raw) as SaturatedFixture)
+  const path = process.env.KUMIAI_MLS_SATURATED_FIXTURE_PATH
+  if (path == null || path.length === 0) throw new Error('Missing saturated fixture path')
+  saturated ??= readFile(path).then((raw) => deserialize(raw) as SaturatedFixture)
   return saturated
 }
 
