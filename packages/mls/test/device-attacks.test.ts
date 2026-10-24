@@ -382,8 +382,8 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     controller?: string
     revoked?: DeviceValue['revoked']
   }> = [
-    { attack: 'missing revocation', reason: 'no-rev', proof: [inception] },
-    { attack: 'empty proof', reason: 'no-rev', proof: [] },
+    { attack: 'missing revocation', reason: 'effects-mismatch', proof: [inception] },
+    { attack: 'empty proof', reason: 'effects-mismatch', proof: [] },
     {
       attack: 'wrong controller',
       reason: 'wrong-controller',

@@ -710,7 +710,7 @@ test('concurrent mutual rmv: the first to land wins and the second is not-endors
   ).toEqual({ status: 'not-provable', reason: 'not-endorsed' })
 })
 
-test('a partial current-epoch removal closure is refused with no-rev', async () => {
+test('a partial current-epoch removal closure is refused with effects-mismatch', async () => {
   const f = await fixture()
   expect(() =>
     authenticateLifecycleProof(
@@ -738,7 +738,7 @@ test('a partial current-epoch removal closure is refused with no-rev', async () 
       },
       registryForLog(f.did, { chain: f.log.chain, events: [] }),
     ),
-  ).toThrow(expect.objectContaining({ constructor: RevokeProofError, reason: 'no-rev' }))
+  ).toThrow(expect.objectContaining({ constructor: RevokeProofError, reason: 'effects-mismatch' }))
 })
 
 test('a new denial after reset is not mistaken for an earlier-generation record', async () => {

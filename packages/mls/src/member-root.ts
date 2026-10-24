@@ -191,15 +191,33 @@ export function effectOf(
   checkEffect(log, claim, genFloor, effectProofs(normalizeDID(controller), log))
 }
 
+export function effectProofContext(controller: string, log: ControllerLog) {
+  const did = normalizeDID(controller)
+  const proofs = effectProofs(did, log)
+  return {
+    effectOf: (claim: EffectClaim, genFloor: number) => checkEffect(log, claim, genFloor, proofs),
+    claimsFor: (recorded: ControllerLog | undefined, genFloor: number) =>
+      claimsWithProofs(did, recorded, log, genFloor, proofs),
+  }
+}
+
 export function claimsFor(
   controller: string,
   recorded: ControllerLog | undefined,
   merged: ControllerLog,
   genFloor: number,
 ): Array<EffectClaim> {
-  const did = normalizeDID(controller)
+  return effectProofContext(controller, merged).claimsFor(recorded, genFloor)
+}
+
+function claimsWithProofs(
+  did: string,
+  recorded: ControllerLog | undefined,
+  merged: ControllerLog,
+  genFloor: number,
+  proofs: ReturnType<typeof effectProofs>,
+): Array<EffectClaim> {
   const before = recorded == null ? undefined : foldedLog(did, recorded)
-  const proofs = effectProofs(did, merged)
   const after = proofs.folded
   const delta = effectDelta(before?.head, after.head)
   const eventClaims = new Map<string, Array<{ claim: EffectClaim; gen: number }>>()

@@ -19,6 +19,7 @@ import { beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
+import * as controllerLogModule from '../src/controller-log.js'
 import { asControllerLog, foldChain, foldControllerLog } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
 import { LeafBindingError, RevokeProofError } from '../src/errors.js'
@@ -225,7 +226,7 @@ describe('authenticated proof attachment', () => {
           revoked: [{ did: target }],
         }),
       ),
-    ).rejects.toMatchObject({ reason: 'no-rev' })
+    ).rejects.toMatchObject({ reason: 'effects-mismatch' })
   })
 
   test('rejects a proof for the wrong controller', async () => {
@@ -745,7 +746,7 @@ describe('proof boundary cases', () => {
           revoked: [{ did: target }],
         }),
       ),
-    ).rejects.toMatchObject({ reason: 'no-rev' })
+    ).rejects.toMatchObject({ reason: 'effects-mismatch' })
   })
 
   test('a later full chain cannot substitute for an attached suffix', async () => {
@@ -1102,7 +1103,9 @@ describe('deny-gaining rotate proofs', () => {
   test('a plain rotate does not prove a revoke', () => {
     const chain: Array<SignedEvent> = [inception]
     chain.push(rotateChain({ seed: controllerSeed, profile: 0, did: controllerID, chain }))
-    expect(() => authenticate(chain)).toThrow(expect.objectContaining({ reason: 'no-rev' }))
+    expect(() => authenticate(chain)).toThrow(
+      expect.objectContaining({ reason: 'effects-mismatch' }),
+    )
   })
 
   test('a later rotate retaining a denial keeps the gain position', () => {
@@ -1261,7 +1264,7 @@ describe('controller-log deny proofs', () => {
     const f = await fixture()
     const registry = registryModule.registryForLog(f.did, asControllerLog(f.log.chain))
     expect(() => authenticateLifecycleProof(f.did, f.entry, registry)).toThrow(
-      expect.objectContaining({ constructor: RevokeProofError, reason: 'no-rev' }),
+      expect.objectContaining({ constructor: RevokeProofError, reason: 'effects-mismatch' }),
     )
   })
 
@@ -1441,3 +1444,70 @@ test('deny cascade keeps evidenced children', async () => {
   expect(effects.removeLeafIndices).toEqual([1])
   expect(added.group.findMemberLeafIndex(child.id)).toBe(2)
 })
+
+test.each(['duplicates', 'wrong-target', 'valid'] as const)(
+  'effect proof folds once before checking %s claims',
+  async (kind) => {
+    const f = await buildEpoch({ members: 1 })
+    const log = structuredClone(f.log)
+    for (const target of [agent(81).id, agent(82).id]) {
+      const folded = foldControllerLog(f.did, log)
+      if (!folded.ok) throw new Error(folded.reason)
+      log.events.push(
+        createRevoke({
+          did: f.did,
+          head: folded.head,
+          parents: epochHeads(f.did, log),
+          signer: f.root,
+          target,
+        }),
+      )
+    }
+    const effects = log.events
+      .slice(-2)
+      .map(({ event }) => {
+        if (event.t !== 'rev') throw new Error('Missing revocation')
+        return { kind: 'deny' as const, did: event.x, ref: { event: digestOf(event) } }
+      })
+      .sort((a, b) => (a.did < b.did ? -1 : a.did > b.did ? 1 : 0))
+    const correct = effects[0]
+    if (correct == null) throw new Error('Missing effect')
+    const registry = registryModule.registryForLog(f.did, f.log)
+    const folds = vi.spyOn(controllerLogModule, 'foldControllerLog')
+    try {
+      const authenticate = () =>
+        authenticateLifecycleProof(
+          f.did,
+          {
+            issuer: agent(41).id,
+            entry: {
+              type: DEVICE_ENTRY_TYPE,
+              groupID: 'effect-count',
+              subject: f.did,
+              value: {
+                op: 'revoke',
+                proof: { chain: [], events: log.events.slice(-2) },
+                effects:
+                  kind === 'duplicates'
+                    ? Array.from({ length: 100 }, () => correct)
+                    : kind === 'wrong-target'
+                      ? [correct, { ...correct, did: agent(83).id }]
+                      : effects,
+                removed: [],
+                revoked: [],
+              },
+            },
+          },
+          registry,
+        )
+      if (kind === 'valid') expect(authenticate().recordedLog.events).toHaveLength(3)
+      else expect(authenticate).toThrow(new RevokeProofError('effects-mismatch'))
+      expect(
+        folds.mock.calls.filter(([, log]) => log.events.some(({ event }) => event.t === 'rev'))
+          .length,
+      ).toBeLessThanOrEqual(1)
+    } finally {
+      folds.mockRestore()
+    }
+  },
+)

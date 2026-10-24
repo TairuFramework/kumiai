@@ -23,9 +23,8 @@ import type { VerifiedLedgerEntry } from './ledger.js'
 import { attestedTreeTime, isLapsed, leafAt } from './lifecycle.js'
 import {
   cascadeOf,
-  claimsFor,
   type EffectClaim,
-  effectOf,
+  effectProofContext,
   memberRootStatus,
   type RemovedEffect,
 } from './member-root.js'
@@ -133,13 +132,10 @@ export function authenticateLifecycleProof(
       throw new RevokeProofError('generation-floor')
   } else if (delta.generation) throw new RevokeProofError('needs-reset')
   const proofLog = lifecycleProofLog(controller, ingested, proof)
-  const expected = claimsFor(controller, previous?.recordedLog, proofLog, floor)
+  const context = effectProofContext(controller, proofLog)
+  const expected = context.claimsFor(previous?.recordedLog, floor)
   if (value.effects == null || (value.effects.length === 0 && value.op !== 'reset'))
     throw new RevokeProofError('no-rev')
-  for (const claim of value.effects) {
-    if (value.op !== 'reset' && 'snapshot' in claim.ref) throw new RevokeProofError('no-rev')
-    effectOf(controller, proofLog, claim, floor)
-  }
   const target = (claim: EffectClaim) =>
     claim.kind === 'deny'
       ? `deny:${normalizeDID(claim.did)}`
@@ -152,6 +148,10 @@ export function authenticateLifecycleProof(
     })
   )
     throw new RevokeProofError('effects-mismatch')
+  for (const claim of value.effects) {
+    if (value.op !== 'reset' && 'snapshot' in claim.ref) throw new RevokeProofError('no-rev')
+    context.effectOf(claim, floor)
+  }
   const resetIndex =
     value.op === 'reset'
       ? ingested.log.chain.findIndex(
