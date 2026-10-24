@@ -35,6 +35,7 @@ import { denyEffects } from './fixtures/controller-chain.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
 import {
   agent,
+  belowGateWelcome,
   lowLevelWelcome,
   rawBundle,
   rawCommit,
@@ -851,3 +852,28 @@ test.each(['completed', 'failed'] as const)(
     expect(entries).toEqual([token])
   },
 )
+
+test('renewal then clock in one envelope uses the renewed lease on commit and receive', async () => {
+  const f = await fixture({ creatorMember: true })
+  const peer = agent(61)
+  const { author, joined } = await belowGateWelcome(
+    f.group,
+    peer,
+    await timedBinding({ identity: peer, iat: 100, exp: 3000 }),
+  )
+  const renewal = await logToken(f, api.controllerLogDelta(author, renewed(f)) ?? renewed(f))
+  const clock = await signLedgerEntry(f.identity, {
+    type: DEVICE_ENTRY_TYPE,
+    groupID: author.groupID,
+    subject: f.did,
+    value: { op: 'clock', time: 1500, attest: true },
+  })
+  const result = await api.commitLedgerEntries(author, [renewal, clock])
+  f.publish(result.newGroup.ledgerTokens)
+  await joined.processMessage(result.commitMessage)
+  expect(joined.registry).toEqual(result.newGroup.registry)
+  expect(joined.registry.controllers.get(f.did)?.attestations.size).toBe(1)
+  expect(
+    head(f.did, recordedLogOf(joined.registry, f.did) ?? f.log).members.get(f.member.add)?.lease,
+  ).toBe(2000)
+})

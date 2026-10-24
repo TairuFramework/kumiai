@@ -40,6 +40,7 @@ import {
   type DeviceValue,
   denySetOf,
   mayReadmitResetDevice,
+  registryApply,
 } from './registry.js'
 import { assertNewerBinding, bindingIssuedAt, stalePairedAdd } from './stale-leaf.js'
 
@@ -141,12 +142,16 @@ export function treeTime(
   )
 }
 
-export function isLapsed(group: GroupHandle, leaf: LeafNode): boolean {
+export function isLapsed(
+  group: GroupHandle,
+  leaf: LeafNode,
+  registry: DeviceRegistry = group.registry,
+): boolean {
   const controller = group.anchor.controller
   if (controller == null) return false
   const binding = identity(leaf).controller
-  const expiry = binding == null ? undefined : leafExpiry(binding, group.registry, controller)
-  return expiry != null && expiry < treeTime(group, controller)
+  const expiry = binding == null ? undefined : leafExpiry(binding, registry, controller)
+  return expiry != null && expiry < treeTime(group, controller, registry)
 }
 
 export function leafExpiry(
@@ -552,8 +557,11 @@ export async function prepareLifecycleGate(
     throw new RevokeProofError('effects-mismatch')
   const expectedRemoves = new Set<number>()
   if (controller != null) {
+    let registry = group.registry
     for (const entry of lifecycleEntries) {
-      const effects = await verifyLifecycleProof(group, entry as VerifiedLedgerEntry<DeviceValue>)
+      const verified = entry as VerifiedLedgerEntry<DeviceValue>
+      const effects = await verifyLifecycleProof(group, verified, registry)
+      registry = registryApply(verified, registry, controller)
       if (['revoke', 'reset'].includes(opOf(entry)))
         for (const index of effects.removeLeafIndices) expectedRemoves.add(index)
     }

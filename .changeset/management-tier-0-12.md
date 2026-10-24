@@ -22,3 +22,5 @@ Recheck lifecycle knowledge atomically when adopting recovery candidates, includ
 Reject log events authored by tombstoned member incarnations after stale root settlements.
 
 Reject unauthenticated no-op log updates and bound replay and effect-claim verification work.
+
+Verify lifecycle envelopes in order so renewal and attestation can share a commit.

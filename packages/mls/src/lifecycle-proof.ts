@@ -227,6 +227,7 @@ function effectsMatch(
 export async function lifecycleProofEffects(
   group: GroupHandle,
   verified: VerifiedLedgerEntry<DeviceValue>,
+  registry: DeviceRegistry = group.registry,
 ): Promise<LifecycleProofEffects> {
   const controllerID = group.anchor.controller
   if (controllerID == null) throw new RevokeProofError('wrong-controller')
@@ -241,7 +242,7 @@ export async function lifecycleProofEffects(
   ) {
     throw new RevokeProofError('wrong-controller')
   }
-  const previous = group.registry.controllers.get(controller)
+  const previous = registry.controllers.get(controller)
   const leaves = group.listMembers().map((member) => {
     const binding = group.bindingOfDID(member.id)
     const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
@@ -278,7 +279,11 @@ export async function lifecycleProofEffects(
       if (!eligible) throw new RevokeProofError('effects-mismatch')
     } else if (
       value.time <= timeFloor ||
-      value.time > attestedTreeTime(group.state.ratchetTree, group.registry, controller)
+      value.time >
+        Math.max(
+          attestedTreeTime(group.state.ratchetTree, group.registry, controller),
+          attestedTreeTime(group.state.ratchetTree, registry, controller),
+        )
     ) {
       throw new RevokeProofError('effects-mismatch')
     }
@@ -292,14 +297,14 @@ export async function lifecycleProofEffects(
       removeLeafIndices: [],
     }
   }
-  const authenticated = authenticateLifecycleProof(controller, verified, group.registry)
+  const authenticated = authenticateLifecycleProof(controller, verified, registry)
   if (value.op === 'log') {
     const index = group.findMemberLeafIndex(verified.issuer)
     const leaf = index == null ? undefined : leafAt(group.state.ratchetTree, index)
     if (leaf == null) throw new RevokeProofError('wrong-controller')
-    if (denySetOf(group.registry).has(normalizeDID(verified.issuer)))
+    if (denySetOf(registry).has(normalizeDID(verified.issuer)))
       throw new LeafBindingError('denied-id')
-    if (isLapsed(group, leaf)) throw new LeafLapsedError('lapsed')
+    if (isLapsed(group, leaf, registry)) throw new LeafLapsedError('lapsed')
     const before = historySize(
       group.state.ratchetTree,
       group.ledger.map(({ verified }) => verified),
@@ -317,7 +322,7 @@ export async function lifecycleProofEffects(
   if (value.op !== 'revoke' && value.op !== 'reset') throw new RevokeProofError('no-rev')
   const candidate = registryApply(
     { ...verified, entry: { ...verified.entry, value: { ...value, revoked: [] } } },
-    group.registry,
+    registry,
     controller,
   )
   for (const raw of value.survivors ?? []) {
@@ -394,7 +399,7 @@ export async function lifecycleProofEffects(
       ]
     }),
     claims,
-    group.registry,
+    registry,
     candidate,
     controller,
   )
@@ -424,8 +429,9 @@ export async function lifecycleProofEffects(
 export async function verifyLifecycleProof(
   group: GroupHandle,
   verified: VerifiedLedgerEntry<DeviceValue>,
+  registry: DeviceRegistry = group.registry,
 ): Promise<LifecycleProofEffects> {
-  const effects = await lifecycleProofEffects(group, verified)
+  const effects = await lifecycleProofEffects(group, verified, registry)
   const value = verified.entry.value
   if (
     (value.op === 'revoke' || value.op === 'reset') &&
