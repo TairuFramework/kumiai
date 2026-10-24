@@ -108,6 +108,7 @@ export async function publishControllerLog(
       controller,
       recordedLogOf(group.registry, controller),
       delta,
+      group.registry.controllers.get(normalizeDID(controller)),
     )
     const effects = effectDelta(ingested.before?.head, ingested.after.head)
     if (effects.generation || effects.denied.length > 0 || effects.removed.length > 0)
@@ -469,7 +470,9 @@ export async function revokeWithProof(
         proof = { ...proof, events: supplied.events }
       }
       const ingested =
-        proof == null ? null : ingestControllerLog(controller, projection?.recordedLog, proof)
+        proof == null
+          ? null
+          : ingestControllerLog(controller, projection?.recordedLog, proof, projection)
       if (!reset && ingested != null && ingested.after.head.gen !== ingested.before?.head.gen)
         throw new RevokeProofError('needs-reset')
       if (!reset) {

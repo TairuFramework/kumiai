@@ -14,6 +14,7 @@ import { normalizeDID } from '@kokuin/token'
 
 import { foldControllerLog, isDetachedFoldReason } from './controller-log.js'
 import { RevokeProofError } from './errors.js'
+import type { ControllerProjection } from './registry.js'
 
 export type FoldOk = Extract<FoldResult, { ok: true }>
 
@@ -21,6 +22,7 @@ export function ingestControllerLog(
   controller: string,
   recorded: ControllerLog | undefined,
   proof: ControllerLog,
+  previous?: ControllerProjection,
 ): { log: ControllerLog; before?: FoldOk; after: FoldOk; introduced: Array<string> } {
   const did = normalizeDID(controller)
   let before: FoldOk | undefined
@@ -84,7 +86,12 @@ export function ingestControllerLog(
     const { event } = signed
     if (!newlyApplied.has(digestOf(event)) || event.by == null) continue
     const author = before?.head.members.get(event.by)
-    if (author != null && (author.removed || !author.effective))
+    const tombstone = previous?.removedMembers.get(event.by)
+    if (
+      (tombstone != null &&
+        (author == null || normalizeDID(tombstone.did) === normalizeDID(author.did))) ||
+      (author != null && (author.removed || !author.effective))
+    )
       throw new RevokeProofError('not-endorsed')
   }
   return { log, ...(before == null ? {} : { before }), after, introduced }

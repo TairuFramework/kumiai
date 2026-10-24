@@ -777,3 +777,97 @@ test('a new denial after reset is not mistaken for an earlier-generation record'
     effects: [{ kind: 'deny', did: target, ref: { event: digestOf(next.event) } }],
   })
 })
+
+test.each(['tombstoned', 're-added'] as const)(
+  '%s incarnation after settlement has consistent log authority',
+  async (incarnation) => {
+    const f = await fixture()
+    const withB = await belowGateWelcome(f.group, f.b.identity, {
+      id: f.did,
+      prefix: f.log.chain,
+      member: { add: f.b.add, g: 0 },
+      iat: 100,
+    })
+    const removed = built(
+      await api.revokeWithProof(withB.author, {
+        log: f.removedLog,
+        remove: f.remove,
+      }),
+    )
+    let add = f.a.add
+    let log = f.log
+    if (incarnation === 're-added') {
+      const fresh = createAdd({
+        seed: f.seed,
+        profile: 0,
+        did: f.did,
+        head: head(f.did, f.removedLog),
+        parents: epochHeads(f.did, f.removedLog),
+        member: { did: f.a.did, key: encodeKey(f.a.identity.publicKey, 'EdDSA'), lease: 2000 },
+      })
+      add = digestOf(fresh.event)
+      log = { ...f.removedLog, events: [...f.removedLog.events, fresh] }
+    }
+    const settled = settle(f, log)
+    const published = await api.publishControllerLog(removed.newGroup, settled)
+    if (published == null) throw new Error('Missing settlement')
+    const group = published.newGroup
+    expect(group.registry.controllers.get(f.did)?.removedMembers.has(f.a.add)).toBe(true)
+    const hostile = createRemove({
+      did: f.did,
+      head: head(f.did, settled),
+      parents: epochHeads(f.did, settled),
+      signer: { member: { ...f.a, add } },
+      add: f.b.add,
+    })
+    const proof = { ...settled, events: [hostile] }
+    const result = await api.revokeWithProof(group, {
+      log: proof,
+      remove: [{ did: f.b.identity.id, add: f.b.add }],
+    })
+    if (incarnation === 're-added') {
+      expect(built(result).newGroup.findMemberLeafIndex(f.b.identity.id)).toBeUndefined()
+      return
+    }
+    expect(result).toEqual({ status: 'not-provable', reason: 'not-endorsed' })
+    expect(group.findMemberLeafIndex(f.b.identity.id)).toBeDefined()
+    expect(() =>
+      authenticateLifecycleProof(
+        f.did,
+        {
+          issuer: f.identity.id,
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: f.did,
+            value: {
+              op: 'revoke',
+              proof: { chain: [], events: [hostile] },
+              effects: [
+                {
+                  kind: 'remove',
+                  member: { did: f.b.identity.id, add: f.b.add },
+                  ref: { event: digestOf(hostile.event) },
+                },
+              ],
+              removed: [],
+              revoked: [],
+            },
+          },
+        },
+        group.registry,
+      ),
+    ).toThrow(new RevokeProofError('not-endorsed'))
+    const renewal = createRenew({
+      did: f.did,
+      head: head(f.did, settled),
+      parents: epochHeads(f.did, settled),
+      signer: { member: f.a },
+      add: f.b.add,
+      lease: 3000,
+    })
+    await expect(
+      api.publishControllerLog(group, { ...settled, events: [renewal] }),
+    ).rejects.toMatchObject({ reason: 'not-endorsed' })
+  },
+)

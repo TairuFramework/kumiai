@@ -105,7 +105,7 @@ export function authenticateLifecycleProof(
     if (!isControllerLog(proof)) throw new RevokeProofError('not-authority-signed')
     if (value.op === 'seed' ? previous?.recordedLog != null : previous?.recordedLog == null)
       throw new RevokeProofError('detached')
-    const ingested = ingestControllerLog(controller, previous?.recordedLog, proof)
+    const ingested = ingestControllerLog(controller, previous?.recordedLog, proof, previous)
     if (value.op === 'log') {
       const delta = effectDelta(ingested.before?.head, ingested.after.head)
       if (delta.generation) throw new RevokeProofError('needs-reset')
@@ -125,7 +125,7 @@ export function authenticateLifecycleProof(
     throw new RevokeProofError('generation-floor')
   if (value.op === 'revoke' && proof.chain.some(({ event }) => event.g > (previous?.genFloor ?? 0)))
     throw new RevokeProofError('needs-reset')
-  const ingested = ingestControllerLog(controller, previous?.recordedLog, proof)
+  const ingested = ingestControllerLog(controller, previous?.recordedLog, proof, previous)
   if (ingested.after.head.saturated) throw new RevokeProofError('too-large')
   const delta = effectDelta(ingested.before?.head, ingested.after.head)
   if (value.op === 'reset') {
