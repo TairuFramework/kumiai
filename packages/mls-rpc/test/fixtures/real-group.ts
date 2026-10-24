@@ -10,8 +10,10 @@ import {
   joinGroupExternal,
   ledgerEntryDigest,
   processWelcome,
+  publishControllerLog,
   removeMember,
   renewLeaf,
+  revokeWithProof,
 } from '@kumiai/mls'
 import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 
@@ -33,6 +35,7 @@ export async function createRealBoundRecovery(
       },
     }),
   options: { replaceStaleLeaf?: boolean } = {},
+  bindingKind: 'root' | 'mbr' | 'membership' = 'root',
 ) {
   const fixture = (await import(
     new URL('../../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -45,26 +48,41 @@ export async function createRealBoundRecovery(
       parent?: string
       issuer?: OwnIdentity
     }) => Promise<ControllerBinding>
+    managementFixture: (kind: 'root' | 'mbr' | 'membership') => Promise<{
+      alice: OwnIdentity
+      bob: OwnIdentity
+      log: Parameters<typeof publishControllerLog>[1]
+      creatorBinding: ControllerBinding
+      binding: (iat: number) => Promise<ControllerBinding>
+      member: { did: string; add: string }
+      deniedDID: string
+      nextLog: (op: 'log' | 'deny' | 'remove') => Parameters<typeof publishControllerLog>[1]
+      admissionBinding: (
+        authority: 'effective' | 'removed' | 'unavailable',
+      ) => Promise<ControllerBinding>
+    }>
+    rawAdd: (
+      group: GroupHandle,
+      identity: OwnIdentity,
+      binding: ControllerBinding,
+    ) => Promise<{ message: Uint8Array }>
   }
   const now = Math.floor(Date.now() / 1000)
-  const alice = fixture.agent(41)
-  const bob = fixture.agent(61)
-  const creatorBinding = await fixture.timedBinding({
-    identity: alice,
-    iat: now - 20,
-    exp: now + 1000,
-  })
-  const cached = await fixture.timedBinding({
-    identity: bob,
-    iat: options.replaceStaleLeaf ? now - 5 : now - 20,
-    exp: now + 1000,
-    ...(options.replaceStaleLeaf ? { parent: creatorBinding.capability, issuer: alice } : {}),
-  })
+  const management = await fixture.managementFixture(bindingKind)
+  const { alice, bob, creatorBinding } = management
+  const cached = options.replaceStaleLeaf
+    ? await fixture.timedBinding({
+        identity: bob,
+        iat: options.replaceStaleLeaf ? now - 5 : now - 20,
+        exp: now + 1000,
+        ...(options.replaceStaleLeaf ? { parent: creatorBinding.capability, issuer: alice } : {}),
+      })
+    : await management.binding(now - 20)
   let offered = cached
   let source = (
     await createGroup(alice, 'bound-conformance', {
       controller: creatorBinding,
-      controllerLog: { chain: cached.prefix, events: [] },
+      controllerLog: management.log,
     })
   ).group
   if (options.replaceStaleLeaf) {
@@ -74,19 +92,24 @@ export async function createRealBoundRecovery(
     const stale = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
     source = (await commitInvite(source, staleBundle.publicPackage, stale.invite)).newGroup
   }
-  const bundle = await createKeyPackageBundle(bob, { controller: cached })
+  const bundle = await createKeyPackageBundle(bob, {
+    controller: cached,
+    controllerLog: management.log,
+  })
   const { invite } = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
   const added = await commitInvite(source, bundle.publicPackage, invite)
   source = added.newGroup
+  const slot = createLedgerEntrySlot()
   const group = (
     await processWelcome({
       identity: bob,
       invite,
       welcome: added.welcomeMessage,
       keyPackageBundle: bundle,
+      options: { resolveLedgerEntries: slot.resolve },
     })
   ).group
-  const member = { identity: bob, handle: group, slot: createLedgerEntrySlot() }
+  const member = { identity: bob, handle: group, slot }
   const access = await makeAccess(member)
   const requester = createGroupMLS({
     identity: bob,
@@ -105,6 +128,7 @@ export async function createRealBoundRecovery(
     entrySlot: createLedgerEntrySlot(),
   })
   return {
+    requesterDID: bob.id,
     requester,
     responder,
     ratchet: async () => {
@@ -112,8 +136,44 @@ export async function createRealBoundRecovery(
       await access.replace((await renewLeaf(current, cached)).newGroup)
     },
     replaceBinding: async () => {
-      offered = await fixture.timedBinding({ identity: bob, iat: now - 10, exp: now + 1000 })
+      offered = await management.binding(now - 10)
     },
+    buildManagementCommit: async (op: 'log' | 'deny' | 'remove') => {
+      const log = management.nextLog(op)
+      const result =
+        op === 'log'
+          ? await publishControllerLog(source, log)
+          : await revokeWithProof(source, {
+              log,
+              ...(op === 'deny'
+                ? { deny: [management.deniedDID] }
+                : { remove: [management.member] }),
+            }).then((built) => {
+              if (built.status !== 'built') throw new Error(`No management commit: ${built.status}`)
+              return built.result
+            })
+      if (result == null) throw new Error('Missing log commit')
+      const entries = result.newGroup.ledgerTokens.slice(source.ledgerTokens.length)
+      source = result.newGroup
+      return {
+        commit: result.commitMessage,
+        entries,
+        context: {
+          senderDID: alice.id,
+          resolveLedgerEntries: async () => entries,
+        },
+      }
+    },
+    buildAdmission: async (authority: 'effective' | 'removed' | 'unavailable') => ({
+      commit: (
+        await fixture.rawAdd(
+          source,
+          fixture.agent(63),
+          await management.admissionBinding(authority),
+        )
+      ).message,
+      context: { senderDID: alice.id },
+    }),
   }
 }
 

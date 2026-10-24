@@ -65,7 +65,7 @@ consumed-key state while leaving the pending record. No database transaction or 
 may be held while awaiting a handle or peer operation. The real `@kumiai/mls-rpc` port's optional
 `pending` adapter calls `decryptStaged` for durable logged events.
 
-## Authority model
+## Standard-group authority model
 
 Authority is a **roster**, folded from a signed **control ledger** and rooted at a genesis anchor installed in the GroupContext when the group is created. There is no capability chain: a member's right to act is decided by the roster every peer computes independently, not by a token the member carries.
 - **The ledger is an ordered log of enactments.** Each entry is a token signed by its issuer (a `kumiai.role` entry names a subject DID and grants it `admin` or `member` of the group). The log is replayable and position-dependent: the same claim recurring later is meaningful — a demotion back to a previously-held role is exactly that.
@@ -74,6 +74,31 @@ Authority is a **roster**, folded from a signed **control ledger** and rooted at
 - **`GroupPermission` is `'admin' | 'member'` — there is no read-only tier.** It cannot exist: a group member holds the epoch secrets, which is what membership _is_ in MLS. A `read` member derives the same application keys as any other member and can decrypt everything. Read-only observers do not belong in the group; gate them outside MLS, at the transport or storage layer.
 
 The invite carries the full ordered ledger plus the invitee's new role entry last, so a joiner folds the same roster the group holds and cannot fork from a role change made before it joined.
+
+## Management tier
+
+Lifecycle groups bind every leaf to one controller. Creation requires `controller` and an authoritative `controllerLog`.
+The first ledger entry seeds the registry, including existing denials and removed incarnations.
+`ControllerBinding` carries a chain-only `prefix` and either `capability` or `member: { add, g }` plus ordering-only `iat`.
+Member-issued capabilities carry `mbr: { add, g }`. The registry-held log supplies their pinned keys and leases.
+Member roots are supported only in lifecycle groups. Admission refuses removed or unavailable roots.
+
+`publishControllerLog` publishes effect-free log changes and settlement.
+`createInvite` and `renewLeaf` can bundle `controllerLog` changes.
+`revokeWithProof(group, { log, deny?, remove?, survivors?, evidence? })` proves denials or incarnation removals.
+The reset form is `{ reset: true, log }`. Proofs carry `ControllerLog` and exact `EffectClaim` references.
+References identify a chain index, epoch event or reset snapshot.
+Removing an incarnation cascades through its rooted leaves. Valid holder or survivor grants can preserve them until their substitute expiry.
+`removalEvidence` captures removal evidence before settlement. Hosts retain it beside their controller store.
+
+Tree time combines a preserved floor, root-issued token times and effective-member attestations over distinct pinned keys.
+The quorum uses the second-highest attestation, or the highest for one effective key.
+Membership leaves advance time through `attestTreeTime`, without attesting their binding `iat`.
+Member-rooted admission is capped at 32 applied epoch events. `settleAdvisory()` prompts from 24 and blocks above 32.
+Existing leaves, Welcome trees, root-issued admission and lifecycle entries are exempt.
+Recovery refuses candidates that discard known lifecycle effects, floors or effective-key attestations.
+
+The [lifecycle reference](../../docs/reference/mls-lifecycle.md) defines binding, proof, time and recovery contracts.
 
 ## External rejoin (stale device recovery)
 

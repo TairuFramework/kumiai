@@ -158,11 +158,18 @@ testPendingGroupCryptoConformance({
 })
 
 testGroupMLSConformance({
-  createBoundRecovery: () =>
-    createRealBoundRecovery(async (member) => {
-      const host = await createTransactionalAccess(member, createTransactionalStore(member.handle))
-      return host.access
-    }),
+  createBoundRecovery: (binding) =>
+    createRealBoundRecovery(
+      async (member) => {
+        const host = await createTransactionalAccess(
+          member,
+          createTransactionalStore(member.handle),
+        )
+        return host.access
+      },
+      {},
+      binding,
+    ),
   label: 'createGroupMLS over a transactional HandleAccess',
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `tx-mls-conformance-${id}`)

@@ -68,8 +68,81 @@ export type MemoryGroupMLS = GroupMLS & {
   failNextRecoveryAdopt: () => void
 }
 
-export type MemoryRecoveryBinding = { id: string; prefix: Array<unknown>; capability: string }
+export type MemoryRecoveryBinding = {
+  id: string
+  prefix: Array<unknown>
+  capability?: string
+  holderGrant?: string
+  member?: { add: string; g: number }
+  iat?: number
+}
+export type MemoryControllerEvent = {
+  id: string
+  op: 'add' | 'deny' | 'remove'
+  target: string
+}
+export type MemoryControllerLog = { chain: Array<string>; events: Array<MemoryControllerEvent> }
+
+function memberOf(binding: MemoryRecoveryBinding) {
+  if (binding.member != null) return binding.member
+  if (binding.capability?.startsWith('{')) {
+    try {
+      return (JSON.parse(binding.capability) as { mbr?: { add: string; g: number } }).mbr
+    } catch {
+      return null
+    }
+  }
+}
+
+function effectiveMember(log: MemoryControllerLog | undefined, member: { add: string; g: number }) {
+  return (
+    log != null &&
+    member.g === 0 &&
+    log.events.some((event) => event.op === 'add' && event.target === member.add) &&
+    !log.events.some((event) => event.op === 'remove' && event.target === member.add)
+  )
+}
+
+function projectControllerLog(log: MemoryControllerLog | undefined, tokens: Array<string>) {
+  const candidate = log == null ? undefined : structuredClone(log)
+  for (const token of tokens) {
+    if (!token.startsWith('management:')) continue
+    const value = JSON.parse(token.slice('management:'.length)) as {
+      op: string
+      proof: MemoryControllerLog
+      effects: Array<MemoryControllerEvent>
+    }
+    if (
+      candidate == null ||
+      !Array.isArray(value.proof?.chain) ||
+      value.proof.chain.length !== 0 ||
+      !Array.isArray(value.proof.events)
+    )
+      throw new Error('Unavailable controller log')
+    const effects: Array<MemoryControllerEvent> = []
+    for (const event of value.proof.events) {
+      if (
+        typeof event.id !== 'string' ||
+        typeof event.target !== 'string' ||
+        !['add', 'deny', 'remove'].includes(event.op) ||
+        candidate.events.some((known) => known.id === event.id)
+      )
+        throw new Error('Invalid controller event')
+      if (event.op !== 'add') effects.push(event)
+      candidate.events.push(event)
+    }
+    if (
+      !['log', 'revoke'].includes(value.op) ||
+      (value.op === 'log' && effects.length > 0) ||
+      JSON.stringify(effects) !== JSON.stringify(value.effects)
+    )
+      throw new Error('Controller effects mismatch')
+  }
+  return candidate
+}
+
 export type MemoryGroupMLSOptions = {
+  controllerLog?: MemoryControllerLog
   binding?: MemoryRecoveryBinding
   recoveryBinding?: () => Promise<MemoryRecoveryBinding | null>
   groupID?: string
@@ -193,6 +266,7 @@ type MemoryCommit = {
    * roster it found is the roster it leaves.
    */
   adds?: Array<string>
+  bindings?: Record<string, MemoryRecoveryBinding>
   removes?: Array<string>
 }
 
@@ -214,6 +288,7 @@ export function encodeMemoryCommit(
     head?: string
     external?: boolean
     adds?: Array<string>
+    bindings?: Record<string, MemoryRecoveryBinding>
     removes?: Array<string>
     /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
     signerDID?: string
@@ -234,6 +309,7 @@ export function encodeMemoryCommit(
     // A genuine commit is signed by the member it names. Only a forger passes these apart.
     signerDID: options.signerDID ?? committerDID,
     ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
+    ...(options.bindings == null ? {} : { bindings: options.bindings }),
     ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
   return fromUTF(JSON.stringify(commit))
@@ -417,6 +493,8 @@ function openWithKey(
  */
 export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): MemoryGroupMLS {
   const recoverySecret = options.recoverySecret ?? new Uint8Array(32).fill(0x33)
+  let controllerLog =
+    options.controllerLog == null ? undefined : structuredClone(options.controllerLog)
   const localDID = options.localDID
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
   const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
@@ -506,9 +584,24 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   let asked = false
   const unusable = new Set<string>()
   const bindingID = (value: MemoryRecoveryBinding): string =>
-    JSON.stringify([value.id, value.prefix, value.capability])
-  const usable = (value?: MemoryRecoveryBinding): boolean =>
-    value != null && !unusable.has(bindingID(value))
+    JSON.stringify([
+      value.id,
+      value.prefix,
+      value.capability,
+      value.holderGrant,
+      value.member,
+      value.iat,
+    ])
+  const usable = (value?: MemoryRecoveryBinding): boolean => {
+    if (value == null || unusable.has(bindingID(value))) return false
+    const member = memberOf(value)
+    return (
+      member === undefined ||
+      (member != null &&
+        effectiveMember(controllerLog, member) &&
+        JSON.stringify(value.prefix) === JSON.stringify(controllerLog?.chain))
+    )
+  }
   const askBinding = async (): Promise<MemoryRecoveryBinding | undefined> => {
     if (asked) return
     asked = true
@@ -593,6 +686,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   const enact = (parsed: MemoryCommit): void => {
+    controllerLog = projectControllerLog(
+      controllerLog,
+      parsed.entryIDs.map((id) => bodies.get(id) ?? ''),
+    )
     ledger.push(...parsed.entryIDs)
     // The head is the committer's, not this receiver's: a handle whose ledger is incomplete
     // must stay visibly incomplete rather than re-anchor on its own truncated fold. A commit
@@ -745,6 +842,29 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // is never opened, because the entries are never resolved.
       if (parsed.epoch !== epoch) {
         return { advanced: false, epochBefore: epoch, epochAfter: epoch }
+      }
+      if (parsed.adds != null && (controllerLog != null || parsed.bindings != null)) {
+        for (const did of parsed.adds) {
+          const binding = parsed.bindings?.[did]
+          const denied = controllerLog?.events.some(
+            (event) => event.op === 'deny' && event.target === did,
+          )
+          const member = binding == null ? undefined : memberOf(binding)
+          const effective = member != null && effectiveMember(controllerLog, member)
+          if (
+            denied ||
+            binding?.id !== options.binding?.id ||
+            JSON.stringify(binding?.prefix) !== JSON.stringify(controllerLog?.chain) ||
+            !effective ||
+            (controllerLog?.events.length ?? 0) > 32
+          )
+            return {
+              advanced: false,
+              epochBefore: epoch,
+              epochAfter: epoch,
+              refusal: denied ? ('invalid' as const) : ('binding' as const),
+            }
+        }
       }
       // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
       // change ciphertext beyond the sampled prefix without breaking the sender-data read.

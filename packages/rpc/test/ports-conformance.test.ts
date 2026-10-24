@@ -9,6 +9,7 @@ import {
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
+import { expect, test } from 'vitest'
 
 import type { AppOutbox } from '../src/app-outbox.js'
 import {
@@ -23,6 +24,8 @@ import { createMemoryCommitJournal } from './fixtures/journal.js'
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
+  type MemoryControllerLog,
+  type MemoryRecoveryBinding,
   memoryEntryID,
   sealMemoryRecoveryVerdict,
 } from './fixtures/memory-group-mls.js'
@@ -135,23 +138,117 @@ testPendingGroupCryptoConformance({
 
 const COMMITTER_DID = 'did:key:committer'
 
+test.each([
+  { name: 'missing registry', log: undefined },
+  {
+    name: 'epoch cap',
+    log: {
+      chain: ['inception'],
+      events: Array.from({ length: 33 }, (_, index) => ({
+        id: `add-${index}`,
+        op: 'add' as const,
+        target: `add-${index}`,
+      })),
+    },
+  },
+])('member-rooted double admission refuses $name', async ({ log }) => {
+  const binding = {
+    id: 'controller',
+    prefix: ['inception'],
+    member: { add: 'add-0', g: 0 },
+    iat: 100,
+  }
+  const receiver = createMemoryGroupMLS({
+    controllerLog: log,
+    localDID: 'bob',
+    binding,
+    members: ['alice', 'bob'],
+  })
+  const commit = encodeMemoryCommit(0, 'alice', [], {
+    adds: ['newcomer'],
+    bindings: { newcomer: binding },
+  })
+  expect(await receiver.processCommit(commit, {})).toMatchObject({
+    advanced: false,
+    refusal: 'binding',
+  })
+  expect(await receiver.readEpoch()).toBe(0)
+  expect(receiver.leaves()).toEqual(['alice', 'bob'])
+})
+
 testGroupMLSConformance({
   label: 'createMemoryGroupMLS',
-  createBoundRecovery: async () => {
-    const binding = { id: 'controller', prefix: [], capability: 'initial-capability' }
+  createBoundRecovery: async (kind = 'root') => {
+    const binding: MemoryRecoveryBinding = {
+      id: 'controller',
+      prefix: ['inception'],
+      ...(kind === 'membership'
+        ? { member: { add: 'member-add', g: 0 }, iat: 100 }
+        : {
+            capability:
+              kind === 'mbr'
+                ? JSON.stringify({ mbr: { add: 'member-add', g: 0 }, iat: 100 })
+                : 'initial-capability',
+          }),
+    }
     let offered = binding
-    const options = { binding, recoveryBinding: async () => offered, members: ['alice', 'bob'] }
+    const controllerLog: MemoryControllerLog = {
+      chain: ['inception'],
+      events: [{ id: 'member-add', op: 'add', target: 'member-add' }],
+    }
+    const options = {
+      binding,
+      controllerLog,
+      recoveryBinding: async () => offered,
+      members: ['alice', 'bob'],
+    }
     const requester = createMemoryGroupMLS({ ...options, localDID: 'bob' })
     const responder = createMemoryGroupMLS({ ...options, localDID: 'alice' })
     return {
+      requesterDID: 'bob',
       requester,
       responder,
       ratchet: async () => {
         requester.adopt(requester.buildCommit())
       },
       replaceBinding: async () => {
-        offered = { ...binding, capability: 'renewed-capability' }
+        offered =
+          kind === 'membership'
+            ? { ...binding, iat: 110 }
+            : {
+                ...binding,
+                capability:
+                  kind === 'mbr'
+                    ? JSON.stringify({ mbr: { add: 'member-add', g: 0 }, iat: 110 })
+                    : 'renewed-capability',
+              }
       },
+      buildManagementCommit: async (op) => {
+        const event =
+          op === 'log'
+            ? { id: 'new-add', op: 'add', target: 'unknown-add' }
+            : op === 'deny'
+              ? { id: 'denial', op: 'deny', target: 'newcomer' }
+              : { id: 'removal', op: 'remove', target: 'member-add' }
+        const token = `management:${JSON.stringify({ op: op === 'log' ? 'log' : 'revoke', proof: { chain: [], events: [event] }, effects: op === 'log' ? [] : [event] })}`
+        const commit = responder.buildCommit([token])
+        responder.adopt(commit)
+        return { commit, entries: [token], context: { resolveLedgerEntries: async () => [token] } }
+      },
+      buildAdmission: async (authority) => ({
+        commit: encodeMemoryCommit(await responder.readEpoch(), 'alice', [], {
+          adds: ['newcomer'],
+          bindings: {
+            newcomer: {
+              id: binding.id,
+              prefix: binding.prefix,
+              member: { add: authority === 'unavailable' ? 'unknown-add' : 'member-add', g: 0 },
+              iat: 100,
+            },
+          },
+        }),
+        context: {},
+      }),
     }
   },
   createGroup: async (size, id) => {

@@ -64,10 +64,15 @@ export type ConformanceAppliedRecovery =
   | { renewalRequired: true }
   | null
 export type ConformanceBoundRecovery = {
+  requesterDID: string
   requester: ConformanceGroupMLS
   responder: ConformanceGroupMLS
   ratchet: () => Promise<void>
   replaceBinding: () => Promise<void>
+  buildManagementCommit: (
+    op: 'log' | 'deny' | 'remove',
+  ) => Promise<ConformanceCommit & { entries: Array<string> }>
+  buildAdmission: (authority: 'effective' | 'removed' | 'unavailable') => Promise<ConformanceCommit>
 }
 export type ConformancePendingRecovery = {
   epoch: number
@@ -192,7 +197,9 @@ export type GroupMLSConformanceParams = {
   label: string
   /** A fresh group of `size` ports plus an outside committer. `id` is unique per case. */
   createGroup: (size: number, id: string) => Promise<ConformanceMLSGroup>
-  createBoundRecovery: () => Promise<ConformanceBoundRecovery>
+  createBoundRecovery: (
+    binding?: 'root' | 'mbr' | 'membership',
+  ) => Promise<ConformanceBoundRecovery>
 }
 
 /** The member at `index`, with the assertion the suite would otherwise repeat everywhere. */
@@ -757,25 +764,98 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
         })
       })
-      test('a marked replacement binding is not reused after a ratchet or returned again by the host', async () => {
-        const { requester, responder, ratchet, replaceBinding } = await params.createBoundRecovery()
-        expect(await requester.prepareRecovery()).toBe('ready')
-        const request = await requester.createRecoveryRequest('mark-binding')
-        const pending = await requester.applyRecovery(
-          await responder.sealGroupInfo(request),
-          'mark-binding',
-        )
-        if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
-        const before = await requester.readEpoch()
-        expect(pending.markBindingUnusable()).toBeUndefined()
-        expect(pending.markBindingUnusable()).toBeUndefined()
-        expect(await requester.readEpoch()).toBe(before)
-        expect(await requester.prepareRecovery()).toBe('renewal-required')
-        await ratchet()
-        expect(await requester.prepareRecovery()).toBe('renewal-required')
-        await replaceBinding()
-        expect(await requester.prepareRecovery()).toBe('ready')
-      })
+      test.each(['root', 'mbr', 'membership'] as const)(
+        'a marked %s replacement binding is not reused after a ratchet or returned again by the host',
+        async (binding) => {
+          const { requester, responder, ratchet, replaceBinding } =
+            await params.createBoundRecovery(binding)
+          expect(await requester.prepareRecovery()).toBe('ready')
+          const request = await requester.createRecoveryRequest('mark-binding')
+          const pending = await requester.applyRecovery(
+            await responder.sealGroupInfo(request),
+            'mark-binding',
+          )
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
+          const before = await requester.readEpoch()
+          expect(pending.markBindingUnusable()).toBeUndefined()
+          expect(pending.markBindingUnusable()).toBeUndefined()
+          expect(await requester.readEpoch()).toBe(before)
+          expect(await requester.prepareRecovery()).toBe('renewal-required')
+          await ratchet()
+          expect(await requester.prepareRecovery()).toBe('renewal-required')
+          await replaceBinding()
+          expect(await requester.prepareRecovery()).toBe('ready')
+        },
+      )
+
+      test.each(['mbr', 'membership'] as const)(
+        'an admitted %s leaf recovers with its binding',
+        async (binding) => {
+          const { requester, requesterDID, responder } = await params.createBoundRecovery(binding)
+          expect(dids(await responder.rosterEntries())).toContain(requesterDID)
+          expect(await requester.prepareRecovery()).toBe('ready')
+          const request = await requester.createRecoveryRequest('member-binding')
+          const pending = await requester.applyRecovery(
+            await responder.sealGroupInfo(request),
+            'member-binding',
+          )
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
+          expect(await responder.processCommit(pending.commit, {})).toMatchObject({
+            advanced: true,
+          })
+          await pending.onAccepted()
+          expect(await requester.readEpoch()).toBe(await responder.readEpoch())
+          expect(dids(await requester.rosterEntries())).toContain(requesterDID)
+          expect(await requester.prepareRecovery()).toBe('ready')
+        },
+      )
+
+      test.each(['log', 'deny'] as const)(
+        'a management %s entry advances the authenticated ledger',
+        async (op) => {
+          const { requester, responder, buildManagementCommit, buildAdmission } =
+            await params.createBoundRecovery()
+          const before = await requester.readEpoch()
+          const built = await buildManagementCommit(op)
+          expect(built.entries.length).toBeGreaterThan(0)
+          expect(await requester.processCommit(built.commit, built.context)).toMatchObject({
+            advanced: true,
+            epochBefore: before,
+            epochAfter: before + 1,
+          })
+          expect(await requester.getLedger()).toEqual(await responder.getLedger())
+          expect(await requester.getLedger()).toEqual(expect.arrayContaining(built.entries))
+          const admission = await buildAdmission(op === 'log' ? 'unavailable' : 'effective')
+          expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject(
+            op === 'log' ? { advanced: true } : { advanced: false, refusal: 'invalid' },
+          )
+        },
+      )
+
+      test.each(['removed', 'unavailable'] as const)(
+        'a %s member root is refused on admission',
+        async (authority) => {
+          const { requester, buildManagementCommit, buildAdmission } =
+            await params.createBoundRecovery()
+          if (authority === 'removed') {
+            const removal = await buildManagementCommit('remove')
+            expect(await requester.processCommit(removal.commit, removal.context)).toMatchObject({
+              advanced: true,
+            })
+          }
+          const epoch = await requester.readEpoch()
+          const roster = await requester.rosterEntries()
+          const ledger = await requester.getLedger()
+          const admission = await buildAdmission(authority)
+          expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+            advanced: false,
+            refusal: 'binding',
+          })
+          expect(await requester.readEpoch()).toBe(epoch)
+          expect(await requester.rosterEntries()).toEqual(roster)
+          expect(await requester.getLedger()).toEqual(ledger)
+        },
+      )
       test('pending exporter agrees with survivors without adopting, and acceptance is idempotent', async () => {
         await withGroup(2, 'confirmation-exporter', async (group) => {
           const alice = memberAt(group.members, 0)
