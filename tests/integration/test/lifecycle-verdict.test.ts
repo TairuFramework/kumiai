@@ -192,8 +192,15 @@ test('candidate registries retain revocations and stale refusals are advisory', 
   const { createVerdictJudge } = await import(
     new URL('../../../packages/mls-rpc/src/recovery.ts', import.meta.url).href
   )
+  const current = candidate as typeof candidate & {
+    group: GroupHandle
+    sourceTree: GroupHandle['state']['ratchetTree']
+    knownRegistry: DeviceRegistry
+  }
   const known = {
+    ...current.knownRegistry,
     devices: new Map([
+      ...current.knownRegistry.devices,
       [
         s.bob.id,
         {
@@ -203,17 +210,11 @@ test('candidate registries retain revocations and stale refusals are advisory', 
         },
       ],
     ]),
-    controllers: new Map(),
-  }
-  const current = candidate as typeof candidate & {
-    group: GroupHandle
-    sourceTree: GroupHandle['state']['ratchetTree']
-    knownRegistry: DeviceRegistry
   }
   const { assertRetainsKnownEffects, RecoveryKnowledgeError } = await import('@kumiai/mls')
-  expect(() => assertRetainsKnownEffects(fixture.controllerID, known, registrySeed())).toThrow(
-    new RecoveryKnowledgeError('revocation'),
-  )
+  expect(() =>
+    assertRetainsKnownEffects(fixture.controllerID, known, current.knownRegistry),
+  ).toThrow(new RecoveryKnowledgeError('revocation'))
   expect(() => assertRetainsKnownEffects(fixture.controllerID, registrySeed(), known)).not.toThrow()
   const judge = createVerdictJudge({
     group: current.group,
@@ -229,6 +230,40 @@ test('candidate registries retain revocations and stale refusals are advisory', 
     position: 'position',
     commitDigest: 'digest',
   }
+  const control = createVerdictJudge({
+    group: current.group,
+    sourceTree: current.sourceTree,
+    known: current.knownRegistry,
+    requestID: 'stale',
+  })
+  const controlKey = await control.confirmationKey('position', 'digest')
+  expect(recoverySignerEligible({ group: current.group, registry: known, signer: s.bob.id })).toBe(
+    false,
+  )
+  expect(
+    recoverySignerEligible({
+      group: current.group,
+      registry: current.knownRegistry,
+      signer: s.bob.id,
+    }),
+  ).toBe(true)
+  expect(
+    control.judgeVerdict({
+      signer: s.bob.id,
+      verdict: { ...binding, verdict: 'refused', reason: 'policy' },
+    }),
+  ).toBe('authoritative')
+  expect(
+    control.judgeVerdict({
+      signer: s.bob.id,
+      verdict: {
+        ...binding,
+        verdict: 'confirmed',
+        epoch: candidate.epoch,
+        tag: confirmationTag(controlKey, 'stale'),
+      },
+    }),
+  ).toBe('authoritative')
   expect(
     judge.judgeVerdict({
       signer: s.bob.id,

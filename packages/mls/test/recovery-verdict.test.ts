@@ -1,9 +1,10 @@
-import { createRemove, encodeKey, epochHeads } from '@kokuin/controller'
+import { createRemove, encodeKey, epochHeads, foldLog, MAX_LOG_EVENTS } from '@kokuin/controller'
 import { normalizeDID, randomIdentity } from '@kokuin/token'
 import { nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { asControllerLog } from '../src/controller-log.js'
+import { RecoveryKnowledgeError } from '../src/errors.js'
 import { denyEffects, revokeChain } from './fixtures/controller-chain.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -18,9 +19,57 @@ import {
   recoverySignerEligible,
   sealRecoveryVerdict,
 } from '../src/recovery-verdict.js'
-import { registryForLog } from '../src/registry.js'
-import { buildEpoch } from './fixtures/controller-epoch.js'
+import { assertRetainsKnownEffects, registryForLog, registrySeed } from '../src/registry.js'
+import { buildEpoch, saturatedRegistry } from './fixtures/controller-epoch.js'
 import { pipelineGroup } from './fixtures/lifecycle-pipeline.js'
+
+test.each(['missing', 'failed'] as const)(
+  'recovery refuses a %s candidate fold when the known controller has folded state',
+  async (kind) => {
+    const f = await buildEpoch({ members: 1 })
+    const known = registryForLog(f.did, { chain: f.log.chain, events: [] })
+    const projection = known.controllers.get(f.did)
+    const member = f.members[0]
+    if (projection == null || member == null) throw new Error('Missing controller or member')
+    const held = {
+      ...known,
+      controllers: new Map([
+        [
+          f.did,
+          {
+            ...projection,
+            attestations: new Map([[encodeKey(member.identity.publicKey, 'EdDSA'), 1200]]),
+          },
+        ],
+      ]),
+    }
+    const invalid = { ...f.log, events: Array(MAX_LOG_EVENTS + 1).fill(f.log.events[0]) }
+    expect(foldLog(f.did, invalid).ok).toBe(false)
+    const candidate =
+      kind === 'missing'
+        ? registrySeed()
+        : { ...known, controllers: new Map([[f.did, { ...projection, recordedLog: invalid }]]) }
+    expect(() => assertRetainsKnownEffects(f.did, held, candidate)).toThrow(
+      new RecoveryKnowledgeError('epoch-event'),
+    )
+    expect(() => assertRetainsKnownEffects(f.did, registrySeed(), candidate)).not.toThrow()
+    expect(() => assertRetainsKnownEffects(f.did, candidate, candidate)).not.toThrow()
+  },
+)
+
+test('recovery refuses a saturated candidate even when the known epoch has no applied events', async () => {
+  const candidate = await saturatedRegistry()
+  const [did, projection] = [...candidate.controllers][0] ?? []
+  if (did == null || projection?.recordedLog == null) throw new Error('Missing saturated log')
+  const folded = foldLog(did, projection.recordedLog)
+  if (!folded.ok) throw new Error(folded.reason)
+  expect(folded.head.saturated).toBe(true)
+  const known = registryForLog(did, { chain: projection.recordedLog.chain, events: [] })
+  expect(() => assertRetainsKnownEffects(did, known, candidate)).toThrow(
+    new RecoveryKnowledgeError('epoch-event'),
+  )
+  expect(() => assertRetainsKnownEffects(did, registrySeed(), candidate)).not.toThrow()
+})
 
 test('member-rooted signer judged on the candidate registry', async () => {
   vi.spyOn(Date, 'now').mockReturnValue(150_000)

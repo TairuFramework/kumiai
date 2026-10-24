@@ -203,6 +203,25 @@ test('reply whose chain settles past the omitted epoch events is accepted (its f
   ).toThrow(new mls.RecoveryKnowledgeError('attestation'))
 })
 
+test('a settlement that leaves the known epoch open cannot supersede its applied events', async () => {
+  const f = await buildEpoch()
+  const log = settle(f)
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const event = createRenew({
+    did: f.did,
+    head: head(f.did, log),
+    parents: epochHeads(f.did, log),
+    signer: { root: { seed: f.seed, profile: 0 } },
+    add: member.add,
+    lease: 2000,
+  })
+  const known = mls.registryForLog(f.did, { ...log, events: [event] })
+  expect(() => mls.assertRetainsKnownEffects(f.did, known, mls.registryForLog(f.did, log))).toThrow(
+    new mls.RecoveryKnowledgeError('epoch-event'),
+  )
+})
+
 test("reply carrying a reset above the omitted removal's generation is accepted", async () => {
   const f = await removal()
   const candidate = mls.registryForLog(f.did, {
@@ -210,6 +229,37 @@ test("reply carrying a reset above the omitted removal's generation is accepted"
     events: [],
   })
   expect(() => mls.assertRetainsKnownEffects(f.did, f.known, candidate)).not.toThrow()
+})
+
+test('a reset at the same generation cannot supersede an omitted removal', async () => {
+  const f = await buildEpoch()
+  const log = {
+    chain: [f.inception, createReset(f.seed, 0, 1, snapshotOf(f.head))],
+    events: [],
+  }
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const event = createRemove({
+    did: f.did,
+    head: head(f.did, log),
+    parents: epochHeads(f.did, log),
+    signer: { root: { seed: f.seed, profile: 0 } },
+    add: member.add,
+  })
+  const known = mls.registryForLog(f.did, { ...log, events: [event] })
+  expect(known.controllers.get(f.did)?.removedMembers.get(member.add)?.gen).toBe(1)
+  expect(() => mls.assertRetainsKnownEffects(f.did, known, mls.registryForLog(f.did, log))).toThrow(
+    new mls.RecoveryKnowledgeError('removal'),
+  )
+})
+
+test('equivalent authenticated chain representations retain known settlement state', async () => {
+  const f = await buildEpoch()
+  const log = settle(f)
+  const reset = createReset(f.seed, 0, 1)
+  const known = mls.registryForLog(f.did, { chain: [...log.chain, reset], events: [] })
+  const candidate = mls.registryForLog(f.did, { chain: [f.inception, reset], events: [] })
+  expect(() => mls.assertRetainsKnownEffects(f.did, known, candidate)).not.toThrow()
 })
 
 test('settlement does not supersede an omitted removal', async () => {
@@ -259,21 +309,20 @@ test('unapplied event bytes confer no recovery knowledge', async () => {
   ).not.toThrow()
 })
 
-async function recovery() {
+async function recoveryGroup(f: Awaited<ReturnType<typeof buildEpoch>>, log = f.log) {
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
-  const f = await removal()
   const identity = fixture.agent(41)
   const signer = f.members[1]
   if (signer == null) throw new Error('Missing signer')
   let known = (
     await mls.createGroup(identity, 'recovery-knowledge', {
-      controller: await fixture.timedBinding({ identity, iat: 100, exp: 900 }),
-      controllerLog: f.log,
+      controller: await fixture.timedBinding({ identity, iat: 100, exp: 2000 }),
+      controllerLog: log,
     })
   ).group
   const bundle = await mls.createKeyPackageBundle(signer.identity, {
-    controller: { id: f.did, prefix: f.log.chain, member: { add: signer.add, g: 0 }, iat: 100 },
-    controllerLog: f.log,
+    controller: { id: f.did, prefix: log.chain, member: { add: signer.add, g: 0 }, iat: 100 },
+    controllerLog: log,
   })
   const { invite } = await mls.createInvite({
     group: known,
@@ -319,18 +368,19 @@ async function recovery() {
       },
     }),
   })
-  const removed = await mls.revokeWithProof(known, {
-    log: f.removedLog,
-    remove: [{ did: f.a.identity.id, add: f.a.add }],
-  })
-  if (removed.status !== 'built') throw new Error('Expected removal')
-  known = removed.result.newGroup
   return {
-    ...f,
+    signer,
     requester,
     responder,
     group: () => known,
-    publish: () => source.processMessage(removed.result.commitMessage),
+    source: () => source,
+    adopt: (next: GroupHandle) => {
+      known = next
+    },
+    adoptSource: (next: GroupHandle) => {
+      source = next
+    },
+    publish: (message: Uint8Array) => source.processMessage(message),
     pending: async () => {
       const request = await requester.createRecoveryRequest('knowledge')
       return requester.applyRecovery(await responder.sealGroupInfo(request), 'knowledge')
@@ -338,15 +388,126 @@ async function recovery() {
   }
 }
 
+async function recovery() {
+  const f = await removal()
+  const r = await recoveryGroup(f)
+  const removed = await mls.revokeWithProof(r.group(), {
+    log: f.removedLog,
+    remove: [{ did: f.a.identity.id, add: f.a.add }],
+  })
+  if (removed.status !== 'built') throw new Error('Expected removal')
+  r.adopt(removed.result.newGroup)
+  return {
+    ...f,
+    ...r,
+    publish: () => r.publish(removed.result.commitMessage),
+  }
+}
+
+test('recovery cannot roll back a published settlement to revive a lapsed signer', async () => {
+  const f = await buildEpoch()
+  const log = settle(f)
+  const r = await recoveryGroup(f, log)
+  const prior = log.chain.at(-1)
+  if (prior == null) throw new Error('Missing chain head')
+  const snapshot = snapshotOf(head(f.did, log))
+  snapshot.members = snapshot.members.map((member) =>
+    member.add === r.signer.add ? { ...member, lease: 200 } : member,
+  )
+  const settled = {
+    chain: [
+      ...log.chain,
+      createRotate({
+        seed: f.seed,
+        profile: 0,
+        did: f.did,
+        prior: prior.event,
+        snapshot,
+      }),
+    ],
+    events: [],
+  }
+  const published = await mls.publishControllerLog(r.group(), settled)
+  if (published == null) throw new Error('Expected settlement publication')
+  r.adopt(published.newGroup)
+  vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+  const lease = (registry: DeviceRegistry) => {
+    const recorded = registry.controllers.get(f.did)?.recordedLog
+    if (recorded == null) throw new Error('Missing log')
+    return head(f.did, recorded).members.get(r.signer.add)?.lease
+  }
+  expect(lease(r.group().registry)).toBe(200)
+  expect(lease(r.source().registry)).toBe(1000)
+  expect(
+    mls.recoverySignerEligible({
+      group: r.group(),
+      registry: r.group().registry,
+      signer: r.signer.identity.id,
+    }),
+  ).toBe(false)
+  expect(
+    mls.recoverySignerEligible({
+      group: r.group(),
+      registry: r.source().registry,
+      signer: r.signer.identity.id,
+    }),
+  ).toBe(true)
+  const retention = vi.spyOn(mls, 'assertRetainsKnownEffects')
+  const pending = await r.pending()
+  if (pending != null && !('renewalRequired' in pending)) await pending.onAccepted()
+  expect(lease(r.group().registry)).toBe(200)
+  expect(pending).toBeNull()
+  expect(retention.mock.results).toContainEqual({
+    type: 'throw',
+    value: new mls.RecoveryKnowledgeError('forked'),
+  })
+  expect(retention.mock.results[0]?.value).toBeInstanceOf(mls.RecoveryKnowledgeError)
+  expect(retention.mock.results[0]?.value).toHaveProperty('reason', 'forked')
+  expect(
+    mls.recoverySignerEligible({
+      group: r.group(),
+      registry: r.group().registry,
+      signer: r.signer.identity.id,
+    }),
+  ).toBe(false)
+})
+
+test.each(['at', 'ahead'] as const)(
+  'a responder %s the known chain is accepted',
+  async (position) => {
+    const f = await buildEpoch()
+    const log = settle(f)
+    const r = await recoveryGroup(f, log)
+    if (position === 'ahead') {
+      const published = await mls.publishControllerLog(r.source(), settle(f, log))
+      if (published == null) throw new Error('Expected settlement publication')
+      r.adoptSource(published.newGroup)
+    }
+    const pending = await r.pending()
+    if (pending == null || 'renewalRequired' in pending) throw new Error('Expected candidate')
+    await pending.onAccepted()
+    const recorded = r.group().registry.controllers.get(f.did)?.recordedLog
+    expect(recorded?.chain.length).toBe(position === 'ahead' ? 3 : 2)
+  },
+)
+
 test('an effective member reply omitting the known removal is ineligible', async () => {
   const f = await recovery()
+  const retention = vi.spyOn(mls, 'assertRetainsKnownEffects')
   await expect(f.pending()).resolves.toBeNull()
+  expect(retention.mock.results).toContainEqual({
+    type: 'throw',
+    value: new mls.RecoveryKnowledgeError('removal'),
+  })
+  expect(retention.mock.results[0]?.value).toBeInstanceOf(mls.RecoveryKnowledgeError)
+  expect(retention.mock.results[0]?.value).toHaveProperty('reason', 'removal')
   expect(f.group().registry.controllers.get(f.did)?.removedMembers.has(f.a.add)).toBe(true)
 })
 
 test('known removal survives adoption and restore', async () => {
   const f = await recovery()
   await f.publish()
+  const retention = vi.spyOn(mls, 'assertRetainsKnownEffects')
   const pending = await f.pending()
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected candidate')
   const candidate = pending as typeof pending & {
@@ -354,7 +515,13 @@ test('known removal survives adoption and restore', async () => {
     knownRegistry: DeviceRegistry
   }
   expect(candidate.knownRegistry).toBe(candidate.group.registry)
+  const checked = retention.mock.calls[0]?.[2]
+  expect(checked).toBeDefined()
+  expect(candidate.group.registry).toEqual(checked)
+  expect(candidate.group.ledgerTokens).toEqual(f.source().ledgerTokens)
   await pending.onAccepted()
+  expect(f.group().registry).toBe(candidate.group.registry)
+  expect(f.group().registry).toEqual(checked)
   expect(f.group().registry.controllers.get(f.did)?.removedMembers.get(f.a.add)).toMatchObject({
     did: f.a.identity.id,
     gen: 0,

@@ -481,9 +481,15 @@ export function assertRetainsKnownEffects(
   const before = held?.recordedLog == null ? undefined : foldControllerLog(did, held.recordedLog)
   const after =
     offered?.recordedLog == null ? undefined : foldControllerLog(did, offered.recordedLog)
+  if (before?.ok && (!after?.ok || after.head.saturated))
+    throw new RecoveryKnowledgeError('epoch-event')
   if (held?.recordedLog != null && offered?.recordedLog != null) {
     const branches = resolveBranches(did, [held.recordedLog.chain, offered.recordedLog.chain])
-    if (!branches.ok) throw new RecoveryKnowledgeError('forked')
+    if (
+      !branches.ok ||
+      (before?.ok && after?.ok && !after.states.some((state) => state.digest === before.head.epoch))
+    )
+      throw new RecoveryKnowledgeError('forked')
   }
   if (
     (offered?.timeFloor ?? 0) < (held?.timeFloor ?? 0) ||
