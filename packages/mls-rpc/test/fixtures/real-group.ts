@@ -32,6 +32,7 @@ export async function createRealBoundRecovery(
         member.handle = next
       },
     }),
+  options: { replaceStaleLeaf?: boolean } = {},
 ) {
   const fixture = (await import(
     new URL('../../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -41,19 +42,38 @@ export async function createRealBoundRecovery(
       identity: OwnIdentity
       iat: number
       exp: number
+      parent?: string
+      issuer?: OwnIdentity
     }) => Promise<ControllerBinding>
   }
   const now = Math.floor(Date.now() / 1000)
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)
-  const cached = await fixture.timedBinding({ identity: bob, iat: now - 20, exp: now + 1000 })
+  const creatorBinding = await fixture.timedBinding({
+    identity: alice,
+    iat: now - 20,
+    exp: now + 1000,
+  })
+  const cached = await fixture.timedBinding({
+    identity: bob,
+    iat: options.replaceStaleLeaf ? now - 5 : now - 20,
+    exp: now + 1000,
+    ...(options.replaceStaleLeaf ? { parent: creatorBinding.capability, issuer: alice } : {}),
+  })
   let offered = cached
   let source = (
     await createGroup(alice, 'bound-conformance', {
-      controller: await fixture.timedBinding({ identity: alice, iat: now - 20, exp: now + 1000 }),
+      controller: creatorBinding,
       controllerLog: { chain: cached.prefix, events: [] },
     })
   ).group
+  if (options.replaceStaleLeaf) {
+    const staleBundle = await createKeyPackageBundle(bob, {
+      controller: await fixture.timedBinding({ identity: bob, iat: now - 10, exp: now + 1000 }),
+    })
+    const stale = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
+    source = (await commitInvite(source, staleBundle.publicPackage, stale.invite)).newGroup
+  }
   const bundle = await createKeyPackageBundle(bob, { controller: cached })
   const { invite } = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
   const added = await commitInvite(source, bundle.publicPackage, invite)

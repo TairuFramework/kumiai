@@ -693,7 +693,7 @@ test.each(['author', 'receiver'] as const)(
 )
 
 test.each(['completed', 'failed'] as const)(
-  'retrying an invite after a %s build preserves its input and carries a fresh clock',
+  'retrying an invite after a %s build uses its pristine entries',
   async (firstAttempt) => {
     const f = await fixture()
     vi.mocked(Date.now).mockReturnValue(170000)
@@ -728,13 +728,15 @@ test.each(['completed', 'failed'] as const)(
         failure,
       )
     } else {
-      await api.commitInvite(receiving.author, bundle.publicPackage, invite)
+      const completed = await api.commitInvite(receiving.author, bundle.publicPackage, invite)
+      expect(completed.invite).toBe(invite)
+      expect(invite.ledgerEntries).toEqual(completed.newGroup.ledgerTokens)
     }
-    expect(invite).toEqual(originalInvite)
+    if (firstAttempt === 'failed') expect(invite).toEqual(originalInvite)
     vi.mocked(Date.now).mockReturnValue(180000)
     const result = await api.commitInvite(receiving.author, bundle.publicPackage, invite)
     expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toEqual({ op: 'clock', time: 150 })
-    expect(invite).toEqual(originalInvite)
+    expect(result.invite).toBe(invite)
     expect(result.invite.ledgerEntries).toEqual(result.newGroup.ledgerTokens)
     const clock = await signLedgerEntry(f.identity, {
       type: DEVICE_ENTRY_TYPE,
@@ -753,7 +755,15 @@ test.each(['completed', 'failed'] as const)(
       receiving.author,
       await timedBinding({ identity: f.identity, iat: 175, exp: 900 }),
     )
+    const deliveredInvite = structuredClone(invite)
+    const failure = new Error('Retry build failed')
+    vi.spyOn(lifecycle, 'prepareLifecycleGate').mockRejectedValueOnce(failure)
+    await expect(api.commitInvite(renewed.newGroup, bundle.publicPackage, invite)).rejects.toBe(
+      failure,
+    )
+    expect(invite).toEqual(deliveredInvite)
     const withoutClock = await api.commitInvite(renewed.newGroup, bundle.publicPackage, invite)
+    expect(withoutClock.invite).toBe(invite)
     expect(withoutClock.newGroup.ledgerTokens).toEqual(originalInvite.ledgerEntries)
     expect(withoutClock.invite).toEqual(originalInvite)
     expect(invite).toEqual(originalInvite)

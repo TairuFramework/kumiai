@@ -25,6 +25,7 @@ import {
   type RecoveryBinding,
   type RecoveryBindingRequest,
 } from '../src/recovery.js'
+import { createRealBoundRecovery } from './fixtures/real-group.js'
 
 // Imported at collection, not inside the first test: transforming the cross-package fixture under
 // load overran that test's 5s timeout.
@@ -125,6 +126,32 @@ async function chainedRecovery() {
     source: () => source,
   }
 }
+
+test('the real recovery fixture delivers an input invite with its preservation clock', async () => {
+  const date = vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  try {
+    const f = await createRealBoundRecovery(
+      async (member) => {
+        expect(member.handle.ledger.map(({ verified }) => verified.entry.value)).toEqual([
+          expect.objectContaining({ op: 'seed' }),
+          { op: 'clock', time: 140 },
+        ])
+        return simpleHandleAccess({
+          handle: () => member.handle,
+          adopt: (next) => {
+            member.handle = next
+          },
+        })
+      },
+      { replaceStaleLeaf: true },
+    )
+    expect(await f.requester.exportRecoverySecret()).toEqual(
+      await f.responder.exportRecoverySecret(),
+    )
+  } finally {
+    date.mockRestore()
+  }
+})
 
 async function recover(
   fixture: Awaited<ReturnType<typeof chainedRecovery>>,

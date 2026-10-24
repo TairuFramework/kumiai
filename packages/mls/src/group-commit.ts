@@ -103,6 +103,9 @@ export type CreateInviteResult = {
   invite: Invite
 }
 
+// Completed builds refresh the handle, but retries must never enact a previous build's clock.
+const INVITE_ENTRIES = new WeakMap<Invite, ReadonlyArray<string>>()
+
 /** Create an invite without adding its recipient; commitInvite enacts the admission. */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
   const { group, identity, recipientDID } = params
@@ -151,14 +154,14 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
       }),
     ]
   }
-  return {
-    invite: {
-      groupID: group.groupID,
-      inviterID: identity.id,
-      recipientDID,
-      ledgerEntries: [...group.ledgerTokens, ...appended],
-    },
+  const invite: Invite = {
+    groupID: group.groupID,
+    inviterID: identity.id,
+    recipientDID,
+    ledgerEntries: [...group.ledgerTokens, ...appended],
   }
+  INVITE_ENTRIES.set(invite, [...invite.ledgerEntries])
+  return { invite }
 }
 
 /**
@@ -467,14 +470,13 @@ export async function commitWithEntries(
  * corrupting the chain for every receiver.
  */
 function entriesAddedByInvite(group: GroupHandle, invite: Invite): Array<string> {
+  const entries = INVITE_ENTRIES.get(invite) ?? [...invite.ledgerEntries]
+  INVITE_ENTRIES.set(invite, entries)
   const held = group.ledgerTokens
-  if (
-    invite.ledgerEntries.length < held.length ||
-    held.some((token, index) => invite.ledgerEntries[index] !== token)
-  ) {
+  if (entries.length < held.length || held.some((token, index) => entries[index] !== token)) {
     throw new Error("commitInvite: the invite's ledger does not extend this group's own")
   }
-  return invite.ledgerEntries.slice(held.length)
+  return entries.slice(held.length)
 }
 
 export type CommitLedgerEntriesResult = {
@@ -524,7 +526,7 @@ export async function commitLedgerEntries(
 }
 
 export type CommitInviteResult = {
-  /** Invite copy containing the complete ledger, including any preservation clock. */
+  /** The input invite, updated with the complete ledger, including any preservation clock. */
   invite: Invite
   /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
   commitMessage: Uint8Array
@@ -551,7 +553,8 @@ export type CommitInviteResult = {
  * The invite carries the group's whole history (a joiner has nothing to fold it onto),
  * but only the entries beyond that history ride the commit — see
  * {@link entriesAddedByInvite} and {@link commitWithEntries}.
- * Deliver the returned invite with the Welcome so it includes any preservation clock.
+ * On success, updates the input invite with the complete ledger for delivery with the Welcome.
+ * Failed attempts leave it unchanged. Retries always build from its original ledger entries.
  *
  * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
  * `group`. The caller MUST adopt `newGroup` — never reuse `group` — before the next
@@ -649,10 +652,13 @@ export async function commitInvite(
     }
     // Preservation may append a clock after the invite was prepared.
     await newGroup.applyLedgerEntries(result.enacted)
+    const commitMessage = encode(mlsMessageEncoder, result.commit)
+    const welcomeMessage = encode(mlsMessageEncoder, result.welcome)
+    invite.ledgerEntries = newGroup.ledgerTokens
     return {
-      invite: { ...invite, ledgerEntries: newGroup.ledgerTokens },
-      commitMessage: encode(mlsMessageEncoder, result.commit),
-      welcomeMessage: encode(mlsMessageEncoder, result.welcome),
+      invite,
+      commitMessage,
+      welcomeMessage,
       newGroup,
       epoch: newGroup.epoch,
     }

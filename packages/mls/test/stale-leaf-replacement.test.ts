@@ -64,11 +64,11 @@ test('assertNewerBinding orders a membership binding against a capability bindin
 })
 
 /** An own-agents group of A, a stale leaf for B whose handle is lost, and a live C. */
-async function staleGroup() {
+async function staleGroup(bobIssuedAt = 100) {
   const setup = await pipelineGroup()
   const bob = agent(51)
   const carol = agent(52)
-  const bobBinding = await timedBinding({ identity: bob, iat: 100, exp: 200 })
+  const bobBinding = await timedBinding({ identity: bob, iat: bobIssuedAt, exp: 200 })
   const withBob = await lowLevelWelcome(setup.group, bob, bobBinding)
   const withCarol = await lowLevelWelcome(
     withBob.author,
@@ -166,6 +166,43 @@ test('admitting a fresh key package replaces the stale leaf of the same DID', as
   const opened = await bobGroup.decrypt(fromCarol)
   expect(new TextDecoder().decode(opened.payload)).toBe('welcome back')
   expect(opened.senderDID).toBe(carol.id)
+})
+
+test('the delivered input invite includes the stale replacement preservation clock', async () => {
+  const f = await staleGroup(140)
+  const parent = f.author.bindingOfDID(f.identity.id)?.capability
+  if (parent == null) throw new Error('Missing inviter capability')
+  const bundle = await rawBundle(
+    f.author,
+    f.bob,
+    await timedBinding({ identity: f.bob, iat: 145, exp: 200, parent, issuer: f.identity }),
+  )
+  const before = [...f.invite.ledgerEntries]
+  const result = await commitInvite(f.author, bundle.publicPackage, f.invite)
+  const clock = await signLedgerEntry(f.identity, {
+    type: 'kumiai.device',
+    groupID: f.author.groupID,
+    subject: controllerID,
+    value: { op: 'clock', time: 140 },
+  })
+  expect(result.newGroup.ledgerTokens).toEqual([...before, clock])
+  for (const token of f.invite.ledgerEntries) f.tokens.set(ledgerEntryDigest(token), token)
+  const { group: joined } = await processWelcome({
+    identity: f.bob,
+    invite: f.invite,
+    welcome: result.welcomeMessage,
+    keyPackageBundle: { ...bundle, ownerDID: f.bob.id },
+  })
+  expect(result.invite).toBe(f.invite)
+  expect(joined.ledgerTokens).toEqual([...before, clock])
+  expect(joined.registry.controllers.get(controllerID)?.timeFloor).toBe(140)
+  await f.carolGroup.processMessage(result.commitMessage)
+  expect(f.carolGroup.registry).toEqual(joined.registry)
+  const payload = utf8.encode('replacement with preserved time')
+  await expect(f.carolGroup.decrypt(await joined.encrypt(payload))).resolves.toMatchObject({
+    payload,
+    senderDID: f.bob.id,
+  })
 })
 
 function admissionsOf(group: GroupHandle): Array<string> {
