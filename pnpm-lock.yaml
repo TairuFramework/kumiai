@@ -201,8 +201,8 @@ catalogs:
       specifier: ^0.5.2
       version: 0.5.2
     '@kokuin/controller':
-      specifier: ^0.2.4
-      version: 0.2.4
+      specifier: ^0.2.5
+      version: 0.2.5
     '@kokuin/expo':
       specifier: ^0.4.2
       version: 0.4.2
@@ -585,7 +585,7 @@ importers:
         version: 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/controller':
         specifier: 'catalog:'
-        version: 0.2.4(@logtape/logtape@2.4.2)
+        version: 0.2.5(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.6.2(@logtape/logtape@2.4.2)
@@ -796,7 +796,7 @@ importers:
         version: 0.2.0
       '@kokuin/controller':
         specifier: 'catalog:'
-        version: 0.2.4(@logtape/logtape@2.4.2)
+        version: 0.2.5(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.6.2(@logtape/logtape@2.4.2)
@@ -1738,8 +1738,8 @@ packages:
   '@kokuin/capability@0.5.2':
     resolution: {integrity: sha512-TSHpklIIpHv6jjv4cZ0gPy/Id4noEIy4wuSCkrNLSNJSCWsHXh4g9Qbprp79OgNOWfFODAGqTvYpWsNFh/8jdw==}
 
-  '@kokuin/controller@0.2.4':
-    resolution: {integrity: sha512-lncv9XhO54hSOoB779p00Vy8gJEo38HUP8/8eD1Qg3WDFgko5pjwOkPRp1zLVMuxMaeu/OCgF0f9o3aFa1xRCw==}
+  '@kokuin/controller@0.2.5':
+    resolution: {integrity: sha512-ApWN7AIuhupK2hBmNlqsswdMPu2m+lPpNZTZ26wkwXaUGJx/L3M4/3bNFVcjhEIU+9JVY+A77u+837pRjA5Z6g==}
 
   '@kokuin/expo@0.4.2':
     resolution: {integrity: sha512-vxtJltdEGTAnBy/q2ZYqNOwh++al8jLbRZrZySi+EaEY7EkF7iO1bi/pu+gGUViQLJJ6+ewntCpNqEQhSC0t2w==}
@@ -6026,7 +6026,7 @@ snapshots:
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@kokuin/controller@0.2.4(@logtape/logtape@2.4.2)':
+  '@kokuin/controller@0.2.5(@logtape/logtape@2.4.2)':
     dependencies:
       '@kokuin/token': 0.6.2(@logtape/logtape@2.4.2)
       '@noble/curves': 2.4.0

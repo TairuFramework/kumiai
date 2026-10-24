@@ -413,6 +413,10 @@
   dir: packages/mls
   intents:
     - management-tier-0-12
+"@kumiai/mls@0.12.1":
+  dir: packages/mls
+  intents:
+    - settled-removal-tombstones
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
