@@ -22,6 +22,7 @@ import {
   createGroupCrypto,
   createGroupMLS,
   type GroupMLSParams,
+  guardedReplace,
   type LedgerEntrySlot,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
@@ -215,7 +216,7 @@ export function makeMember(params: MakeMemberParams): Member {
     adopt: adoptHandle,
     persist: (next) => stateStore.save(next),
   })
-  const adopt = (next: GroupHandle) => access.replace(next)
+  const adopt = (next: GroupHandle) => guardedReplace(access, next)
   const pending =
     pendingStore == null
       ? undefined

@@ -19,6 +19,8 @@ depend on both.
 
 - `simpleHandleAccess({ handle, adopt, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
+- `guardedReplace(access, next)` — replace through `retainsKnownEffects(next)`, the guard that
+  refuses a handle dropping lifecycle effects the live handle knows; it throws if `access` skipped it.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
 - `createGroupMLS({ access, identity, entrySlot, recoverySecret? })` — `GroupMLS` over the same
   access.
@@ -33,7 +35,7 @@ depend on both.
 
 Both factories take the same `access` instance. The adapter reads the current handle through
 `handle: () => GroupHandle`, because authored commits and recovery replace it wholesale. A host
-adopts an authored commit through `access.replace(next)` after acceptance. The adapter saves before
+adopts an authored commit through `guardedReplace(access, next)` after acceptance. The adapter saves before
 publishing the replacement and publishes its synchronous epoch hint after a successful save.
 
 Before every host commit build, `createGroupMLS` persists a handshake reservation through `access.mutate`.
@@ -79,7 +81,8 @@ const mls = createGroupMLS({ access, identity, entrySlot })
 A host with its own handle store implements the port instead:
 - `read(fn)` lends the handle for the callback only. `mutate(fn)` serialises with every other
   operation and resolves after the state is stored; `fn`'s `persist` argument goes to
-  `processMessage`, `bootstrapLedger` and `reserveHandshakeGeneration`. `replace(next)` stores before publishing. A transactional
+  `processMessage`, `bootstrapLedger` and `reserveHandshakeGeneration`. `replace(next, guard)` runs `guard(live)` under the lock first, aborts if it throws, then stores
+  before publishing. A transactional
   host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
 - `epoch()` is a synchronous hint. Publish it only after the outermost successful commit, and restore
   it on rollback. No port decision reads it: every one uses an epoch read under the lock.

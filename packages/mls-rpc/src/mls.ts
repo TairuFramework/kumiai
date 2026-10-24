@@ -1,6 +1,5 @@
 import type { OwnIdentity } from '@kokuin/token'
 import {
-  assertRetainsKnownEffects,
   confirmationKey,
   createRecoveryRequest,
   encodeGroupAnchor,
@@ -31,7 +30,7 @@ import type {
   RosterEntry,
 } from '@kumiai/rpc'
 
-import type { HandleAccess } from './access.js'
+import { guardedReplace, type HandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
 import {
   createRecoveryBindingState,
@@ -436,16 +435,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         confirmationKey: judge.confirmationKey,
         judgeVerdict: judge.judgeVerdict,
         onAccepted: () => {
-          accepted ??= access
-            .replace(rejoined.group, (live) => {
-              const controller = live.anchor.controller
-              if (controller != null)
-                assertRetainsKnownEffects(controller, live.registry, rejoined.group.registry)
-            })
-            .catch((error: unknown) => {
-              accepted = undefined
-              throw error
-            })
+          accepted ??= guardedReplace(access, rejoined.group).catch((error: unknown) => {
+            accepted = undefined
+            throw error
+          })
           return accepted
         },
       }

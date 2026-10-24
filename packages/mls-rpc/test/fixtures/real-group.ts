@@ -18,6 +18,7 @@ import {
 import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 
 import { type HandleAccess, simpleHandleAccess } from '../../src/access.js'
+import { guardedReplace } from '../../src/index.js'
 import { createGroupMLS, createLedgerEntrySlot, type LedgerEntrySlot } from '../../src/mls.js'
 
 export type RealMember = {
@@ -153,7 +154,7 @@ export async function createRealBoundRecovery(
     responder,
     ratchet: async () => {
       const current = await access.read((handle) => handle)
-      await access.replace((await renewLeaf(current, cached)).newGroup)
+      await guardedReplace(access, (await renewLeaf(current, cached)).newGroup)
     },
     replaceBinding: async () => {
       offered = await management.binding(now - 10)

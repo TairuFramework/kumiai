@@ -14,6 +14,7 @@ import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
+  guardedReplace,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import {
@@ -410,7 +411,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
       bodies: offered.invite.ledgerEntries,
       kind: 'invite',
       journal: encodeJournal(rotated.newGroup),
-      onAccepted: () => s.aliceAccess.replace(rotated.newGroup),
+      onAccepted: () => guardedReplace(s.aliceAccess, rotated.newGroup),
     }
   })
   const seal = s.aliceMLS.sealGroupInfo.bind(s.aliceMLS)
@@ -419,9 +420,9 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     .mockImplementation(seal)
   const adopted: Array<number> = []
   const replace = s.bobAccess.replace.bind(s.bobAccess)
-  vi.spyOn(s.bobAccess, 'replace').mockImplementation(async (group) => {
+  vi.spyOn(s.bobAccess, 'replace').mockImplementation(async (group, guard) => {
     adopted.push(Number(group.epoch))
-    await replace(group)
+    await replace(group, guard)
   })
   let supersededOpened = false
   const open = s.bobMLS.openRecoveryVerdict.bind(s.bobMLS)
@@ -683,7 +684,7 @@ test.each([false, true])(
     const leaf = s.aliceGroup().findMemberLeafIndex(s.carolID.id)
     if (leaf == null) throw new Error('Missing removed leaf')
     const removal = await removeMember(s.aliceGroup(), leaf)
-    await s.aliceAccess.replace(removal.newGroup)
+    await guardedReplace(s.aliceAccess, removal.newGroup)
     expect(s.bobGroup().findMemberLeafIndex(s.carolID.id)).toBeDefined()
     expect(s.aliceGroup().findMemberLeafIndex(s.carolID.id)).toBeUndefined()
     const { sealRealRecoveryVerdict } = await import(
@@ -770,7 +771,7 @@ test.each(['policy', 'invalid'] as const)(
         commitPolicy: () => 'reject',
       })
       await rejector.bootstrapLedger(original.ledgerTokens)
-      await s.aliceAccess.replace(rejector)
+      await guardedReplace(s.aliceAccess, rejector)
     } else {
       const { lowLevelExternal } = await import(
         new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href

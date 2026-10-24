@@ -170,7 +170,7 @@ export async function createTransactionalAccess(
       locked(async () => {
         await store.settled()
         const row = store.snapshot()
-        guard?.(await restore(row))
+        guard(await restore(row))
         await store.save(row.revision, encodeClientState(next.state), next.ledgerTokens)
         publish(next, row.revision + 1)
         next.confirmAdopted()

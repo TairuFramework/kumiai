@@ -4,6 +4,7 @@ import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
+  guardedReplace,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import { assertFrameFits, commitTopic, createGroupPeer, FrameTooLargeError } from '@kumiai/rpc'
@@ -116,7 +117,7 @@ test('a final frame one byte above the hub cap is rejected before journalling or
         bodies: [token],
         kind: 'ledger',
         journal: encodeClientState(built.newGroup.state),
-        onAccepted: async () => access.replace(built.newGroup),
+        onAccepted: async () => guardedReplace(access, built.newGroup),
       })),
     ).rejects.toBeInstanceOf(FrameTooLargeError)
     expect(put).toHaveBeenCalledTimes(0)

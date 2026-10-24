@@ -22,6 +22,7 @@ import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
+  guardedReplace,
   type HandleAccess,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
@@ -509,7 +510,7 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
         value: 'third',
       }),
     ])
-    await aliceAccess.replace(third.newGroup)
+    await guardedReplace(aliceAccess, third.newGroup)
     await connection.publish({
       senderDID: fixture.agent(75).id,
       topicID,
