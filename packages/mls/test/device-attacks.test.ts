@@ -276,6 +276,10 @@ describe('attack: history hidden in advisory or clock entries', () => {
 
   test.each(['clock', 'beacon'] as const)('author rejects hidden history on %s', async (op) => {
     const { group, identity } = await lifecycleGroup()
+    const [seed] = structuredClone(group.ledger)
+    if (seed == null) throw new Error('Missing seed')
+    expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+    expect(group.ledgerTokens).toEqual([seed.token])
     const binding = group.bindingOfDID(identity.id)
     if (binding?.capability == null) throw new Error('Missing leaf capability')
     const base: DeviceValue =
@@ -295,7 +299,8 @@ describe('attack: history hidden in advisory or clock entries', () => {
       await expect(
         commitWithEntries({ group, extraProposals: [], enacted: [token], requireAdmin: false }),
       ).rejects.toThrow()
-      expect(group.ledgerTokens).toHaveLength(1)
+      expect(group.ledgerTokens).toEqual([seed.token])
+      expect(group.ledger).toEqual([seed])
       expect(group.registry.controllers.size).toBe(1)
     }
   })
@@ -307,6 +312,10 @@ describe('attack: history hidden in advisory or clock entries', () => {
         const { group, identity, tokens } = await lifecycleGroup()
         const recipient = agent(51)
         const members = await addMember(group, recipient, await bindingFor(recipient))
+        const [seed] = structuredClone(members.joined.ledger)
+        if (seed == null) throw new Error('Missing seed')
+        expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+        expect(members.joined.ledgerTokens).toEqual([seed.token])
         const binding = members.group.bindingOfDID(identity.id)
         if (binding?.capability == null) throw new Error('Missing leaf capability')
         const base: DeviceValue =
@@ -329,7 +338,8 @@ describe('attack: history hidden in advisory or clock entries', () => {
         await expect(members.joined.processMessage(message)).rejects.toThrow()
         expect(members.joined.epoch).toBe(epoch)
         expect(members.joined.registry).toBe(registry)
-        expect(members.joined.ledgerTokens).toHaveLength(1)
+        expect(members.joined.ledgerTokens).toEqual([seed.token])
+        expect(members.joined.ledger).toEqual([seed])
       }
     },
   )
@@ -539,6 +549,10 @@ describe('attack: reserved lifecycle entries', () => {
       const { group, identity, tokens } = await lifecycleGroup()
       const recipient = agent(51)
       const members = await addMember(group, recipient, await bindingFor(recipient))
+      const [seed] = structuredClone(members.joined.ledger)
+      if (seed == null) throw new Error('Missing seed')
+      expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+      expect(members.joined.ledgerTokens).toEqual([seed.token])
       const token = await signLedgerEntry(identity, {
         type,
         groupID: group.groupID,
@@ -559,7 +573,8 @@ describe('attack: reserved lifecycle entries', () => {
       await expect(members.joined.processMessage(message)).rejects.toThrow()
       expect(members.joined.epoch).toBe(epoch)
       expect(members.joined.roster.roles).toEqual(new Map([[controllerID, 'admin']]))
-      expect(members.joined.ledgerTokens).toHaveLength(1)
+      expect(members.joined.ledgerTokens).toEqual([seed.token])
+      expect(members.joined.ledger).toEqual([seed])
     },
   )
 })

@@ -239,8 +239,9 @@ export type CommitWithEntriesParams = {
  */
 export async function commitWithEntries(
   params: CommitWithEntriesParams,
-): Promise<Awaited<ReturnType<typeof createCommit>>> {
-  const { group, extraProposals, enacted } = params
+): Promise<Awaited<ReturnType<typeof createCommit>> & { enacted: Array<string> }> {
+  const { group, extraProposals } = params
+  const enacted = [...params.enacted]
   if (group.anchor.controller != null && group.findMemberLeafIndex(group.credential.id) == null) {
     throw new Error('the committer must hold a leaf')
   }
@@ -410,10 +411,10 @@ export async function commitWithEntries(
       stage: 'full',
       mode: 'admit',
     },
-    () =>
+    (context) =>
       createCommit({
         context: {
-          ...group.context,
+          ...context,
           authService: {
             validateCredential: async (credential, key) => {
               const update = incoming.proposals.find(
@@ -437,7 +438,7 @@ export async function commitWithEntries(
                       ? 'retain'
                       : 'admit',
                 },
-                () => group.context.authService.validateCredential(credential, key),
+                (judgedContext) => judgedContext.authService.validateCredential(credential, key),
               )
             },
           },
@@ -451,7 +452,7 @@ export async function commitWithEntries(
       }),
   )
   await gate.postApply(result.newState)
-  return result
+  return { ...result, enacted }
 }
 
 /**
@@ -513,7 +514,7 @@ export async function commitLedgerEntries(
     }
     const result = await commitWithEntries({ group, extraProposals: [], enacted: tokens })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(tokens)
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -523,6 +524,8 @@ export async function commitLedgerEntries(
 }
 
 export type CommitInviteResult = {
+  /** Invite copy containing the complete ledger, including any preservation clock. */
+  invite: Invite
   /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
   commitMessage: Uint8Array
   /** Framed MLSMessage(Welcome) bytes. Delivered to the new member. */
@@ -548,6 +551,7 @@ export type CommitInviteResult = {
  * The invite carries the group's whole history (a joiner has nothing to fold it onto),
  * but only the entries beyond that history ride the commit — see
  * {@link entriesAddedByInvite} and {@link commitWithEntries}.
+ * Deliver the returned invite with the Welcome so it includes any preservation clock.
  *
  * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
  * `group`. The caller MUST adopt `newGroup` — never reuse `group` — before the next
@@ -644,9 +648,9 @@ export async function commitInvite(
       throw new Error('commitInvite: expected a Welcome message for the add proposal')
     }
     // Preservation may append a clock after the invite was prepared.
-    await newGroup.applyLedgerEntries(enacted)
-    invite.ledgerEntries = newGroup.ledgerTokens
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
+      invite: { ...invite, ledgerEntries: newGroup.ledgerTokens },
       commitMessage: encode(mlsMessageEncoder, result.commit),
       welcomeMessage: encode(mlsMessageEncoder, result.welcome),
       newGroup,

@@ -143,7 +143,7 @@ export async function commitSelfRemovals(group: GroupHandle): Promise<CommitResu
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(tokens)
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -222,7 +222,7 @@ async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult
   const historical = result.newState.historicalReceiverData.get(group.epoch)
   if (historical != null && commitState != null) historical.ratchetTree = group.state.ratchetTree
   const newGroup = deriveGroup(group, result.newState)
-  await newGroup.applyLedgerEntries(tokens)
+  await newGroup.applyLedgerEntries(result.enacted)
   return {
     commitMessage: encode(mlsMessageEncoder, result.commit),
     newGroup,

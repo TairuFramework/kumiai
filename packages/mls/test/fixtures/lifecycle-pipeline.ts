@@ -95,7 +95,12 @@ export async function pipelineGroup(options: PipelineGroupOptions = {}) {
     ...(options.standard
       ? {}
       : {
-          controller: await timedBinding({ identity, iat: 100, exp: 200 }),
+          controller: await timedBinding({
+            identity,
+            iat: 100,
+            exp: 200,
+            prefix: options.controllerLog?.chain,
+          }),
           controllerLog: options.controllerLog ?? asControllerLog([inception]),
         }),
     leafLifetime: options.leafLifetime,

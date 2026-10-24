@@ -144,24 +144,24 @@ export async function createGroup(
   const headIndex = extensions.findIndex((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)
   if (tokens.length > 0 && headIndex >= 0) extensions[headIndex] = head
   else if (headIndex < 0) extensions.push(head)
-  const statePromise = generateKeyPackageWithKey({
-    credential: mlsCredential,
-    signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
-    cipherSuite: context.cipherSuite,
-    capabilities: buildLeafCapabilities(extensions, options?.capabilities),
-  }).then((keyPackage) => {
-    return mlsCreateGroup({
-      context,
-      groupId: new TextEncoder().encode(groupID),
-      keyPackage: keyPackage.publicPackage,
-      privateKeyPackage: keyPackage.privatePackage,
-      extensions,
-    })
-  })
   const state = await withJudging(
     context,
     { registry, stage: 'full', mode: 'admit' },
-    () => statePromise,
+    async (judgedContext) => {
+      const keyPackage = await generateKeyPackageWithKey({
+        credential: mlsCredential,
+        signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
+        cipherSuite: judgedContext.cipherSuite,
+        capabilities: buildLeafCapabilities(extensions, options?.capabilities),
+      })
+      return mlsCreateGroup({
+        context: judgedContext,
+        groupId: new TextEncoder().encode(groupID),
+        keyPackage: keyPackage.publicPackage,
+        privateKeyPackage: keyPackage.privatePackage,
+        extensions,
+      })
+    },
   )
 
   const credential: MemberCredential = {

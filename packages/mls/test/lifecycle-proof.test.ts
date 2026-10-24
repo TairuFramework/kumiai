@@ -14,7 +14,7 @@ import { beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
-import { foldChain } from '../src/controller-log.js'
+import { asControllerLog, foldChain } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
 import { LeafBindingError } from '../src/errors.js'
 import { restoreGroup } from '../src/group-create.js'
@@ -79,18 +79,10 @@ function proofEntry(
   issuer: string,
   subject: string,
   value: DeviceValue,
-  seeded = true,
 ): VerifiedLedgerEntry<DeviceValue> {
-  const attached =
-    seeded &&
-    value.op === 'revoke' &&
-    Array.isArray(value.proof) &&
-    value.proof[0]?.event.t === 'icp'
-      ? { ...value, proof: value.proof.slice(1) }
-      : value
   return {
     issuer,
-    entry: { type: DEVICE_ENTRY_TYPE, groupID: 'lifecycle-ledger', subject, value: attached },
+    entry: { type: DEVICE_ENTRY_TYPE, groupID: 'lifecycle-ledger', subject, value },
   }
 }
 
@@ -99,7 +91,7 @@ async function recordFirst() {
   const log = [inception, revoke([inception], otherTarget)]
   const verified = proofEntry(setup.identity.id, otherTarget, {
     op: 'revoke',
-    proof: log,
+    proof: log.slice(1),
     revoked: [{ did: otherTarget }],
   })
   const token = await signLedgerEntry(setup.identity, verified.entry)
@@ -183,7 +175,7 @@ describe('authenticated proof attachment', () => {
       group,
       proofEntry(identity.id, target, {
         op: 'revoke',
-        proof: log,
+        proof: log.slice(1),
         revoked: [{ did: target }],
       }),
     )
@@ -206,7 +198,7 @@ describe('authenticated proof attachment', () => {
         group,
         proofEntry(identity.id, target, {
           op: 'revoke',
-          proof: [inception],
+          proof: [],
           revoked: [{ did: target }],
         }),
       ),
@@ -257,7 +249,7 @@ describe('authenticated proof attachment', () => {
           group,
           proofEntry(identity.id, target, {
             op: 'revoke',
-            proof,
+            proof: proof.slice(1),
             revoked: [{ did: target }],
           }),
         ),
@@ -303,7 +295,7 @@ describe('authenticated proof attachment', () => {
           group,
           proofEntry(identity.id, target, {
             op: 'revoke',
-            proof,
+            proof: proof.slice(1),
             revoked,
           }),
         ),
@@ -327,7 +319,7 @@ describe('authenticated proof attachment', () => {
         group,
         proofEntry(identity.id, target, {
           op: 'revoke',
-          proof,
+          proof: proof.slice(1),
           revoked: [{ did: target }],
         }),
       ),
@@ -343,11 +335,31 @@ describe('authenticated proof attachment', () => {
         group,
         proofEntry(identity.id, target, {
           op: 'revoke',
-          proof: log,
+          proof: log.slice(1),
           revoked: [{ did: target }],
         }),
       ),
     ).rejects.toMatchObject({ reason: 'needs-reset' })
+  })
+
+  test('allows a first revoke re-parented on a recorded reset', async () => {
+    const reset = createReset(controllerSeed, 0, 1)
+    const prefix = [inception, reset]
+    const { group, identity } = await lifecycleGroup(prefix, asControllerLog(prefix))
+    const rev = revoke(prefix, target)
+    const effects = await verifyLifecycleProof(
+      group,
+      proofEntry(identity.id, target, { op: 'revoke', proof: [rev], revoked: [{ did: target }] }),
+    )
+    expect(effects).toEqual({
+      controller: controllerID,
+      recordedLog: { chain: [...prefix, rev], events: [] },
+      logPosition: 2,
+      genFloor: 1,
+      timeFloor: 0,
+      revoked: [{ did: target }],
+      removeLeafIndices: [],
+    })
   })
 })
 
@@ -377,7 +389,7 @@ describe('recorded log replay', () => {
           initial.identity,
           proofEntry(initial.identity.id, otherTarget, {
             op: 'revoke',
-            proof: firstLog,
+            proof: firstLog.slice(1),
             revoked: [{ did: otherTarget }],
           }).entry,
         )
@@ -435,7 +447,7 @@ describe('recorded log replay', () => {
       identity,
       proofEntry(identity.id, otherTarget, {
         op: 'revoke',
-        proof: log,
+        proof: log.slice(1),
         revoked: [{ did: otherTarget }],
       }).entry,
     )
@@ -501,7 +513,7 @@ describe('live effect derivation', () => {
     const revoked = [{ did: trusted.id }, { did: child.id, cascadedFrom: trusted.id }]
     const verified = proofEntry(initial.identity.id, trusted.id, {
       op: 'revoke',
-      proof: [inception, revoke([inception], trusted.id)],
+      proof: [revoke([inception], trusted.id)],
       revoked,
     })
     const effects = await verifyLifecycleProof(withChild.group, verified)
@@ -549,7 +561,7 @@ describe('live effect derivation', () => {
         replay,
         proofEntry(identity.id, target, {
           op: 'revoke',
-          proof: [inception, revoke([inception], target)],
+          proof: [revoke([inception], target)],
           revoked: [{ did: target }],
         }),
       ),
@@ -584,6 +596,10 @@ describe('live effect derivation', () => {
 describe('proof boundary cases', () => {
   test('a throwing ledger apply leaves the handle usable and unchanged', async () => {
     const { group, identity } = await lifecycleGroup()
+    const [seed] = structuredClone(group.ledger)
+    if (seed == null) throw new Error('Missing seed')
+    expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+    expect(group.ledgerTokens).toEqual([seed.token])
     const clock = await signLedgerEntry(
       identity,
       proofEntry(identity.id, controllerID, { op: 'clock', time: 100 }).entry,
@@ -599,7 +615,8 @@ describe('proof boundary cases', () => {
     } finally {
       fold.mockRestore()
     }
-    expect(group.ledgerTokens).toHaveLength(1)
+    expect(group.ledgerTokens).toEqual([seed.token])
+    expect(group.ledger).toEqual([seed])
     expect(group.registry).toEqual(registry)
     expect(group.roster).toEqual(roster)
     await expect(group.applyLedgerEntries([])).resolves.toEqual([])
@@ -673,16 +690,11 @@ describe('proof boundary cases', () => {
     await expect(
       verifyLifecycleProof(
         group,
-        proofEntry(
-          identity.id,
-          target,
-          {
-            op: 'revoke',
-            proof: full,
-            revoked: [{ did: target }],
-          },
-          false,
-        ),
+        proofEntry(identity.id, target, {
+          op: 'revoke',
+          proof: full,
+          revoked: [{ did: target }],
+        }),
       ),
     ).rejects.toMatchObject({ reason: 'detached' })
   })
@@ -709,7 +721,7 @@ describe('proof boundary cases', () => {
         group,
         proofEntry(target, otherTarget, {
           op: 'revoke',
-          proof: [inception, revoke([inception], otherTarget)],
+          proof: [revoke([inception], otherTarget)],
           revoked: [{ did: otherTarget }],
         }),
       ),
@@ -732,7 +744,7 @@ describe('proof boundary cases', () => {
       members.group,
       proofEntry(identity.id, device.id, {
         op: 'revoke',
-        proof: [inception, revoke([inception], device.id)],
+        proof: [revoke([inception], device.id)],
         revoked: [{ did: device.id }],
       }),
     )
@@ -874,11 +886,15 @@ describe('lifecycle ledger pipeline', () => {
     const { group, identity, tokens } = await lifecycleGroup()
     const recipient = agent(51)
     const members = await addMember(group, recipient, await bindingFor(recipient))
+    const [seed] = structuredClone(members.joined.ledger)
+    if (seed == null) throw new Error('Missing seed')
+    expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+    expect(members.joined.ledgerTokens).toEqual([seed.token])
     const token = await signLedgerEntry(
       identity,
       proofEntry(identity.id, target, {
         op: 'revoke',
-        proof: [inception, revoke([inception], target)],
+        proof: [revoke([inception], target)],
         revoked: [{ did: otherTarget }],
       }).entry,
     )
@@ -892,7 +908,8 @@ describe('lifecycle ledger pipeline', () => {
     await expect(members.joined.processMessage(message)).rejects.toThrow()
     expect(members.joined.epoch).toBe(epoch)
     expect(members.joined.registry).toBe(before)
-    expect(members.joined.ledgerTokens).toHaveLength(1)
+    expect(members.joined.ledgerTokens).toEqual([seed.token])
+    expect(members.joined.ledger).toEqual([seed])
   })
 
   test('the receiver rejects a lifecycle register even if its self-attestation would otherwise pass', async () => {
@@ -927,7 +944,7 @@ describe('lifecycle ledger pipeline', () => {
       identity,
       proofEntry(identity.id, otherTarget, {
         op: 'revoke',
-        proof: log,
+        proof: log.slice(1),
         revoked: [{ did: otherTarget }],
       }).entry,
     )
@@ -961,15 +978,10 @@ describe('deny-gaining rotate proofs', () => {
     const registry = registrySeed()
     return authenticateLifecycleProof(
       controllerID,
-      proofEntry(
-        agent(41).id,
-        subject,
-        {
-          op: 'revoke',
-          proof,
-        },
-        false,
-      ),
+      proofEntry(agent(41).id, subject, {
+        op: 'revoke',
+        proof,
+      }),
       {
         ...registry,
         controllers: new Map([

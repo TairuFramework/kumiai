@@ -42,7 +42,7 @@ export async function removeMember(
     const result = await commitWithEntries({ group, extraProposals: [removeProposal], enacted })
 
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(enacted)
+    await newGroup.applyLedgerEntries(result.enacted)
 
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),

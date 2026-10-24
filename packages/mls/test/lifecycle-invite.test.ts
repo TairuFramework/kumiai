@@ -58,8 +58,12 @@ async function admission(entries: Array<string> = []) {
 
 test('membership and Welcome require a recipient and no role token', async () => {
   const { group, bob, invite, bundle } = await admission()
+  const [seed] = structuredClone(group.ledger)
+  if (seed == null) throw new Error('Missing seed')
+  expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+  expect(group.ledgerTokens).toEqual([seed.token])
   expect(invite.recipientDID).toBe(bob.id)
-  expect(invite.ledgerEntries).toHaveLength(1)
+  expect(invite.ledgerEntries).toEqual([seed.token])
   const result = await commitInvite(group, bundle.publicPackage, invite)
   const { group: joined } = await processWelcome({
     identity: bob,
@@ -69,7 +73,8 @@ test('membership and Welcome require a recipient and no role token', async () =>
   })
   expect(joined.listMembers()).toHaveLength(2)
   expect(joined.listMembers().every((member) => member.controller === controllerID)).toBe(true)
-  expect(joined.ledgerTokens).toHaveLength(1)
+  expect(joined.ledgerTokens).toEqual([seed.token])
+  expect(joined.ledger).toEqual([seed])
   await expect(
     createInvite({ group: joined, identity: bob, recipientDID: agent(62).id }),
   ).resolves.toBeDefined()
@@ -146,6 +151,10 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
 
 test('an inviter and consumer issuer need a pre-commit leaf', async () => {
   const { group, identity, bob, invite, bundle } = await admission()
+  const [seed] = structuredClone(group.ledger)
+  if (seed == null) throw new Error('Missing seed')
+  expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+  expect(group.ledgerTokens).toEqual([seed.token])
   const outsider = agent(62)
   await expect(createInvite({ group, identity: outsider, recipientDID: bob.id })).rejects.toThrow(
     /leaf/,
@@ -162,7 +171,8 @@ test('an inviter and consumer issuer need a pre-commit leaf', async () => {
       ledgerEntries: [...group.ledgerTokens, token],
     }),
   ).rejects.toThrow(/pre-commit/)
-  expect(group.ledgerTokens).toHaveLength(1)
+  expect(group.ledgerTokens).toEqual([seed.token])
+  expect(group.ledger).toEqual([seed])
   expect(group.findMemberLeafIndex(identity.id)).toBeDefined()
 })
 

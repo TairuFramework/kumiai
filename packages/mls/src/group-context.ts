@@ -32,24 +32,33 @@ export function deviceDenyHolderFor(context: MlsContext): DeviceDenyHolder | und
   return DENY_HOLDERS.get(context)
 }
 
+/** Run with an isolated authentication service without changing the source context. */
 export async function withJudging<T>(
   context: MlsContext,
   judging: JudgingContext,
-  fn: () => Promise<T>,
+  fn: (context: MlsContext) => Promise<T>,
 ): Promise<T> {
   const holder = deviceDenyHolderFor(context)
   if (holder == null) throw new Error('Missing judging holder')
-  const previous = holder.judging
-  const previousProvider = holder.provider
   const registry = judging.registry
-  if (registry != null) holder.provider = () => denySetOf(registry)
-  holder.judging = () => judging
-  try {
-    return await fn()
-  } finally {
-    holder.judging = previous
-    holder.provider = previousProvider
+  const scopedHolder: DeviceDenyHolder = {
+    ...holder,
+    provider: registry == null ? holder.provider : () => denySetOf(registry),
+    judging: () => judging,
   }
+  const scopedContext = { ...context, authService: authenticationFor(scopedHolder) }
+  DENY_HOLDERS.set(scopedContext, scopedHolder)
+  return fn(scopedContext)
+}
+
+function authenticationFor(holder: DeviceDenyHolder): MlsContext['authService'] {
+  return createDIDAuthenticationService({
+    deviceDenySet: () => holder.provider(),
+    judging: () => holder.judging?.() ?? { stage: 'full', mode: 'admit' },
+    mayKeepDeniedIssuer: () => holder.judging?.().mode === 'retain',
+    leafLifetime: () => holder.leafLifetime,
+    trustedGrantLifetime: () => holder.trustedGrantLifetime,
+  })
 }
 
 export async function resolveMlsContext(
@@ -73,13 +82,7 @@ export function createMlsContext(
     trustedGrantLifetime:
       anchor?.controller == null ? undefined : (anchor.trustedGrantLifetime ?? 2_592_000),
   }
-  const authService = createDIDAuthenticationService({
-    deviceDenySet: () => holder.provider(),
-    judging: () => holder.judging?.() ?? { stage: 'full', mode: 'admit' },
-    mayKeepDeniedIssuer: () => holder.judging?.().mode === 'retain',
-    leafLifetime: () => holder.leafLifetime,
-    trustedGrantLifetime: () => holder.trustedGrantLifetime,
-  })
+  const authService = authenticationFor(holder)
   const context: MlsContext = { cipherSuite, authService }
   DENY_HOLDERS.set(context, holder)
   return context

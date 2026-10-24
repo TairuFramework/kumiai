@@ -16,8 +16,9 @@ import { commitWithEntries } from '../src/group-commit.js'
 import { createGroup } from '../src/group-create.js'
 import { deriveGroup } from '../src/group-handle.js'
 import { removeLapsedLeaves, renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
-import { HISTORY_HORIZON, historySize } from '../src/history.js'
+import { controllerLogSize, HISTORY_HORIZON, historySize } from '../src/history.js'
 import { isLapsed, leafAt, treeTime } from '../src/lifecycle.js'
+import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { revocationOf } from '../src/registry.js'
 import { revokeChain, rotateChain, snapshotForChain } from './fixtures/controller-chain.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
@@ -240,43 +241,74 @@ describe('proof builders', () => {
   })
 })
 
-test('renewal and proof growth fail at the exact history horizon boundary, while shrinking reopens room', async () => {
+test('renewal and proof growth fail one byte above the exact history horizon, while shrinking reopens room', async () => {
   const { group, identity } = await pipelineGroup()
-  const base = historySize(group.state.ratchetTree, [])
-  const large = [inception, rotation([inception], HISTORY_HORIZON - 1_024 - base)]
+  const [seed] = structuredClone(group.ledger)
+  expect(seed?.verified.entry.value).toMatchObject({
+    op: 'seed',
+    proof: asControllerLog([inception]),
+  })
+  const entries = group.ledger.map(({ verified }) => verified)
+  const base = historySize(group.state.ratchetTree, entries)
+  const room = 2_048
+  const large = [inception, rotation([inception], HISTORY_HORIZON - room - base)]
   const near = await renewLeaf(
     group,
     await timedBinding({ identity, iat: 150, exp: 250, prefix: large }),
   )
-  expect(historySize(near.newGroup.state.ratchetTree, [])).toBe(HISTORY_HORIZON - 1_024)
-  const grown = [...large, rotation(large, 2_048)]
+  expect(historySize(near.newGroup.state.ratchetTree, entries)).toBe(HISTORY_HORIZON - room)
+  const atBoundary = [...large, rotation(large, room)]
+  const accepted = await renewLeaf(
+    near.newGroup,
+    await timedBinding({ identity, iat: 150, exp: 250, prefix: atBoundary }),
+  )
+  expect(historySize(accepted.newGroup.state.ratchetTree, entries)).toBe(HISTORY_HORIZON)
+  const overBoundary = [...large, rotation(large, room + 1)]
   await expect(
-    renewLeaf(near.newGroup, await timedBinding({ identity, iat: 150, exp: 250, prefix: grown })),
+    renewLeaf(
+      near.newGroup,
+      await timedBinding({ identity, iat: 150, exp: 250, prefix: overBoundary }),
+    ),
   ).rejects.toMatchObject({ reason: 'history-horizon' })
   const target = agent(51).id
-  const resetLog = [inception, createReset(controllerSeed, 0, 1)]
-  const eventBytes = (events: Array<SignedEvent>) =>
-    events.reduce(
-      (total, event) => total + new TextEncoder().encode(JSON.stringify(event)).length,
-      0,
-    )
-  const probe = [...resetLog, rotation(resetLog, 1024)]
-  const revBytes = eventBytes([revoke(probe, target)])
-  const proofLog: Array<SignedEvent> = [
-    ...resetLog,
-    rotation(resetLog, 2_048 - eventBytes(resetLog) - revBytes),
-  ]
-  proofLog.push(revoke(proofLog, target))
-  expect(eventBytes(proofLog)).toBe(2_048)
+  const proofLog = (bytes: number): Array<SignedEvent> => {
+    const probe = [inception, rotation([inception], 1_024)]
+    const revBytes = controllerLogSize([revoke(probe, target)])
+    const log: Array<SignedEvent> = [inception, rotation([inception], bytes - revBytes)]
+    log.push(revoke(log, target))
+    expect(controllerLogSize(log.slice(1))).toBe(bytes)
+    return log
+  }
+  const exactProof = proofLog(room)
+  const proof = await revokeWithProof(near.newGroup, { subject: target, log: exactProof })
+  expect(proof.status).toBe('built')
+  if (proof.status !== 'built') throw new Error('Missing boundary proof')
+  expect(proof.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    proof: JSON.parse(JSON.stringify(exactProof.slice(1))),
+  })
   expect(
-    await revokeWithProof(near.newGroup, {
-      subject: target,
-      log: [...large, revoke(large, target)],
+    historySize(
+      proof.result.newGroup.state.ratchetTree,
+      proof.result.newGroup.ledger.map(({ verified }) => verified),
+    ),
+  ).toBe(HISTORY_HORIZON)
+  const tooLargeProof = proofLog(room + 1)
+  await expect(
+    verifyLifecycleProof(near.newGroup, {
+      issuer: identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: group.groupID,
+        subject: target,
+        value: { op: 'revoke', proof: tooLargeProof.slice(1), revoked: [{ did: target }] },
+      },
     }),
-  ).toEqual({
+  ).rejects.toMatchObject({ reason: 'too-large' })
+  expect(await revokeWithProof(near.newGroup, { subject: target, log: tooLargeProof })).toEqual({
     status: 'not-provable',
     reason: 'too-large',
   })
+  const resetLog = [inception, createReset(controllerSeed, 0, 1)]
   const shrunk = await renewLeaf(
     near.newGroup,
     await timedBinding({ identity, iat: 150, exp: 250, prefix: resetLog }),
@@ -284,9 +316,12 @@ test('renewal and proof growth fail at the exact history horizon boundary, while
   const reset = await revokeWithProof(shrunk.newGroup, { reset: true, log: resetLog })
   expect(reset.status).toBe('built')
   if (reset.status !== 'built') throw new Error('Missing reset')
+  const reopened: Array<SignedEvent> = [...resetLog, rotation(resetLog, room)]
+  reopened.push(revoke(reopened, target))
   expect(
-    (await revokeWithProof(reset.result.newGroup, { subject: target, log: proofLog })).status,
+    (await revokeWithProof(reset.result.newGroup, { subject: target, log: reopened })).status,
   ).toBe('built')
+  expect(group.ledger).toEqual([seed])
   const node = shrunk.newGroup.state.ratchetTree[0]
   expect(node?.nodeType).toBe(nodeTypes.leaf)
   if (node?.nodeType === nodeTypes.leaf && 'identity' in node.leaf.credential)
@@ -635,41 +670,63 @@ test.each(['revoke', 'reset'] as const)(
       group,
       await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
     )
-    const before = structuredClone(renewed.newGroup.state)
+    let proofGroup = renewed.newGroup
+    if (op === 'revoke') {
+      const recordedReset = await revokeWithProof(proofGroup, { reset: true, log: current })
+      expect(recordedReset.status).toBe('built')
+      if (recordedReset.status !== 'built') throw new Error('Missing reset')
+      proofGroup = recordedReset.result.newGroup
+    }
+    const before = structuredClone(proofGroup.state)
+    const ledgerBefore = [...proofGroup.ledgerTokens]
+    expect(proofGroup.ledger[0]?.verified.entry.value).toMatchObject({ op: 'seed' })
     const originalLog = structuredClone(log)
     const built = await revokeWithProof(
-      renewed.newGroup,
+      proofGroup,
       op === 'reset' ? { reset: true, log } : { subject: target, log },
     )
-    if (op === 'revoke') {
-      expect(built).toEqual({ status: 'not-provable', reason: 'needs-reset' })
-      return
-    }
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
     const expected = JSON.parse(JSON.stringify([inception, reset, currentRevoke]))
     expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
-      proof: expected,
+      proof: op === 'revoke' ? expected.slice(2) : expected,
     })
+    expect(built.result.newGroup.ledgerTokens).toEqual([
+      ...ledgerBefore,
+      built.result.newGroup.ledger.at(-1)?.token,
+    ])
     expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual({
       chain: expected,
       events: [],
     })
     expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
-    expect(renewed.newGroup.state).toEqual(before)
+    if (op === 'revoke') {
+      expect(revocationOf(built.result.newGroup, target)?.logPosition).toBe(2)
+      expect(built.result.newGroup.registry.devices.get(target)?.proofRef).toEqual({
+        chainIndex: 2,
+      })
+    }
+    expect(proofGroup.state).toEqual(before)
     expect(log).toEqual(originalLog)
   },
 )
 
 test('a first proof cannot use a subject revoke before the latest reset', async () => {
-  const { group } = await pipelineGroup()
+  const reset = createReset(controllerSeed, 0, 1)
+  const { group } = await pipelineGroup({ controllerLog: asControllerLog([inception, reset]) })
+  const [seed] = structuredClone(group.ledger)
+  expect(seed?.verified.entry.value).toMatchObject({
+    op: 'seed',
+    proof: asControllerLog([inception, reset]),
+  })
+  expect(group.ledger).toEqual([seed])
   const target = agent(61).id
-  const log = [inception, revoke([inception], target), createReset(controllerSeed, 0, 1)]
+  const log = [inception, revoke([inception], target), reset]
   expect(await revokeWithProof(group, { subject: target, log })).toEqual({
     status: 'not-provable',
-    reason: 'needs-reset',
+    reason: 'no-rev',
   })
-  expect(group.ledger).toHaveLength(1)
+  expect(group.ledger).toEqual([seed])
 })
 
 test('proof construction ends at the deny gain before a retaining rotate', async () => {
@@ -687,12 +744,14 @@ test('proof construction ends at the deny gain before a retaining rotate', async
   })
 })
 
-test('proof construction requires reset for a reset snapshot denial', async () => {
-  const { group } = await pipelineGroup()
+test('proof construction refuses a reset snapshot denial as a revoke', async () => {
   const subject = agent(61).id
   const log = [inception, createReset(controllerSeed, 0, 1, { members: [], deny: [subject] })]
+  const { group } = await pipelineGroup({
+    controllerLog: asControllerLog([inception, createReset(controllerSeed, 0, 1)]),
+  })
   expect(await revokeWithProof(group, { subject, log })).toEqual({
     status: 'not-provable',
-    reason: 'needs-reset',
+    reason: 'no-rev',
   })
 })
