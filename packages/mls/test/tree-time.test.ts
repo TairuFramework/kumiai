@@ -1,8 +1,20 @@
-import { createAdd, createRemove, digestOf, encodeKey, epochHeads } from '@kokuin/controller'
+import {
+  createAdd,
+  createInception,
+  createRemove,
+  createReset,
+  didFromInception,
+  digestOf,
+  encodeKey,
+  epochHeads,
+  snapshotOf,
+} from '@kokuin/controller'
+import type { OwnIdentity } from '@kokuin/token'
 import { type ClientState, nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { mintLeafCapability } from '../src/capability.js'
+import { foldControllerLog } from '../src/controller-log.js'
 import { deriveGroup } from '../src/group-handle.js'
 import { attestedTreeTime, isLapsed, leafAt, treeTime } from '../src/lifecycle.js'
 import { registryForLog } from '../src/registry.js'
@@ -13,7 +25,12 @@ afterEach(() => vi.restoreAllMocks())
 
 type Epoch = Awaited<ReturnType<typeof buildEpoch>>
 
-async function memberLeaf(f: Epoch, index: number, iat: number, add?: string) {
+async function memberLeaf(
+  f: Epoch,
+  index: number,
+  iat: number,
+  options: { add?: string; generation?: number; issuer?: OwnIdentity; controllerID?: string } = {},
+) {
   const member = f.members[index]
   if (member == null) throw new Error('Missing member')
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
@@ -21,15 +38,20 @@ async function memberLeaf(f: Epoch, index: number, iat: number, add?: string) {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const identity = agent(70 + index)
   const capability = await mintLeafCapability({
-    signer: member.identity,
-    controllerID: f.did,
+    signer: options.issuer ?? member.identity,
+    controllerID: options.controllerID ?? f.did,
     audience: identity.id,
     leafKey: identity.publicKey,
     exp: 1000,
-    member: { add: add ?? member.add, g: 0 },
+    member: { add: options.add ?? member.add, g: options.generation ?? 0 },
   })
-  return (await rawBundle(group, identity, { id: f.did, prefix: f.log.chain, capability }))
-    .publicPackage.leafNode
+  return (
+    await rawBundle(group, identity, {
+      id: options.controllerID ?? f.did,
+      prefix: f.log.chain,
+      capability,
+    })
+  ).publicPackage.leafNode
 }
 
 function tree(
@@ -66,6 +88,69 @@ test('sole effective member advances tree time', async () => {
   ).toBe(200)
 })
 
+test('a member token from a stale generation does not advance tree time', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const reset = createReset(f.seed, 0, 1, snapshotOf(f.head))
+  const registry = registryForLog(f.did, { chain: [f.inception, reset], events: [] })
+  expect(attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(0)
+  expect(
+    attestedTreeTime(tree(await memberLeaf(f, 0, 200, { generation: 1 })), registry, f.did),
+  ).toBe(200)
+})
+
+test('a token whose issuer differs from the pinned member DID does not advance tree time', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const registry = registryForLog(f.did, f.log)
+  const leaf = await memberLeaf(f, 0, 200, { issuer: agent(91) })
+  expect(attestedTreeTime(tree(leaf), registry, f.did)).toBe(0)
+  expect(attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(200)
+})
+
+test('a member token for another controller does not advance tree time', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const registry = registryForLog(f.did, f.log)
+  const other = createInception(new Uint8Array(32).fill(32), 0)
+  const leaf = await memberLeaf(f, 0, 200, { controllerID: didFromInception(other.event) })
+  expect(attestedTreeTime(tree(leaf), registry, f.did)).toBe(0)
+  expect(attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(200)
+})
+
+test('a token naming a non-effective member add does not advance tree time', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const a = f.members[0]
+  if (a == null) throw new Error('Missing member')
+  const removal = createRemove({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: a.add,
+  })
+  const removedLog = { chain: f.log.chain, events: [...f.log.events, removal] }
+  const removed = registryForLog(f.did, removedLog)
+  const recorded = removed.controllers.get(f.did)?.recordedLog
+  if (recorded == null) throw new Error('Missing recorded log')
+  const folded = foldControllerLog(f.did, recorded)
+  if (!folded.ok) throw new Error(folded.reason)
+  const add = createAdd({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    head: folded.head,
+    parents: epochHeads(f.did, removedLog),
+    member: { did: a.did, key: encodeKey(a.identity.publicKey, 'EdDSA'), lease: 1100 },
+  })
+  const registry = registryForLog(f.did, { ...removedLog, events: [...removedLog.events, add] })
+  expect(attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(0)
+  expect(
+    attestedTreeTime(
+      tree(await memberLeaf(f, 0, 200, { add: digestOf(add.event) })),
+      registry,
+      f.did,
+    ),
+  ).toBe(200)
+})
+
 test('two incarnations of one pinned key count once', async () => {
   const f = await buildEpoch({ members: 2 })
   const a = f.members[0]
@@ -81,7 +166,7 @@ test('two incarnations of one pinned key count once', async () => {
   const log = { chain: f.log.chain, events: [...f.log.events, concurrent] }
   const leaves = tree(
     await memberLeaf(f, 0, 200),
-    await memberLeaf(f, 0, 250, digestOf(concurrent.event)),
+    await memberLeaf(f, 0, 250, { add: digestOf(concurrent.event) }),
   )
   const registry = registryForLog(f.did, log)
   expect(attestedTreeTime(leaves, registry, f.did)).toBe(0)

@@ -1283,3 +1283,59 @@ test('delayed application frame gets the same verdict before and after a later r
     'Unknown epoch ledger head',
   )
 })
+
+test('registryAt caches distinct authenticated heads and recomputes the evicted projection', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  let { group } = await pipelineGroup({ controllerLog: f.log })
+  let log = f.log
+  const heads: Array<Uint8Array> = []
+  for (let index = 0; index < 9; index++) {
+    const folded = foldControllerLog(f.did, log)
+    if (!folded.ok) throw new Error(folded.reason)
+    const renewal = createRenew({
+      did: f.did,
+      head: folded.head,
+      parents: epochHeads(f.did, log),
+      signer: f.root,
+      add: member.add,
+      lease: 1001 + index,
+    })
+    log = { chain: log.chain, events: [...log.events, renewal] }
+    const published = await publishControllerLog(group, log)
+    if (published == null) throw new Error('Missing renewal')
+    group = published.newGroup
+    const head = readLedgerHead(group)?.head
+    if (head == null) throw new Error('Missing authenticated head')
+    heads.push(head)
+  }
+  const projections = heads.slice(0, 8).map((head, index) => {
+    const registry = registryAt(group, head)
+    const recorded = registry.controllers.get(f.did)?.recordedLog
+    if (recorded == null) throw new Error('Missing recorded log')
+    const folded = foldControllerLog(f.did, recorded)
+    if (!folded.ok) throw new Error(folded.reason)
+    expect(folded.head.members.get(member.add)?.lease).toBe(1001 + index)
+    expect(recorded.events).toHaveLength(2 + index)
+    return registry
+  })
+  expect(new Set(projections).size).toBe(8)
+  for (const [index, head] of heads.slice(0, 8).entries()) {
+    expect(registryAt(group, head)).toBe(projections[index])
+  }
+  const firstHead = heads[0]
+  const ninthHead = heads[8]
+  if (firstHead == null || ninthHead == null) throw new Error('Missing head')
+  const ninth = registryAt(group, ninthHead)
+  expect(ninth.controllers.get(f.did)?.recordedLog).toEqual(log)
+  expect(projections).not.toContain(ninth)
+  for (const [index, head] of heads.slice(1, 8).entries()) {
+    expect(registryAt(group, head)).toBe(projections[index + 1])
+  }
+  expect(registryAt(group, ninthHead)).toBe(ninth)
+  const recomputed = registryAt(group, firstHead)
+  expect(recomputed).not.toBe(projections[0])
+  expect(recomputed).toEqual(projections[0])
+  expect(registryAt(group, firstHead)).toBe(recomputed)
+})

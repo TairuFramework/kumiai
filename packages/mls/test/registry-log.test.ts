@@ -1,26 +1,32 @@
 import {
   type ControllerLog,
+  createAdd,
   createRemove,
   createRenew,
   createReset,
   createRevoke,
   createRotate,
   digestOf,
+  encodeKey,
+  epochHeads,
   MAX_EPOCH_EVENTS,
   MAX_EVENT_PARENTS,
   snapshotOf,
 } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
-import { expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import { foldControllerLog } from '../src/controller-log.js'
 import type { FoldDrop, FoldInput } from '../src/fold.js'
-import { authenticateLifecycleProof } from '../src/lifecycle-proof.js'
+import { authenticateLifecycleProof, verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { memberRootStatus } from '../src/member-root.js'
 import * as registry from '../src/registry.js'
 import { buildEpoch } from './fixtures/controller-epoch.js'
+import { belowGateWelcome, pipelineGroup } from './fixtures/lifecycle-pipeline.js'
 
 const groupID = 'registry-log'
+
+afterEach(() => vi.restoreAllMocks())
 
 function entry(
   did: string,
@@ -72,6 +78,117 @@ test('seed entry at position 0 seeds the recorded log', async () => {
     survivorGrants: new Map(),
   })
   expect(registry.registryForLog(did, log)).toEqual(result.registry)
+})
+
+test.each(['re-added', 'concurrent'] as const)(
+  'attest replay uses the same pin across %s incarnations of one DID',
+  async (kind) => {
+    vi.spyOn(Date, 'now').mockReturnValue(150_000)
+    const f = await buildEpoch({ members: 1 })
+    const member = f.members[0]
+    if (member == null) throw new Error('Missing member')
+    const key = encodeKey(member.identity.publicKey, 'EdDSA')
+    const removal = createRemove({
+      did: f.did,
+      head: f.head,
+      parents: epochHeads(f.did, f.log),
+      signer: f.root,
+      add: member.add,
+    })
+    const prior = {
+      chain: f.log.chain,
+      events: [...f.log.events, ...(kind === 're-added' ? [removal] : [])],
+    }
+    const add = createAdd({
+      seed: f.seed,
+      profile: 0,
+      did: f.did,
+      head: folded(f.did, prior).head,
+      parents: kind === 're-added' ? epochHeads(f.did, prior) : [f.head.epoch],
+      member: { did: member.did, key, lease: 1100 },
+    })
+    const log = { chain: prior.chain, events: [...prior.events, add] }
+    const members = folded(f.did, log).head.members
+    expect(members.get(member.add)).toMatchObject({ effective: kind === 'concurrent', key })
+    expect(members.get(digestOf(add.event))).toMatchObject({ effective: true, key })
+    expect(new Set([...members.values()].map((value) => value.key))).toEqual(new Set([key]))
+    const setup = await pipelineGroup({ controllerLog: log })
+    const { author: group } = await belowGateWelcome(setup.group, member.identity, {
+      id: f.did,
+      prefix: log.chain,
+      member: { add: digestOf(add.event), g: 0 },
+      iat: 100,
+    })
+    const clock = {
+      issuer: member.identity.id,
+      entry: {
+        type: registry.DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 1050, attest: true } as const,
+      },
+    }
+    await expect(verifyLifecycleProof(group, clock)).resolves.toMatchObject({ timeFloor: 0 })
+    const applied = registry.registryApply(clock, group.registry, f.did)
+    expect(applied.controllers.get(f.did)?.attestations).toEqual(new Map([[key, 1050]]))
+    expect(applied.controllers.get(f.did)?.timeFloor).toBe(0)
+  },
+)
+
+test('the recorded log refuses another pin for the same member DID', async () => {
+  const f = await buildEpoch({ members: 2 })
+  const [a, b] = f.members
+  if (a == null || b == null) throw new Error('Missing members')
+  const add = createAdd({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    head: f.head,
+    parents: [f.head.epoch],
+    member: { did: a.did, key: encodeKey(b.identity.publicKey, 'EdDSA'), lease: 1100 },
+  })
+  const result = replay(f.did, [entry(f.did, 'seed', { ...f.log, events: [...f.log.events, add] })])
+  expect(result.drops).toEqual([])
+  const recorded = registry.recordedLogOf(result.registry, f.did)
+  if (recorded == null) throw new Error('Missing recorded log')
+  expect(folded(f.did, recorded).head.members.has(digestOf(add.event))).toBe(false)
+  expect(folded(f.did, recorded).head.members.get(a.add)?.key).toBe(
+    encodeKey(a.identity.publicKey, 'EdDSA'),
+  )
+})
+
+test('attest clock is refused when the issuer has no effective incarnation', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  const f = await buildEpoch({ members: 1 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  const removal = createRemove({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: member.add,
+  })
+  const setup = await pipelineGroup({
+    controllerLog: { chain: f.log.chain, events: [...f.log.events, removal] },
+  })
+  const { author: group } = await belowGateWelcome(setup.group, member.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: member.add, g: 0 },
+    iat: 100,
+  })
+  await expect(
+    verifyLifecycleProof(group, {
+      issuer: member.identity.id,
+      entry: {
+        type: registry.DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 200, attest: true },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
 })
 
 test('seed at a later position, or into a recorded log, is refused', async () => {
