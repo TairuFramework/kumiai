@@ -262,6 +262,32 @@ test('equivalent authenticated chain representations retain known settlement sta
   expect(() => mls.assertRetainsKnownEffects(f.did, known, candidate)).not.toThrow()
 })
 
+test.each(['full', 'pruned'] as const)(
+  'a newer reset on a %s chain supersedes the known settlement',
+  async (representation) => {
+    const f = await buildEpoch()
+    const log = settle(f)
+    const known = mls.registryForLog(f.did, log)
+    const reset = createReset(f.seed, 0, 1)
+    const candidate = mls.registryForLog(f.did, {
+      chain: representation === 'full' ? [...log.chain, reset] : [f.inception, reset],
+      events: [],
+    })
+    expect(() => mls.assertRetainsKnownEffects(f.did, known, candidate)).not.toThrow()
+  },
+)
+
+test('a pruned stale reset cannot roll back a later settlement in its generation', async () => {
+  const f = await buildEpoch()
+  const reset = createReset(f.seed, 0, 1)
+  const log = { chain: [...settle(f).chain, reset], events: [] }
+  const known = mls.registryForLog(f.did, settle(f, log))
+  const candidate = mls.registryForLog(f.did, { chain: [f.inception, reset], events: [] })
+  expect(() => mls.assertRetainsKnownEffects(f.did, known, candidate)).toThrow(
+    new mls.RecoveryKnowledgeError('forked'),
+  )
+})
+
 test('settlement does not supersede an omitted removal', async () => {
   const f = await removal()
   const candidate = mls.registryForLog(f.did, settle(f, f.removedLog))

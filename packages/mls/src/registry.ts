@@ -485,10 +485,8 @@ export function assertRetainsKnownEffects(
     throw new RecoveryKnowledgeError('epoch-event')
   if (held?.recordedLog != null && offered?.recordedLog != null) {
     const branches = resolveBranches(did, [held.recordedLog.chain, offered.recordedLog.chain])
-    if (
-      !branches.ok ||
-      (before?.ok && after?.ok && !after.states.some((state) => state.digest === before.head.epoch))
-    )
+    const winner = branches.ok ? foldChain(did, branches.winner) : undefined
+    if (!winner?.ok || (after?.ok && after.head.epoch !== winner.head.epoch))
       throw new RecoveryKnowledgeError('forked')
   }
   if (
