@@ -8,9 +8,8 @@ import {
 } from 'ts-mls'
 
 import type { GroupAnchor } from './anchor.js'
-import { createDIDAuthenticationService } from './authentication.js'
+import { createDIDAuthenticationService, type JudgingContext } from './authentication.js'
 import { nobleCryptoProvider } from './crypto.js'
-import type { DeviceRegistry } from './registry.js'
 import type { GroupOptions } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
@@ -20,7 +19,7 @@ const EMPTY_DENY: ReadonlySet<string> = new Set()
 /** Late-bound provider of a context's device deny set, pointed at the live handle after construction. */
 export type DeviceDenyHolder = {
   provider: () => ReadonlySet<string>
-  registry?: () => DeviceRegistry | undefined
+  judging?: () => JudgingContext
   leafLifetime?: number
   trustedGrantLifetime?: number
 }
@@ -55,7 +54,7 @@ export function createMlsContext(
   }
   const authService = createDIDAuthenticationService({
     deviceDenySet: () => holder.provider(),
-    deviceRegistry: () => holder.registry?.(),
+    judging: () => holder.judging?.() ?? { stage: 'full', mode: 'admit' },
     leafLifetime: () => holder.leafLifetime,
     trustedGrantLifetime: () => holder.trustedGrantLifetime,
   })

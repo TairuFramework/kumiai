@@ -94,7 +94,20 @@ export function capabilityKey(payload: CapabilityPayload) {
 }
 
 export function assertControllerGrant(payload: CapabilityPayload, controllerID: string): void {
-  if (normalizeDID(payload.iss) !== normalizeDID(controllerID)) {
+  const member = payload.mbr
+  if (
+    member !== undefined &&
+    (member == null ||
+      typeof member !== 'object' ||
+      Array.isArray(member) ||
+      Object.keys(member).length !== 2 ||
+      typeof member.add !== 'string' ||
+      member.add.length === 0 ||
+      !Number.isSafeInteger(member.g) ||
+      member.g < 0)
+  )
+    throw new LeafBindingError('issuer-mismatch')
+  if (member === undefined && normalizeDID(payload.iss) !== normalizeDID(controllerID)) {
     throw new LeafBindingError('issuer-mismatch')
   }
   if (normalizeDID(payload.sub) !== normalizeDID(controllerID)) {

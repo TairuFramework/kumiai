@@ -1,23 +1,35 @@
 import { audienceConfirmation, now } from '@kokuin/capability'
 import {
   createAdd,
+  createRemove,
   createRotate,
   digestOf,
   encodeKey,
+  epochHeads,
   foldLog,
   type SignedEvent,
   snapshotOf,
 } from '@kokuin/controller'
 import { stringifyToken } from '@kokuin/token'
 import type { Credential } from 'ts-mls'
-import { defaultCredentialTypes } from 'ts-mls'
+import { defaultCredentialTypes, nodeTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
-import { createDIDAuthenticationService, verifyLeafCredential } from '../src/authentication.js'
+import {
+  createDIDAuthenticationService,
+  type JudgingContext,
+  verifyLeafCredential,
+} from '../src/authentication.js'
 import { LeafBindingError } from '../src/errors.js'
+import { makeMLSCredential } from '../src/group-credential.js'
+import { rejectionReason, validateEntry } from '../src/lifecycle.js'
+import { memberRootStatus } from '../src/member-root.js'
+import { type ControllerProjection, registryForLog, registrySeed } from '../src/registry.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 import { revokeChain, rotateChain } from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
+import { agent, pipelineGroup, rawBundle } from './fixtures/lifecycle-pipeline.js'
 
 // Captures every DID the embedded resolver's loadLog is ever called with, across the whole file —
 // the zero-sidecar test below resets it and asserts the only DID ever loaded is the embedded
@@ -193,7 +205,7 @@ describe('offline leaf credential verification', () => {
     }
   })
 
-  test('rejects a member-issued grant carried by a rotated prefix snapshot', async () => {
+  test('refuses a member-issued grant without a lifecycle judging context', async () => {
     const f = await leafCapabilityFixture()
     const initial = foldLog(f.controller.id, { chain: [f.inception], events: [] })
     if (!initial.ok) throw new Error(initial.reason)
@@ -246,7 +258,7 @@ describe('offline leaf credential verification', () => {
       (error: unknown) => error,
     )
     expect(error).toBeInstanceOf(LeafBindingError)
-    expect(error).toMatchObject({ reason: 'issuer-mismatch' })
+    expect(error).toMatchObject({ reason: 'controller-mismatch' })
     expect(
       await createDIDAuthenticationService().validateCredential(credential, f.device.publicKey),
     ).toBe(false)
@@ -544,4 +556,232 @@ test('a bad capability signature requires a new binding', async () => {
     fixture.device.publicKey,
   ).catch((error: unknown) => error)
   expect(rejectionReason(error)).toBe('binding')
+})
+
+async function memberLeafFixture() {
+  const epoch = await buildEpoch({ members: 2, renewEvery: 4_000_000 })
+  const [member, other] = epoch.members
+  if (member == null || other == null) throw new Error('Missing members')
+  const f = await leafCapabilityFixture()
+  const payload = {
+    ...f.childPayload,
+    sub: epoch.did,
+    cap: undefined,
+    iat: 100,
+    nbf: 100,
+    exp: 200,
+    mbr: { add: member.add, g: epoch.head.gen },
+  }
+  const capability = stringifyToken(
+    await member.identity.signToken(payload, { embedLongForm: true }),
+  )
+  const binding = { id: epoch.did, prefix: epoch.log.chain, capability }
+  const credential = makeMLSCredential(agent(41), binding)
+  const registry = registryForLog(epoch.did, epoch.log)
+  const removedLog = {
+    chain: epoch.log.chain,
+    events: [
+      ...epoch.log.events,
+      createRemove({
+        did: epoch.did,
+        head: epoch.head,
+        parents: epochHeads(epoch.did, epoch.log),
+        signer: { member: other },
+        add: member.add,
+      }),
+    ],
+  }
+  const removed = registryForLog(epoch.did, removedLog)
+  const judging: JudgingContext = { registry, stage: 'full', mode: 'admit' }
+  const verify = (context: JudgingContext = judging, raw = capability) =>
+    verifyLeafCredential(
+      makeMLSCredential(agent(41), { ...binding, capability: raw }),
+      f.device.publicKey,
+      {
+        judging: () => context,
+      },
+    )
+  return {
+    ...epoch,
+    member,
+    other,
+    f,
+    payload,
+    capability,
+    binding,
+    credential,
+    registry,
+    removed,
+    judging,
+    verify,
+  }
+}
+
+test('direct mbr leaf capability authenticates', async () => {
+  const f = await memberLeafFixture()
+  await expect(f.verify()).resolves.toBeUndefined()
+  expect(
+    await createDIDAuthenticationService({ judging: () => f.judging }).validateCredential(
+      f.credential,
+      f.f.device.publicKey,
+    ),
+  ).toBe(true)
+})
+
+test('direct mbr leaf refused when the issuer is not an effective member', async () => {
+  const f = await memberLeafFixture()
+  await expect(f.verify({ ...f.judging, registry: f.removed })).rejects.toMatchObject({
+    reason: 'member-removed',
+  })
+})
+
+test('mbr grant past the lease is refused', async () => {
+  const f = await memberLeafFixture()
+  const capability = stringifyToken(
+    await f.member.identity.signToken(
+      { ...f.payload, iat: 3_999_900, nbf: 3_999_900, exp: 4_000_001 },
+      { embedLongForm: true },
+    ),
+  )
+  await expect(f.verify(f.judging, capability)).rejects.toMatchObject({
+    reason: 'signature-invalid',
+    cause: expect.objectContaining({
+      message: expect.stringContaining('expires after the issuer'),
+    }),
+  })
+})
+
+test('admission refuses a removed member root whose own evidence still verifies', async () => {
+  const f = await memberLeafFixture()
+  const holderGrant = stringifyToken(
+    await f.f.controller.signToken({ ...f.payload, mbr: undefined }),
+  )
+  const parent = stringifyToken(
+    await f.member.identity.signToken(
+      {
+        ...f.payload,
+        aud: f.f.trusted.id,
+        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: f.f.trusted.publicKey }),
+        exp: 1000,
+      },
+      { embedLongForm: true },
+    ),
+  )
+  const capability = stringifyToken(
+    await f.f.trusted.signToken({ ...f.payload, mbr: undefined, cap: parent }),
+  )
+  const credential = makeMLSCredential(agent(41), { ...f.binding, capability, holderGrant })
+  const root = { kind: 'member' as const, did: f.member.did, add: f.member.add, gen: 0 }
+  expect(memberRootStatus(f.removed, f.did, root)).toEqual({ status: 'removed' })
+  expect(
+    f.removed.controllers.get(f.did)?.recordedLog?.events.some(({ event }) => event.t === 'rmv'),
+  ).toBe(true)
+  for (const mode of ['retain', 'rejudge'] as const) {
+    await expect(
+      verifyLeafCredential(credential, f.f.device.publicKey, {
+        judging: () => ({ registry: f.removed, stage: 'full', mode }),
+      }),
+    ).resolves.toBeUndefined()
+  }
+  await expect(
+    verifyLeafCredential(credential, f.f.device.publicKey, {
+      judging: () => ({ registry: f.removed, stage: 'full', mode: 'admit' }),
+    }),
+  ).rejects.toMatchObject({ reason: 'member-removed' })
+})
+
+test('admit refuses on an unavailable registry', async () => {
+  const f = await memberLeafFixture()
+  await expect(f.verify({ ...f.judging, registry: registrySeed() })).rejects.toMatchObject({
+    reason: 'member-unavailable',
+  })
+})
+
+test('retain keeps an unchanged leaf on an unavailable registry', async () => {
+  const f = await memberLeafFixture()
+  await expect(
+    f.verify({ registry: registrySeed(), stage: 'full', mode: 'retain' }),
+  ).resolves.toBeUndefined()
+})
+
+test('rejudge refuses it', async () => {
+  const f = await memberLeafFixture()
+  await expect(
+    f.verify({ registry: registrySeed(), stage: 'full', mode: 'rejudge' }),
+  ).rejects.toMatchObject({ reason: 'member-unavailable' })
+})
+
+test('structural stage accepts an mbr leaf without a registry and refuses a tampered mbr signature', async () => {
+  const f = await memberLeafFixture()
+  const judging: JudgingContext = { stage: 'structural', mode: 'admit' }
+  await expect(
+    verifyLeafCredential(f.credential, f.f.device.publicKey, {
+      judging: () => judging,
+      deviceDenySet: () => {
+        throw new Error('Structural verification read denials')
+      },
+    }),
+  ).resolves.toBeUndefined()
+  await expect(f.verify(judging, `${f.capability}x`)).rejects.toMatchObject({
+    reason: 'signature-invalid',
+  })
+})
+
+test('standard group refuses a member-rooted leaf and an mbr manage capability', async () => {
+  const f = await memberLeafFixture()
+  const { group } = await pipelineGroup({ standard: true })
+  const bundle = await rawBundle(group, agent(41), f.binding)
+  await expect(validateEntry(group, bundle.publicPackage.leafNode)).rejects.toMatchObject({
+    reason: 'controller-mismatch',
+  })
+  const { verifyManagementCapability } = await import('../src/authentication.js')
+  const capability = stringifyToken(
+    await f.member.identity.signToken(
+      { ...f.payload, act: 'manage', res: 'kumiai/devices' },
+      { embedLongForm: true },
+    ),
+  )
+  expect(
+    await verifyManagementCapability({
+      capability,
+      prefix: f.log.chain,
+      controllerID: f.did,
+      audience: f.f.device.id,
+      leafKey: f.f.device.publicKey,
+    }),
+  ).toBe(false)
+})
+
+test.each(['member-removed', 'member-unavailable', 'epoch-cap'] as const)(
+  '%s requires a new binding',
+  (reason) => {
+    expect(rejectionReason(new LeafBindingError(reason))).toBe('binding')
+  },
+)
+
+test('a parent active at leaf issuance may start after its own issuance', async () => {
+  const f = await leafCapabilityFixture({ parent: { nbf: 2000 } })
+  await expect(verifyLeafCredential(f.credential(), f.device.publicKey)).resolves.toBeUndefined()
+})
+
+test('standard group root grants ignore lifecycle floors in the default judging context', async () => {
+  const f = await memberLeafFixture()
+  const { group } = await pipelineGroup({ standard: true })
+  const held = group.state.ratchetTree[0]
+  if (held?.nodeType !== nodeTypes.leaf) throw new Error('Missing leaf')
+  const projection = f.registry.controllers.get(f.did)
+  if (projection == null) throw new Error('Missing projection')
+  ;(group.registry.controllers as Map<string, ControllerProjection>).set(f.did, {
+    ...projection,
+    genFloor: 99,
+    timeFloor: 1000,
+  })
+  const capability = stringifyToken(
+    await f.f.controller.signToken({ ...f.payload, mbr: undefined }),
+  )
+  const leaf = {
+    ...held.leaf,
+    credential: makeMLSCredential(agent(41), { ...f.binding, capability }),
+  }
+  await expect(validateEntry(group, leaf, held.leaf)).resolves.toBeUndefined()
 })

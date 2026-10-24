@@ -13,7 +13,7 @@ import {
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
-import { checkHolderEvidence, verifyLeafCredential } from './authentication.js'
+import { checkHolderEvidence, type JudgingContext, verifyLeafCredential } from './authentication.js'
 import {
   assertCapabilityLifetime,
   MAX_LEAF_LIFETIME,
@@ -29,6 +29,7 @@ import { decodeLedgerHead, extendHead, genesisHead, headsMatch } from './head.js
 import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
+import { memberRootsOf } from './member-root.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
 import {
   DEVICE_ENTRY_TYPE,
@@ -153,6 +154,7 @@ function checkBinding(
   previous?: LeafNode,
   /** The leaf arrives in a Welcome tree rather than as an entry. */
   welcome = false,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): void {
   const parsed = identity(leaf)
   const binding = parsed.controller
@@ -164,10 +166,21 @@ function checkBinding(
     normalizeDID(binding.id) !== normalizeDID(controller)
   )
     throw new LeafBindingError('controller-mismatch')
-  const denied = denySetOf(group.registry)
-  if (denied.has(normalizeDID(parsed.id)) && !mayReadmitResetDevice(group.registry, parsed))
+  if (
+    controller == null &&
+    binding != null &&
+    memberRootsOf(binding, parsed.id).some(({ root }) => root.kind === 'member')
+  )
+    throw new LeafBindingError('controller-mismatch')
+  const registry = judging.registry
+  const full = judging.stage === 'full'
+  const denied = full && registry != null ? denySetOf(registry) : new Set<string>()
+  if (
+    denied.has(normalizeDID(parsed.id)) &&
+    !mayReadmitResetDevice(registry ?? group.registry, parsed)
+  )
     throw new LeafBindingError('denied-id')
-  const record = group.registry.devices.get(normalizeDID(parsed.id))
+  const record = full ? registry?.devices.get(normalizeDID(parsed.id)) : undefined
   if (record != null && (binding == null || normalizeDID(binding.id) !== record.controller))
     throw new LeafBindingError('controller-mismatch')
   if (previous != null) {
@@ -218,9 +231,10 @@ function checkBinding(
   const folded = foldChain(binding.id, binding.prefix)
   if (!folded.ok) throw new LeafBindingError('controller-mismatch')
   if (
+    full &&
     controller != null &&
     (folded.states.at(-1)?.gen ?? 0) <
-      (group.registry.controllers.get(normalizeDID(controller))?.genFloor ?? 0)
+      (registry?.controllers.get(normalizeDID(controller))?.genFloor ?? 0)
   )
     throw new LeafBindingError('generation-floor')
 }
@@ -234,8 +248,13 @@ function checkAdmissionExpiry(group: GroupHandle, leaf: LeafNode): void {
     throw new LeafLapsedError('lapsed')
 }
 
-function checkEntry(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): void {
-  checkBinding(group, leaf, previous)
+function checkEntry(
+  group: GroupHandle,
+  leaf: LeafNode,
+  previous?: LeafNode,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
+): void {
+  checkBinding(group, leaf, previous, false, judging)
   checkAdmissionExpiry(group, leaf)
 }
 
@@ -244,11 +263,15 @@ async function validateBoundLeaf(
   leaf: LeafNode,
   previous?: LeafNode,
   welcome = false,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): Promise<void> {
-  checkBinding(group, leaf, previous, welcome)
+  checkBinding(group, leaf, previous, welcome, judging)
   await verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
-    deviceDenySet: () => denySetOf(group.registry),
-    deviceRegistry: () => (group.anchor.controller == null ? undefined : group.registry),
+    judging: () => ({
+      ...judging,
+      registry: group.anchor.controller == null ? undefined : judging.registry,
+    }),
+    deviceDenySet: () => (judging.registry == null ? new Set() : denySetOf(judging.registry)),
     mayKeepDeniedIssuer: () => welcome && group.anchor.controller != null,
     leafLifetime: () =>
       group.anchor.controller == null ? undefined : (group.anchor.leafLifetime ?? 86_400),
@@ -263,8 +286,9 @@ export async function validateEntry(
   group: GroupHandle,
   leaf: LeafNode,
   previous?: LeafNode,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): Promise<void> {
-  await validateBoundLeaf(group, leaf, previous)
+  await validateBoundLeaf(group, leaf, previous, false, judging)
   checkAdmissionExpiry(group, leaf)
 }
 

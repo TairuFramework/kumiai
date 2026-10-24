@@ -19,6 +19,9 @@ export type LeafBindingReason =
   | 'controller-mismatch'
   | 'floating-refused'
   | 'history-horizon'
+  | 'member-removed'
+  | 'member-unavailable'
+  | 'epoch-cap'
 
 export class LeafBindingError extends Error {
   #reason: LeafBindingReason

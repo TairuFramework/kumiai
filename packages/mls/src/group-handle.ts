@@ -515,7 +515,11 @@ export class GroupHandle {
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
       denyHolder.provider = () => this.currentDenySet()
-      denyHolder.registry = () => (anchor.controller == null ? undefined : this.registry)
+      denyHolder.judging = () => ({
+        registry: anchor.controller == null ? undefined : this.registry,
+        stage: 'full',
+        mode: 'admit',
+      })
       denyHolder.leafLifetime =
         anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400)
       denyHolder.trustedGrantLifetime =
@@ -1916,8 +1920,11 @@ export class GroupHandle {
                 try {
                   await verifyLeafCredential(credential, key, {
                     deviceDenySet: () => this.currentDenySet(),
-                    deviceRegistry: () =>
-                      this.#anchor.controller == null ? undefined : this.registry,
+                    judging: () => ({
+                      registry: this.#anchor.controller == null ? undefined : this.registry,
+                      stage: 'full',
+                      mode: 'admit',
+                    }),
                     // MLS re-validates the committer's path leaf after its proposals are judged:
                     // an evidenced child keeps a denied issuer only with the credential it
                     // already holds at that leaf.

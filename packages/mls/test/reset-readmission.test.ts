@@ -222,10 +222,9 @@ test('cascadeRevokedDeviceStillRefused', async () => {
   const fresh = await timedBinding({ identity: target, iat: 150, exp: 250, prefix: resetLog })
   expect(mayReadmitResetDevice(resetCascade, { id: target.id, controller: fresh })).toBe(false)
   expect(
-    await createDIDAuthenticationService({ deviceRegistry: () => resetCascade }).validateCredential(
-      makeMLSCredential(target, fresh),
-      target.publicKey,
-    ),
+    await createDIDAuthenticationService({
+      judging: () => ({ registry: resetCascade, stage: 'full', mode: 'admit' }),
+    }).validateCredential(makeMLSCredential(target, fresh), target.publicKey),
   ).toBe(false)
   const registry = registryApply(
     {

@@ -4,13 +4,16 @@ import {
   type ControllerProjection,
   cascadeOf,
   claimsFor,
+  createDIDAuthenticationService,
   createRegistryControllerResolver,
+  type DIDAuthenticationDependencies,
   type EvidenceSlot,
   effectDelta,
   effectiveAuthorityOf,
   effectOf,
   type FoldOk,
   ingestControllerLog,
+  type JudgingContext,
   type LeafRef,
   type MemberRootStatus,
   memberDropIndices,
@@ -83,4 +86,12 @@ test('registry controller resolution is available through the package entry poin
     registry: registryForLog(did, log),
   })
   await expect(resolver.frozen().resolve(did, {})).resolves.toMatchObject({ alg: 'EdDSA' })
+})
+
+test('judging context is available through the package entry point', () => {
+  const judging: JudgingContext = { stage: 'structural', mode: 'retain' }
+  const dependencies: DIDAuthenticationDependencies = { judging: () => judging }
+  expect(createDIDAuthenticationService(dependencies).validateCredential).toEqual(
+    expect.any(Function),
+  )
 })

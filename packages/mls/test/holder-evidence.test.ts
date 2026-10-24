@@ -1,12 +1,14 @@
-import { audienceConfirmation } from '@kokuin/capability'
+import { audienceConfirmation, checkCapability } from '@kokuin/capability'
 import { createControllerIdentity } from '@kokuin/controller'
 import { stringifyToken } from '@kokuin/token'
 import { defaultCredentialTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
+import { mintLeafCapability, mintTrustedGrant, readCapability } from '../src/capability.js'
 import { asControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
+import { createRegistryControllerResolver } from '../src/embedded-resolver.js'
 import { LeafBindingError } from '../src/errors.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import {
@@ -18,7 +20,10 @@ import {
   renewLeaf,
   revokeWithProof,
 } from '../src/index.js'
+import { registryForLog } from '../src/registry.js'
 import { revokeChain } from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
+import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -431,4 +436,116 @@ test('expired holder grant refused on external replacement', async () => {
   })
   await expect(processing).rejects.toHaveProperty('cause', expect.any(LeafBindingError))
   expect(author.epoch).toBe(epoch)
+})
+
+async function memberHolderFixture() {
+  const epoch = await buildEpoch({ members: 1, renewEvery: 4_000_000 })
+  const member = epoch.members[0]
+  if (member == null) throw new Error('Missing member')
+  const f = await leafCapabilityFixture()
+  const payload = {
+    ...f.childPayload,
+    sub: epoch.did,
+    iat: 100,
+    nbf: 100,
+    exp: 2_592_100,
+    cap: undefined,
+    mbr: { add: member.add, g: 0 },
+  }
+  const parent = stringifyToken(
+    await member.identity.signToken(
+      {
+        ...payload,
+        aud: f.trusted.id,
+        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: f.trusted.publicKey }),
+      },
+      { embedLongForm: true },
+    ),
+  )
+  const holderGrant = stringifyToken(
+    await member.identity.signToken(payload, { embedLongForm: true }),
+  )
+  const leafPayload = { ...payload, mbr: undefined, iat: 200, nbf: 200, exp: 3800, cap: parent }
+  const capability = stringifyToken(await f.trusted.signToken(leafPayload))
+  const binding = { id: epoch.did, prefix: epoch.log.chain, capability, holderGrant }
+  const registry = registryForLog(epoch.did, epoch.log)
+  const deps = {
+    judging: () => ({ registry, stage: 'full' as const, mode: 'admit' as const }),
+    leafLifetime: () => 3600,
+    trustedGrantLifetime: () => 2_592_000,
+  }
+  const verify = (overrides = {}, dependencies = deps) =>
+    verifyLeafCredential(
+      makeMLSCredential(agent(41), { ...binding, ...overrides }),
+      f.device.publicKey,
+      dependencies,
+    )
+  return { ...epoch, member, f, parent, holderGrant, leafPayload, binding, registry, deps, verify }
+}
+
+test('holder grant minted by a member authenticates a chained leaf', async () => {
+  const f = await memberHolderFixture()
+  await expect(f.verify()).resolves.toBeUndefined()
+})
+
+test('30-day member parent with a one-hour leaf authenticates', async () => {
+  const f = await memberHolderFixture()
+  const frozen = createRegistryControllerResolver({
+    controllerID: f.did,
+    prefix: f.log.chain,
+    registry: f.registry,
+  }).frozen()
+  const payload = readCapability(f.binding.capability).payload
+  await expect(
+    checkCapability({ act: 'authenticate', res: 'kumiai/mls-leaf' }, payload, {
+      atTime: payload.iat,
+      methods: [frozen],
+      maxDepth: 1,
+      maxMemberGrantLifetime: 604_800,
+    }),
+  ).rejects.toThrow('member grant lifetime exceeds the maximum')
+  await expect(f.verify()).resolves.toBeUndefined()
+})
+
+test('member holder grant over the group trustedGrantLifetime is refused', async () => {
+  const f = await memberHolderFixture()
+  const holderGrant = stringifyToken(
+    await f.member.identity.signToken(
+      {
+        ...readCapability(f.holderGrant).payload,
+        exp: 2_592_101,
+      },
+      { embedLongForm: true },
+    ),
+  )
+  await expect(f.verify({ holderGrant })).rejects.toMatchObject({ reason: 'lifetime-cap' })
+})
+
+test('longer holder grant does not lengthen the leaf', async () => {
+  const f = await memberHolderFixture()
+  const capability = stringifyToken(await f.f.trusted.signToken({ ...f.leafPayload, exp: 3801 }))
+  await expect(f.verify({ capability })).rejects.toMatchObject({ reason: 'lifetime-cap' })
+})
+
+test('leaf minting accepts a well-formed member-rooted parent', async () => {
+  const f = await memberHolderFixture()
+  vi.spyOn(Date, 'now').mockReturnValue(200_000)
+  const parent = await mintTrustedGrant({
+    signer: f.member.identity,
+    controllerID: f.did,
+    audience: f.f.trusted.id,
+    leafKey: f.f.trusted.publicKey,
+    exp: 2_592_100,
+    member: { add: f.member.add, g: 0 },
+  })
+  await expect(
+    mintLeafCapability({
+      signer: f.f.trusted,
+      controllerID: f.did,
+      audience: f.f.device.id,
+      leafKey: f.f.device.publicKey,
+      exp: 3800,
+      parent,
+    }),
+  ).resolves.toEqual(expect.any(String))
 })

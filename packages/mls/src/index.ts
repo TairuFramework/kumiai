@@ -23,6 +23,8 @@ export {
 } from './anchor.js'
 export {
   createDIDAuthenticationService,
+  type DIDAuthenticationDependencies,
+  type JudgingContext,
   MLS_DEVICES_ACT,
   MLS_DEVICES_RES,
   MLS_LEAF_ACT,
