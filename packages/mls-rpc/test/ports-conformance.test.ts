@@ -190,7 +190,7 @@ testPendingGroupCryptoConformance({
 
 testGroupMLSConformance({
   label: 'createGroupMLS over a real GroupHandle',
-  createBoundRecovery: createRealBoundRecovery,
+  createBoundRecovery: (binding) => createRealBoundRecovery(undefined, {}, binding),
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `mls-conformance-${id}`)
     let hintOffset = 0

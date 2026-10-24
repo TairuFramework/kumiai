@@ -661,7 +661,7 @@ test('a lifecycle reply authenticates the complete ordered ledger', async () => 
       requestID: 'authenticated-ledger',
       ephemeralPrivateKey,
     })
-    expect(opened.ledger).toEqual([token])
+    expect(opened.ledger).toEqual(responder.ledgerTokens)
     expect(opened.signer).toBe(identity.id)
     const { hpke } = group.context.cipherSuite
     const aad = ledgerAAD(group.groupID, identity.id, 'authenticated-ledger')

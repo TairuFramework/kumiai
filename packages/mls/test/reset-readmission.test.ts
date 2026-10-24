@@ -65,7 +65,7 @@ async function resetRemoved() {
     fixture.author,
     await timedBinding({ identity: setup.identity, iat: 150, exp: 250, prefix: log }),
   )
-  const reset = await revokeWithProof(renewed.newGroup, { reset: true, log })
+  const reset = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
   expect(reset.status).toBe('built')
   if (reset.status !== 'built') throw new Error('Missing reset')
   const group = reset.result.newGroup
@@ -77,7 +77,7 @@ async function resetRemoved() {
   return { ...setup, group, target, old, log }
 }
 
-test('resetRemovedDeviceReaddedWithPostResetEvidence', async () => {
+test('reset keeps reset-only readmission', async () => {
   const { group, identity, target, log } = await resetRemoved()
   const binding = await timedBinding({ identity: target, iat: 150, exp: 250, prefix: log })
   const bundle = await rawBundle(group, target, binding)
@@ -153,7 +153,10 @@ test('subjectRevokedDeviceStillRefused', async () => {
   const setup = await pipelineGroup()
   const target = agent(51)
   const log = [inception, revoke([inception], target.id)]
-  const result = await revokeWithProof(setup.group, { subject: target.id, log })
+  const result = await revokeWithProof(setup.group, {
+    deny: [target.id],
+    log: asControllerLog(log),
+  })
   expect(result.status).toBe('built')
   if (result.status !== 'built') throw new Error('Missing revoke')
   const bundle = await rawBundle(
@@ -180,8 +183,8 @@ test('cascadeRevokedDeviceStillRefused', async () => {
   const chained = await timedBinding({ identity: target, iat: 150, exp: 250, issuer, parent })
   const fixture = await belowGateWelcome(setup.group, target, withoutHolderEvidence(chained))
   const result = await revokeWithProof(fixture.author, {
-    subject: issuer.id,
-    log: [inception, revoke([inception], issuer.id)],
+    deny: [issuer.id],
+    log: asControllerLog([inception, revoke([inception], issuer.id)]),
   })
   expect(result.status).toBe('built')
   if (result.status !== 'built') throw new Error('Missing cascade')
@@ -210,8 +213,10 @@ test('cascadeRevokedDeviceStillRefused', async () => {
         type: DEVICE_ENTRY_TYPE,
         subject: controllerID,
         value: {
+          effects: [],
+          removed: [],
           op: 'reset',
-          proof: resetLog,
+          proof: asControllerLog(resetLog),
           revoked: [{ did: target.id, cascadedFrom: issuer.id }],
         },
       },
@@ -222,10 +227,9 @@ test('cascadeRevokedDeviceStillRefused', async () => {
   const fresh = await timedBinding({ identity: target, iat: 150, exp: 250, prefix: resetLog })
   expect(mayReadmitResetDevice(resetCascade, { id: target.id, controller: fresh })).toBe(false)
   expect(
-    await createDIDAuthenticationService({ deviceRegistry: () => resetCascade }).validateCredential(
-      makeMLSCredential(target, fresh),
-      target.publicKey,
-    ),
+    await createDIDAuthenticationService({
+      judging: () => ({ registry: resetCascade, stage: 'full', mode: 'admit' }),
+    }).validateCredential(makeMLSCredential(target, fresh), target.publicKey),
   ).toBe(false)
   const registry = registryApply(
     {
@@ -234,7 +238,13 @@ test('cascadeRevokedDeviceStillRefused', async () => {
         groupID: group.groupID,
         type: DEVICE_ENTRY_TYPE,
         subject: controllerID,
-        value: { op: 'reset', proof: resetLog, revoked: [{ did: target.id }] },
+        value: {
+          effects: [],
+          removed: [],
+          op: 'reset',
+          proof: asControllerLog(resetLog),
+          revoked: [{ did: target.id }],
+        },
       },
     },
     group.registry,
@@ -330,8 +340,8 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
 test('resetThenSubjectRevokedStaysTerminal', async () => {
   const { group, target, log } = await resetRemoved()
   const result = await revokeWithProof(group, {
-    subject: target.id,
-    log: [...log, revoke(log, target.id)],
+    deny: [target.id],
+    log: asControllerLog([...log, revoke(log, target.id)]),
   })
   expect(result.status).toBe('built')
   if (result.status !== 'built') throw new Error('Missing revoke')

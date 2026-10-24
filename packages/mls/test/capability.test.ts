@@ -4,8 +4,10 @@ import { b64uToJSON } from '@sozai/codec'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
+import { makeMLSCredential } from '../src/group-credential.js'
 import * as mls from '../src/index.js'
 import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
+import { agent } from './fixtures/lifecycle-pipeline.js'
 
 const payloadOf = (token: string): Record<string, unknown> => {
   const payload = token.split('.')[1]
@@ -16,6 +18,33 @@ const payloadOf = (token: string): Record<string, unknown> => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('capability issuing', () => {
+  test('mintLeafCapability with member writes mbr and refuses self-issue', async () => {
+    const f = await leafCapabilityFixture()
+    vi.spyOn(Date, 'now').mockReturnValue(2000000)
+    const params = {
+      signer: f.trusted,
+      controllerID: f.controller.id,
+      audience: f.device.id,
+      leafKey: f.device.publicKey,
+      exp: 3000,
+      member: { add: 'member-add', g: 0 },
+    }
+    for (const mint of [mls.mintLeafCapability, mls.mintTrustedGrant]) {
+      const token = await mint(params)
+      expect(payloadOf(token)).toMatchObject({
+        iss: f.trusted.id,
+        sub: f.controller.id,
+        aud: f.device.id,
+        mbr: { add: 'member-add', g: 0 },
+        iat: 2000,
+        exp: 3000,
+      })
+      await expect(mint({ ...params, audience: f.trusted.id })).rejects.toMatchObject({
+        reason: 'self-issued',
+      })
+    }
+  })
+
   test('mints a direct leaf at the seven-day ceiling with the required pins', async () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
@@ -38,7 +67,14 @@ describe('capability issuing', () => {
     })
     expect(payloadOf(token).cap).toBeUndefined()
     await expect(
-      verifyLeafCredential(f.credential(token), f.device.publicKey),
+      verifyLeafCredential(
+        makeMLSCredential(agent(41), {
+          id: f.controller.id,
+          prefix: [f.inception],
+          capability: token,
+        }),
+        f.device.publicKey,
+      ),
     ).resolves.toBeUndefined()
   })
 

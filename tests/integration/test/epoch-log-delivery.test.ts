@@ -39,6 +39,7 @@ afterEach(async () => {
 const lifecycle = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
+  inception: ControllerBinding['prefix'][number]
   timedBinding(params: {
     identity: OwnIdentity
     iat: number
@@ -70,6 +71,7 @@ async function setup(
   const group = options.lifecycle
     ? (
         await createGroup(aliceID, 'delivery-integration', {
+          controllerLog: { chain: [lifecycle.inception], events: [] },
           controller: await lifecycle.timedBinding({ identity: aliceID, iat: 100, exp: 500 }),
         })
       ).group

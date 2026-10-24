@@ -1,5 +1,13 @@
 import { audienceConfirmation } from '@kokuin/capability'
-import { createControllerIdentity, createReset, createRotate } from '@kokuin/controller'
+import {
+  createControllerIdentity,
+  createRemove,
+  createRenew,
+  createReset,
+  createRotate,
+  epochHeads,
+  snapshotOf,
+} from '@kokuin/controller'
 import { createIdentity, stringifyToken } from '@kokuin/token'
 import {
   createProposal,
@@ -12,7 +20,7 @@ import {
 } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { asControllerLog } from '../src/controller-log.js'
+import { asControllerLog, foldControllerLog } from '../src/controller-log.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
@@ -22,7 +30,10 @@ import {
   CommitRejectedError,
   deriveGroup,
   type GroupHandle,
+  registryAt,
 } from '../src/group-handle.js'
+import { publishControllerLog, renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
+import { readLedgerHead } from '../src/head.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
 import {
@@ -32,12 +43,18 @@ import {
   validateEntry,
   validateWelcomeTree,
 } from '../src/lifecycle.js'
-import { DEVICE_ENTRY_TYPE } from '../src/registry.js'
-import { revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
+import {
+  type ControllerProjection,
+  controllerProjection,
+  DEVICE_ENTRY_TYPE,
+} from '../src/registry.js'
+import { denyEffects, revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import { joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
+  belowGateWelcome,
   controllerID,
   inception,
   lowLevelApply,
@@ -81,8 +98,14 @@ test.each(['author', 'receiver'] as const)(
     const token = await signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: author.groupID,
-      subject: target.id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: target.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], target.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: target.id }],
+      },
     })
     const entryID = ledgerEntryDigest(token)
     tokens.set(entryID, token)
@@ -489,8 +512,14 @@ describe('path, clock and lapse gates', () => {
     const token = await signLedgerEntry(setup.identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: setup.author.groupID,
-      subject: setup.bobIdentity.id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: setup.bobIdentity.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], setup.bobIdentity.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: setup.bobIdentity.id }],
+      },
     })
     await expect(
       commitWithEntries({
@@ -521,8 +550,14 @@ describe('path, clock and lapse gates', () => {
     const token = await signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
-      subject: agent(81).id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: agent(81).id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], agent(81).id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: agent(81).id }],
+      },
     })
     const add = await rawAdd(
       group,
@@ -686,12 +721,11 @@ describe('lifetime and admission boundaries', () => {
       ...leaf.leaf,
       credential: makeMLSCredential(identity, await timedBinding({ identity, iat: 90, exp: 200 })),
     }
-    ;(
-      group.registry.controllers as Map<
-        string,
-        { recordedLog: Array<never>; genFloor: number; timeFloor: number }
-      >
-    ).set(controllerID, { recordedLog: [], genFloor: 99, timeFloor: 1000 })
+    ;(group.registry.controllers as Map<string, ControllerProjection>).set(controllerID, {
+      ...controllerProjection(),
+      genFloor: 99,
+      timeFloor: 1000,
+    })
     expect(treeTime(group, controllerID)).toBe(0)
     await expect(validateEntry(group, bound, leaf.leaf)).resolves.toBeUndefined()
   })
@@ -841,7 +875,7 @@ describe('consensus history and composition', () => {
       type: DEVICE_ENTRY_TYPE,
       groupID: author.groupID,
       subject: controllerID,
-      value: { op: 'reset', proof: prefix, revoked: [] },
+      value: { effects: [], removed: [], op: 'reset', proof: asControllerLog(prefix), revoked: [] },
     })
     const result = await commitWithEntries({
       group: author,
@@ -1033,8 +1067,14 @@ test('a lifecycle external replacement is refused when its subject is denied', a
   const token = await signLedgerEntry(identity, {
     type: DEVICE_ENTRY_TYPE,
     groupID: author.groupID,
-    subject: bob.id,
-    value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: bob.id }] },
+    subject: controllerID,
+    value: {
+      effects: denyEffects([revoke], bob.id),
+      removed: [],
+      op: 'revoke',
+      proof: asControllerLog([revoke]),
+      revoked: [{ did: bob.id }],
+    },
   })
   // Seed a known revocation on the offered epoch to exercise admission independently of removal.
   await author.applyLedgerEntries([token])
@@ -1140,17 +1180,162 @@ test('two revoke proofs cannot share a commit', async () => {
     signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
-      subject: first.id,
-      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: first.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], first.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: first.id }],
+      },
     }),
     signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: group.groupID,
-      subject: second.id,
-      value: { op: 'revoke', proof: [next], revoked: [{ did: second.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects([next], second.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([next]),
+        revoked: [{ did: second.id }],
+      },
     }),
   ])
   await expect(
     commitWithEntries({ group, extraProposals: [], enacted: tokens, requireAdmin: false }),
   ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('delayed application frame gets the same verdict before and after a later renewal, removal and settlement', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const b = f.members[0]
+  if (b == null) throw new Error('Missing member')
+  const { group, identity, tokens } = await pipelineGroup({ controllerLog: f.log })
+  const peer = await belowGateWelcome(group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  vi.spyOn(Date, 'now').mockReturnValue(1_500_000)
+  const advanced = await renewLeaf(
+    peer.author,
+    await timedBinding({ identity, iat: 1500, exp: 2500 }),
+  )
+  for (const held of advanced.newGroup.ledger) tokens.set(held.entryID, held.token)
+  await peer.joined.processMessage(advanced.commitMessage)
+  const delayed = await rawApplication(peer.joined)
+  const epochHead = readLedgerHead(peer.joined)?.head
+  if (epochHead == null) throw new Error('Missing head')
+  const assertDelayed = async (receiver: GroupHandle) => {
+    const copy = deriveGroup(receiver, structuredClone(receiver.state))
+    await expect(copy.decrypt(delayed)).rejects.toMatchObject({ reason: 'lapsed' })
+  }
+  await assertDelayed(advanced.newGroup)
+  const renewal = createRenew({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: b.add,
+    lease: 2000,
+  })
+  const renewedLog = { chain: f.log.chain, events: [...f.log.events, renewal] }
+  const published = await publishControllerLog(advanced.newGroup, renewedLog)
+  if (published == null) throw new Error('Missing renewal')
+  await assertDelayed(published.newGroup)
+  const folded = foldControllerLog(f.did, renewedLog)
+  if (!folded.ok) throw new Error(folded.reason)
+  const removal = createRemove({
+    did: f.did,
+    head: folded.head,
+    parents: epochHeads(f.did, renewedLog),
+    signer: f.root,
+    add: b.add,
+  })
+  const removedLog = { chain: f.log.chain, events: [...renewedLog.events, removal] }
+  const removed = await revokeWithProof(published.newGroup, {
+    log: removedLog,
+    remove: [{ did: b.did, add: b.add }],
+  })
+  if (removed.status !== 'built') throw new Error('Missing removal')
+  await assertDelayed(removed.result.newGroup)
+  const finalFold = foldControllerLog(f.did, removedLog)
+  if (!finalFold.ok) throw new Error(finalFold.reason)
+  const settled = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: f.inception.event,
+    snapshot: snapshotOf(finalFold.head),
+  })
+  const settlement = await publishControllerLog(removed.result.newGroup, {
+    chain: [f.inception, settled],
+    events: [],
+  })
+  if (settlement == null) throw new Error('Missing settlement')
+  await assertDelayed(settlement.newGroup)
+  const historical = registryAt(settlement.newGroup, epochHead)
+  expect(registryAt(settlement.newGroup, epochHead)).toBe(historical)
+  expect(historical.controllers.get(f.did)?.recordedLog).toEqual(f.log)
+  expect(() => registryAt(settlement.newGroup, new Uint8Array(32))).toThrow(
+    'Unknown epoch ledger head',
+  )
+})
+
+test('registryAt caches distinct authenticated heads and recomputes the evicted projection', async () => {
+  const f = await buildEpoch({ members: 1 })
+  const member = f.members[0]
+  if (member == null) throw new Error('Missing member')
+  let { group } = await pipelineGroup({ controllerLog: f.log })
+  let log = f.log
+  const heads: Array<Uint8Array> = []
+  for (let index = 0; index < 9; index++) {
+    const folded = foldControllerLog(f.did, log)
+    if (!folded.ok) throw new Error(folded.reason)
+    const renewal = createRenew({
+      did: f.did,
+      head: folded.head,
+      parents: epochHeads(f.did, log),
+      signer: f.root,
+      add: member.add,
+      lease: 1001 + index,
+    })
+    log = { chain: log.chain, events: [...log.events, renewal] }
+    const published = await publishControllerLog(group, log)
+    if (published == null) throw new Error('Missing renewal')
+    group = published.newGroup
+    const head = readLedgerHead(group)?.head
+    if (head == null) throw new Error('Missing authenticated head')
+    heads.push(head)
+  }
+  const projections = heads.slice(0, 8).map((head, index) => {
+    const registry = registryAt(group, head)
+    const recorded = registry.controllers.get(f.did)?.recordedLog
+    if (recorded == null) throw new Error('Missing recorded log')
+    const folded = foldControllerLog(f.did, recorded)
+    if (!folded.ok) throw new Error(folded.reason)
+    expect(folded.head.members.get(member.add)?.lease).toBe(1001 + index)
+    expect(recorded.events).toHaveLength(2 + index)
+    return registry
+  })
+  expect(new Set(projections).size).toBe(8)
+  for (const [index, head] of heads.slice(0, 8).entries()) {
+    expect(registryAt(group, head)).toBe(projections[index])
+  }
+  const firstHead = heads[0]
+  const ninthHead = heads[8]
+  if (firstHead == null || ninthHead == null) throw new Error('Missing head')
+  const ninth = registryAt(group, ninthHead)
+  expect(ninth.controllers.get(f.did)?.recordedLog).toEqual(log)
+  expect(projections).not.toContain(ninth)
+  for (const [index, head] of heads.slice(1, 8).entries()) {
+    expect(registryAt(group, head)).toBe(projections[index + 1])
+  }
+  expect(registryAt(group, ninthHead)).toBe(ninth)
+  const recomputed = registryAt(group, firstHead)
+  expect(recomputed).not.toBe(projections[0])
+  expect(recomputed).toEqual(projections[0])
+  expect(registryAt(group, firstHead)).toBe(recomputed)
 })

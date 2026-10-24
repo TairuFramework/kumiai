@@ -30,12 +30,11 @@ import type {
   RosterEntry,
 } from '@kumiai/rpc'
 
-import type { HandleAccess } from './access.js'
+import { guardedReplace, type HandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
 import {
   createRecoveryBindingState,
   createVerdictJudge,
-  knownRecoveryRegistry,
   type RecoveryBinding,
   type RecoveryCandidate,
 } from './recovery.js'
@@ -402,7 +401,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         if (rejoined == null || 'renewalRequired' in rejoined) return rejoined
         return {
           ...rejoined,
-          knownRegistry: knownRecoveryRegistry(group.registry, rejoined.sourceRegistry),
+          knownRegistry: rejoined.group.registry,
         }
       })
       if (candidate == null || 'renewalRequired' in candidate) return candidate
@@ -411,7 +410,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         rejoined.group.anchor.controller != null &&
         !recoverySignerEligible({
           group: rejoined.group,
-          known: rejoined.knownRegistry,
+          registry: rejoined.knownRegistry,
           signer: reply.signer,
         })
       )
@@ -436,7 +435,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         confirmationKey: judge.confirmationKey,
         judgeVerdict: judge.judgeVerdict,
         onAccepted: () => {
-          accepted ??= access.replace(rejoined.group).catch((error: unknown) => {
+          accepted ??= guardedReplace(access, rejoined.group).catch((error: unknown) => {
             accepted = undefined
             throw error
           })

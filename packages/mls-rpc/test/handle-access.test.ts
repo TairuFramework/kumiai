@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
+import { guardedReplace, type HandleAccess, simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
@@ -25,7 +25,7 @@ test('admission stays synchronous at the old epoch through awaited adoption', as
   await buildRealCommit(group)
   const next = group.committer.handle
   const confirm = vi.spyOn(next, 'confirmAdopted')
-  await access.replace(next)
+  await access.replace(next, () => {})
   expect(confirm).toHaveBeenCalledOnce()
   expect(mls.sendAdmission()).toEqual({ epoch: Number(next.epoch), admissible: true })
   expect(access.epoch()).toBe(mls.sendAdmission().epoch)
@@ -45,7 +45,7 @@ test('failed adoption neither confirms the candidate nor publishes its snapshots
   await buildRealCommit(group)
   const next = group.committer.handle
   const confirm = vi.spyOn(next, 'confirmAdopted')
-  await expect(access.replace(next)).rejects.toThrow('adoption failed')
+  await expect(access.replace(next, () => {})).rejects.toThrow('adoption failed')
   expect(access.admission()).toEqual(before)
   expect(access.epoch()).toBe(before.epoch)
   expect(confirm).not.toHaveBeenCalled()
@@ -109,7 +109,7 @@ test('one access instance serves both ports and publishes replacement after save
   )
   await buildRealCommit(group)
   const next = group.committer.handle
-  await access.replace(next)
+  await access.replace(next, () => {})
   expect(saved).toHaveBeenCalledWith(next)
   expect(member.handle).toBe(next)
   expect(crypto.epoch()).toBe(Number(next.epoch))
@@ -183,7 +183,7 @@ test('replace saves before adoption and open passes through the staged writer', 
     },
     persist,
   })
-  const replacement = access.replace(next)
+  const replacement = access.replace(next, () => {})
   await Promise.resolve()
   expect(member.handle).toBe(old)
   expect(access.epoch()).toBe(Number(old.epoch))
@@ -203,4 +203,44 @@ test('replace saves before adoption and open passes through the staged writer', 
   }, writer)
   expect(writer).toHaveBeenCalledWith(new Uint8Array([1]), record)
   expect(persist).toHaveBeenCalledOnce()
+})
+
+test('a throwing guard aborts replacement before persistence', async () => {
+  const group = await createRealGroup(1, 'guard-aborts')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const before = member.handle
+  const persist = vi.fn()
+  const access = simpleHandleAccess({
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+    persist,
+  })
+  await buildRealCommit(group)
+  await expect(
+    access.replace(group.committer.handle, () => {
+      throw new Error('stale')
+    }),
+  ).rejects.toThrow('stale')
+  expect(persist).not.toHaveBeenCalled()
+  expect(member.handle).toBe(before)
+})
+
+test('guardedReplace refuses an access implementation that skips the guard', async () => {
+  const group = await createRealGroup(1, 'guard-skipped')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const inner = simpleHandleAccess({
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+  })
+  const skipping: HandleAccess = { ...inner, replace: (next) => inner.replace(next, () => {}) }
+  await buildRealCommit(group)
+  await expect(guardedReplace(skipping, group.committer.handle)).rejects.toThrow(
+    'HandleAccess.replace did not run its guard',
+  )
 })

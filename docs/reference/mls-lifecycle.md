@@ -3,7 +3,8 @@
 ## Genesis and membership
 
 A lifecycle group has `GroupAnchor.controller`, naming one `did:kokuin` controller H.
-The creator passes a `ControllerBinding` to `createGroup`.
+The creator passes a `ControllerBinding` and authoritative `options.controllerLog` to `createGroup`.
+A first-position `seed` entry installs the log, generation floor, denials and removed-member tombstones atomically.
 Every leaf belongs to an agent and proves its binding to H.
 Membership is a live leaf in the tree. A local controller-head check is advisory and never an MLS input.
 
@@ -21,57 +22,92 @@ A competing admission loses the epoch race and checks consumption again.
 
 ## Credentials and time
 
-`mintLeafCapability` issues a direct H-signed capability or a child of one H-signed trusted grant.
+`ControllerBinding` carries `id`, a chain-only `prefix`, and one binding form:
+
+- `capability`, with `holderGrant` for a chained leaf.
+- `member: { add, g }` and self-attested `iat`, binding the leaf to its own pinned membership incarnation.
+
+Capabilities may be H-signed or member-signed with `mbr: { add, g }`.
+Member roots resolve through the registry-held `ControllerLog`, including the pinned signing key and lease.
+Standard groups remain root-only. Member-rooted credentials require a lifecycle group.
+Membership `iat` orders replacements but never attests tree time.
+`memberRootStatus(...).status` is `root`, `effective`, `removed` or `unavailable`.
+Admission refuses removed or unavailable authority. Retention keeps unchanged leaves when authority is unavailable.
+Welcome and recovery require available authority and may use verified survivor authority.
+
+`mintLeafCapability` issues a direct capability or a child of one trusted grant.
 `mintTrustedGrant` authorises a trusted agent T to issue children, without requiring T to hold a group leaf.
 Both set `iat`. Leaf capabilities cannot exceed seven days, and trusted grants cannot exceed 365 days.
 Group limits can be lower. A child cannot outlive its parent or name its signer as its audience.
 Chains deeper than one are refused. The parent pins T's signing key through `cnf`.
-Direct capabilities pin `iss = sub = H`, the agent audience, permission and leaf key.
+Root-issued direct capabilities pin `iss = sub = H`. Member-issued capabilities pin `iss` to the member DID and `sub` to H.
+Both pin the agent audience, permission and leaf key.
 Verification uses token reference times and embedded controller prefixes, without a clock or DID cache.
 Authoring checks additionally require `iat <= now < exp`, including creation, key packages, external joins, invites and renewal.
 
-Tree time is the maximum of the ledger time floor and H-signed times in the tree.
-A direct leaf attests its capability's `iat`. A chained leaf attests its parent's `iat`, never T's child timestamp.
-A leaf is lapsed when its `exp` is below tree time.
-A leaf that enters or changes needs a strictly later `exp`: `exp > treeTime(H)` of the pre-commit epoch.
+Tree time is `max(timeFloor, rootTime, quorum)`.
+Root-issued direct capabilities and chain parents attest their `iat` through `rootTime`.
+Effective members attest through member-issued direct capabilities, chain parents and registry-held attest clocks.
+The quorum uses distinct pinned keys: the second-highest attestation, or the highest when only one key is effective.
+With no effective keys, the quorum contributes zero. Membership leaves attest nothing.
+`attestTreeTime(group, time?)` publishes an effective member's own `clock` entry with `attest: true`.
+A leaf is lapsed when its effective expiry is below tree time. Membership expiry comes from the recorded lease or survivor grant.
+A leaf that enters or changes needs effective expiry strictly above `treeTime(H)` of the pre-commit epoch.
 This entry check applies to an Add, an external commit's new leaf, an Update, and a committer's path leaf whose credential changed.
-At `exp == treeTime(H)` an installed leaf is not lapsed, but the same leaf cannot enter or change.
+At expiry equal to `treeTime(H)`, an installed leaf is not lapsed, but the same leaf cannot enter or change.
 Wall-clock expiry alone does not stop an installed member sending.
-H must sign something newer that reaches the group to advance lapse.
-A `clock` entry preserves the pre-commit tree time whenever a removal or renewal would lower it.
+Root time or member attestations reaching the group advance lapse.
+A preservation `clock` entry prevents time falling across changes to the proposed tree or candidate registry.
 
 `sendAdmission()` is a synchronous epoch-paired verdict. Lapsed senders cannot encrypt or send ordinary member commits.
 Receivers reject a lapsed sender before opening its application message, preserving the ratchet generation.
-An empty renewal commit can renew the sender out of lapse.
-`renewLeaf` preserves the agent DID, long form, signature key and controller, and never lowers capability `iat`.
+A renewal commit can renew the sender out of lapse and bundle `controllerLog`.
+`renewLeaf` preserves the agent DID, long form, signature key and controller, and never lowers `bindingIssuedAt`.
 One exception: a direct H capability may replace a leaf whose capability has a newer `iat` when the group registry records that leaf's issuer T as revoked.
 T denied only in a later H log, not yet recorded by the group, does not qualify.
 Every other check still applies: same agent and key, same controller, lifetime, lapse and monotonic tree time.
-Every agent renews in every group at least once per `leafLifetime`.
+Capability-bound agents renew in every group at least once per `leafLifetime`. Membership-bound agents follow their recorded leases.
 H renews T's trusted grant at least once per `trustedGrantLifetime`.
 
 ## Device operations and commits
 
-Lifecycle `kumiai.device` entries allow proven `revoke`, `reset`, `clock` and advisory `beacon`.
+Lifecycle `kumiai.device` entries allow `seed`, `log`, proven `revoke`, `reset`, `clock` and advisory `beacon`.
 They reject `register`, `add`, `label` and capability-authorised revocation.
 Other groups retain device management with registry/tree controller agreement and issuer/subject pins.
 Terminally denied DIDs cannot enter as bound or floating leaves, or issue leaf capabilities.
 
 The ledger is the only revocation authority.
-A proven revoke verifies authority-signed controller events against the group's recorded log.
-A device revoke is a non-reset rotate whose state snapshot newly denies the device DID.
-A later rotate retaining that denial does not create another revoke.
-The first proof carries a chain. Later proofs carry a suffix after its recorded head, possibly empty.
-A reset carries a chain re-parented on inception and raises the generation floor.
-Revoking T cascades to its current child leaves. Effects and exact Removes are authenticated in the entry.
-In a lifecycle group, the cascade skips an evidenced child: a chained leaf carrying its holder's own valid H grant, for a holder that is not denied.
-H bound that agent directly, so revoking T removes only T. Builder and receivers derive the same effects from the pre-commit tree.
+Proof-bearing entries carry `proof: ControllerLog`, with `chain` and `events` arrays.
+The registry stores only the authoritative merged log. Leaves keep chain-only prefixes.
+A delta carries an empty chain, a suffix after the recorded head, or a full chain for genesis or reset.
+`publishControllerLog(group, log)` publishes effect-free changes, including leases, added members and settlement.
+A `log` entry cannot introduce denials, member removals or generation changes.
+Newly applied events from authors already removed or ineffective in the recorded head are refused.
+
+`revokeWithProof(group, { log, deny?, remove?, survivors?, evidence? })` publishes exact declared effects and Removes.
+`remove` names `{ did, add }` incarnations. `{ reset: true, log }` raises the generation floor.
+`EffectClaim` uses `kind: 'deny'` with `did`, or `kind: 'remove'` with `member: { did, add }`.
+Each claim carries `ref: ProofRef`: `{ chainIndex }`, `{ event, epoch? }`, or reset-only `{ snapshot }`.
+`DeviceRecord.proofRef` and `Revocation.proofRef` replace log positions.
+Epoch `rev` events prove DID denial. Epoch `rmv` events prove incarnation removal.
+An `rmv` cascades through that incarnation's membership leaf and rooted grants, without permanently denying their holder DIDs.
+Grants other effective members issued to that DID remain valid. Root may deny the DID at its next settlement.
+A removed holder can return through another effective root or a new incarnation.
+
+`effectiveAuthorityOf` chooses the primary root, then valid holder evidence, then an accepted survivor grant.
+`survivorTargets(group, add)` lists affected leaf holders and keys for substitute grants.
+The `survivors` input carries those grants. Their expiry bounds surviving leaves, including membership leaves.
+`memberRemoved` reports accepted incarnation removal.
+`removalEvidence(controller, log, rmv)` captures an epoch closure before settlement for a never-snapshotted removal.
+Hosts retain that evidence beside their controller store until every group has accepted the removal.
+The ledger preserves historical evidence. The recorded log keeps only the authoritative projection.
 A repeat proof for T reports `already-revoked` while only evidenced children of T remain.
 An evidenced child keeps T as its issuer until it renews:
+
 - On the commit path, including survivor checks and authentication of the committer's path leaf, it passes only with the credential and key already in the tree at that leaf.
 - A Welcome or external joiner has no earlier tree, so it accepts any evidenced child in the tree it receives. A denied-issuer leaf without valid evidence is still refused.
 - Entry checks keep refusing a denied T: no Add, update or external replacement may carry a new capability T issued.
-  Subject and cascade revocations are permanent, including for a subject without a leaf.
+  DID denials and their cascades are permanent, including for a subject without a leaf.
   An un-revoke in H's log cannot remove them. A replacement agent needs a new DID.
   Reset-only removal permits re-entry through Add and Welcome with valid binding evidence at or above the current generation floor.
   Direct H grants and chained capabilities with the holder's own H-signed grant follow the same rule.
@@ -94,7 +130,7 @@ A lapsed target may be removed by any member. A target's self-removal proposal m
 Other discretionary removals, PSKs and ReInit are refused.
 An external rejoin replaces exactly one existing leaf with the same agent and key, using a bound replacement.
 
-`renewLeaf`, `removeLapsedLeaves`, `commitInvite` and `revokeWithProof` return speculative handles.
+`renewLeaf`, `removeLapsedLeaves`, `commitInvite`, `publishControllerLog`, `attestTreeTime` and `revokeWithProof` return speculative handles when they build commits.
 They neither publish nor adopt, and lifecycle helpers absorb no pending proposals.
 The host publishes and adopts on acceptance, or discards a losing result and rebuilds against the winner.
 Adoption calls `confirmAdopted()` once. Repeated calls emit nothing further.
@@ -112,11 +148,16 @@ The send hold and durable handover contract are in [the app lane](./app-lane.md)
 ## History and frames
 
 `HISTORY_HORIZON = 393,216` bytes is fixed, with no per-group override.
-History counts signed-event JSON bytes across every leaf prefix and every ledger proof, including repeated copies.
+History counts signed-event JSON bytes across every leaf prefix and every ledger proof, including repeated chain and epoch-event copies.
 A commit passes when `post <= horizon` or `post <= pre`, so shrinking remains possible above the horizon.
 Welcome/external revalidation has no absolute horizon check. Only that comparative commit gate authorises history growth.
 A reset shortens renewed prefixes to `[icp, reset, ...]`, but never compacts earlier ledger proofs.
 A group whose ledger alone fills the horizon needs a new group.
+
+Member-rooted admission permits at most 32 distinct applied current-epoch events (`MAX_EPOCH_EVENTS_FOR_LEAVES`).
+`settleAdvisory(log)` and `group.settleAdvisory()` return `ok`, `prompt` from 24 events, or `blocked` above 32.
+The cap excludes unchanged leaves, Welcome trees, root-issued admissions and lifecycle entries.
+Settlement clears the current epoch count.
 
 Consumer entries have only the whole-frame bound, not the history horizon.
 Every RPC-owned frame passes `assertFrameFits` before journalling or publishing.
@@ -143,9 +184,12 @@ Outside lifecycle groups, refusals and superseded require a source-tree signer. 
 
 A verdict signed by the rejoiner never counts.
 Lifecycle attestations and verdicts count only from a bound leaf in the pending tree.
-The known registry combines the last-known and reply ledgers, uniting revocations and taking maximum floors.
-Neither the signer nor its chain issuer may be revoked, and its generation must meet the known floor.
-Its leaf must remain live at `max(treeTime(pending), now - 300 seconds)`, with the known time floor.
+The reply's authenticated ledger supplies the candidate registry for judgement and adoption.
+`assertRetainsKnownEffects(controller, known, candidate)` refuses dropped denials, removed incarnations, current-epoch events, floors or effective-key attestations.
+Root settlement supersedes only its ended epoch events. A newer reset may supersede older incarnations and events.
+Neither supersedes MLS time floors or effective-key attestations.
+Signer and survivor authority use the candidate registry, including after adoption and restore.
+The signer must remain live at `max(treeTime(pending), now - 300 seconds)` and meet the candidate generation floor.
 A failed signer gate makes the verdict advisory.
 
 Binding, lapse and floor refusals call `PendingRecovery.markBindingUnusable()` and end as `renewal-required`.
@@ -171,11 +215,11 @@ Closing this residual requires an upstream MLS change.
 ## Errors
 
 `LeafBindingError.reason` includes issuer-mismatch, subject-mismatch, audience-mismatch, permission-denied, signature-invalid, confirmation-invalid, chain-depth, self-issued, child-outlives-parent, denied-issuer,
-lifetime-cap, generation-floor, identity-change, controller-mismatch, floating-refused and history-horizon.
+lifetime-cap, generation-floor, identity-change, controller-mismatch, floating-refused, history-horizon, member-removed, member-unavailable and epoch-cap.
 `LeafLapsedError` refuses sending or opening a lapsed leaf's traffic.
 `RevokeProofError.reason` includes no-rev, wrong-controller, not-authority-signed, generation-floor, too-large,
 detached, needs-reset, effects-mismatch and removes-mismatch. Helpers return these through `not-provable`.
-`no-rev` means no revoking rotate for the subject. A reset carrying a denial does not count.
+`no-rev` means the supplied log and retained evidence cannot prove the requested effect. Reset denials use the reset form.
 
 `@kumiai/mls-rpc` and `@kumiai/mls-hub` inherit the `@kumiai/mls` behaviour change.
 

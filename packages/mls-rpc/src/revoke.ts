@@ -1,4 +1,5 @@
 import {
+  type EffectClaim,
   type GroupHandle,
   type RevokeBuildResult,
   type RevokeWithProofParams,
@@ -6,6 +7,7 @@ import {
 } from '@kumiai/mls'
 import type { GroupMLS, GroupPeer, GroupProtocolDefinition } from '@kumiai/rpc'
 
+import { guardedReplace } from './access.js'
 import { groupHandleAccess } from './mls.js'
 
 export type RevokeJournalOptions = {
@@ -14,7 +16,7 @@ export type RevokeJournalOptions = {
 }
 
 export type PublishRevokeResult =
-  | { status: 'committed'; epoch: number }
+  | { status: 'committed'; epoch: number; effects: Array<EffectClaim> }
   | Exclude<RevokeBuildResult, { status: 'built' }>
 
 export type PublishRevokeProofParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
@@ -43,6 +45,7 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
           outcome = built.result
           throw finished
         }
+        const effects = built.result.effects
         const { newGroup, commitMessage, epoch } = built.result.result
         const journal = await options.serializeJournal(newGroup)
         return {
@@ -51,8 +54,8 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
           kind: 'ledger',
           journal,
           onAccepted: async () => {
-            await access.replace(newGroup)
-            outcome = { status: 'committed', epoch: Number(epoch) }
+            await guardedReplace(access, newGroup)
+            outcome = { status: 'committed', epoch: Number(epoch), effects }
           },
         }
       },

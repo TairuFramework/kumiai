@@ -27,7 +27,7 @@ import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, computeHead } from '../../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../../src/ledger.js'
 import { createRecoveryRequest, sealGroupInfo } from '../../src/recovery.js'
-import { revokeChain, snapshotForChain } from './controller-chain.js'
+import { denyEffects, revokeChain, snapshotForChain } from './controller-chain.js'
 
 export function printTable(rows: Array<Record<string, unknown>>) {
   if (process.env.KUMIAI_PROBE_REPORT !== '1') return
@@ -235,6 +235,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     }
     const { group } = await createGroup(alice, groupID, {
       controller: await binding(alice, prefix),
+      controllerLog: { chain: prefix, events: [] },
       commitPolicy: () => 'accept',
     })
     const bundle = await createKeyPackageBundle(bob, { controller: await binding(bob, prefix) })
@@ -290,8 +291,15 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
         await signLedgerEntry(alice, {
           type: 'kumiai.device',
           groupID,
-          subject: target.id,
-          value: { op: 'revoke', subject: target.id, proof, revoked: [{ did: target.id }] },
+          subject: controllerID,
+          value: {
+            effects: denyEffects(proof, target.id),
+            removed: [],
+            op: 'revoke',
+            subject: target.id,
+            proof: asControllerLog(proof),
+            revoked: [{ did: target.id }],
+          },
         }),
       )
     }

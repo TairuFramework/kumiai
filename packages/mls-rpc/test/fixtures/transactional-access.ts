@@ -166,9 +166,11 @@ export async function createTransactionalAccess(
         publish(working, row.revision + 1)
         return result
       }),
-    replace: (next) =>
+    replace: (next, guard) =>
       locked(async () => {
+        await store.settled()
         const row = store.snapshot()
+        guard(await restore(row))
         await store.save(row.revision, encodeClientState(next.state), next.ledgerTokens)
         publish(next, row.revision + 1)
         next.confirmAdopted()

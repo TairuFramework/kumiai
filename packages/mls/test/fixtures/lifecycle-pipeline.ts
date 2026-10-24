@@ -1,11 +1,15 @@
 import { audienceConfirmation } from '@kokuin/capability'
 import {
+  type ControllerLog,
   createControllerIdentity,
+  createRemove,
   createReset,
+  createRevoke,
   createRotate,
+  epochHeads,
   type SignedEvent,
 } from '@kokuin/controller'
-import { type OwnIdentity, stringifyToken } from '@kokuin/token'
+import { createIdentity, type OwnIdentity, stringifyToken } from '@kokuin/token'
 import {
   createApplicationMessage,
   createCommit,
@@ -26,7 +30,7 @@ import {
   wireformats,
 } from 'ts-mls'
 
-import { asControllerLog } from '../../src/controller-log.js'
+import { asControllerLog, foldControllerLog } from '../../src/controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from '../../src/credential.js'
 import { encodeControlEnvelope } from '../../src/envelope.js'
 import { resolveMlsContext } from '../../src/group-context.js'
@@ -37,9 +41,86 @@ import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../../src/head.js'
 import { ledgerEntryDigest } from '../../src/ledger.js'
 import { snapshotForChain } from './controller-chain.js'
+import { buildEpoch } from './controller-epoch.js'
 import { agent, controllerID, controllerSeed, inception } from './lifecycle-ledger.js'
 
 export { agent, controllerID, inception }
+
+export async function managementFixture(kind: 'root' | 'mbr' | 'membership') {
+  const now = Math.floor(Date.now() / 1000)
+  const epoch = await buildEpoch({ members: 2, renewEvery: now + 10_000 })
+  const [member, unknown] = epoch.members
+  if (member == null || unknown == null) throw new Error('Missing members')
+  let log: ControllerLog = { chain: epoch.log.chain, events: [member.event] }
+  const newcomer = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(63) }],
+    didMethod: 'peer:4',
+  })
+  const newcomerLongForm = newcomer.longForm
+  if (newcomerLongForm == null) throw new Error('Missing admission long form')
+  const alice = agent(41)
+  const bob = kind === 'membership' ? member.identity : agent(61)
+  const binding = async (iat: number, pin = member): Promise<ControllerBinding> => {
+    if (kind === 'membership')
+      return { id: epoch.did, prefix: log.chain, member: { add: pin.add, g: 0 }, iat }
+    if (kind === 'root') return timedBinding({ identity: bob, iat, exp: now + 1000 })
+    return grant(bob, pin, iat)
+  }
+  const grant = async (identity: OwnIdentity, pin = member, iat = now - 20) => ({
+    id: epoch.did,
+    prefix: log.chain,
+    capability: stringifyToken(
+      await pin.identity.signToken(
+        {
+          sub: epoch.did,
+          aud: identity.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
+          iat,
+          exp: now + 1000,
+          mbr: { add: pin.add, g: 0 },
+        },
+        { embedLongForm: true },
+      ),
+    ),
+  })
+  return {
+    alice,
+    bob,
+    log,
+    creatorBinding: await timedBinding({ identity: alice, iat: now - 20, exp: now + 1000 }),
+    binding,
+    member: { did: member.identity.id, add: member.add },
+    newcomer,
+    deniedDID: newcomer.id,
+    denialAliases: { long: newcomerLongForm, short: newcomer.id },
+    nextLog: (op: 'log' | 'deny' | 'deny-alias' | 'remove') => {
+      const folded = foldControllerLog(epoch.did, log)
+      if (!folded.ok) throw new Error(folded.reason)
+      const params = {
+        did: epoch.did,
+        head: folded.head,
+        parents: epochHeads(epoch.did, log),
+        signer: epoch.root,
+      }
+      const event =
+        op === 'log'
+          ? unknown.event
+          : op === 'deny'
+            ? createRevoke({ ...params, target: newcomer.id })
+            : op === 'deny-alias'
+              ? createRevoke({ ...params, target: newcomerLongForm })
+              : createRemove({ ...params, add: member.add })
+      log = { chain: log.chain, events: [...log.events, event] }
+      return log
+    },
+    admissionBinding: (authority: 'effective' | 'removed' | 'unavailable' | 'foreign') =>
+      authority === 'foreign'
+        ? binding(now - 20)
+        : grant(newcomer, authority === 'unavailable' ? unknown : member),
+  }
+}
 
 export type TimedBindingParams = {
   identity: OwnIdentity
@@ -80,6 +161,7 @@ export async function timedBinding(params: TimedBindingParams): Promise<Controll
 }
 
 export type PipelineGroupOptions = {
+  controllerLog?: ControllerLog
   leafLifetime?: number
   trustedGrantLifetime?: number
   /** Create a group with no lifecycle controller. */
@@ -92,7 +174,15 @@ export async function pipelineGroup(options: PipelineGroupOptions = {}) {
   const { group } = await createGroup(identity, 'lifecycle-pipeline', {
     ...(options.standard
       ? {}
-      : { controller: await timedBinding({ identity, iat: 100, exp: 200 }) }),
+      : {
+          controller: await timedBinding({
+            identity,
+            iat: 100,
+            exp: 200,
+            prefix: options.controllerLog?.chain,
+          }),
+          controllerLog: options.controllerLog ?? asControllerLog([inception]),
+        }),
     leafLifetime: options.leafLifetime,
     trustedGrantLifetime: options.trustedGrantLifetime,
     commitPolicy: () => 'accept',

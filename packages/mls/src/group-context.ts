@@ -8,9 +8,9 @@ import {
 } from 'ts-mls'
 
 import type { GroupAnchor } from './anchor.js'
-import { createDIDAuthenticationService } from './authentication.js'
+import { createDIDAuthenticationService, type JudgingContext } from './authentication.js'
 import { nobleCryptoProvider } from './crypto.js'
-import type { DeviceRegistry } from './registry.js'
+import { denySetOf } from './registry.js'
 import type { GroupOptions } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
@@ -20,7 +20,7 @@ const EMPTY_DENY: ReadonlySet<string> = new Set()
 /** Late-bound provider of a context's device deny set, pointed at the live handle after construction. */
 export type DeviceDenyHolder = {
   provider: () => ReadonlySet<string>
-  registry?: () => DeviceRegistry | undefined
+  judging?: () => JudgingContext
   leafLifetime?: number
   trustedGrantLifetime?: number
 }
@@ -30,6 +30,35 @@ const DENY_HOLDERS = new WeakMap<MlsContext, DeviceDenyHolder>()
 /** The deny holder for an internally built context, or undefined for others. */
 export function deviceDenyHolderFor(context: MlsContext): DeviceDenyHolder | undefined {
   return DENY_HOLDERS.get(context)
+}
+
+/** Run with an isolated authentication service without changing the source context. */
+export async function withJudging<T>(
+  context: MlsContext,
+  judging: JudgingContext,
+  fn: (context: MlsContext) => Promise<T>,
+): Promise<T> {
+  const holder = deviceDenyHolderFor(context)
+  if (holder == null) throw new Error('Missing judging holder')
+  const registry = judging.registry
+  const scopedHolder: DeviceDenyHolder = {
+    ...holder,
+    provider: registry == null ? holder.provider : () => denySetOf(registry),
+    judging: () => judging,
+  }
+  const scopedContext = { ...context, authService: authenticationFor(scopedHolder) }
+  DENY_HOLDERS.set(scopedContext, scopedHolder)
+  return fn(scopedContext)
+}
+
+function authenticationFor(holder: DeviceDenyHolder): MlsContext['authService'] {
+  return createDIDAuthenticationService({
+    deviceDenySet: () => holder.provider(),
+    judging: () => holder.judging?.() ?? { stage: 'full', mode: 'admit' },
+    mayKeepDeniedIssuer: () => holder.judging?.().mode === 'retain',
+    leafLifetime: () => holder.leafLifetime,
+    trustedGrantLifetime: () => holder.trustedGrantLifetime,
+  })
 }
 
 export async function resolveMlsContext(
@@ -53,12 +82,7 @@ export function createMlsContext(
     trustedGrantLifetime:
       anchor?.controller == null ? undefined : (anchor.trustedGrantLifetime ?? 2_592_000),
   }
-  const authService = createDIDAuthenticationService({
-    deviceDenySet: () => holder.provider(),
-    deviceRegistry: () => holder.registry?.(),
-    leafLifetime: () => holder.leafLifetime,
-    trustedGrantLifetime: () => holder.trustedGrantLifetime,
-  })
+  const authService = authenticationFor(holder)
   const context: MlsContext = { cipherSuite, authService }
   DENY_HOLDERS.set(context, holder)
   return context

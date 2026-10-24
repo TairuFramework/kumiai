@@ -1,0 +1,53 @@
+# Management tier follow-ups
+
+**Priority:** next.
+**Context:** `../completed/2026-10-24-management-tier.complete.md`.
+
+## 1. Release band 0.12
+
+- The intent `.changeset/management-tier-0-12.md` raises all fourteen packages one minor. The user runs
+  the release.
+- After publishing, tell the kubun stack-adoption session. 0.12 unblocks its controller-owned
+  credential-record carriage, where a co-member resolves a delegate's authority from the owner's log
+  through `resolveMember`.
+- Kubun host duties to restate at integration:
+  - Capture `removalEvidence(controller, log, rmv)` before a settle, and keep it beside the kokuin
+    store until the removal has landed in every group.
+  - A custom `HandleAccess` must run `replace`'s guard under the replacement lock, before persisting.
+  - Adopt authored commits through `guardedReplace`.
+
+## 2. Adopt kokuin #23 (controller 0.2.x patch)
+
+- kokuin #23 folds in the #22 canonical-deny fix.
+- The user decided (2026-10-24) that the controller ships it as a 0.2.x patch, so it flows up the
+  stack without band raises, but only if it is proven compatible with the published 0.2.3:
+  - 0.2.3 folds logs carrying `u`, tolerating and ignoring the field;
+  - 0.2.3 logs fold to the same members and deny sets, apart from the alias fix;
+  - the API is additive only.
+  If that fails, it is a minor (0.3), and kumiai needs a catalog minor plus its own band raise.
+- As a patch, kumiai's `^0.2.3` picks it up on install. Re-run the full gate, then adopt the
+  additions below as ordinary changes.
+- Do this after 0.12 ships; 0.12 does not wait on it.
+- Kubun's adoption notes (kokuin worktree `vault-records`, stack-adoption-2 upstream) cover:
+  - `resolveMemberHistoric` with `removed: true`;
+  - the removed-member tombstone in the snapshot field `u`, shaped `{ did, key, add, lease }`, with
+    `gen` taken from its chain state;
+  - `resolveDenySet`, which now returns raw and canonical entries;
+  - `deviceRevokeIndices`, which is unchanged.
+- kumiai's `removedMembers` judges by incarnation (`add`), not by removal time. A settled tombstone
+  maps to its first carrying chain state with
+  `foldLog(did, log).states.findIndex((s) => s.tombstones.has(add))`. Snapshot
+  granularity is enough, because after a settle kumiai already downgrades `{ event }` refs to
+  `{ chainIndex }`.
+- Re-check canonical DID handling on both sides wherever kumiai reads kokuin's deny or member state.
+- In #23, chain-state and head `members` are unchanged from 0.2: they hold only live snapshot members.
+  Removed incarnations from `u` move to a separate `KeyState.tombstones` map, keyed by `add`, so
+  kumiai's snapshot-drop predicates keep working.
+- Tighten attest-clock attribution in `registryApply` (`packages/mls/src/registry.ts`) to effective
+  members of the previous projection. Today it matches any incarnation by DID. The admission gate
+  already refuses removed attestors.
+
+## 3. Catch up the Spec P phase 2 worktree
+
+The milestone worktree (`kumiai.worktrees/spec-p-phase-2`) must rebase or merge over 0.12 before it
+continues.

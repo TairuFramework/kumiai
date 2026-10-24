@@ -1,10 +1,15 @@
-import { createRotate } from '@kokuin/controller'
+import { audienceConfirmation } from '@kokuin/capability'
+import { createRenew, createRotate, epochHeads } from '@kokuin/controller'
+import { stringifyToken } from '@kokuin/token'
 import { defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import type { ControllerBinding } from '../src/credential.js'
 import {
   commitInvite,
   createInvite,
+  createKeyPackageBundle,
+  createLastResortKeyPackageBundle,
   exportGroupInfo,
   joinGroupExternal,
   processWelcome,
@@ -12,11 +17,23 @@ import {
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { addDevice } from '../src/group-device.js'
-import { deriveGroup } from '../src/group-handle.js'
+import { buildCommitPolicyContext, deriveGroup } from '../src/group-handle.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
+import { leafExpiry } from '../src/index.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
+import {
+  isLapsed,
+  leafAt,
+  prepareLifecycleGate,
+  treeTime,
+  validateEntry,
+  validateWelcomeTree,
+} from '../src/lifecycle.js'
+import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
+import { DEVICE_ENTRY_TYPE } from '../src/registry.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 import { snapshotForChain } from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import { buildBoundKeyPackageBundle, joinBoundDevice } from './fixtures/device-harness.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
@@ -25,6 +42,7 @@ import {
   lowLevelWelcome,
   pipelineGroup,
   rawAdd,
+  rawBundle,
   rawCommit,
   timedBinding,
 } from './fixtures/lifecycle-pipeline.js'
@@ -51,8 +69,12 @@ async function admission(entries: Array<string> = []) {
 
 test('membership and Welcome require a recipient and no role token', async () => {
   const { group, bob, invite, bundle } = await admission()
+  const [seed] = structuredClone(group.ledger)
+  if (seed == null) throw new Error('Missing seed')
+  expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+  expect(group.ledgerTokens).toEqual([seed.token])
   expect(invite.recipientDID).toBe(bob.id)
-  expect(invite.ledgerEntries).toHaveLength(0)
+  expect(invite.ledgerEntries).toEqual([seed.token])
   const result = await commitInvite(group, bundle.publicPackage, invite)
   const { group: joined } = await processWelcome({
     identity: bob,
@@ -62,7 +84,8 @@ test('membership and Welcome require a recipient and no role token', async () =>
   })
   expect(joined.listMembers()).toHaveLength(2)
   expect(joined.listMembers().every((member) => member.controller === controllerID)).toBe(true)
-  expect(joined.ledgerTokens).toHaveLength(0)
+  expect(joined.ledgerTokens).toEqual([seed.token])
+  expect(joined.ledger).toEqual([seed])
   await expect(
     createInvite({ group: joined, identity: bob, recipientDID: agent(62).id }),
   ).resolves.toBeDefined()
@@ -124,7 +147,7 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
     welcome: first.welcomeMessage,
     keyPackageBundle: { ...bundle, ownerDID: bob.id },
   })
-  expect(consumer.group.ledgerTokens).toEqual([token])
+  expect(consumer.group.ledgerTokens).toEqual([...group.ledgerTokens, token])
   await receiver.processMessage(first.commitMessage)
   await expect(receiver.processMessage(second.commitMessage)).rejects.toThrow()
   const consentConsumptions = receiver.ledger.filter(
@@ -132,13 +155,17 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
   ).length
   expect(consentConsumptions).toBe(1)
   expect(receiver.findMemberLeafIndex(bob.id)).toBeDefined()
-  expect(first.newGroup.ledgerTokens).toEqual([token])
+  expect(first.newGroup.ledgerTokens).toEqual([...group.ledgerTokens, token])
   const retry = await createInvite({ group: receiver, identity: carol, recipientDID: bob.id })
-  expect(retry.invite.ledgerEntries).toEqual([token])
+  expect(retry.invite.ledgerEntries).toEqual([...group.ledgerTokens, token])
 })
 
 test('an inviter and consumer issuer need a pre-commit leaf', async () => {
   const { group, identity, bob, invite, bundle } = await admission()
+  const [seed] = structuredClone(group.ledger)
+  if (seed == null) throw new Error('Missing seed')
+  expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+  expect(group.ledgerTokens).toEqual([seed.token])
   const outsider = agent(62)
   await expect(createInvite({ group, identity: outsider, recipientDID: bob.id })).rejects.toThrow(
     /leaf/,
@@ -150,9 +177,13 @@ test('an inviter and consumer issuer need a pre-commit leaf', async () => {
     value: 'consent-id',
   })
   await expect(
-    commitInvite(group, bundle.publicPackage, { ...invite, ledgerEntries: [token] }),
+    commitInvite(group, bundle.publicPackage, {
+      ...invite,
+      ledgerEntries: [...group.ledgerTokens, token],
+    }),
   ).rejects.toThrow(/pre-commit/)
-  expect(group.ledgerTokens).toEqual([])
+  expect(group.ledgerTokens).toEqual([seed.token])
+  expect(group.ledger).toEqual([seed])
   expect(group.findMemberLeafIndex(identity.id)).toBeDefined()
 })
 
@@ -510,4 +541,292 @@ test('the commit gate still refuses growing history above the horizon', async ()
     }),
   ).rejects.toMatchObject({ reason: 'history-horizon' })
   expect(group.state).toBe(previous)
+})
+
+async function membershipLeaf(lease = 1000) {
+  authorClock()
+  const epoch = await buildEpoch({ members: 1, renewEvery: lease })
+  const member = epoch.members[0]
+  if (member == null) throw new Error('Missing member')
+  const { group, identity } = await pipelineGroup({ controllerLog: epoch.log })
+  const binding: ControllerBinding = {
+    id: epoch.did,
+    prefix: epoch.log.chain,
+    member: { add: member.add, g: epoch.head.gen },
+    iat: 9_000_000,
+  }
+  const leaf = (await rawBundle(group, member.identity, binding)).publicPackage.leafNode
+  group.state.ratchetTree.push(undefined, { nodeType: nodeTypes.leaf, leaf })
+  const floor = (time: number) => {
+    const projection = group.registry.controllers.get(epoch.did)
+    if (projection == null) throw new Error('Missing projection')
+    Object.assign(projection, { timeFloor: time })
+  }
+  return { ...epoch, group, identity, member, binding, leaf, floor }
+}
+
+test('membership leaf lapses at its lease end by tree time', async () => {
+  const f = await membershipLeaf()
+  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(1000)
+  f.floor(1000)
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({ reason: 'lapsed' })
+  f.floor(1001)
+  expect(isLapsed(f.group, f.leaf)).toBe(true)
+})
+
+test('renewal reaches a membership leaf through a log entry', async () => {
+  const f = await membershipLeaf()
+  const renew = createRenew({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: f.root,
+    add: f.member.add,
+    lease: 2000,
+  })
+  await f.group.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: f.group.groupID,
+      subject: f.did,
+      value: { op: 'log', proof: { chain: [], events: [renew] } },
+    }),
+  ])
+  f.floor(1500)
+  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(2000)
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
+})
+
+test('phone member keeps its leaf 30 days on a 90-day lease', async () => {
+  const f = await membershipLeaf(7_776_000)
+  f.floor(2_592_000)
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
+})
+
+test('membership leaf attests no tree time', async () => {
+  const f = await membershipLeaf()
+  expect(treeTime(f.group, f.did)).toBe(100)
+  await expect(
+    verifyLifecycleProof(f.group, {
+      issuer: f.identity.id,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: f.group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 101 },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('an unavailable membership lease keeps existing leaves and refuses admission', async () => {
+  const f = await membershipLeaf()
+  ;(f.group.registry.controllers as Map<string, unknown>).clear()
+  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBeUndefined()
+  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({
+    reason: 'member-unavailable',
+  })
+})
+
+async function stagedWelcome(membership = false, carriesAdd = true) {
+  authorClock()
+  const epoch = await buildEpoch({ members: 1 })
+  const member = epoch.members[0]
+  if (member == null) throw new Error('Missing member')
+  const { group, identity } = await pipelineGroup({
+    controllerLog: { chain: epoch.log.chain, events: [] },
+  })
+  const joiner = membership ? member.identity : agent(61)
+  const binding: ControllerBinding = {
+    id: epoch.did,
+    prefix: epoch.log.chain,
+    ...(membership
+      ? { member: { add: member.add, g: epoch.head.gen }, iat: 100 }
+      : {
+          capability: stringifyToken(
+            await member.identity.signToken(
+              {
+                sub: epoch.did,
+                aud: joiner.id,
+                act: 'authenticate',
+                res: 'kumiai/mls-leaf',
+                cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: joiner.publicKey }),
+                iat: 100,
+                exp: 200,
+                mbr: { add: member.add, g: epoch.head.gen },
+              },
+              { embedLongForm: true },
+            ),
+          ),
+        }),
+  }
+  const entries = carriesAdd
+    ? [
+        await signLedgerEntry(identity, {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: epoch.did,
+          value: { op: 'log', proof: { chain: [], events: epoch.log.events } },
+        }),
+      ]
+    : []
+  const { invite } = await createInvite({
+    group,
+    identity,
+    recipientDID: joiner.id,
+  })
+  const bundle = await rawBundle(group, joiner, binding)
+  const result = await rawCommit({
+    group,
+    proposals: [
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+    ],
+    tokens: entries,
+  })
+  if (result.welcome == null) throw new Error('Missing Welcome')
+  return {
+    ...epoch,
+    member,
+    identity,
+    binding,
+    params: {
+      identity: joiner,
+      invite: { ...invite, ledgerEntries: [...invite.ledgerEntries, ...entries] },
+      welcome: result.welcome.welcome,
+      keyPackageBundle: { ...bundle, ownerDID: joiner.id },
+    },
+  }
+}
+
+test.each([
+  ['entry', 100, 1001, true],
+  ['entry', 1001, 100, false],
+  ['proposal', 100, 1001, true],
+  ['proposal', 1001, 100, false],
+  ['Welcome', 100, 1001, true],
+  ['Welcome', 1001, 100, false],
+] as const)(
+  '%s judges membership expiry with current floor %s and judging floor %s',
+  async (path, currentFloor, judgingFloor, lapsed) => {
+    const f = await stagedWelcome(true)
+    const { group } = await processWelcome(f.params)
+    const registry = structuredClone(group.registry)
+    const current = group.registry.controllers.get(f.did)
+    const judging = registry.controllers.get(f.did)
+    if (current == null || judging == null) throw new Error('Missing projection')
+    Object.assign(current, { timeFloor: currentFloor })
+    Object.assign(judging, { timeFloor: judgingFloor })
+    const leaf = leafAt(group.state.ratchetTree, group.state.privatePath.leafIndex)
+    if (leaf == null) throw new Error('Missing joiner')
+    expect(leafExpiry(f.binding, registry, f.did)).toBe(1000)
+    const validate = async () => {
+      if (path === 'entry')
+        return validateEntry(group, leaf, undefined, { registry, stage: 'full', mode: 'admit' })
+      if (path === 'Welcome')
+        return validateWelcomeTree(group, { registry, stage: 'full', mode: 'rejudge' })
+      const bundle = await rawBundle(group, f.member.identity, f.binding)
+      const gate = await prepareLifecycleGate({
+        group,
+        entries: [],
+        candidateRegistry: registry,
+        context: buildCommitPolicyContext(group, {
+          baseRoster: group.roster,
+          candidateRoster: group.roster,
+          entryIDs: [],
+          enactedDeviceEntries: [],
+        }),
+      })
+      gate.check({
+        kind: 'proposal',
+        proposal: {
+          senderLeafIndex: undefined,
+          proposal: {
+            proposalType: defaultProposalTypes.add,
+            add: { keyPackage: bundle.publicPackage },
+          },
+        },
+      })
+    }
+    const result = validate()
+    if (lapsed)
+      await expect(result).rejects.toMatchObject({ name: 'LeafLapsedError', reason: 'lapsed' })
+    else await expect(result).resolves.toBeUndefined()
+    expect(current.timeFloor).toBe(currentFloor)
+    expect(judging.timeFloor).toBe(judgingFloor)
+  },
+)
+
+test("Welcome with an mbr leaf joins once the ledger carries the member's add", async () => {
+  const f = await stagedWelcome()
+  const entries = [...f.params.invite.ledgerEntries]
+  const { group } = await processWelcome(f.params)
+  expect(group.memberCount).toBe(2)
+  expect(group.ledgerTokens).toEqual(entries)
+  expect(f.params.invite.ledgerEntries).toEqual(entries)
+  expect(group.sendAdmission()).toMatchObject({ admissible: true })
+})
+
+test('Welcome with an mbr leaf whose member the ledger lacks is refused', async () => {
+  const f = await stagedWelcome(false, false)
+  await expect(processWelcome(f.params)).rejects.toMatchObject({
+    name: 'LeafBindingError',
+    reason: 'member-unavailable',
+  })
+})
+
+test('Welcome joiner with a membership leaf takes admission from the folded registry', async () => {
+  const f = await stagedWelcome(true)
+  const { group } = await processWelcome(f.params)
+  expect(group.sendAdmission()).toMatchObject({ admissible: true })
+  await group.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: f.did,
+      value: { op: 'clock', time: 1000 },
+    }),
+  ])
+  expect(group.sendAdmission()).toMatchObject({ admissible: true })
+  await group.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: f.did,
+      value: { op: 'clock', time: 1001 },
+    }),
+  ])
+  expect(group.sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
+  await expect(group.encrypt(new Uint8Array([1]))).rejects.toMatchObject({ reason: 'lapsed' })
+})
+
+test('membership key package needs controllerLog', async () => {
+  const f = await stagedWelcome(true)
+  for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
+    await expect(build(f.member.identity, { controller: f.binding })).rejects.toMatchObject({
+      reason: 'member-unavailable',
+    })
+    const bundle = await build(f.member.identity, { controller: f.binding, controllerLog: f.log })
+    expect(bundle.ownerDID).toBe(f.member.identity.id)
+  }
+})
+
+test('mbr key package verifies against controllerLog', async () => {
+  const f = await stagedWelcome()
+  for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
+    await expect(build(f.params.identity, { controller: f.binding })).rejects.toMatchObject({
+      reason: 'member-unavailable',
+    })
+    const bundle = await build(f.params.identity, { controller: f.binding, controllerLog: f.log })
+    expect(bundle.ownerDID).toBe(f.params.identity.id)
+    await expect(
+      build(f.params.identity, {
+        controller: f.binding,
+        controllerLog: { chain: f.log.chain, events: [] },
+      }),
+    ).rejects.toMatchObject({ reason: 'member-unavailable' })
+  }
 })

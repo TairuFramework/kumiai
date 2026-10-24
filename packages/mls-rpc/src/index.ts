@@ -19,7 +19,13 @@
  * @module mls-rpc
  */
 
-export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
+export {
+  guardedReplace,
+  type HandleAccess,
+  retainsKnownEffects,
+  type SimpleHandleAccessParams,
+  simpleHandleAccess,
+} from './access.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
 export {
   createGroupCrypto,

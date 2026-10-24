@@ -1,3 +1,4 @@
+import type { ControllerLog } from '@kokuin/controller'
 import { normalizeDID, type SigningIdentity } from '@kokuin/token'
 import {
   type ClientState,
@@ -8,9 +9,12 @@ import {
   encode,
   type GroupContextExtension,
   isDefaultCredential,
+  isDefaultProposal,
   type KeyPackage,
   type LeafIndex,
   mlsMessageEncoder,
+  nodeTypes,
+  type ProposalWithSender,
   type UnappliedProposals,
 } from 'ts-mls'
 
@@ -20,6 +24,7 @@ import { verifyDeviceEntry } from './device-proof.js'
 import { encodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
+import { withJudging } from './group-context.js'
 import { assertBindingAuthorTime } from './group-credential.js'
 import {
   buildCommitPolicyContext,
@@ -28,6 +33,7 @@ import {
   type GroupHandle,
   mutexFor,
 } from './group-handle.js'
+import { controllerLogDelta, preservationClock } from './group-lifecycle.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from './head.js'
 import {
   ledgerEntryDigest,
@@ -35,7 +41,12 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-import { prepareLifecycleGate, rejectionReason, validateEntry } from './lifecycle.js'
+import {
+  isUnchangedLeaf,
+  prepareLifecycleGate,
+  rejectionReason,
+  validateEntry,
+} from './lifecycle.js'
 import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import { staleLeafIndex } from './stale-leaf.js'
@@ -82,6 +93,7 @@ export type CreateInviteParams = {
   group: GroupHandle
   identity: SigningIdentity
   recipientDID: string
+  controllerLog?: ControllerLog
 } & (
   | { permission: GroupPermission; entries?: never }
   | { permission?: never; entries?: Array<string> }
@@ -90,6 +102,9 @@ export type CreateInviteParams = {
 export type CreateInviteResult = {
   invite: Invite
 }
+
+// Completed builds refresh the handle, but retries must never enact a previous build's clock.
+const INVITE_ENTRIES = new WeakMap<Invite, ReadonlyArray<string>>()
 
 /** Create an invite without adding its recipient; commitInvite enacts the admission. */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
@@ -101,7 +116,7 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     if (group.findMemberLeafIndex(identity.id) == null) {
       throw new Error('createInvite: the inviter must hold a leaf')
     }
-    appended = params.entries ?? []
+    appended = [...(params.entries ?? [])]
     for (const token of appended) {
       const verified = await verifyLedgerEntry(token)
       if (
@@ -111,6 +126,18 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
         normalizeDID(verified.issuer) !== normalizeDID(identity.id)
       )
         throw new Error('createInvite: entries must be consumer entries signed by the inviter')
+    }
+    if (params.controllerLog != null) {
+      const delta = controllerLogDelta(group, params.controllerLog)
+      if (delta != null)
+        appended.unshift(
+          await signLedgerEntry(identity, {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: group.anchor.controller,
+            value: { op: 'log', proof: delta },
+          }),
+        )
     }
   } else {
     if (params.permission == null)
@@ -127,14 +154,14 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
       }),
     ]
   }
-  return {
-    invite: {
-      groupID: group.groupID,
-      inviterID: identity.id,
-      recipientDID,
-      ledgerEntries: [...group.ledgerTokens, ...appended],
-    },
+  const invite: Invite = {
+    groupID: group.groupID,
+    inviterID: identity.id,
+    recipientDID,
+    ledgerEntries: [...group.ledgerTokens, ...appended],
   }
+  INVITE_ENTRIES.set(invite, [...invite.ledgerEntries])
+  return { invite }
 }
 
 /**
@@ -156,6 +183,29 @@ function extensionsWithHead(
   return group.state.groupContext.extensions.map((ext) =>
     ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE ? next : ext,
   )
+}
+
+export function proposedTree(
+  state: ClientState,
+  proposals: Array<ProposalWithSender>,
+): ClientState['ratchetTree'] {
+  const tree = state.ratchetTree.slice()
+  for (const { proposal, senderLeafIndex } of proposals) {
+    if (!isDefaultProposal(proposal)) continue
+    switch (proposal.proposalType) {
+      case defaultProposalTypes.add:
+        tree.push({ nodeType: nodeTypes.leaf, leaf: proposal.add.keyPackage.leafNode })
+        break
+      case defaultProposalTypes.update:
+        if (senderLeafIndex != null)
+          tree[senderLeafIndex * 2] = { nodeType: nodeTypes.leaf, leaf: proposal.update.leafNode }
+        break
+      case defaultProposalTypes.remove:
+        tree[proposal.remove.removed * 2] = undefined
+        break
+    }
+  }
+  return tree
 }
 
 export type CommitWithEntriesParams = {
@@ -192,8 +242,9 @@ export type CommitWithEntriesParams = {
  */
 export async function commitWithEntries(
   params: CommitWithEntriesParams,
-): Promise<Awaited<ReturnType<typeof createCommit>>> {
-  const { group, extraProposals, enacted } = params
+): Promise<Awaited<ReturnType<typeof createCommit>> & { enacted: Array<string> }> {
+  const { group, extraProposals } = params
+  const enacted = [...params.enacted]
   if (group.anchor.controller != null && group.findMemberLeafIndex(group.credential.id) == null) {
     throw new Error('the committer must hold a leaf')
   }
@@ -225,22 +276,42 @@ export async function commitWithEntries(
     }
     inputs.push({ verified, entryID: ledgerEntryDigest(token) })
   }
-  const fold = foldEnvelope({
-    baseRoster: group.roster,
-    baseRegistry: group.registry,
-    entries: inputs,
-    groupID: group.groupID,
-    context:
-      group.anchor.controller == null
-        ? undefined
-        : {
-            controllerID: group.anchor.controller,
-            memberController: (did) => group.bindingOfDID(did)?.controller,
-          },
-  })
+  const foldEntries = () =>
+    foldEnvelope({
+      baseRoster: group.roster,
+      baseRegistry: group.registry,
+      entries: inputs,
+      groupID: group.groupID,
+      context:
+        group.anchor.controller == null
+          ? undefined
+          : {
+              controllerID: group.anchor.controller,
+              memberController: (did) => group.bindingOfDID(did)?.controller,
+            },
+    })
+  let fold = foldEntries()
   if (!fold.ok) {
     if (fold.error != null) throw fold.error
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
+  }
+
+  const sourceState = params.commitState ?? group.state
+  const tree = proposedTree(sourceState, [
+    ...Object.values(params.pendingProposals ?? {}),
+    ...extraProposals.map((proposal) => ({
+      proposal,
+      senderLeafIndex: sourceState.privatePath.leafIndex,
+    })),
+  ])
+  const clocks = await preservationClock(group, tree, fold.registry)
+  for (const clock of clocks) {
+    const verified = await verifyLedgerEntry(clock)
+    if (verified == null) throw new Error('Invalid preservation clock')
+    enacted.push(clock)
+    inputs.push({ verified, entryID: ledgerEntryDigest(clock) })
+    fold = foldEntries()
+    if (!fold.ok) throw fold.error ?? new Error(fold.reason)
   }
 
   // Same reason as the fold guard above: verify device entries against THIS group's tree and
@@ -328,20 +399,63 @@ export async function commitWithEntries(
       ) {
         assertBindingAuthorTime(parseMLSCredentialIdentity(leaf.credential.identity).controller)
       }
-      await validateEntry(group, leaf)
+      await validateEntry(group, leaf, undefined, {
+        registry: fold.registry,
+        stage: 'full',
+        mode: 'admit',
+      })
     }
   }
-  const result = await createCommit({
-    context: group.context,
-    state: commitState,
-    extraProposals: proposals,
-    ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
-    ...(entryIDs.length > 0 && {
-      authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
-    }),
-  })
+  const candidateRegistry = fold.registry
+  const result = await withJudging(
+    group.context,
+    {
+      registry: group.anchor.controller == null ? undefined : candidateRegistry,
+      stage: 'full',
+      mode: 'admit',
+    },
+    (context) =>
+      createCommit({
+        context: {
+          ...context,
+          authService: {
+            validateCredential: async (credential, key) => {
+              const update = incoming.proposals.find(
+                ({ proposal }) =>
+                  isDefaultProposal(proposal) &&
+                  proposal.proposalType === defaultProposalTypes.update &&
+                  proposal.update.leafNode.credential === credential,
+              )
+              const index = update?.senderLeafIndex
+              return withJudging(
+                group.context,
+                {
+                  registry: group.anchor.controller == null ? undefined : candidateRegistry,
+                  stage: 'full',
+                  mode:
+                    index != null &&
+                    isUnchangedLeaf(group.state.ratchetTree, index, {
+                      credential,
+                      signaturePublicKey: key,
+                    })
+                      ? 'retain'
+                      : 'admit',
+                },
+                (judgedContext) => judgedContext.authService.validateCredential(credential, key),
+              )
+            },
+          },
+        },
+        state: commitState,
+        extraProposals: proposals,
+        ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
+        ...(entryIDs.length > 0 && {
+          authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
+        }),
+      }),
+  )
   await gate.postApply(result.newState)
-  return result
+  return { ...result, enacted }
 }
 
 /**
@@ -356,14 +470,13 @@ export async function commitWithEntries(
  * corrupting the chain for every receiver.
  */
 function entriesAddedByInvite(group: GroupHandle, invite: Invite): Array<string> {
+  const entries = INVITE_ENTRIES.get(invite) ?? [...invite.ledgerEntries]
+  INVITE_ENTRIES.set(invite, entries)
   const held = group.ledgerTokens
-  if (
-    invite.ledgerEntries.length < held.length ||
-    held.some((token, index) => invite.ledgerEntries[index] !== token)
-  ) {
+  if (entries.length < held.length || held.some((token, index) => entries[index] !== token)) {
     throw new Error("commitInvite: the invite's ledger does not extend this group's own")
   }
-  return invite.ledgerEntries.slice(held.length)
+  return entries.slice(held.length)
 }
 
 export type CommitLedgerEntriesResult = {
@@ -403,7 +516,7 @@ export async function commitLedgerEntries(
     }
     const result = await commitWithEntries({ group, extraProposals: [], enacted: tokens })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(tokens)
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -413,6 +526,8 @@ export async function commitLedgerEntries(
 }
 
 export type CommitInviteResult = {
+  /** The input invite, updated with the complete ledger, including any preservation clock. */
+  invite: Invite
   /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
   commitMessage: Uint8Array
   /** Framed MLSMessage(Welcome) bytes. Delivered to the new member. */
@@ -438,6 +553,8 @@ export type CommitInviteResult = {
  * The invite carries the group's whole history (a joiner has nothing to fold it onto),
  * but only the entries beyond that history ride the commit — see
  * {@link entriesAddedByInvite} and {@link commitWithEntries}.
+ * On success, updates the input invite with the complete ledger for delivery with the Welcome.
+ * Failed attempts leave it unchanged. Retries always build from its original ledger entries.
  *
  * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
  * `group`. The caller MUST adopt `newGroup` — never reuse `group` — before the next
@@ -533,11 +650,15 @@ export async function commitInvite(
     if (result.welcome == null) {
       throw new Error('commitInvite: expected a Welcome message for the add proposal')
     }
-    // The entries this commit enacts are now part of the group's ledger.
-    await newGroup.applyLedgerEntries(enacted)
+    // Preservation may append a clock after the invite was prepared.
+    await newGroup.applyLedgerEntries(result.enacted)
+    const commitMessage = encode(mlsMessageEncoder, result.commit)
+    const welcomeMessage = encode(mlsMessageEncoder, result.welcome)
+    invite.ledgerEntries = newGroup.ledgerTokens
     return {
-      commitMessage: encode(mlsMessageEncoder, result.commit),
-      welcomeMessage: encode(mlsMessageEncoder, result.welcome),
+      invite,
+      commitMessage,
+      welcomeMessage,
       newGroup,
       epoch: newGroup.epoch,
     }

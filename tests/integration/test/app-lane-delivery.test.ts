@@ -1,3 +1,14 @@
+import type { OwnIdentity } from '@kokuin/token'
+import {
+  type ControllerBinding,
+  commitInvite,
+  createGroup,
+  createInvite,
+  createKeyPackageBundle,
+  processWelcome,
+  verifyLedgerEntry,
+} from '@kumiai/mls'
+import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { APP_TOPIC_LABEL, protocolTopic } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -17,6 +28,125 @@ import {
 import { createWireHub } from './log-hub-over-wire.js'
 
 const flush = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const lifecycle = (await import(
+  new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
+)) as {
+  agent: (byte: number) => OwnIdentity
+  timedBinding: (params: {
+    identity: OwnIdentity
+    iat: number
+    exp: number
+    parent?: string
+    issuer?: OwnIdentity
+  }) => Promise<ControllerBinding>
+}
+
+test('the app-lane invite build publishes its preservation clock and delivers the input invite', async () => {
+  const hub = createWireHub()
+  const aliceID = lifecycle.agent(41)
+  const bobID = lifecycle.agent(51)
+  const carolID = lifecycle.agent(52)
+  const now = Math.floor(Date.now() / 1000)
+  const creatorBinding = await lifecycle.timedBinding({
+    identity: aliceID,
+    iat: now - 20,
+    exp: now + 1000,
+  })
+  const aliceSlot = createLedgerEntrySlot()
+  const carolSlot = createLedgerEntrySlot()
+  const bobSlot = createLedgerEntrySlot()
+  const { group } = await createGroup(aliceID, 'app-lane-preservation-clock', {
+    controller: creatorBinding,
+    controllerLog: { chain: creatorBinding.prefix, events: [] },
+    resolveLedgerEntries: aliceSlot.resolve,
+  })
+  const staleBundle = await createKeyPackageBundle(bobID, {
+    controller: await lifecycle.timedBinding({ identity: bobID, iat: now - 10, exp: now + 1000 }),
+  })
+  const stale = await createInvite({ group, identity: aliceID, recipientDID: bobID.id })
+  const withBob = await commitInvite(group, staleBundle.publicPackage, stale.invite)
+  const carolBundle = await createKeyPackageBundle(carolID, {
+    controller: await lifecycle.timedBinding({ identity: carolID, iat: now - 20, exp: now + 1000 }),
+  })
+  const carolInvite = await createInvite({
+    group: withBob.newGroup,
+    identity: aliceID,
+    recipientDID: carolID.id,
+  })
+  const withCarol = await commitInvite(
+    withBob.newGroup,
+    carolBundle.publicPackage,
+    carolInvite.invite,
+  )
+  const { group: carolGroup } = await processWelcome({
+    identity: carolID,
+    invite: carolInvite.invite,
+    welcome: withCarol.welcomeMessage,
+    keyPackageBundle: carolBundle,
+    options: { resolveLedgerEntries: carolSlot.resolve },
+  })
+  const alice = makeMember({
+    hub,
+    identity: aliceID,
+    group: withCarol.newGroup,
+    entrySlot: aliceSlot,
+  })
+  const carol = makeMember({
+    hub,
+    identity: carolID,
+    group: carolGroup,
+    entrySlot: carolSlot,
+  })
+  try {
+    await flush()
+    const { invite } = await createInvite({
+      group: alice.handle(),
+      identity: aliceID,
+      recipientDID: bobID.id,
+    })
+    const bundle = await createKeyPackageBundle(bobID, {
+      controller: await lifecycle.timedBinding({
+        identity: bobID,
+        iat: now - 5,
+        exp: now + 1000,
+        parent: creatorBinding.capability,
+        issuer: aliceID,
+      }),
+    })
+    let welcome: Uint8Array | undefined
+    const pending = await buildInviteCommit(alice, { invite, bundle }, (message) => {
+      welcome = message
+    })()
+    const result = await alice.peer.commit(async () => pending)
+    expect(result.lost).toBeUndefined()
+    expect(pending.bodies).toEqual(alice.handle().ledgerTokens)
+    const clock = pending.bodies?.at(-1)
+    if (clock == null) throw new Error('Missing preservation clock')
+    expect((await verifyLedgerEntry(clock))?.entry.value).toEqual({ op: 'clock', time: now - 10 })
+    await vi.waitFor(() => expect(carol.handle().epoch).toBe(alice.handle().epoch))
+    expect(carol.handle().ledgerTokens).toEqual(alice.handle().ledgerTokens)
+    if (welcome == null) throw new Error('Missing accepted Welcome')
+    const joined = await joinFromWelcome({
+      identity: bobID,
+      invite,
+      welcome,
+      bundle,
+      ratchetTree: alice.handle().state.ratchetTree,
+      entrySlot: bobSlot,
+    })
+    expect(joined.ledgerTokens).toEqual(alice.handle().ledgerTokens)
+    expect(joined.registry.controllers.get(creatorBinding.id)?.timeFloor).toBe(now - 10)
+    const payload = new TextEncoder().encode('app-lane preserved time')
+    await expect(carol.handle().decrypt(await joined.encrypt(payload))).resolves.toMatchObject({
+      payload,
+      senderDID: bobID.id,
+    })
+  } finally {
+    await alice.disconnect()
+    await carol.disconnect()
+  }
+})
 
 /**
  * The branch's thesis, end to end, with nothing substituted: the real `hub-server` reached

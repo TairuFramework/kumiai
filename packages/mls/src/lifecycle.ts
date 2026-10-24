@@ -1,3 +1,4 @@
+import { decodeKey } from '@kokuin/controller'
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   type ClientState,
@@ -13,22 +14,30 @@ import {
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
-import { checkHolderEvidence, verifyLeafCredential } from './authentication.js'
+import { checkHolderEvidence, type JudgingContext, verifyLeafCredential } from './authentication.js'
 import {
   assertCapabilityLifetime,
+  capabilityKey,
   MAX_LEAF_LIFETIME,
   MAX_TRUSTED_GRANT_LIFETIME,
   readCapability,
 } from './capability.js'
-import { foldChain } from './controller-log.js'
+import { foldChain, foldControllerLog } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
+import { prefixRelation } from './embedded-resolver.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
-import type { GroupHandle } from './group-handle.js'
-import { decodeLedgerHead, extendHead, genesisHead, headsMatch } from './head.js'
+import { type GroupHandle, registryAt } from './group-handle.js'
+import { decodeLedgerHead } from './head.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
+import {
+  effectiveAttestingMembers,
+  effectiveAuthorityOf,
+  memberRootStatus,
+  memberRootsOf,
+} from './member-root.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
 import {
   DEVICE_ENTRY_TYPE,
@@ -36,8 +45,9 @@ import {
   type DeviceValue,
   denySetOf,
   mayReadmitResetDevice,
+  registryApply,
 } from './registry.js'
-import { assertNewerBinding, stalePairedAdd } from './stale-leaf.js'
+import { assertNewerBinding, bindingIssuedAt, stalePairedAdd } from './stale-leaf.js'
 
 export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
 
@@ -70,38 +80,126 @@ export function leafAt(tree: ClientState['ratchetTree'], index: number): LeafNod
   return node?.nodeType === nodeTypes.leaf ? node.leaf : undefined
 }
 
-function attestedTime(leaf: LeafNode, controllerID: string): number {
-  const binding = identity(leaf).controller
-  if (binding == null || normalizeDID(binding.id) !== normalizeDID(controllerID)) return 0
-  const payload = readCapability(binding.capability).payload
-  const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
-  return parent == null ? payload.iat : readCapability(parent).payload.iat
-}
-
-function timeOf(tree: ClientState['ratchetTree'], controllerID: string, floor: number): number {
-  let time = floor
+export function attestedTreeTime(
+  tree: ClientState['ratchetTree'],
+  registry: DeviceRegistry,
+  controllerID: string,
+): number {
+  const controller = normalizeDID(controllerID)
+  const projection = registry.controllers.get(controller)
+  const folded =
+    projection?.recordedLog == null
+      ? undefined
+      : foldControllerLog(controller, projection.recordedLog)
+  const head = folded?.ok && !folded.head.saturated ? folded.head : undefined
+  const effective = new Map(effectiveAttestingMembers(head, projection))
+  const attestations = new Map<string, number>()
+  for (const member of effective.values())
+    attestations.set(member.key, projection?.attestations.get(member.key) ?? 0)
+  let rootTime = 0
   for (const node of tree) {
-    if (node?.nodeType === nodeTypes.leaf)
-      time = Math.max(time, attestedTime(node.leaf, controllerID))
+    if (node?.nodeType !== nodeTypes.leaf) continue
+    const binding = identity(node.leaf).controller
+    if (
+      binding?.capability == null ||
+      binding.member != null ||
+      normalizeDID(binding.id) !== controller
+    )
+      continue
+    const payload = readCapability(binding.capability).payload
+    const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
+    const attested = parent == null ? payload : readCapability(parent).payload
+    if (attested.mbr == null) {
+      if (normalizeDID(attested.iss) === controller) rootTime = Math.max(rootTime, attested.iat)
+      continue
+    }
+    const member = effective.get(attested.mbr.add)
+    if (
+      member == null ||
+      attested.mbr.g !== head?.gen ||
+      normalizeDID(member.did) !== normalizeDID(attested.iss)
+    )
+      continue
+    attestations.set(member.key, Math.max(attestations.get(member.key) ?? 0, attested.iat))
   }
-  return time
+  const times = [...attestations.values()].sort((a, b) => b - a)
+  const quorum = times.length === 1 ? times[0] : times[1]
+  return Math.max(projection?.timeFloor ?? 0, rootTime, quorum ?? 0)
 }
 
-export function treeTime(group: GroupHandle, controllerID: string): number {
-  const floor =
-    group.anchor.controller == null
-      ? 0
-      : (group.registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0)
-  return timeOf(group.state.ratchetTree, controllerID, floor)
+export function treeTime(
+  group: GroupHandle,
+  controllerID: string,
+  registry: DeviceRegistry = group.registry,
+): number {
+  return attestedTreeTime(
+    group.state.ratchetTree,
+    group.anchor.controller == null ? { ...registry, controllers: new Map() } : registry,
+    controllerID,
+  )
 }
 
-export function isLapsed(group: GroupHandle, leaf: LeafNode): boolean {
+export function isLapsed(
+  group: GroupHandle,
+  leaf: LeafNode,
+  registry: DeviceRegistry = group.registry,
+): boolean {
   const controller = group.anchor.controller
   if (controller == null) return false
   const binding = identity(leaf).controller
-  return (
-    binding != null && readCapability(binding.capability).payload.exp < treeTime(group, controller)
-  )
+  const expiry = binding == null ? undefined : leafExpiry(binding, registry, controller)
+  return expiry != null && expiry < treeTime(group, controller, registry)
+}
+
+export function leafExpiry(
+  binding: ControllerBinding,
+  registry: DeviceRegistry,
+  controller: string,
+): number | undefined {
+  const did = normalizeDID(controller)
+  const projection = registry.controllers.get(did)
+  if (binding.member == null) {
+    if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
+    const { payload } = readCapability(binding.capability)
+    const authority = effectiveAuthorityOf(
+      { did: payload.aud, binding, leafKey: capabilityKey(payload).publicKey },
+      registry,
+      controller,
+    )
+    return 'root' in authority && authority.expiry != null
+      ? Math.min(payload.exp, authority.expiry)
+      : payload.exp
+  }
+  if (normalizeDID(binding.id) !== did) return undefined
+  const log = projection?.recordedLog
+  if (log == null || prefixRelation(log, binding.prefix) !== 'contained') return undefined
+  const folded = foldControllerLog(did, log)
+  if (!folded.ok) return undefined
+  const member = folded.head.members.get(binding.member.add)
+  const memberDID = member?.did ?? projection?.removedMembers.get(binding.member.add)?.did
+  if (memberDID == null) return undefined
+  const survivor = projection?.survivorGrants.get(normalizeDID(memberDID))
+  const leafKey =
+    member == null
+      ? survivor == null
+        ? undefined
+        : capabilityKey(readCapability(survivor).payload).publicKey
+      : decodeKey(member.key).publicKey
+  if (leafKey != null) {
+    const authority = effectiveAuthorityOf(
+      { did: memberDID, binding, leafKey },
+      registry,
+      controller,
+    )
+    if ('root' in authority && authority.expiry != null) return authority.expiry
+  }
+  const status = memberRootStatus(registry, did, {
+    kind: 'member',
+    did: memberDID,
+    add: binding.member.add,
+    gen: binding.member.g,
+  })
+  return status.status === 'effective' ? status.lease : undefined
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -133,6 +231,8 @@ function replacesRevokedIssuer(
 ): boolean {
   const controller = group.anchor.controller
   if (controller == null || normalizeDID(binding.id) !== normalizeDID(controller)) return false
+  if (binding.member != null || old.member != null || old.capability == null) return false
+  if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
   if (readCapability(binding.capability).payload.cap !== undefined) return false
   const current = readCapability(old.capability).payload
   return (
@@ -147,6 +247,7 @@ function checkBinding(
   previous?: LeafNode,
   /** The leaf arrives in a Welcome tree rather than as an entry. */
   welcome = false,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): void {
   const parsed = identity(leaf)
   const binding = parsed.controller
@@ -158,10 +259,21 @@ function checkBinding(
     normalizeDID(binding.id) !== normalizeDID(controller)
   )
     throw new LeafBindingError('controller-mismatch')
-  const denied = denySetOf(group.registry)
-  if (denied.has(normalizeDID(parsed.id)) && !mayReadmitResetDevice(group.registry, parsed))
+  if (
+    controller == null &&
+    binding != null &&
+    memberRootsOf(binding, parsed.id).some(({ root }) => root.kind === 'member')
+  )
+    throw new LeafBindingError('controller-mismatch')
+  const registry = judging.registry
+  const full = judging.stage === 'full'
+  const denied = full && registry != null ? denySetOf(registry) : new Set<string>()
+  if (
+    denied.has(normalizeDID(parsed.id)) &&
+    !mayReadmitResetDevice(registry ?? group.registry, parsed)
+  )
     throw new LeafBindingError('denied-id')
-  const record = group.registry.devices.get(normalizeDID(parsed.id))
+  const record = full ? registry?.devices.get(normalizeDID(parsed.id)) : undefined
   if (record != null && (binding == null || normalizeDID(binding.id) !== record.controller))
     throw new LeafBindingError('controller-mismatch')
   if (previous != null) {
@@ -176,14 +288,12 @@ function checkBinding(
     if (
       binding != null &&
       old.controller != null &&
-      readCapability(binding.capability).payload.iat <
-        readCapability(old.controller.capability).payload.iat &&
+      bindingIssuedAt(binding) < bindingIssuedAt(old.controller) &&
       !replacesRevokedIssuer(group, binding, old.controller)
     )
       throw new LeafBindingError('renewal-order')
   }
   if (binding == null) return
-  const payload = readCapability(binding.capability).payload
   checkHolderEvidence(
     parsed,
     leaf.signaturePublicKey,
@@ -191,46 +301,59 @@ function checkBinding(
       ? MAX_TRUSTED_GRANT_LIFETIME
       : (group.anchor.trustedGrantLifetime ?? 2_592_000),
   )
-  assertCapabilityLifetime(
-    payload,
-    controller == null ? MAX_LEAF_LIFETIME : (group.anchor.leafLifetime ?? 86_400),
-  )
-  const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
-  if (parent != null)
+  if (binding.member == null) {
+    if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
+    const payload = readCapability(binding.capability).payload
     assertCapabilityLifetime(
-      readCapability(parent).payload,
-      controller == null
-        ? MAX_TRUSTED_GRANT_LIFETIME
-        : (group.anchor.trustedGrantLifetime ?? 2_592_000),
+      payload,
+      controller == null ? MAX_LEAF_LIFETIME : (group.anchor.leafLifetime ?? 86_400),
     )
-  if (
-    payload.cap != null &&
-    denied.has(normalizeDID(payload.iss)) &&
-    !(welcome && isEvidencedChild(group, leaf, denied))
-  )
-    throw new LeafBindingError('denied-issuer')
+    const parent = Array.isArray(payload.cap) ? payload.cap[0] : payload.cap
+    if (parent != null)
+      assertCapabilityLifetime(
+        readCapability(parent).payload,
+        controller == null
+          ? MAX_TRUSTED_GRANT_LIFETIME
+          : (group.anchor.trustedGrantLifetime ?? 2_592_000),
+      )
+    if (
+      payload.cap != null &&
+      denied.has(normalizeDID(payload.iss)) &&
+      !((welcome || judging.mode === 'retain') && isEvidencedChild(group, leaf, denied))
+    )
+      throw new LeafBindingError('denied-issuer')
+  }
   const folded = foldChain(binding.id, binding.prefix)
   if (!folded.ok) throw new LeafBindingError('controller-mismatch')
   if (
+    full &&
     controller != null &&
     (folded.states.at(-1)?.gen ?? 0) <
-      (group.registry.controllers.get(normalizeDID(controller))?.genFloor ?? 0)
+      (registry?.controllers.get(normalizeDID(controller))?.genFloor ?? 0)
   )
     throw new LeafBindingError('generation-floor')
 }
 
-function checkAdmissionExpiry(group: GroupHandle, leaf: LeafNode): void {
+function checkAdmissionExpiry(
+  group: GroupHandle,
+  leaf: LeafNode,
+  registry: DeviceRegistry = group.registry,
+): void {
   const binding = identity(leaf).controller
-  if (
-    binding != null &&
-    readCapability(binding.capability).payload.exp <= treeTime(group, binding.id)
-  )
-    throw new LeafLapsedError('lapsed')
+  if (binding == null) return
+  const expiry = leafExpiry(binding, registry, binding.id)
+  if (expiry == null) throw new LeafBindingError('member-unavailable')
+  if (expiry <= treeTime(group, binding.id, registry)) throw new LeafLapsedError('lapsed')
 }
 
-function checkEntry(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): void {
-  checkBinding(group, leaf, previous)
-  checkAdmissionExpiry(group, leaf)
+function checkEntry(
+  group: GroupHandle,
+  leaf: LeafNode,
+  previous?: LeafNode,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
+): void {
+  checkBinding(group, leaf, previous, false, judging)
+  if (judging.mode === 'admit') checkAdmissionExpiry(group, leaf, judging.registry)
 }
 
 async function validateBoundLeaf(
@@ -238,12 +361,17 @@ async function validateBoundLeaf(
   leaf: LeafNode,
   previous?: LeafNode,
   welcome = false,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): Promise<void> {
-  checkBinding(group, leaf, previous, welcome)
+  checkBinding(group, leaf, previous, welcome, judging)
   await verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
-    deviceDenySet: () => denySetOf(group.registry),
-    deviceRegistry: () => (group.anchor.controller == null ? undefined : group.registry),
-    mayKeepDeniedIssuer: () => welcome && group.anchor.controller != null,
+    judging: () => ({
+      ...judging,
+      registry: group.anchor.controller == null ? undefined : judging.registry,
+    }),
+    deviceDenySet: () => (judging.registry == null ? new Set() : denySetOf(judging.registry)),
+    mayKeepDeniedIssuer: () =>
+      (welcome || judging.mode === 'retain') && group.anchor.controller != null,
     leafLifetime: () =>
       group.anchor.controller == null ? undefined : (group.anchor.leafLifetime ?? 86_400),
     trustedGrantLifetime: () =>
@@ -257,9 +385,10 @@ export async function validateEntry(
   group: GroupHandle,
   leaf: LeafNode,
   previous?: LeafNode,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'admit' },
 ): Promise<void> {
-  await validateBoundLeaf(group, leaf, previous)
-  checkAdmissionExpiry(group, leaf)
+  await validateBoundLeaf(group, leaf, previous, false, judging)
+  if (judging.mode === 'admit') checkAdmissionExpiry(group, leaf, judging.registry)
 }
 
 /** The same credential and key a tree already holds at that leaf index. */
@@ -301,9 +430,12 @@ function checkSurvivors(
       continue
     }
     const binding = parsed.controller
-    const payload = readCapability(binding.capability).payload
+    const payload =
+      binding.member != null || binding.capability == null
+        ? undefined
+        : readCapability(binding.capability).payload
     if (
-      payload.cap != null &&
+      payload?.cap != null &&
       denied.has(normalizeDID(payload.iss)) &&
       !(
         (origin.kind === 'welcome' ||
@@ -321,17 +453,31 @@ function checkSurvivors(
         (registry.controllers.get(normalizeDID(controller))?.genFloor ?? 0)
       )
         throw new LeafBindingError('generation-floor')
+      const authority = effectiveAuthorityOf(
+        { did: parsed.id, binding, leafKey: node.leaf.signaturePublicKey },
+        registry,
+        controller,
+      )
+      if ('status' in authority && authority.status === 'removed')
+        throw new LeafBindingError('member-removed')
     }
   }
 }
 
-export async function validateWelcomeTree(group: GroupHandle): Promise<void> {
+export async function validateWelcomeTree(
+  group: GroupHandle,
+  judging: JudgingContext = { registry: group.registry, stage: 'full', mode: 'rejudge' },
+): Promise<void> {
   for (const [index, node] of group.state.ratchetTree.entries()) {
     if (node?.nodeType !== nodeTypes.leaf) continue
-    await validateBoundLeaf(group, node.leaf, undefined, true)
-    if (index === group.state.privatePath.leafIndex * 2) checkAdmissionExpiry(group, node.leaf)
+    await validateBoundLeaf(group, node.leaf, undefined, true, judging)
+    if (judging.stage === 'full' && index === group.state.privatePath.leafIndex * 2)
+      checkAdmissionExpiry(group, node.leaf, judging.registry)
   }
-  checkSurvivors(group, group.state.ratchetTree, group.registry, { kind: 'welcome' })
+  if (judging.stage === 'full')
+    checkSurvivors(group, group.state.ratchetTree, judging.registry ?? group.registry, {
+      kind: 'welcome',
+    })
 }
 
 type IncomingMessage = Parameters<IncomingMessageCallback>[0]
@@ -363,7 +509,8 @@ export async function prepareLifecycleGate(
       if (
         capability != null &&
         binding?.controller != null &&
-        readCapability(capability).payload.exp < treeTime(group, binding.controller)
+        readCapability(capability).payload.exp <
+          treeTime(group, binding.controller, candidateRegistry)
       )
         throw new LeafLapsedError('lapsed')
     }
@@ -378,32 +525,51 @@ export async function prepareLifecycleGate(
     for (let index = 0; index * 2 < before.length; index++) {
       const leaf = leafAt(before, index)
       const binding = leaf == null ? undefined : identity(leaf).controller
-      if (binding != null && readCapability(binding.capability).payload.exp < beforeTime)
-        lapsed.add(index)
+      const expiry = binding == null ? undefined : leafExpiry(binding, group.registry, controller)
+      if (expiry != null && expiry < beforeTime) lapsed.add(index)
     }
   }
   const opOf = ({ entry }: VerifiedLedgerEntry) => (entry.value as DeviceValue).op
   const lifecycleEntries = entries.filter(
     (verified) =>
       verified.entry.type === DEVICE_ENTRY_TYPE &&
-      ['revoke', 'reset', 'clock'].includes(opOf(verified)),
+      ['revoke', 'reset', 'clock', 'log', 'seed'].includes(opOf(verified)),
   )
-  const proofs = lifecycleEntries.filter((verified) => opOf(verified) !== 'clock')
+  const logs = lifecycleEntries.filter((verified) => opOf(verified) === 'log')
+  if (controller != null && lifecycleEntries.some((verified) => opOf(verified) === 'seed'))
+    throw new RevokeProofError('detached')
+  const proofs = lifecycleEntries.filter((verified) => ['revoke', 'reset'].includes(opOf(verified)))
   const clocks = lifecycleEntries.filter((verified) => opOf(verified) === 'clock')
   // A proof commit enacts its proof and at most one clock, nothing else.
   const proofCarriesOtherEntries =
     proofs.length > 0 && entries.length !== proofs.length + clocks.length
-  if (controller != null && (proofs.length > 1 || clocks.length > 1 || proofCarriesOtherEntries))
+  if (
+    controller != null &&
+    (proofs.length > 1 ||
+      logs.length > 1 ||
+      clocks.length > 1 ||
+      (logs.length > 0 && proofs.length > 0) ||
+      proofCarriesOtherEntries)
+  )
     throw new RevokeProofError('effects-mismatch')
   const expectedRemoves = new Set<number>()
   if (controller != null) {
+    let registry = group.registry
     for (const entry of lifecycleEntries) {
-      const effects = await verifyLifecycleProof(group, entry as VerifiedLedgerEntry<DeviceValue>)
-      if (opOf(entry) !== 'clock')
+      const verified = entry as VerifiedLedgerEntry<DeviceValue>
+      const effects = await verifyLifecycleProof(group, verified, registry)
+      registry = registryApply(verified, registry, controller)
+      if (['revoke', 'reset'].includes(opOf(entry)))
         for (const index of effects.removeLeafIndices) expectedRemoves.add(index)
     }
   }
-  if (externalLeaf != null) await validateEntry(group, externalLeaf)
+  const judging = (index: number | undefined, leaf: LeafNode): JudgingContext => ({
+    registry: candidateRegistry,
+    stage: 'full',
+    mode: index != null && isUnchangedLeaf(before, index, leaf) ? 'retain' : 'admit',
+  })
+  if (externalLeaf != null)
+    await validateEntry(group, externalLeaf, undefined, judging(undefined, externalLeaf))
   let incomingCommit: Extract<IncomingMessage, { kind: 'commit' }> | undefined
 
   function checkSize(tree: ClientState['ratchetTree']): void {
@@ -413,8 +579,8 @@ export async function prepareLifecycleGate(
   }
   function checkTime(tree: ClientState['ratchetTree']): void {
     if (controller == null) return
-    const floor = candidateRegistry.controllers.get(normalizeDID(controller))?.timeFloor ?? 0
-    if (timeOf(tree, controller, floor) < beforeTime) throw new RevokeProofError('time-regression')
+    if (attestedTreeTime(tree, candidateRegistry, controller) < beforeTime)
+      throw new RevokeProofError('time-regression')
   }
   function checkRegistryAdds(proposals: Array<ProposalWithSender>): void {
     for (const { entry } of entries) {
@@ -469,7 +635,7 @@ export async function prepareLifecycleGate(
         throw new Error('Missing replacement target')
       const old = leafAt(before, remove.remove.removed)
       if (old == null) throw new LeafBindingError('identity-change')
-      checkEntry(group, externalLeaf, old)
+      checkEntry(group, externalLeaf, old, judging(remove.remove.removed, externalLeaf))
       const tree = before.slice()
       tree[remove.remove.removed * 2] = { nodeType: nodeTypes.leaf, leaf: externalLeaf }
       checkTime(tree)
@@ -512,7 +678,12 @@ export async function prepareLifecycleGate(
         throw new RevokeProofError('effects-mismatch')
       switch (proposal.proposalType) {
         case defaultProposalTypes.add: {
-          checkEntry(group, proposal.add.keyPackage.leafNode)
+          checkEntry(
+            group,
+            proposal.add.keyPackage.leafNode,
+            undefined,
+            judging(undefined, proposal.add.keyPackage.leafNode),
+          )
           const parsed = identity(proposal.add.keyPackage.leafNode)
           const record = candidateRegistry.devices.get(normalizeDID(parsed.id))
           if (
@@ -526,7 +697,12 @@ export async function prepareLifecycleGate(
         case defaultProposalTypes.update: {
           const old = sender == null ? undefined : leafAt(before, sender)
           if (old == null || sender == null) throw new LeafBindingError('identity-change')
-          checkEntry(group, proposal.update.leafNode, old)
+          checkEntry(
+            group,
+            proposal.update.leafNode,
+            old,
+            judging(sender, proposal.update.leafNode),
+          )
           tree[sender * 2] = { nodeType: nodeTypes.leaf, leaf: proposal.update.leafNode }
           break
         }
@@ -554,7 +730,7 @@ export async function prepareLifecycleGate(
                   denied: [denySetOf(group.registry), denySetOf(candidateRegistry)],
                 })
           if (replacement != null && old != null) {
-            checkEntry(group, replacement, old)
+            checkEntry(group, replacement, old, judging(target, replacement))
             assertNewerBinding(replacement, old)
           }
           if (controller != null && (old == null || !(authorised || replacement != null)))
@@ -619,18 +795,22 @@ export async function prepareLifecycleGate(
       ) {
         if (controller != null && (hasRemoves || proofs.length > 0))
           throw new LeafBindingError('identity-change')
-        await validateEntry(group, next, old)
+        await validateEntry(group, next, old, judging(senderIndex, next))
       }
     }
     if (controller != null && senderIndex != null) {
       const old = leafAt(before, senderIndex)
       const next = leafAt(state.ratchetTree, senderIndex)
+      const binding = next == null ? undefined : identity(next).controller
+      const expiry =
+        binding == null ? undefined : leafExpiry(binding, candidateRegistry, controller)
       if (
         old != null &&
         lapsed.has(senderIndex) &&
         (next == null ||
           credentialEqual(old, next) ||
-          readCapability(identity(next).controller?.capability ?? '').payload.exp < beforeTime)
+          expiry == null ||
+          expiry < treeTime(group, controller, candidateRegistry))
       )
         throw new LeafLapsedError('lapsed')
     }
@@ -648,7 +828,7 @@ export type AssertSenderNotLapsedParams = {
   extensions: Array<GroupContextExtension>
 }
 
-/** Historical messages use the tree and clock floor authenticated in their own epoch. */
+/** Historical messages use the tree and registry authenticated in their own epoch. */
 export function assertSenderNotLapsed(params: AssertSenderNotLapsedParams): void {
   const { group, tree, leafIndex, extensions } = params
   const controller = group.anchor.controller
@@ -660,22 +840,10 @@ export function assertSenderNotLapsed(params: AssertSenderNotLapsedParams): void
   )?.extensionData
   const expected = data instanceof Uint8Array ? decodeLedgerHead(data) : null
   if (expected == null) throw new Error('Missing epoch ledger head')
-  let head = genesisHead(group.groupID)
-  let floor = 0
-  for (const held of group.ledger) {
-    if (headsMatch(head, expected.head)) break
-    head = extendHead(head, [held.entryID])
-    const { entry } = held.verified
-    if (entry.type !== DEVICE_ENTRY_TYPE) continue
-    const value = entry.value as DeviceValue
-    if (value.op === 'clock') floor = Math.max(floor, value.time ?? 0)
-  }
-  if (!headsMatch(head, expected.head)) throw new Error('Unknown epoch ledger head')
+  const registry = registryAt(group, expected.head)
   const binding = identity(leaf).controller
-  if (
-    binding != null &&
-    readCapability(binding.capability).payload.exp < timeOf(tree, controller, floor)
-  )
+  const expiry = binding == null ? undefined : leafExpiry(binding, registry, controller)
+  if (expiry != null && expiry < attestedTreeTime(tree, registry, controller))
     throw new LeafLapsedError('lapsed')
 }
 
@@ -702,8 +870,7 @@ export async function assertRecoveryBinding(params: AssertRecoveryBindingParams)
   tree[index * 2] = { nodeType: nodeTypes.leaf, leaf }
   const controllerID = group.anchor.controller
   if (controllerID == null) return
-  const floor = group.registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0
-  if (timeOf(tree, controllerID, floor) < treeTime(group, controllerID))
+  if (attestedTreeTime(tree, group.registry, controllerID) < treeTime(group, controllerID))
     throw new RevokeProofError('effects-mismatch')
   const ledger = group.ledger.map(({ verified }) => verified)
   const size = historySize(tree, ledger)

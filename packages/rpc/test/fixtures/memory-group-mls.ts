@@ -1,4 +1,5 @@
-import { encodeMultibase } from '@kokuin/token'
+import { isDeepStrictEqual } from 'node:util'
+import { encodeMultibase, normalizeDID } from '@kokuin/token'
 import { x25519 } from '@noble/curves/ed25519.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -68,8 +69,88 @@ export type MemoryGroupMLS = GroupMLS & {
   failNextRecoveryAdopt: () => void
 }
 
-export type MemoryRecoveryBinding = { id: string; prefix: Array<unknown>; capability: string }
+export type MemoryRecoveryBinding = {
+  id: string
+  prefix: Array<unknown>
+  capability?: string
+  holderGrant?: string
+  member?: { add: string; g: number }
+  iat?: number
+}
+export type MemoryControllerEvent = {
+  id: string
+  op: 'add' | 'deny' | 'remove'
+  target: string
+  member?: { did: string; key: string }
+  /** Explicitly verified grants supported by this model. Unknown grants fail closed. */
+  grants?: Array<{ capability: string; did: string; key: string }>
+}
+export type MemoryControllerLog = {
+  chain: Array<string>
+  events: Array<MemoryControllerEvent>
+  grants?: Array<{ capability: string; did: string; key: string }>
+}
+
+function memberOf(binding: MemoryRecoveryBinding) {
+  if (binding.member != null) return binding.member
+  if (binding.capability?.startsWith('{')) {
+    try {
+      return (JSON.parse(binding.capability) as { mbr?: { add: string; g: number } }).mbr
+    } catch {
+      return null
+    }
+  }
+}
+
+function effectiveMember(log: MemoryControllerLog | undefined, member: { add: string; g: number }) {
+  return (
+    log != null &&
+    member.g === 0 &&
+    log.events.some((event) => event.op === 'add' && event.target === member.add) &&
+    !log.events.some((event) => event.op === 'remove' && event.target === member.add)
+  )
+}
+
+function projectControllerLog(log: MemoryControllerLog | undefined, tokens: Array<string>) {
+  const candidate = log == null ? undefined : structuredClone(log)
+  for (const token of tokens) {
+    if (!token.startsWith('management:')) continue
+    const value = JSON.parse(token.slice('management:'.length)) as {
+      op: string
+      proof: MemoryControllerLog
+      effects: Array<MemoryControllerEvent>
+    }
+    if (
+      candidate == null ||
+      !Array.isArray(value.proof?.chain) ||
+      value.proof.chain.length !== 0 ||
+      !Array.isArray(value.proof.events)
+    )
+      throw new Error('Unavailable controller log')
+    const effects: Array<MemoryControllerEvent> = []
+    for (const event of value.proof.events) {
+      if (
+        typeof event.id !== 'string' ||
+        typeof event.target !== 'string' ||
+        !['add', 'deny', 'remove'].includes(event.op) ||
+        candidate.events.some((known) => known.id === event.id)
+      )
+        throw new Error('Invalid controller event')
+      if (event.op !== 'add') effects.push(event)
+      candidate.events.push(event)
+    }
+    if (
+      !['log', 'revoke'].includes(value.op) ||
+      (value.op === 'log' && effects.length > 0) ||
+      JSON.stringify(effects) !== JSON.stringify(value.effects)
+    )
+      throw new Error('Controller effects mismatch')
+  }
+  return candidate
+}
+
 export type MemoryGroupMLSOptions = {
+  controllerLog?: MemoryControllerLog
   binding?: MemoryRecoveryBinding
   recoveryBinding?: () => Promise<MemoryRecoveryBinding | null>
   groupID?: string
@@ -80,6 +161,7 @@ export type MemoryGroupMLSOptions = {
   /** This member's DID — the committer stamped into the Commits it builds, and the modelled
    *  recipient of GroupInfo sealed to its leaf. */
   localDID?: string
+  signatureKey?: string
   /** Signed tokens whose BODIES this member holds — a joiner's Welcome carries them, and a
    *  member that resolved them from a commit frame keeps them. Holding a body is not the
    *  same as having enacted it: the ledger is what a commit enacted, and it starts empty. */
@@ -193,6 +275,8 @@ type MemoryCommit = {
    * roster it found is the roster it leaves.
    */
   adds?: Array<string>
+  bindings?: Record<string, MemoryRecoveryBinding>
+  signatureKeys?: Record<string, string>
   removes?: Array<string>
 }
 
@@ -214,6 +298,8 @@ export function encodeMemoryCommit(
     head?: string
     external?: boolean
     adds?: Array<string>
+    bindings?: Record<string, MemoryRecoveryBinding>
+    signatureKeys?: Record<string, string>
     removes?: Array<string>
     /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
     signerDID?: string
@@ -234,6 +320,8 @@ export function encodeMemoryCommit(
     // A genuine commit is signed by the member it names. Only a forger passes these apart.
     signerDID: options.signerDID ?? committerDID,
     ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
+    ...(options.bindings == null ? {} : { bindings: options.bindings }),
+    ...(options.signatureKeys == null ? {} : { signatureKeys: options.signatureKeys }),
     ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
   return fromUTF(JSON.stringify(commit))
@@ -272,6 +360,7 @@ type MemoryGroupInfo = {
   epoch: number
   head: string
   members: Array<string>
+  controllerLog?: MemoryControllerLog
 }
 
 /**
@@ -417,6 +506,8 @@ function openWithKey(
  */
 export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): MemoryGroupMLS {
   const recoverySecret = options.recoverySecret ?? new Uint8Array(32).fill(0x33)
+  let controllerLog =
+    options.controllerLog == null ? undefined : structuredClone(options.controllerLog)
   const localDID = options.localDID
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
   const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
@@ -506,22 +597,84 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   let asked = false
   const unusable = new Set<string>()
   const bindingID = (value: MemoryRecoveryBinding): string =>
-    JSON.stringify([value.id, value.prefix, value.capability])
-  const usable = (value?: MemoryRecoveryBinding): boolean =>
-    value != null && !unusable.has(bindingID(value))
+    JSON.stringify([
+      value.id,
+      value.prefix,
+      value.capability,
+      value.holderGrant,
+      value.member,
+      value.iat,
+    ])
+  const bindingRefusal = (
+    value: MemoryRecoveryBinding | undefined,
+    did: string | undefined,
+    key: string | undefined,
+    log: MemoryControllerLog | undefined,
+  ): 'invalid' | 'binding' | undefined => {
+    if (did == null) return 'binding'
+    if (
+      log?.events.some(
+        (event) => event.op === 'deny' && normalizeDID(event.target) === normalizeDID(did),
+      )
+    )
+      return 'invalid'
+    if (
+      value == null ||
+      normalizeDID(value.id) !== normalizeDID(options.binding?.id ?? '') ||
+      JSON.stringify(value.prefix) !== JSON.stringify(log?.chain) ||
+      (log?.events.length ?? 0) > 32
+    )
+      return 'binding'
+    const member = memberOf(value)
+    if (member === undefined) {
+      return log?.grants?.some(
+        (grant) =>
+          grant.capability === value.capability &&
+          normalizeDID(grant.did) === normalizeDID(did) &&
+          grant.key === key,
+      )
+        ? undefined
+        : 'binding'
+    }
+    if (member == null || !effectiveMember(log, member) || key == null) return 'binding'
+    const admission = log?.events.find((event) => event.op === 'add' && event.target === member.add)
+    if (admission?.member == null) return 'binding'
+    if (value.member != null) {
+      return normalizeDID(admission.member.did) === normalizeDID(did) &&
+        admission.member.key === key
+        ? undefined
+        : 'binding'
+    }
+    // A grant's signature is outside this model. Only explicitly recorded verified grants qualify.
+    return admission.grants?.some(
+      (grant) =>
+        grant.capability === value.capability &&
+        normalizeDID(grant.did) === normalizeDID(did) &&
+        grant.key === key,
+    )
+      ? undefined
+      : 'binding'
+  }
+  const usable = (
+    value: MemoryRecoveryBinding | undefined,
+    log: MemoryControllerLog | undefined,
+  ): boolean => {
+    if (value == null || unusable.has(bindingID(value))) return false
+    return bindingRefusal(value, localDID, options.signatureKey, log) == null
+  }
   const askBinding = async (): Promise<MemoryRecoveryBinding | undefined> => {
     if (asked) return
     asked = true
     const offered = await options.recoveryBinding?.()
-    return offered != null && usable(offered) ? offered : undefined
+    return offered != null && usable(offered, controllerLog) ? offered : undefined
   }
   const prepare = async (): Promise<'ready' | 'renewal-required'> => {
     prepared = true
     asked = false
     preparedBinding = binding
-    if (binding == null || usable(preparedBinding)) return 'ready'
+    if (binding == null || usable(preparedBinding, controllerLog)) return 'ready'
     preparedBinding = await askBinding()
-    return usable(preparedBinding) ? 'ready' : 'renewal-required'
+    return usable(preparedBinding, controllerLog) ? 'ready' : 'renewal-required'
   }
 
   const advance = (to: number): void => {
@@ -593,6 +746,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   const enact = (parsed: MemoryCommit): void => {
+    controllerLog = projectControllerLog(
+      controllerLog,
+      parsed.entryIDs.map((id) => bodies.get(id) ?? ''),
+    )
     ledger.push(...parsed.entryIDs)
     // The head is the committer's, not this receiver's: a handle whose ledger is incomplete
     // must stay visibly incomplete rather than re-anchor on its own truncated fold. A commit
@@ -745,6 +902,24 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // is never opened, because the entries are never resolved.
       if (parsed.epoch !== epoch) {
         return { advanced: false, epochBefore: epoch, epochAfter: epoch }
+      }
+      const admissions = [...(parsed.adds ?? []), ...(parsed.external ? [parsed.committerDID] : [])]
+      if (controllerLog != null || binding != null || parsed.bindings != null) {
+        for (const did of admissions) {
+          const refusal = bindingRefusal(
+            parsed.bindings?.[did],
+            did,
+            parsed.signatureKeys?.[did],
+            controllerLog,
+          )
+          if (refusal != null)
+            return {
+              advanced: false,
+              epochBefore: epoch,
+              epochAfter: epoch,
+              refusal,
+            }
+        }
       }
       // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
       // change ciphertext beyond the sampled prefix without breaking the sender-data read.
@@ -908,6 +1083,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             // will hold, and why its empty ledger reads incomplete rather than
             // complete-and-empty.
             head: ledgerHead,
+            controllerLog,
           } satisfies MemoryGroupInfo),
         ),
       )
@@ -941,10 +1117,27 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     ): Promise<PendingRecovery | { renewalRequired: true } | null> {
       const info = open(sealed, requestID)
       if (info == null) return null
+      if (controllerLog != null) {
+        if (info.controllerLog == null) return null
+        const { events: knownEvents, ...knownState } = controllerLog
+        const { events: offeredEvents, ...offeredState } = info.controllerLog
+        // This model cannot verify settlement or resets. Retain full events and other state exactly.
+        if (
+          !isDeepStrictEqual(knownState, offeredState) ||
+          !Array.isArray(offeredEvents) ||
+          !knownEvents.every((known) => {
+            return offeredEvents.some((event) => isDeepStrictEqual(known, event))
+          })
+        )
+          return null
+      }
       if (!prepared) await prepare()
-      if (binding != null && !usable(preparedBinding)) {
+      if (
+        (binding != null || info.controllerLog != null) &&
+        !usable(preparedBinding, info.controllerLog)
+      ) {
         preparedBinding = await askBinding()
-        if (!usable(preparedBinding)) return { renewalRequired: true }
+        if (!usable(preparedBinding, info.controllerLog)) return { renewalRequired: true }
       }
       const candidateBinding =
         preparedBinding == null ? undefined : structuredClone(preparedBinding)
@@ -959,6 +1152,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       const commit = encodeMemoryCommit(info.epoch, localDID ?? '', [], {
         head: info.head,
         external: true,
+        ...(candidateBinding == null || localDID == null
+          ? {}
+          : {
+              bindings: { [localDID]: candidateBinding },
+              signatureKeys:
+                options.signatureKey == null ? undefined : { [localDID]: options.signatureKey },
+            }),
       })
       return {
         commit,
@@ -1013,6 +1213,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           }
           advance(info.epoch + 1)
           binding = candidateBinding
+          controllerLog = structuredClone(info.controllerLog)
           accepted = true
         },
       }

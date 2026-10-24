@@ -19,6 +19,9 @@ depend on both.
 
 - `simpleHandleAccess({ handle, adopt, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
+- `retainsKnownEffects(next)` — replacement guard refusing a handle that drops lifecycle effects the
+  live handle knows. `guardedReplace(access, next)` replaces through it, and throws afterwards if
+  `access` never invoked the guard (a broken adapter has then already adopted `next`).
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
 - `createGroupMLS({ access, identity, entrySlot, recoverySecret? })` — `GroupMLS` over the same
   access.
@@ -33,8 +36,8 @@ depend on both.
 
 Both factories take the same `access` instance. The adapter reads the current handle through
 `handle: () => GroupHandle`, because authored commits and recovery replace it wholesale. A host
-adopts an authored commit through `access.replace(next)` after acceptance. The adapter saves before
-publishing the replacement and publishes its synchronous epoch hint after a successful save.
+adopts an authored commit through `guardedReplace(access, next)` after acceptance. The adapter saves
+before publishing the replacement and publishes its synchronous epoch hint after a successful save.
 
 Before every host commit build, `createGroupMLS` persists a handshake reservation through `access.mutate`.
 The epoch and application ratchet stay unchanged, including when a discarded CAS winner never applies.
@@ -79,8 +82,10 @@ const mls = createGroupMLS({ access, identity, entrySlot })
 A host with its own handle store implements the port instead:
 - `read(fn)` lends the handle for the callback only. `mutate(fn)` serialises with every other
   operation and resolves after the state is stored; `fn`'s `persist` argument goes to
-  `processMessage`, `bootstrapLedger` and `reserveHandshakeGeneration`. `replace(next)` stores before publishing. A transactional
-  host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
+  `processMessage`, `bootstrapLedger` and `reserveHandshakeGeneration`. `replace(next, guard)`
+  must run `guard(live)` on the live handle under the lock, abort if it throws, then store before
+  publishing. A transactional host may restore a fresh handle per mutation, discard it on rollback,
+  and publish on commit.
 - `epoch()` is a synchronous hint. Publish it only after the outermost successful commit, and restore
   it on rollback. No port decision reads it: every one uses an epoch read under the lock.
 - `open(fn, persistOpened)` is the durable open. `fn` stages the open and hands its state and record

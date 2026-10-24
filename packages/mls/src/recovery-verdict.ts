@@ -11,7 +11,10 @@ import { sha256 } from '@noble/hashes/sha2.js'
 
 import { readCapability } from './capability.js'
 import { foldChain } from './controller-log.js'
+import type { ControllerBinding } from './credential.js'
 import type { GroupHandle } from './group-handle.js'
+import { attestedTreeTime, leafExpiry } from './lifecycle.js'
+import { effectiveAuthorityOf, memberRootStatus } from './member-root.js'
 import {
   type OpenSealedGroupInfoParams,
   openSealedReply,
@@ -156,38 +159,57 @@ export async function openRecoveryVerdict(
 
 export type RecoverySignerEligibleParams = {
   group: GroupHandle
-  known: DeviceRegistry
+  registry: DeviceRegistry
   signer: string
   /** Seconds since epoch; defaults to the current time. */
   now?: number
 }
 
 export function recoverySignerEligible(params: RecoverySignerEligibleParams): boolean {
-  const { group, known, signer, now = Date.now() / 1000 } = params
+  const { group, registry, signer, now = Date.now() / 1000 } = params
   const controller = group.anchor.controller
   if (controller == null) return false
   try {
     const binding = group.bindingOfDID(signer)
-    if (binding?.controller !== controller || binding.capability == null || binding.prefix == null)
-      return false
-    const payload = readCapability(binding.capability).payload
+    if (binding?.controller !== controller || binding.prefix == null) return false
+    const payload =
+      binding.member != null || binding.capability == null
+        ? undefined
+        : readCapability(binding.capability).payload
     if (
-      known.devices.get(normalizeDID(signer))?.status === 'revoked' ||
-      (payload.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
+      registry.devices.get(normalizeDID(signer))?.status === 'revoked' ||
+      (payload?.cap != null &&
+        registry.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
     )
       return false
     const folded = foldChain(controller, binding.prefix)
-    const projection = known.controllers.get(normalizeDID(controller))
+    const projection = registry.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
-    let time = projection?.timeFloor ?? 0
-    for (const member of group.listMembers()) {
-      const leaf = group.bindingOfDID(member.id)
-      if (leaf?.controller !== controller || leaf.capability == null) continue
-      const capability = readCapability(leaf.capability).payload
-      const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
-      time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
+    const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
+    const authority = effectiveAuthorityOf(
+      { did: signer, binding: bound, leafKey: binding.leafKey },
+      registry,
+      controller,
+    )
+    if ('status' in authority) return false
+    if (binding.member != null && authority.slot === 'membership') {
+      const status = memberRootStatus(registry, controller, {
+        kind: 'member',
+        did: signer,
+        add: binding.member.add,
+        gen: binding.member.g,
+      })
+      if (
+        status.status !== 'effective' ||
+        status.key.length !== binding.leafKey.length ||
+        status.key.some((byte, index) => byte !== binding.leafKey[index])
+      )
+        return false
     }
-    return payload.exp >= Math.max(time, now - 300)
+    const expiry = leafExpiry(bound, registry, controller)
+    if (expiry == null) return false
+    const time = attestedTreeTime(group.state.ratchetTree, registry, controller)
+    return expiry >= Math.max(time, now - 300)
   } catch {
     return false
   }

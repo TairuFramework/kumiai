@@ -13,6 +13,7 @@ import {
   type IncomingMessageAction,
   type IncomingMessageCallback,
   isDefaultCredential,
+  isDefaultProposal,
   type LeafNode,
   leafNodeSources,
   type MlsContext,
@@ -59,10 +60,12 @@ import {
   decodeLedgerHead,
   encodeLedgerHead,
   extendHead,
+  genesisHead,
   headsMatch,
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
+import { settleAdvisory } from './history.js'
 import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from './ledger.js'
 import {
   assertSenderNotLapsed,
@@ -74,6 +77,7 @@ import {
   prepareLifecycleGate,
   rejectionReason,
 } from './lifecycle.js'
+import type { ProofRef } from './member-root.js'
 import { createMutex, type Mutex } from './mutex.js'
 import {
   type CommitPolicyContext,
@@ -91,6 +95,7 @@ import {
   foldControl,
   isDeviceValue,
   mayReadmitResetDevice,
+  recordedLogOf,
   revocationOf,
 } from './registry.js'
 import type { RosterState } from './roster.js'
@@ -101,6 +106,38 @@ import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
  *  time in issue order. Keyed weakly: the entry is collected with the handle, and
  *  the handle carries no reference back to it. */
 const MUTEXES = new WeakMap<GroupHandle, Mutex>()
+
+const HISTORICAL_REGISTRIES = new WeakMap<GroupHandle, Map<string, DeviceRegistry>>()
+
+export function registryAt(group: GroupHandle, head: Uint8Array): DeviceRegistry {
+  let cache = HISTORICAL_REGISTRIES.get(group)
+  if (cache == null) {
+    cache = new Map()
+    HISTORICAL_REGISTRIES.set(group, cache)
+  }
+  const key = toB64(head)
+  const cached = cache.get(key)
+  if (cached != null) return cached
+  let held = genesisHead(group.groupID)
+  let length = 0
+  for (const entry of group.ledger) {
+    if (headsMatch(held, head)) break
+    held = extendHead(held, [entry.entryID])
+    length++
+  }
+  if (!headsMatch(held, head)) throw new Error('Unknown epoch ledger head')
+  const registry = foldLedgerControl(
+    group.ledger.slice(0, length),
+    group.anchor,
+    group.groupID,
+  ).registry
+  cache.set(key, registry)
+  if (cache.size > 8) {
+    const oldest = cache.keys().next().value
+    if (oldest != null) cache.delete(oldest)
+  }
+  return registry
+}
 
 /** Leave half the configured receiver window unused. */
 const HANDSHAKE_WINDOW_DIVISOR = 2
@@ -117,10 +154,15 @@ export function mutexFor(handle: GroupHandle): Mutex {
 /** Events a GroupHandle emits. Advisory notifications derived from the folded ledger; never
  *  a protocol input. Delivered via `fire` (a throwing listener never breaks a fold). */
 export type GroupHandleEvents = {
+  memberRemoved: Array<{
+    controller: string
+    member: { did: string; add: string }
+    removedLeaves: Array<string>
+  }>
   deviceRevoked: Array<{
     device: string
     controller: string
-    logPosition?: number
+    proofRef?: ProofRef
     reason?: 'reset'
     cascadedFrom?: string
   }>
@@ -237,6 +279,7 @@ type CommitCapture = {
 }
 
 type CommitPipeline = {
+  candidateRegistry: DeviceRegistry
   callback: IncomingMessageCallback | undefined
   capture: CommitCapture
   applyOnAccept: (notify?: boolean) => () => void
@@ -515,7 +558,11 @@ export class GroupHandle {
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
       denyHolder.provider = () => this.currentDenySet()
-      denyHolder.registry = () => (anchor.controller == null ? undefined : this.registry)
+      denyHolder.judging = () => ({
+        registry: anchor.controller == null ? undefined : this.registry,
+        stage: 'full',
+        mode: 'admit',
+      })
       denyHolder.leafLifetime =
         anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400)
       denyHolder.trustedGrantLifetime =
@@ -620,6 +667,12 @@ export class GroupHandle {
     return this.#registry
   }
 
+  settleAdvisory(): 'ok' | 'prompt' | 'blocked' {
+    const controller = this.#anchor.controller
+    const log = controller == null ? undefined : recordedLogOf(this.#registry, controller)
+    return log == null ? 'ok' : settleAdvisory(log)
+  }
+
   /**
    * The device deny set the auth service consumes: the DIDs revoked in the CURRENTLY folded
    * registry (pre-commit). Matched, never enumerated by consumers. A revoke takes deny-effect from
@@ -667,12 +720,33 @@ export class GroupHandle {
     }
     const emitter = emitterOf(this)
     const revoked: GroupHandleEvents['deviceRevoked'] = []
+    const removed: GroupHandleEvents['memberRemoved'] = []
     for (const { entry } of enacted) {
       if (entry.type !== DEVICE_ENTRY_TYPE || !isDeviceValue(entry.value)) continue
       const value: DeviceValue = entry.value
       const subject = normalizeDID(entry.subject)
       if (this.#anchor.controller != null && (value.op === 'revoke' || value.op === 'reset')) {
-        for (const effect of value.revoked ?? []) {
+        for (const claim of value.effects ?? []) {
+          if (claim.kind !== 'remove') continue
+          removed.push({
+            controller: subject,
+            member: { did: normalizeDID(claim.member.did), add: claim.member.add },
+            removedLeaves: (value.removed ?? [])
+              .filter(
+                ({ cascadedFrom }) => normalizeDID(cascadedFrom) === normalizeDID(claim.member.did),
+              )
+              .map(({ did }) => normalizeDID(did)),
+          })
+        }
+        for (const effect of [
+          ...(value.revoked ?? []),
+          ...(value.effects ?? []).flatMap((claim) =>
+            claim.kind === 'deny' &&
+            !value.revoked?.some(({ did }) => normalizeDID(did) === normalizeDID(claim.did))
+              ? [{ did: claim.did }]
+              : [],
+          ),
+        ]) {
           const device = normalizeDID(effect.did)
           const record = revocationOf(this, device)
           if (record != null) revoked.push({ device, ...record })
@@ -689,6 +763,7 @@ export class GroupHandle {
       }
     }
     if (revoked.length > 0) emitter.fire('deviceRevoked', revoked)
+    if (removed.length > 0) emitter.fire('memberRemoved', removed)
   }
 
   /** Deliver independent host notifications after acceptance and any requested persist. */
@@ -1647,6 +1722,7 @@ export class GroupHandle {
     }
 
     return {
+      candidateRegistry,
       callback: wrapCommitPolicy(combined, capture),
       capture,
       applyOnAccept,
@@ -1737,6 +1813,8 @@ export class GroupHandle {
               controller: parsed.controller.id,
               prefix: parsed.controller.prefix,
               capability: parsed.controller.capability,
+              ...(parsed.controller.member == null ? {} : { member: parsed.controller.member }),
+              ...(parsed.controller.iat == null ? {} : { iat: parsed.controller.iat }),
               ...(parsed.controller.holderGrant == null
                 ? {}
                 : { holderGrant: parsed.controller.holderGrant }),
@@ -1883,10 +1961,8 @@ export class GroupHandle {
           : undefined)
       // Past proposals cannot be enacted at this epoch and need no ratchet or ledger work.
       if (proposalEpoch != null && proposalEpoch < this.epoch) return null
-      const { callback, capture, applyOnAccept, postApply } = await this.#prepareCommitPipeline(
-        decoded,
-        opts,
-      )
+      const { callback, capture, applyOnAccept, postApply, candidateRegistry } =
+        await this.#prepareCommitPipeline(decoded, opts)
       const previousState = this.#state
       const previousAdmission = this.#admission
       const application = readPrivateFrame(decoded, contentTypes.application)
@@ -1912,20 +1988,41 @@ export class GroupHandle {
             authService: {
               validateCredential: async (credential, key) => {
                 try {
+                  // Referenced Updates authenticate before the commit callback runs.
+                  const proposed = (
+                    capture.rejected?.proposals ?? Object.values(this.#state.unappliedProposals)
+                  ).find(({ proposal }) => {
+                    if (!isDefaultProposal(proposal)) return false
+                    if (proposal.proposalType === defaultProposalTypes.add)
+                      return proposal.add.keyPackage.leafNode.credential === credential
+                    return (
+                      proposal.proposalType === defaultProposalTypes.update &&
+                      proposal.update.leafNode.credential === credential
+                    )
+                  })
+                  const index =
+                    proposed == null
+                      ? capture.committerLeafIndex
+                      : proposed.proposal.proposalType === defaultProposalTypes.update
+                        ? proposed.senderLeafIndex
+                        : undefined
+                  const retained =
+                    index != null &&
+                    isUnchangedLeaf(this.#state.ratchetTree, index, {
+                      credential,
+                      signaturePublicKey: key,
+                    })
                   await verifyLeafCredential(credential, key, {
-                    deviceDenySet: () => this.currentDenySet(),
-                    deviceRegistry: () =>
-                      this.#anchor.controller == null ? undefined : this.registry,
+                    deviceDenySet: () => denySetOf(candidateRegistry),
+                    judging: () => ({
+                      registry: this.#anchor.controller == null ? undefined : candidateRegistry,
+                      stage: 'full',
+                      mode: retained ? 'retain' : 'admit',
+                    }),
                     // MLS re-validates the committer's path leaf after its proposals are judged:
                     // an evidenced child keeps a denied issuer only with the credential it
                     // already holds at that leaf.
-                    mayKeepDeniedIssuer: (leafCredential, leafKey) =>
-                      this.#anchor.controller != null &&
-                      capture.committerLeafIndex != null &&
-                      isUnchangedLeaf(this.#state.ratchetTree, capture.committerLeafIndex, {
-                        credential: leafCredential,
-                        signaturePublicKey: leafKey,
-                      }),
+                    mayKeepDeniedIssuer: () => this.#anchor.controller != null && retained,
                     leafLifetime: () =>
                       this.#anchor.controller == null
                         ? undefined

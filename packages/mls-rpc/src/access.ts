@@ -1,4 +1,4 @@
-import type { GroupHandle } from '@kumiai/mls'
+import { assertRetainsKnownEffects, type GroupHandle } from '@kumiai/mls'
 import type { PendingAppFrame, SendAdmission } from '@kumiai/rpc'
 
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
@@ -12,11 +12,35 @@ export type HandleAccess = {
   mutate<TValue>(
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
   ): Promise<TValue>
-  replace(next: GroupHandle): Promise<void>
+  /** Must run the guard under the replacement lock, before persistence; a throw aborts. */
+  replace(next: GroupHandle, guard: (live: GroupHandle) => void): Promise<void>
   open<TValue>(
     fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
     persistOpened: PersistOpened,
   ): Promise<TValue>
+}
+
+/** Refuses a replacement that drops lifecycle effects the live handle knows. */
+export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => void {
+  return (live) => {
+    const controller = live.anchor.controller
+    if (controller != null) assertRetainsKnownEffects(controller, live.registry, next.registry)
+  }
+}
+
+/**
+ * Replaces through `retainsKnownEffects`. A guard never invoked throws after the fact (the skipping
+ * implementation has already adopted `next`): this surfaces a broken adapter, it does not undo it.
+ * It cannot prove the guard ran on the live handle or under the lock; that stays the port contract.
+ */
+export async function guardedReplace(access: HandleAccess, next: GroupHandle): Promise<void> {
+  const guard = retainsKnownEffects(next)
+  let ran = false
+  await access.replace(next, (live) => {
+    guard(live)
+    ran = true
+  })
+  if (!ran) throw new Error('HandleAccess.replace did not run its guard')
 }
 
 export type SimpleHandleAccessParams = {
@@ -62,8 +86,9 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         publishedAdmission = handle.sendAdmission()
         return result
       }),
-    replace: (next) =>
+    replace: (next, guard) =>
       serialise(async () => {
+        guard(params.handle())
         await save(next)
         await params.adopt(next)
         publishedAdmission = next.sendAdmission()

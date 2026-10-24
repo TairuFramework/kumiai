@@ -7,7 +7,6 @@ import {
   createKeyPackageBundle,
   type GroupHandle,
   processWelcome,
-  registrySeed,
   revokeWithProof,
 } from '@kumiai/mls'
 import { createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
@@ -18,6 +17,7 @@ import { revokeChain } from './fixtures/controller-chain.js'
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
+  inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
   lowLevelExternal: (params: {
@@ -46,7 +46,10 @@ async function setup(
     await createGroup(identity, 'lifecycle-verdict', {
       ...(options.standard
         ? {}
-        : { controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }) }),
+        : {
+            controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }),
+            controllerLog: { chain: [fixture.inception], events: [] },
+          }),
     })
   ).group
   const bob = fixture.agent(61)
@@ -102,7 +105,7 @@ async function setup(
   }
 }
 
-test('the adapter judge retains own-ledger revocations when the reply offers a stale tree', async () => {
+test('the adapter refuses a reply whose ledger omits an own-ledger revocation', async () => {
   const s = await setup()
   const mallory = fixture.agent(81)
   const bundle = await createKeyPackageBundle(mallory, {
@@ -122,16 +125,7 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
       keyPackageBundle: bundle,
     })
   ).group
-  const malloryMLS = createGroupMLS({
-    identity: mallory,
-    entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
-      handle: () => malloryGroup,
-      adopt: () => {
-        throw new Error('Unexpected adoption')
-      },
-    }),
-  })
+  expect(malloryGroup.findMemberLeafIndex(mallory.id)).toBeDefined()
   s.install(added.newGroup)
   await s.responderGroup.processMessage(added.commitMessage)
   const { controllerSeed, inception } = await import(
@@ -144,52 +138,18 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
     chain: [inception],
     subject: mallory.id,
   })
-  const removed = await revokeWithProof(s.group(), { subject: mallory.id, log: [inception, rev] })
+  const removed = await revokeWithProof(s.group(), {
+    deny: [mallory.id],
+    log: { chain: [inception, rev], events: [] },
+  })
   if (removed.status !== 'built') throw new Error('Expected revoke')
   s.install(removed.result.newGroup)
   expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')
   const requestID = 'known-revoked-verdict'
   const request = await s.mls.createRecoveryRequest(requestID)
   const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
-  if (pending == null || 'renewalRequired' in pending) throw new Error('Expected stale candidate')
-  const key = await pending.confirmationKey('position', 'digest')
-  await malloryGroup.processMessage(pending.commit)
-  expect(await malloryMLS.confirmationKey('position', 'digest')).toEqual({
-    epoch: pending.epoch,
-    key,
-  })
-  const { confirmationTag } = await import('@kumiai/mls')
-  const verdict = {
-    groupID: s.group().groupID,
-    requestID,
-    position: 'position',
-    commitDigest: 'digest',
-    verdict: 'confirmed' as const,
-    epoch: pending.epoch,
-    tag: confirmationTag(key, requestID),
-  }
-  const opened = await s.mls.openRecoveryVerdict(
-    await malloryMLS.sealRecoveryVerdict(request, verdict),
-    requestID,
-  )
-  if (opened == null) throw new Error('No authenticated stale verdict')
-  expect(opened.signer).toBe(mallory.id)
-  expect(pending.judgeVerdict(opened)).toBe('advisory')
-  const { createVerdictJudge } = await import(
-    new URL('../../../packages/mls-rpc/src/recovery.ts', import.meta.url).href
-  )
-  const retained = pending as typeof pending & {
-    group: GroupHandle
-    sourceTree: GroupHandle['state']['ratchetTree']
-  }
-  const emptyJudge = createVerdictJudge({
-    group: retained.group,
-    sourceTree: retained.sourceTree,
-    known: registrySeed(),
-    requestID,
-  })
-  await emptyJudge.confirmationKey('position', 'digest')
-  expect(emptyJudge.judgeVerdict(opened)).toBe('authoritative')
-  expect(pending.judgeVerdict({ signer: s.bob.id, verdict })).toBe('authoritative')
+  expect(pending).toBeNull()
   expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')
+  expect(s.group().findMemberLeafIndex(mallory.id)).toBeUndefined()
+  expect(s.responderGroup.findMemberLeafIndex(mallory.id)).toBeDefined()
 })

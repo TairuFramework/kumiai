@@ -1,25 +1,46 @@
 import {
+  type ControllerLog,
   createControllerIdentity,
   createInception,
+  createRemove,
   createReset,
+  createRevoke,
   createRotate,
+  digestOf,
+  encodeKey,
+  epochHeads,
   type SignedEvent,
+  snapshotOf,
 } from '@kokuin/controller'
 import { createIdentity, type OwnIdentity } from '@kokuin/token'
 import { createProposal, defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { mintTrustedGrant } from '../src/capability.js'
-import { asControllerLog, foldChain } from '../src/controller-log.js'
+import { asControllerLog, foldChain, foldControllerLog } from '../src/controller-log.js'
 import { parseMLSCredentialIdentity } from '../src/credential.js'
-import { commitWithEntries } from '../src/group-commit.js'
+import { commitInvite, commitWithEntries, createInvite } from '../src/group-commit.js'
 import { createGroup } from '../src/group-create.js'
-import { deriveGroup } from '../src/group-handle.js'
-import { removeLapsedLeaves, renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
-import { HISTORY_HORIZON, historySize } from '../src/history.js'
+import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
+import {
+  attestTreeTime,
+  publishControllerLog,
+  removeLapsedLeaves,
+  renewLeaf,
+  revokeWithProof,
+} from '../src/group-lifecycle.js'
+import { processWelcome } from '../src/group-welcome.js'
+import { controllerLogSize, HISTORY_HORIZON, historySize } from '../src/history.js'
 import { isLapsed, leafAt, treeTime } from '../src/lifecycle.js'
+import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { revocationOf } from '../src/registry.js'
-import { revokeChain, rotateChain, snapshotForChain } from './fixtures/controller-chain.js'
+import {
+  denyEffects,
+  revokeChain,
+  rotateChain,
+  snapshotForChain,
+} from './fixtures/controller-chain.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -180,47 +201,60 @@ describe('proof builders', () => {
     )
     const log = [inception, revoke([inception], target.id)]
     const snapshot = structuredClone(fixture.author.state)
-    const built = await revokeWithProof(fixture.author, { subject: target.id, log })
+    const built = await revokeWithProof(fixture.author, {
+      deny: [target.id],
+      log: asControllerLog(log),
+    })
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
     expect(built.result.epoch).toBe(fixture.author.epoch + 1n)
     expect(built.result.newGroup.findMemberLeafIndex(target.id)).toBeUndefined()
-    expect(revocationOf(built.result.newGroup, target.id)?.logPosition).toBe(1)
+    expect(revocationOf(built.result.newGroup, target.id)?.proofRef).toEqual({ chainIndex: 1 })
     expect(fixture.author.state).toEqual(snapshot)
     for (const held of built.result.newGroup.ledger) tokens.set(held.entryID, held.token)
     await fixture.joined.processMessage(built.result.commitMessage)
     expect(fixture.joined.state.groupActiveState.kind).toBe('removedFromGroup')
-    expect(await revokeWithProof(built.result.newGroup, { subject: target.id, log })).toEqual({
+    expect(
+      await revokeWithProof(built.result.newGroup, {
+        deny: [target.id],
+        log: asControllerLog(log),
+      }),
+    ).toEqual({
       status: 'already-revoked',
     })
     const absent = agent(61).id
     const full = [...log, revoke(log, absent)]
-    const next = await revokeWithProof(built.result.newGroup, { subject: absent, log: full })
+    const next = await revokeWithProof(built.result.newGroup, {
+      deny: [absent],
+      log: asControllerLog(full),
+    })
     expect(next.status).toBe('built')
     if (next.status !== 'built') throw new Error('Missing proof')
-    expect(revocationOf(next.result.newGroup, absent)?.logPosition).toBe(2)
+    expect(revocationOf(next.result.newGroup, absent)?.proofRef).toEqual({ chainIndex: 2 })
     expect(next.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
-      proof: JSON.parse(JSON.stringify([full[2]])),
+      proof: asControllerLog(JSON.parse(JSON.stringify([full[2]]))),
     })
     expect(identity.id).toBe(group.credential.id)
   })
 
   test('returns typed no-rev and self-affected outcomes', async () => {
     const { group, identity } = await pipelineGroup()
-    expect(await revokeWithProof(group, { subject: agent(51).id, log: [inception] })).toEqual({
+    expect(
+      await revokeWithProof(group, { deny: [agent(51).id], log: asControllerLog([inception]) }),
+    ).toEqual({
       status: 'not-provable',
       reason: 'no-rev',
     })
     expect(
       await revokeWithProof(group, {
-        subject: identity.id,
-        log: [inception, revoke([inception], identity.id)],
+        deny: [identity.id],
+        log: asControllerLog([inception, revoke([inception], identity.id)]),
       }),
     ).toEqual({ status: 'self-affected', subject: identity.id })
     expect(
       await revokeWithProof(group, {
         reset: true,
-        log: [inception, createReset(controllerSeed, 0, 1)],
+        log: asControllerLog([inception, createReset(controllerSeed, 0, 1)]),
       }),
     ).toEqual({ status: 'self-affected', subject: identity.id })
   })
@@ -232,7 +266,10 @@ describe('proof builders', () => {
       group,
       await timedBinding({ identity, iat: 150, exp: 250, prefix: log }),
     )
-    const reset = await revokeWithProof(renewal.newGroup, { reset: true, log })
+    const reset = await revokeWithProof(renewal.newGroup, {
+      reset: true,
+      log: asControllerLog(log),
+    })
     expect(reset.status).toBe('built')
     if (reset.status !== 'built') throw new Error('Missing reset')
     expect(reset.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
@@ -240,48 +277,106 @@ describe('proof builders', () => {
   })
 })
 
-test('renewal and proof growth fail at the exact history horizon boundary, while shrinking reopens room', async () => {
+test('renewal and proof growth fail one byte above the exact history horizon, while shrinking reopens room', async () => {
   const { group, identity } = await pipelineGroup()
-  const base = historySize(group.state.ratchetTree, [])
-  const large = [inception, rotation([inception], HISTORY_HORIZON - 1_024 - base)]
+  const [seed] = structuredClone(group.ledger)
+  expect(seed?.verified.entry.value).toMatchObject({
+    op: 'seed',
+    proof: asControllerLog([inception]),
+  })
+  const entries = group.ledger.map(({ verified }) => verified)
+  const base = historySize(group.state.ratchetTree, entries)
+  const room = 2_048
+  const large = [inception, rotation([inception], HISTORY_HORIZON - room - base)]
   const near = await renewLeaf(
     group,
     await timedBinding({ identity, iat: 150, exp: 250, prefix: large }),
   )
-  expect(historySize(near.newGroup.state.ratchetTree, [])).toBe(HISTORY_HORIZON - 1_024)
-  const grown = [...large, rotation(large, 2_048)]
+  expect(historySize(near.newGroup.state.ratchetTree, entries)).toBe(HISTORY_HORIZON - room)
+  const atBoundary = [...large, rotation(large, room)]
+  const accepted = await renewLeaf(
+    near.newGroup,
+    await timedBinding({ identity, iat: 150, exp: 250, prefix: atBoundary }),
+  )
+  expect(historySize(accepted.newGroup.state.ratchetTree, entries)).toBe(HISTORY_HORIZON)
+  const overBoundary = [...large, rotation(large, room + 1)]
   await expect(
-    renewLeaf(near.newGroup, await timedBinding({ identity, iat: 150, exp: 250, prefix: grown })),
+    renewLeaf(
+      near.newGroup,
+      await timedBinding({ identity, iat: 150, exp: 250, prefix: overBoundary }),
+    ),
   ).rejects.toMatchObject({ reason: 'history-horizon' })
   const target = agent(51).id
-  const resetLog = [inception, createReset(controllerSeed, 0, 1)]
-  const eventBytes = (events: Array<SignedEvent>) =>
-    events.reduce(
-      (total, event) => total + new TextEncoder().encode(JSON.stringify(event)).length,
-      0,
-    )
-  const probe = [...resetLog, rotation(resetLog, 1024)]
-  const revBytes = eventBytes([revoke(probe, target)])
-  const proofLog: Array<SignedEvent> = [
-    ...resetLog,
-    rotation(resetLog, 2_048 - eventBytes(resetLog) - revBytes),
-  ]
-  proofLog.push(revoke(proofLog, target))
-  expect(eventBytes(proofLog)).toBe(2_048)
-  expect(await revokeWithProof(near.newGroup, { subject: target, log: proofLog })).toEqual({
+  const proofLog = (bytes: number): Array<SignedEvent> => {
+    const probe = [inception, rotation([inception], 1_024)]
+    const revBytes = controllerLogSize([revoke(probe, target)])
+    const log: Array<SignedEvent> = [inception, rotation([inception], bytes - revBytes)]
+    log.push(revoke(log, target))
+    expect(controllerLogSize(log.slice(1))).toBe(bytes)
+    return log
+  }
+  const exactProof = proofLog(room)
+  const proof = await revokeWithProof(near.newGroup, {
+    deny: [target],
+    log: asControllerLog(exactProof),
+  })
+  expect(proof.status).toBe('built')
+  if (proof.status !== 'built') throw new Error('Missing boundary proof')
+  expect(proof.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    proof: asControllerLog(JSON.parse(JSON.stringify(exactProof.slice(1)))),
+  })
+  expect(
+    historySize(
+      proof.result.newGroup.state.ratchetTree,
+      proof.result.newGroup.ledger.map(({ verified }) => verified),
+    ),
+  ).toBe(HISTORY_HORIZON)
+  const tooLargeProof = proofLog(room + 1)
+  await expect(
+    verifyLifecycleProof(near.newGroup, {
+      issuer: identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: group.groupID,
+        subject: controllerID,
+        value: {
+          effects: denyEffects(tooLargeProof.slice(1), target),
+          removed: [],
+          op: 'revoke',
+          proof: asControllerLog(tooLargeProof.slice(1)),
+          revoked: [{ did: target }],
+        },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'too-large' })
+  expect(
+    await revokeWithProof(near.newGroup, { deny: [target], log: asControllerLog(tooLargeProof) }),
+  ).toEqual({
     status: 'not-provable',
     reason: 'too-large',
   })
+  const resetLog = [inception, createReset(controllerSeed, 0, 1)]
   const shrunk = await renewLeaf(
     near.newGroup,
     await timedBinding({ identity, iat: 150, exp: 250, prefix: resetLog }),
   )
-  const reset = await revokeWithProof(shrunk.newGroup, { reset: true, log: resetLog })
+  const reset = await revokeWithProof(shrunk.newGroup, {
+    reset: true,
+    log: asControllerLog(resetLog),
+  })
   expect(reset.status).toBe('built')
   if (reset.status !== 'built') throw new Error('Missing reset')
+  const reopened: Array<SignedEvent> = [...resetLog, rotation(resetLog, room)]
+  reopened.push(revoke(reopened, target))
   expect(
-    (await revokeWithProof(reset.result.newGroup, { subject: target, log: proofLog })).status,
+    (
+      await revokeWithProof(reset.result.newGroup, {
+        deny: [target],
+        log: asControllerLog(reopened),
+      })
+    ).status,
   ).toBe('built')
+  expect(group.ledger).toEqual([seed])
   const node = shrunk.newGroup.state.ratchetTree[0]
   expect(node?.nodeType).toBe(nodeTypes.leaf)
   if (node?.nodeType === nodeTypes.leaf && 'identity' in node.leaf.credential)
@@ -372,13 +467,18 @@ test('reset identifies the author through a cascade from an older trusted issuer
     parent,
   })
   const unevidenced = await belowGateWelcome(group, child, withoutHolderEvidence(binding))
-  expect(await revokeWithProof(unevidenced.joined, { reset: true, log: reset })).toEqual({
+  expect(
+    await revokeWithProof(unevidenced.joined, { reset: true, log: asControllerLog(reset) }),
+  ).toEqual({
     status: 'self-affected',
     subject: child.id,
   })
   // A child carrying its holder's evidence is not cascaded, so it publishes the reset itself.
   const evidenced = await lowLevelWelcome(group, child, binding)
-  const built = await revokeWithProof(evidenced.joined, { reset: true, log: reset })
+  const built = await revokeWithProof(evidenced.joined, {
+    reset: true,
+    log: asControllerLog(reset),
+  })
   expect(built.status).toBe('built')
   if (built.status !== 'built') throw new Error('Missing reset')
   expect(built.result.newGroup.listMembers().map(({ id }) => id)).toEqual([child.id])
@@ -393,30 +493,33 @@ test('strips skipped events, and rejects wrong-controller, detached and higher-g
     event: { ...rev.event, t: 'future', crit: false },
   } as unknown as SignedEvent
   const padded = [inception, skipped, rev]
-  const built = await revokeWithProof(group, { subject: target, log: padded })
+  const built = await revokeWithProof(group, { deny: [target], log: asControllerLog(padded) })
   expect(built.status).toBe('built')
   expect(padded).toHaveLength(3)
   if (built.status !== 'built') throw new Error('Missing proof')
-  expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual(
-    JSON.parse(JSON.stringify([inception, rev])),
-  )
-  const foreign = createInception(new Uint8Array(32).fill(99), 0)
-  expect(await revokeWithProof(group, { subject: target, log: [foreign] })).toEqual({
-    status: 'not-provable',
-    reason: 'wrong-controller',
+  expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual({
+    chain: JSON.parse(JSON.stringify([inception, rev])),
+    events: [],
   })
+  const foreign = createInception(new Uint8Array(32).fill(99), 0)
+  expect(await revokeWithProof(group, { deny: [target], log: asControllerLog([foreign]) })).toEqual(
+    {
+      status: 'not-provable',
+      reason: 'wrong-controller',
+    },
+  )
   const other = agent(71).id
   expect(
     await revokeWithProof(built.result.newGroup, {
-      subject: other,
-      log: [inception, revoke([inception], other)],
+      deny: [other],
+      log: asControllerLog([inception, revoke([inception], other)]),
     }),
   ).toEqual({ status: 'not-provable', reason: 'detached' })
   const reset = [inception, createReset(controllerSeed, 0, 1)]
   expect(
     await revokeWithProof(built.result.newGroup, {
-      subject: other,
-      log: [...reset, revoke(reset, other)],
+      deny: [other],
+      log: asControllerLog([...reset, revoke(reset, other)]),
     }),
   ).toEqual({ status: 'not-provable', reason: 'needs-reset' })
 })
@@ -474,8 +577,8 @@ test('a proof removing the newest leaf preserves tree time for the removed recei
     await timedBinding({ identity: target, iat: 150, exp: 250 }),
   )
   const built = await revokeWithProof(fixture.author, {
-    subject: target.id,
-    log: [inception, revoke([inception], target.id)],
+    deny: [target.id],
+    log: asControllerLog([inception, revoke([inception], target.id)]),
   })
   expect(built.status).toBe('built')
   if (built.status !== 'built') throw new Error('Missing proof')
@@ -501,38 +604,49 @@ test('renewal can shorten history while the group is already above the horizon',
   )
 })
 
-test('an empty suffix can prove a revocation already held by the recorded reset chain', async () => {
+test('a deny after a recorded reset uses an attached suffix', async () => {
   const { group, identity } = await pipelineGroup()
   const current: Array<SignedEvent> = [inception, createReset(controllerSeed, 0, 1)]
   const target = agent(61).id
-  current.push(revoke(current, target))
+
   const renewed = await renewLeaf(
     group,
     await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
   )
-  const reset = await revokeWithProof(renewed.newGroup, { reset: true, log: current })
+  const reset = await revokeWithProof(renewed.newGroup, {
+    reset: true,
+    log: asControllerLog(current),
+  })
   if (reset.status !== 'built') throw new Error('Missing reset')
-  const built = await revokeWithProof(reset.result.newGroup, { subject: target, log: current })
+  current.push(revoke(current, target))
+  const built = await revokeWithProof(reset.result.newGroup, {
+    deny: [target],
+    log: asControllerLog(current),
+  })
   expect(built.status).toBe('built')
   if (built.status !== 'built') throw new Error('Missing proof')
-  expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({ proof: [] })
-  expect(revocationOf(built.result.newGroup, target)?.logPosition).toBe(2)
+  expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    proof: asControllerLog(JSON.parse(JSON.stringify(current.slice(2)))),
+  })
+  expect(revocationOf(built.result.newGroup, target)?.proofRef).toEqual({ chainIndex: 2 })
 })
 
 test('invalid signatures, missing resets and old generations return proof reasons', async () => {
   const { group, identity } = await pipelineGroup()
   const target = agent(61).id
-  expect(await revokeWithProof(group, { subject: target, log: [] })).toEqual({
+  expect(await revokeWithProof(group, { deny: [target], log: asControllerLog([]) })).toEqual({
     status: 'not-provable',
     reason: 'no-rev',
   })
-  expect(await revokeWithProof(group, { reset: true, log: [inception] })).toEqual({
+  expect(await revokeWithProof(group, { reset: true, log: asControllerLog([inception]) })).toEqual({
     status: 'not-provable',
     reason: 'no-rev',
   })
   const invalid = revoke([inception], target)
   invalid.sigs = []
-  expect(await revokeWithProof(group, { subject: target, log: [inception, invalid] })).toEqual({
+  expect(
+    await revokeWithProof(group, { deny: [target], log: asControllerLog([inception, invalid]) }),
+  ).toEqual({
     status: 'not-provable',
     reason: 'not-authority-signed',
   })
@@ -541,12 +655,12 @@ test('invalid signatures, missing resets and old generations return proof reason
     group,
     await timedBinding({ identity, iat: 150, exp: 250, prefix: log }),
   )
-  const reset = await revokeWithProof(renewed.newGroup, { reset: true, log })
+  const reset = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
   if (reset.status !== 'built') throw new Error('Missing reset')
   expect(
     await revokeWithProof(reset.result.newGroup, {
-      subject: target,
-      log: [inception, revoke([inception], target)],
+      deny: [target],
+      log: asControllerLog([inception, revoke([inception], target)]),
     }),
   ).toEqual({ status: 'not-provable', reason: 'generation-floor' })
 })
@@ -579,7 +693,10 @@ test('a member without a role builds a cascading proof and observes another memb
   const log = [inception, revoke([inception], identity.id)]
   expect(second.joined.roster.roles.has(publisher.id)).toBe(false)
   const before = structuredClone(second.joined.state)
-  const built = await revokeWithProof(second.joined, { subject: identity.id, log })
+  const built = await revokeWithProof(second.joined, {
+    deny: [identity.id],
+    log: asControllerLog(log),
+  })
   expect(built.status).toBe('built')
   if (built.status !== 'built') throw new Error('Missing proof')
   expect(built.result.newGroup.listMembers().map(({ id }) => id)).toEqual([
@@ -591,7 +708,9 @@ test('a member without a role builds a cascading proof and observes another memb
   for (const held of built.result.newGroup.ledger) tokens.set(held.entryID, held.token)
   const competing = third.joined
   await competing.processMessage(built.result.commitMessage)
-  expect(await revokeWithProof(competing, { subject: identity.id, log })).toEqual({
+  expect(
+    await revokeWithProof(competing, { deny: [identity.id], log: asControllerLog(log) }),
+  ).toEqual({
     status: 'already-revoked',
   })
 })
@@ -603,11 +722,12 @@ test('peer:4 members sign self-verifying proof entries using their leaf long for
   })
   const { group } = await createGroup(identity, 'peer-proof', {
     controller: await timedBinding({ identity, iat: 100, exp: 200 }),
+    controllerLog: { chain: [inception], events: [] },
   })
   const target = agent(61).id
   const built = await revokeWithProof(group, {
-    subject: target,
-    log: [inception, revoke([inception], target)],
+    deny: [target],
+    log: asControllerLog([inception, revoke([inception], target)]),
   })
   expect(built.status).toBe('built')
   if (built.status !== 'built') throw new Error('Missing proof')
@@ -628,60 +748,470 @@ test.each(['revoke', 'reset'] as const)(
       group,
       await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
     )
-    const before = structuredClone(renewed.newGroup.state)
+    let proofGroup = renewed.newGroup
+    if (op === 'revoke') {
+      const recordedReset = await revokeWithProof(proofGroup, {
+        reset: true,
+        log: asControllerLog(current),
+      })
+      expect(recordedReset.status).toBe('built')
+      if (recordedReset.status !== 'built') throw new Error('Missing reset')
+      proofGroup = recordedReset.result.newGroup
+    }
+    const before = structuredClone(proofGroup.state)
+    const ledgerBefore = [...proofGroup.ledgerTokens]
+    expect(proofGroup.ledger[0]?.verified.entry.value).toMatchObject({ op: 'seed' })
     const originalLog = structuredClone(log)
     const built = await revokeWithProof(
-      renewed.newGroup,
-      op === 'reset' ? { reset: true, log } : { subject: target, log },
+      proofGroup,
+      op === 'reset'
+        ? { reset: true, log: asControllerLog(log) }
+        : { deny: [target], log: asControllerLog(log) },
     )
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
     const expected = JSON.parse(JSON.stringify([inception, reset, currentRevoke]))
     expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
-      proof: expected,
+      proof: asControllerLog(op === 'revoke' ? expected.slice(2) : expected),
     })
-    expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual(
-      expected,
-    )
-    if (op === 'revoke') expect(revocationOf(built.result.newGroup, target)?.logPosition).toBe(2)
-    else expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
-    expect(renewed.newGroup.state).toEqual(before)
+    expect(built.result.newGroup.ledgerTokens).toEqual([
+      ...ledgerBefore,
+      built.result.newGroup.ledger.at(-1)?.token,
+    ])
+    expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual({
+      chain: expected,
+      events: [],
+    })
+    expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
+    if (op === 'revoke') {
+      expect(revocationOf(built.result.newGroup, target)?.proofRef).toEqual({ chainIndex: 2 })
+      expect(built.result.newGroup.registry.devices.get(target)?.proofRef).toEqual({
+        chainIndex: 2,
+      })
+    }
+    expect(proofGroup.state).toEqual(before)
     expect(log).toEqual(originalLog)
   },
 )
 
 test('a first proof cannot use a subject revoke before the latest reset', async () => {
-  const { group } = await pipelineGroup()
+  const reset = createReset(controllerSeed, 0, 1)
+  const { group } = await pipelineGroup({ controllerLog: asControllerLog([inception, reset]) })
+  const [seed] = structuredClone(group.ledger)
+  expect(seed?.verified.entry.value).toMatchObject({
+    op: 'seed',
+    proof: asControllerLog([inception, reset]),
+  })
+  expect(group.ledger).toEqual([seed])
   const target = agent(61).id
-  const log = [inception, revoke([inception], target), createReset(controllerSeed, 0, 1)]
-  expect(await revokeWithProof(group, { subject: target, log })).toEqual({
+  const log = [inception, revoke([inception], target), reset]
+  expect(await revokeWithProof(group, { deny: [target], log: asControllerLog(log) })).toEqual({
     status: 'not-provable',
     reason: 'no-rev',
   })
-  expect(group.ledger).toEqual([])
+  expect(group.ledger).toEqual([seed])
 })
 
-test('proof construction ends at the deny gain before a retaining rotate', async () => {
+test('proof construction carries the retaining rotate after a deny gain', async () => {
   const { group } = await pipelineGroup()
   const subject = agent(61).id
   const chain: Array<SignedEvent> = [inception]
   chain.push(revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject }))
   chain.push(rotateChain({ seed: controllerSeed, profile: 0, did: controllerID, chain }))
-  const built = await revokeWithProof(group, { subject, log: chain })
+  const built = await revokeWithProof(group, { deny: [subject], log: asControllerLog(chain) })
   expect(built.status).toBe('built')
   if (built.status !== 'built') throw new Error('Missing proof')
-  expect(revocationOf(built.result.newGroup, subject)?.logPosition).toBe(1)
+  expect(revocationOf(built.result.newGroup, subject)?.proofRef).toEqual({ chainIndex: 1 })
   expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
-    proof: JSON.parse(JSON.stringify(chain.slice(0, 2))),
+    proof: asControllerLog(JSON.parse(JSON.stringify(chain.slice(1)))),
   })
 })
 
 test('proof construction refuses a reset snapshot denial as a revoke', async () => {
-  const { group } = await pipelineGroup()
   const subject = agent(61).id
   const log = [inception, createReset(controllerSeed, 0, 1, { members: [], deny: [subject] })]
-  expect(await revokeWithProof(group, { subject, log })).toEqual({
+  const { group } = await pipelineGroup({
+    controllerLog: asControllerLog([inception]),
+  })
+  expect(await revokeWithProof(group, { deny: [subject], log: asControllerLog(log) })).toEqual({
+    status: 'not-provable',
+    reason: 'needs-reset',
+  })
+})
+
+test('replayed deny is already-revoked', async () => {
+  const { group } = await pipelineGroup()
+  const target = agent(51).id
+  const log = asControllerLog([inception, revoke([inception], target)])
+  const snapshot = structuredClone(log)
+  const built = await revokeWithProof(group, { log, deny: [target] })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing proof')
+  expect(log).toEqual(snapshot)
+  expect(await revokeWithProof(built.result.newGroup, { log, deny: [target] })).toEqual({
+    status: 'already-revoked',
+  })
+})
+
+test('a recorded deny with an unrelated retaining rotate is already-revoked', async () => {
+  const { group } = await pipelineGroup()
+  const target = agent(51).id
+  const chain = [inception, revoke([inception], target)]
+  const built = await revokeWithProof(group, { log: asControllerLog(chain), deny: [target] })
+  if (built.status !== 'built') throw new Error('Missing proof')
+  const recorded = built.result.newGroup
+  const ledger = [...recorded.ledger]
+  const state = structuredClone(recorded.state)
+  const log = asControllerLog([...chain, rotation(chain)])
+  const snapshot = structuredClone(log)
+  expect(await revokeWithProof(recorded, { log, deny: [target] })).toEqual({
+    status: 'already-revoked',
+  })
+  expect(recorded.registry.controllers.get(controllerID)?.recordedLog).toEqual(
+    asControllerLog(chain),
+  )
+  expect(recorded.ledger).toEqual(ledger)
+  expect(recorded.state).toEqual(state)
+  expect(log).toEqual(snapshot)
+  const published = await publishControllerLog(recorded, log)
+  expect(published?.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual(log)
+})
+
+test('revokeWithProof declares both denials carried by the closure', async () => {
+  const f = await buildEpoch({ members: 2 })
+  const { group } = await pipelineGroup({ controllerLog: f.log })
+  const a = f.members[0]
+  const b = f.members[1]
+  if (a == null || b == null) throw new Error('Missing members')
+  const targets = [agent(61).id, agent(71).id].sort()
+  const first = createRevoke({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: { member: a },
+    target: targets[0] as string,
+  })
+  const log: ControllerLog = { chain: f.log.chain, events: [...f.log.events, first] }
+  const folded = foldControllerLog(f.did, log)
+  if (!folded.ok) throw new Error(folded.reason)
+  const second = createRevoke({
+    did: f.did,
+    head: folded.head,
+    parents: epochHeads(f.did, log),
+    signer: { member: b },
+    target: targets[1] as string,
+  })
+  log.events.push(second)
+  const copy = structuredClone(log)
+  const built = await revokeWithProof(group, { log, deny: [targets[0] as string] })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing proof')
+  expect(built.result.newGroup.ledger.at(-1)?.verified.entry).toMatchObject({
+    subject: f.did,
+    value: {
+      effects: [
+        { kind: 'deny', did: targets[0], ref: { event: digestOf(first.event) } },
+        { kind: 'deny', did: targets[1], ref: { event: digestOf(second.event) } },
+      ],
+      revoked: targets.map((did) => ({ did })),
+      removed: [],
+    },
+  })
+  expect(built.effects).toEqual([
+    { kind: 'deny', did: targets[0], ref: { event: digestOf(first.event) } },
+    { kind: 'deny', did: targets[1], ref: { event: digestOf(second.event) } },
+  ])
+  expect(log).toEqual(copy)
+})
+
+test('revokeWithProof deny of a member DID by a member is not provable', async () => {
+  const f = await buildEpoch({ members: 2 })
+  const { group } = await pipelineGroup({ controllerLog: f.log })
+  const a = f.members[0]
+  const b = f.members[1]
+  if (a == null || b == null) throw new Error('Missing members')
+  const rev = createRevoke({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: { member: a },
+    target: b.did,
+  })
+  const log = { chain: f.log.chain, events: [...f.log.events, rev] }
+  expect(await revokeWithProof(group, { log, deny: [b.did] })).toEqual({
     status: 'not-provable',
     reason: 'no-rev',
   })
+  const settle = createRotate({
+    seed: f.seed,
+    profile: 0,
+    did: f.did,
+    prior: f.inception.event,
+    snapshot: { ...snapshotOf(f.head), deny: [b.did] },
+  })
+  const built = await revokeWithProof(group, {
+    log: asControllerLog([f.inception, settle]),
+    deny: [b.did],
+  })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing proof')
+  expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    effects: [{ kind: 'deny', did: b.identity.id, ref: { chainIndex: 1 } }],
+  })
+})
+
+test('re-revoke after reset accepted at gen 2', async () => {
+  const { group, identity } = await pipelineGroup()
+  const target = agent(61).id
+  const first = await revokeWithProof(group, {
+    log: asControllerLog([inception, revoke([inception], target)]),
+    deny: [target],
+  })
+  if (first.status !== 'built') throw new Error('Missing first denial')
+  const prefix = [inception, createReset(controllerSeed, 0, 2)]
+  const renewed = await renewLeaf(
+    first.result.newGroup,
+    await timedBinding({ identity, iat: 150, exp: 250, prefix }),
+  )
+  const reset = await revokeWithProof(renewed.newGroup, {
+    reset: true,
+    log: asControllerLog(prefix),
+  })
+  if (reset.status !== 'built') throw new Error('Missing reset')
+  const log = asControllerLog([...prefix, revoke(prefix, target)])
+  const built = await revokeWithProof(reset.result.newGroup, { log, deny: [target] })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing repeated denial')
+  expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+    effects: [{ kind: 'deny', did: target, ref: { chainIndex: 2 } }],
+  })
+  expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(2)
+})
+
+test('deny of a long-form did:peer:4 matches the short-form leaf', async () => {
+  const { group } = await pipelineGroup()
+  const peer = await createIdentity({
+    didMethod: 'peer:4',
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(122) }],
+  })
+  if (peer.longForm == null) throw new Error('Missing peer long form')
+  const fixture = await lowLevelWelcome(
+    group,
+    peer,
+    await timedBinding({ identity: peer, iat: 100, exp: 200 }),
+  )
+  const built = await revokeWithProof(fixture.author, {
+    log: asControllerLog([inception, revoke([inception], peer.longForm)]),
+    deny: [peer.longForm],
+  })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing proof')
+  expect(built.result.newGroup.findMemberLeafIndex(peer.id)).toBeUndefined()
+  expect(revocationOf(built.result.newGroup, peer.id)).toEqual({
+    controller: controllerID,
+    proofRef: { chainIndex: 1 },
+  })
+})
+
+async function clockGroup(members = 2, onlyFirst = false) {
+  const f = await buildEpoch({ members })
+  const a = f.members[0]
+  if (a == null) throw new Error('Missing member')
+  const tokens = new Map<string, string>()
+  const log = onlyFirst ? { chain: f.log.chain, events: [a.event] } : f.log
+  const { group } = await createGroup(a.identity, 'membership-clocks', {
+    controller: { id: f.did, prefix: f.log.chain, member: { add: a.add, g: 0 }, iat: 100 },
+    controllerLog: log,
+    resolveLedgerEntries: async (ids) =>
+      ids.map((id) => {
+        const token = tokens.get(id)
+        if (token == null) throw new Error('Missing token')
+        return token
+      }),
+  })
+  return { ...f, a, group, tokens }
+}
+
+function rememberClocks(group: GroupHandle, tokens: Map<string, string>): void {
+  for (const held of group.ledger) tokens.set(held.entryID, held.token)
+}
+
+test('membership-only group advances through attest clocks from two members', async () => {
+  const f = await clockGroup()
+  const b = f.members[1]
+  if (b == null) throw new Error('Missing member')
+  const peer = await belowGateWelcome(f.group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  expect(await attestTreeTime(peer.author, 0)).toBeNull()
+  const first = await attestTreeTime(peer.author, 100)
+  if (first == null) throw new Error('Missing attestation')
+  expect(treeTime(first.newGroup, f.did)).toBe(0)
+  expect(first.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(0)
+  expect(
+    first.newGroup.registry.controllers
+      .get(f.did)
+      ?.attestations.get(encodeKey(f.a.identity.publicKey, 'EdDSA')),
+  ).toBe(100)
+  rememberClocks(first.newGroup, f.tokens)
+  await peer.joined.processMessage(first.commitMessage)
+  const second = await attestTreeTime(peer.joined, 120)
+  if (second == null) throw new Error('Missing second attestation')
+  expect(treeTime(second.newGroup, f.did)).toBe(100)
+  rememberClocks(second.newGroup, f.tokens)
+  await first.newGroup.processMessage(second.commitMessage)
+  expect(first.newGroup.registry).toEqual(second.newGroup.registry)
+  expect(await attestTreeTime(first.newGroup, 100)).toBeNull()
+  const newer = await attestTreeTime(first.newGroup)
+  expect(
+    newer?.newGroup.registry.controllers
+      .get(f.did)
+      ?.attestations.get(encodeKey(f.a.identity.publicKey, 'EdDSA')),
+  ).toBe(150)
+})
+
+test('preservation clock cannot exceed attestedTreeTime', async () => {
+  const f = await clockGroup()
+  await expect(
+    verifyLifecycleProof(f.group, {
+      issuer: f.a.identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: f.group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 1 },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('attest clock from a non-member device is refused', async () => {
+  const f = await buildEpoch({ members: 2 })
+  const { group, identity } = await pipelineGroup({ controllerLog: f.log })
+  expect(await attestTreeTime(group, 100)).toBeNull()
+  await expect(
+    verifyLifecycleProof(group, {
+      issuer: identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: group.groupID,
+        subject: controllerID,
+        value: { op: 'clock', time: 100, attest: true },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test("attest clock past the member's lease is refused", async () => {
+  const f = await clockGroup(1)
+  const state = f.group.state
+  const ledger = f.group.ledgerTokens
+  await expect(attestTreeTime(f.group, 1001)).resolves.toBeNull()
+  expect(f.group.state).toBe(state)
+  expect(f.group.ledgerTokens).toEqual(ledger)
+  await expect(
+    verifyLifecycleProof(f.group, {
+      issuer: f.a.identity.id,
+      entry: {
+        type: 'kumiai.device',
+        groupID: f.group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 1001, attest: true },
+      },
+    }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
+})
+
+test('adding a second effective key keeps tree time', async () => {
+  const f = await clockGroup(2, true)
+  const attested = await attestTreeTime(f.group, 100)
+  if (attested == null) throw new Error('Missing attestation')
+  const published = await publishControllerLog(attested.newGroup, f.log)
+  if (published == null) throw new Error('Missing log commit')
+  expect(
+    published.newGroup.ledger.slice(-2).map(({ verified }) => verified.entry.value),
+  ).toMatchObject([{ op: 'log' }, { op: 'clock', time: 100 }])
+  expect(treeTime(published.newGroup, f.did)).toBe(100)
+  expect(published.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(100)
+  expect(published.newGroup.registry.controllers.get(f.did)?.recordedLog).toEqual(f.log)
+  expect(attested.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(0)
+})
+
+test("commitInvite bundling a second member's add keeps tree time", async () => {
+  const f = await clockGroup(2, true)
+  const b = f.members[1]
+  if (b == null) throw new Error('Missing member')
+  const attested = await attestTreeTime(f.group, 100)
+  if (attested == null) throw new Error('Missing attestation')
+  const group = attested.newGroup
+  const { invite } = await createInvite({
+    group,
+    identity: f.a.identity,
+    recipientDID: b.identity.id,
+    controllerLog: f.log,
+  })
+  const original = [...invite.ledgerEntries]
+  const bundle = await rawBundle(group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  const result = await commitInvite(group, bundle.publicPackage, invite)
+  expect(invite.ledgerEntries).toHaveLength(original.length + 1)
+  expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toEqual({ op: 'clock', time: 100 })
+  expect(treeTime(result.newGroup, f.did)).toBe(100)
+  const joined = await processWelcome({
+    identity: b.identity,
+    invite,
+    welcome: result.welcomeMessage,
+    keyPackageBundle: { ...bundle, ownerDID: b.identity.id },
+  })
+  expect(treeTime(joined.group, f.did)).toBe(100)
+  expect(joined.group.registry).toEqual(result.newGroup.registry)
+  expect(group.registry.controllers.get(f.did)?.timeFloor).toBe(0)
+})
+
+test('removing an attestor keeps tree time', async () => {
+  const f = await clockGroup(3)
+  const b = f.members[1]
+  if (b == null) throw new Error('Missing member')
+  const peer = await belowGateWelcome(f.group, b.identity, {
+    id: f.did,
+    prefix: f.log.chain,
+    member: { add: b.add, g: 0 },
+    iat: 100,
+  })
+  const first = await attestTreeTime(peer.author, 100)
+  if (first == null) throw new Error('Missing attestation')
+  rememberClocks(first.newGroup, f.tokens)
+  await peer.joined.processMessage(first.commitMessage)
+  const second = await attestTreeTime(peer.joined, 120)
+  if (second == null) throw new Error('Missing attestation')
+  rememberClocks(second.newGroup, f.tokens)
+  await first.newGroup.processMessage(second.commitMessage)
+  const removal = createRemove({
+    did: f.did,
+    head: f.head,
+    parents: epochHeads(f.did, f.log),
+    signer: { member: f.a },
+    add: b.add,
+  })
+  const built = await revokeWithProof(first.newGroup, {
+    log: { chain: f.log.chain, events: [...f.log.events, removal] },
+    remove: [{ did: b.did, add: b.add }],
+  })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing removal')
+  expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toEqual({
+    op: 'clock',
+    time: 100,
+  })
+  expect(treeTime(built.result.newGroup, f.did)).toBe(100)
+  rememberClocks(built.result.newGroup, f.tokens)
+  await second.newGroup.processMessage(built.result.commitMessage)
+  expect(second.newGroup.registry).toEqual(built.result.newGroup.registry)
 })

@@ -1,42 +1,82 @@
-import { createControllerResolver, type SignedEvent } from '@kokuin/controller'
-import type { DIDMethodResolver } from '@kokuin/token'
+import {
+  type ControllerLog,
+  type ControllerResolver,
+  createControllerResolver,
+  digestOf,
+  type SignedEvent,
+} from '@kokuin/controller'
+import { type DIDMethodResolver, type MemberQuery, normalizeDID } from '@kokuin/token'
 
 import { asControllerLog, hasChainRevoke } from './controller-log.js'
+import { type DeviceRegistry, denySetOf, recordedLogOf } from './registry.js'
 
 const EMPTY: ReadonlySet<string> = new Set()
 
-/**
- * A `did:kokuin:` resolver whose log is the prefix EMBEDDED in an MLS leaf — never fetched
- * externally. `loadLog` answers only for `controllerID`, returning the embedded `prefix`, and
- * `undefined` for any other DID, so no code path can reach a sidecar. `resolveDenySet` is overridden
- * to answer from the injected group-folded set (freshness), rather than the prefix's frozen head.
- *
- * Member grants are unsupported: the prefix carries no epoch events, so members could only come
- * from a stale snapshot.
- *
- * A per-leaf, one-shot instance: the prefix is small, verification is single-pass, and no `history`
- * store is configured. This is the adapter the Slice 1 spike verified to run with zero external I/O.
- */
-export function createEmbeddedControllerResolver(params: {
+export function prefixRelation(
+  recorded: ControllerLog | undefined,
+  prefix: ReadonlyArray<SignedEvent>,
+): 'contained' | 'ahead' | 'forked' | 'none' {
+  const held = recorded?.chain.at(-1)
+  const carried = prefix.at(-1)
+  if (recorded == null || held == null || carried == null) return 'none'
+  const carriedDigest = digestOf(carried.event)
+  if (recorded.chain.some((signed) => digestOf(signed.event) === carriedDigest)) return 'contained'
+  const heldDigest = digestOf(held.event)
+  return prefix.some((signed) => digestOf(signed.event) === heldDigest) ? 'ahead' : 'forked'
+}
+
+/** Root keys come from the leaf prefix; member authority comes from the recorded epoch. */
+export function createRegistryControllerResolver(params: {
   controllerID: string
-  prefix: Array<SignedEvent>
-  denySet?: ReadonlySet<string>
-}): DIDMethodResolver {
-  const base = createControllerResolver({
-    loadLog: async (did) =>
-      did === params.controllerID && !hasChainRevoke(params.prefix)
-        ? asControllerLog(params.prefix)
-        : undefined,
-  })
-  // Forward only what verification needs: anything else kokuin adds is not passed through unseen.
-  const { method, resolve, resolveHistoric, resolveAgreementKey } = base
+  prefix: ReadonlyArray<SignedEvent>
+  registry?: DeviceRegistry
+}): ControllerResolver {
+  const controller = normalizeDID(params.controllerID)
+  const recorded = params.registry == null ? undefined : recordedLogOf(params.registry, controller)
+  const denied = params.registry == null ? EMPTY : denySetOf(params.registry)
+  const prefix = asControllerLog(params.prefix)
+  const resolverFor = (log: ControllerLog) => {
+    return createControllerResolver({
+      loadLog: async (did) =>
+        normalizeDID(did) === controller && !hasChainRevoke(log.chain) ? log : undefined,
+    })
+  }
+  const keys = resolverFor(prefix)
+  const members = recorded == null ? keys : resolverFor(recorded)
+
+  function view(keys: DIDMethodResolver, members: DIDMethodResolver): DIDMethodResolver {
+    const { method, resolve, resolveHistoric, resolveAgreementKey } = keys
+    return {
+      method,
+      resolve,
+      resolveHistoric,
+      resolveAgreementKey,
+      async resolveDenySet(did: string): Promise<ReadonlySet<string>> {
+        if (normalizeDID(did) !== controller) throw new Error(`Unknown DID: ${did}`)
+        // Check saturation before substituting the group-folded denials.
+        await members.resolveDenySet?.(did)
+        return denied
+      },
+      ...(params.registry == null
+        ? {}
+        : {
+            async resolveMember(did: string, query: MemberQuery) {
+              if (normalizeDID(did) !== controller) throw new Error(`Unknown DID: ${did}`)
+              if (prefixRelation(recorded, params.prefix) !== 'contained')
+                throw new Error('Recorded controller log does not contain the leaf prefix')
+              const member = await members.resolveMember?.(did, query)
+              if (member == null) throw new Error('Controller member resolution is unavailable')
+              return member
+            },
+          }),
+    }
+  }
+
   return {
-    method,
-    resolve,
-    resolveHistoric,
-    resolveAgreementKey,
-    async resolveDenySet(_did: string): Promise<ReadonlySet<string>> {
-      return params.denySet ?? EMPTY
+    ...view(keys, members),
+    frozen() {
+      const frozenKeys = keys.frozen()
+      return view(frozenKeys, members === keys ? frozenKeys : members.frozen())
     },
   }
 }

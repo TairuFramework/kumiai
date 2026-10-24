@@ -13,7 +13,10 @@ import { controlCapabilities } from './anchor.js'
 import { verifyLeafCredential } from './authentication.js'
 import { readCapability } from './capability.js'
 import type { ControllerBinding, MLSCredentialIdentity } from './credential.js'
+import { LeafBindingError } from './errors.js'
 import { resolveMlsContext } from './group-context.js'
+import { memberRootsOf } from './member-root.js'
+import { registryForLog } from './registry.js'
 import type { GroupOptions, KeyPackageBundle } from './types.js'
 
 export function makeMLSCredential(
@@ -43,6 +46,13 @@ export function makeMLSCredential(
 
 export function assertBindingAuthorTime(controller?: ControllerBinding): void {
   if (controller == null) return
+  if (controller.member != null) {
+    if (controller.iat == null || !Number.isFinite(controller.iat) || controller.iat > now()) {
+      throw new Error('Membership binding is not valid at authoring time')
+    }
+    return
+  }
+  if (controller.capability == null) throw new LeafBindingError('controller-mismatch')
   const { iat, exp } = readCapability(controller.capability).payload
   const timestamp = now()
   if (exp <= timestamp || iat > timestamp) {
@@ -66,7 +76,20 @@ async function buildBundle(
 ): Promise<KeyPackageBundle> {
   assertBindingAuthorTime(options?.controller)
   const credential = makeMLSCredential(identity, options?.controller)
-  if (options?.controller != null) await verifyLeafCredential(credential, identity.publicKey)
+  if (options?.controller != null) {
+    const memberRooted = memberRootsOf(options.controller, identity.id).some(
+      ({ root }) => root.kind === 'member',
+    )
+    if (memberRooted && options.controllerLog == null)
+      throw new LeafBindingError('member-unavailable')
+    const registry =
+      memberRooted && options.controllerLog != null
+        ? registryForLog(options.controller.id, options.controllerLog)
+        : undefined
+    await verifyLeafCredential(credential, identity.publicKey, {
+      judging: () => ({ registry, stage: 'full', mode: 'admit' }),
+    })
+  }
   const { cipherSuite } = await resolveMlsContext(options)
   const result = await generateKeyPackageWithKey({
     credential,

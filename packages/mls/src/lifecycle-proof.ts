@@ -1,21 +1,40 @@
-import { didFromInception, type InceptionEvent, type SignedEvent } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { assertCapabilityToken, checkCapability } from '@kokuin/capability'
+import { type ControllerLog, isControllerLog, LOG_TOO_LARGE, mergeLogs } from '@kokuin/controller'
+import { normalizeDID, verifyToken } from '@kokuin/token'
 import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes } from 'ts-mls'
 
 import { hasHolderEvidence } from './authentication.js'
-import { readCapability } from './capability.js'
-import { foldChain, isDetachedFoldReason, revokesSubject } from './controller-log.js'
+import {
+  assertCapabilityLifetime,
+  assertControllerGrant,
+  capabilityKey,
+  MLS_LEAF_ACT,
+  MLS_LEAF_RES,
+  readCapability,
+} from './capability.js'
+import { effectDelta, ingestControllerLog } from './controller-ingest.js'
+import { foldChain, foldControllerLog } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
-import { RevokeProofError } from './errors.js'
+import { createRegistryControllerResolver } from './embedded-resolver.js'
+import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
-import { controllerLogSize, HISTORY_HORIZON, historySize } from './history.js'
+import { controllerLogSize, HISTORY_HORIZON, historySize, proofSize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
+import { attestedTreeTime, isLapsed, leafAt } from './lifecycle.js'
+import {
+  cascadeOf,
+  type EffectClaim,
+  effectiveAttestingMembers,
+  effectProofContext,
+  memberRootStatus,
+  type RemovedEffect,
+} from './member-root.js'
 import {
   type DeviceRegistry,
   type DeviceValue,
   denySetOf,
-  isResetOnly,
   type RevokedEffect,
+  registryApply,
 } from './registry.js'
 
 export { controllerLogSize, HISTORY_HORIZON } from './history.js'
@@ -23,18 +42,46 @@ export { controllerLogSize, HISTORY_HORIZON } from './history.js'
 /** Derived from a proof and the pre-commit tree; proposal comparison belongs to the commit gate. */
 export type LifecycleProofEffects = {
   controller: string
-  recordedLog: Array<SignedEvent>
+  recordedLog: ControllerLog
   genFloor: number
   timeFloor: number
-  logPosition?: number
   revoked: Array<RevokedEffect>
+  removed: Array<RemovedEffect>
   removeLeafIndices: Array<number>
 }
 
 type AuthenticatedProof = {
-  recordedLog: Array<SignedEvent>
+  recordedLog: ControllerLog
   genFloor: number
-  logPosition: number
+  resetRef?: { snapshot: number }
+}
+
+/** Keep controller merge limits inside the lifecycle proof error boundary. */
+export function mergeLifecycleProofLogs(
+  controller: string,
+  first: ControllerLog,
+  second: ControllerLog,
+): ControllerLog {
+  try {
+    return mergeLogs(controller, first, second)
+  } catch (cause) {
+    if (!(cause instanceof Error) || !cause.message.startsWith(LOG_TOO_LARGE)) throw cause
+    const error = new RevokeProofError('too-large')
+    error.cause = cause
+    throw error
+  }
+}
+
+/** Reattach historical closures without reviving unapplied current-epoch events. */
+export function lifecycleProofLog(
+  controller: string,
+  ingested: ReturnType<typeof ingestControllerLog>,
+  proof: ControllerLog,
+): ControllerLog {
+  return mergeLifecycleProofLogs(controller, ingested.log, {
+    chain: ingested.log.chain,
+    events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
+  })
 }
 
 /** Authenticate replayable log data without reading any membership state. */
@@ -47,78 +94,81 @@ export function authenticateLifecycleProof(
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
   const previous = registry.controllers.get(controller)
-  const recorded = previous?.recordedLog ?? []
   const floor = previous?.genFloor ?? 0
   if (
     (value.controller != null && normalizeDID(value.controller) !== controller) ||
-    (value.op === 'reset' && subject !== controller)
+    subject !== controller
   )
     throw new RevokeProofError('wrong-controller')
   const proof = value.proof
-  if (!Array.isArray(proof)) throw new RevokeProofError('no-rev')
-  if (recorded.length === 0 && proof.length === 0) throw new RevokeProofError('no-rev')
-  for (const signed of proof) {
-    const event = signed?.event
-    if (event == null || (event.t !== 'icp' && event.t !== 'rot')) {
-      throw new RevokeProofError('not-authority-signed')
+  if (value.op === 'log' || value.op === 'seed') {
+    if (!isControllerLog(proof)) throw new RevokeProofError('not-authority-signed')
+    if (value.op === 'seed' ? previous?.recordedLog != null : previous?.recordedLog == null)
+      throw new RevokeProofError('detached')
+    const ingested = ingestControllerLog(controller, previous?.recordedLog, proof, previous)
+    if (value.op === 'log') {
+      if (
+        ingested.introduced.length === 0 &&
+        ingested.before?.states.at(-1)?.digest === ingested.after.states.at(-1)?.digest
+      )
+        throw new RevokeProofError('effects-mismatch')
+      const delta = effectDelta(ingested.before?.head, ingested.after.head)
+      if (delta.generation) throw new RevokeProofError('needs-reset')
+      if (delta.denied.length > 0 || delta.removed.length > 0)
+        throw new RevokeProofError('effects-mismatch')
     }
-    if ('cap' in event && event.cap != null) throw new RevokeProofError('not-authority-signed')
-    if (event.t === 'icp') {
-      let inceptionDID: string
-      try {
-        inceptionDID = didFromInception(event as InceptionEvent)
-      } catch (cause) {
-        const rejection = new RevokeProofError('not-authority-signed')
-        rejection.cause = cause
-        throw rejection
-      }
-      if (normalizeDID(inceptionDID) !== controller) throw new RevokeProofError('wrong-controller')
-    } else if (event.i !== controller) {
-      throw new RevokeProofError('wrong-controller')
-    }
+    return { recordedLog: ingested.log, genFloor: Math.max(floor, ingested.after.head.gen) }
   }
-  // An old full chain must report the floor even though it cannot attach after a reset.
-  if (proof.length > 0 && proof.every(({ event }) => event.g < floor)) {
+  if (!isControllerLog(proof)) throw new RevokeProofError('no-rev')
+  if (proof.chain.length > 0 && proof.chain.every(({ event }) => event.g < floor))
     throw new RevokeProofError('generation-floor')
-  }
-  if (value.op === 'revoke' && recorded.length > 0 && proof[0]?.event.t === 'icp') {
-    throw new RevokeProofError('detached')
-  }
-  if (value.op === 'revoke' && recorded.length > 0) {
-    const generation = recorded.at(-1)?.event.g ?? 0
-    if (proof.some(({ event }) => event.g > generation)) throw new RevokeProofError('needs-reset')
-  }
-  const log = value.op === 'reset' ? proof : [...recorded, ...proof]
-  const folded = foldChain(controller, log)
-  if (!folded.ok) {
-    const detached = isDetachedFoldReason(folded.reason)
-    throw new RevokeProofError(detached ? 'detached' : 'not-authority-signed')
-  }
-  for (let index = 1; index < folded.states.length; index++) {
-    if (folded.states[index]?.digest === folded.states[index - 1]?.digest) {
-      throw new RevokeProofError('not-authority-signed')
-    }
-  }
+  if (
+    value.op === 'reset' &&
+    proof.chain[0]?.event.t === 'icp' &&
+    proof.chain.every(({ event }) => event.g <= floor)
+  )
+    throw new RevokeProofError('generation-floor')
+  if (value.op === 'revoke' && proof.chain.some(({ event }) => event.g > (previous?.genFloor ?? 0)))
+    throw new RevokeProofError('needs-reset')
+  const ingested = ingestControllerLog(controller, previous?.recordedLog, proof, previous)
+  if (ingested.after.head.saturated) throw new RevokeProofError('too-large')
+  const delta = effectDelta(ingested.before?.head, ingested.after.head)
   if (value.op === 'reset') {
-    let position = -1
-    for (let index = 1; index < log.length; index++) {
-      if (log[index]?.event.g !== log[index - 1]?.event.g) position = index
-    }
-    const generation = folded.states[position]?.gen
-    if (generation == null) throw new RevokeProofError('no-rev')
-    if (generation <= floor) throw new RevokeProofError('generation-floor')
-    return { recordedLog: [...log], genFloor: generation, logPosition: position }
+    if (!delta.generation || ingested.after.head.gen <= floor)
+      throw new RevokeProofError('generation-floor')
+  } else if (delta.generation) throw new RevokeProofError('needs-reset')
+  const proofLog = lifecycleProofLog(controller, ingested, proof)
+  const context = effectProofContext(controller, proofLog)
+  const expected = context.claimsFor(previous?.recordedLog, floor)
+  if (value.effects == null || (value.effects.length === 0 && value.op !== 'reset'))
+    throw new RevokeProofError('no-rev')
+  const target = (claim: EffectClaim) =>
+    claim.kind === 'deny'
+      ? `deny:${normalizeDID(claim.did)}`
+      : `remove:${normalizeDID(claim.member.did)}:${claim.member.add}`
+  if (
+    value.effects.length !== expected.length ||
+    expected.some((claim, index) => {
+      const declared = value.effects?.[index]
+      return declared == null || target(claim) !== target(declared)
+    })
+  )
+    throw new RevokeProofError('effects-mismatch')
+  for (const claim of value.effects) {
+    if (value.op !== 'reset' && 'snapshot' in claim.ref) throw new RevokeProofError('no-rev')
+    context.effectOf(claim, floor)
   }
-  let belowFloor = false
-  for (const [index, state] of folded.states.entries()) {
-    if (!revokesSubject(log, folded.states, index, subject)) continue
-    if (state.gen < floor) {
-      belowFloor = true
-      continue
-    }
-    return { recordedLog: [...log], genFloor: floor, logPosition: index }
+  const resetIndex =
+    value.op === 'reset'
+      ? ingested.log.chain.findIndex(
+          ({ event }, index, chain) => index > 0 && event.g > (chain[index - 1]?.event.g ?? 0),
+        )
+      : -1
+  return {
+    recordedLog: ingested.log,
+    genFloor: Math.max(floor, ingested.after.head.gen),
+    ...(resetIndex < 0 ? {} : { resetRef: { snapshot: resetIndex } }),
   }
-  throw new RevokeProofError(belowFloor ? 'generation-floor' : 'no-rev')
 }
 
 /**
@@ -175,9 +225,10 @@ function effectsMatch(
 }
 
 /** Verify live effects while all leaves still describe the epoch before the commit. */
-export async function verifyLifecycleProof(
+export async function lifecycleProofEffects(
   group: GroupHandle,
   verified: VerifiedLedgerEntry<DeviceValue>,
+  registry: DeviceRegistry = group.registry,
 ): Promise<LifecycleProofEffects> {
   const controllerID = group.anchor.controller
   if (controllerID == null) throw new RevokeProofError('wrong-controller')
@@ -192,89 +243,197 @@ export async function verifyLifecycleProof(
   ) {
     throw new RevokeProofError('wrong-controller')
   }
-  const previous = group.registry.controllers.get(controller)
+  const previous = registry.controllers.get(controller)
   const leaves = group.listMembers().map((member) => {
     const binding = group.bindingOfDID(member.id)
-    const capability = binding?.capability == null ? undefined : readCapability(binding.capability)
-    const parent = capability?.payload.cap
-    const parentRaw = Array.isArray(parent) ? parent[0] : parent
-    const issuer =
-      parentRaw == null || capability == null ? undefined : normalizeDID(capability.payload.iss)
-    const attested =
-      parentRaw == null ? capability?.payload.iat : readCapability(parentRaw).payload.iat
     const folded = binding?.prefix == null ? undefined : foldChain(controller, binding.prefix)
     return {
       did: normalizeDID(member.id),
       leafIndex: member.leafIndex,
-      issuer,
-      exempt: isExemptMember(group, member.leafIndex),
       generation: folded?.ok ? folded.states.at(-1)?.gen : undefined,
-      attested:
-        binding?.controller != null && normalizeDID(binding.controller) === controller
-          ? attested
-          : undefined,
       prefix: binding?.prefix ?? [],
     }
   })
   const timeFloor = previous?.timeFloor ?? 0
   if (value.op === 'clock') {
-    const treeTime = Math.max(timeFloor, ...leaves.map((leaf) => leaf.attested ?? 0))
     if (subject !== controller) throw new RevokeProofError('wrong-controller')
-    if (
-      value.time == null ||
-      !Number.isFinite(value.time) ||
+    if (value.time == null || !Number.isFinite(value.time))
+      throw new RevokeProofError('effects-mismatch')
+    if (value.attest === true) {
+      const folded =
+        previous?.recordedLog == null
+          ? undefined
+          : foldControllerLog(controller, previous.recordedLog)
+      const eligible = effectiveAttestingMembers(
+        folded?.ok ? folded.head : undefined,
+        previous,
+        value.time,
+      ).some(
+        ([, member]) =>
+          normalizeDID(member.did) === normalizeDID(verified.issuer) &&
+          (value.time as number) > (previous?.attestations.get(member.key) ?? 0),
+      )
+      if (!eligible) throw new RevokeProofError('effects-mismatch')
+    } else if (
       value.time <= timeFloor ||
-      value.time > treeTime
+      value.time >
+        Math.max(
+          attestedTreeTime(group.state.ratchetTree, group.registry, controller),
+          attestedTreeTime(group.state.ratchetTree, registry, controller),
+        )
     ) {
       throw new RevokeProofError('effects-mismatch')
     }
     return {
       controller,
-      recordedLog: previous?.recordedLog ?? [],
+      recordedLog: previous?.recordedLog ?? { chain: [], events: [] },
       genFloor: previous?.genFloor ?? 0,
-      timeFloor: value.time,
+      timeFloor: value.attest === true ? timeFloor : value.time,
       revoked: [],
+      removed: [],
       removeLeafIndices: [],
     }
   }
-  const authenticated = authenticateLifecycleProof(controller, verified, group.registry)
-  const revoked: Array<RevokedEffect> = []
-  if (value.op === 'revoke') {
-    const record = group.registry.devices.get(subject)
-    if (record?.status === 'revoked' && !isResetOnly(record))
-      throw new RevokeProofError('effects-mismatch')
-    revoked.push({ did: subject })
-  } else if (value.op === 'reset') {
-    for (const leaf of leaves) {
-      if (leaf.generation != null && leaf.generation < authenticated.genFloor)
-        revoked.push({ did: leaf.did })
+  const authenticated = authenticateLifecycleProof(controller, verified, registry)
+  if (value.op === 'log') {
+    const index = group.findMemberLeafIndex(verified.issuer)
+    const leaf = index == null ? undefined : leafAt(group.state.ratchetTree, index)
+    if (leaf == null) throw new RevokeProofError('wrong-controller')
+    if (denySetOf(registry).has(normalizeDID(verified.issuer)))
+      throw new LeafBindingError('denied-id')
+    if (isLapsed(group, leaf, registry)) throw new LeafLapsedError('lapsed')
+    const before = historySize(
+      group.state.ratchetTree,
+      group.ledger.map(({ verified }) => verified),
+    )
+    if (before + proofSize(value.proof) > HISTORY_HORIZON) throw new RevokeProofError('too-large')
+    return {
+      controller,
+      ...authenticated,
+      timeFloor,
+      revoked: [],
+      removed: [],
+      removeLeafIndices: [],
     }
-  } else {
-    throw new RevokeProofError('no-rev')
   }
-  const direct = new Set(revoked.map(({ did }) => did))
-  for (const leaf of leaves) {
-    if (leaf.issuer != null && direct.has(leaf.issuer) && !direct.has(leaf.did) && !leaf.exempt) {
-      revoked.push({ did: leaf.did, cascadedFrom: leaf.issuer })
-    }
+  if (value.op !== 'revoke' && value.op !== 'reset') throw new RevokeProofError('no-rev')
+  const candidate = registryApply(
+    { ...verified, entry: { ...verified.entry, value: { ...value, revoked: [] } } },
+    registry,
+    controller,
+  )
+  for (const raw of value.survivors ?? []) {
+    const { payload } = readCapability(raw)
+    assertControllerGrant(payload, controller)
+    if (payload.mbr == null || payload.cap != null) throw new LeafBindingError('issuer-mismatch')
+    assertCapabilityLifetime(payload, group.anchor.trustedGrantLifetime ?? 2_592_000)
+    const leaf = group.bindingOfDID(payload.aud)
+    const key = capabilityKey(payload).publicKey
+    if (
+      leaf?.controller !== controller ||
+      key.length !== leaf.leafKey.length ||
+      key.some((byte, index) => byte !== leaf.leafKey[index])
+    )
+      throw new LeafBindingError('confirmation-invalid')
+    const status = memberRootStatus(candidate, controller, {
+      kind: 'member',
+      did: payload.iss,
+      add: payload.mbr.add,
+      gen: payload.mbr.g,
+    })
+    if (status.status !== 'effective')
+      throw new LeafBindingError(
+        status.status === 'removed' ? 'member-removed' : 'member-unavailable',
+      )
+    const resolver = createRegistryControllerResolver({
+      controllerID: controller,
+      prefix: candidate.controllers.get(controller)?.recordedLog?.chain ?? [],
+      registry: candidate,
+    }).frozen()
+    const token = await verifyToken(raw, {
+      methods: [resolver],
+      historic: true,
+      atTime: payload.iat,
+      allowUnsigned: false,
+    })
+    assertCapabilityToken(token)
+    await checkCapability({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, payload, {
+      atTime: payload.iat,
+      methods: [resolver],
+      maxDepth: 1,
+      maxMemberGrantLifetime: group.anchor.trustedGrantLifetime ?? 2_592_000,
+    })
   }
-  if (!effectsMatch(value.revoked, revoked)) throw new RevokeProofError('effects-mismatch')
-  const affected = new Set(revoked.map(({ did }) => did))
-  const removed = leaves.filter(({ did }) => affected.has(did))
+  const resetRef = authenticated.resetRef
+  if (value.op === 'reset' && resetRef == null) throw new RevokeProofError('no-rev')
+  const resetDIDs = new Set(
+    value.op === 'reset'
+      ? leaves
+          .filter((leaf) => leaf.generation != null && leaf.generation < authenticated.genFloor)
+          .map(({ did }) => did)
+      : [],
+  )
+  const claims: Array<EffectClaim> =
+    resetRef == null
+      ? [...(value.effects ?? [])]
+      : [
+          ...[...resetDIDs].map((did): EffectClaim => ({ kind: 'deny', did, ref: resetRef })),
+          ...(value.effects ?? []).filter(
+            (claim) => claim.kind !== 'deny' || !resetDIDs.has(normalizeDID(claim.did)),
+          ),
+        ]
+  const cascade = cascadeOf(
+    group.listMembers().flatMap((member) => {
+      const binding = group.bindingOfDID(member.id)
+      if (binding?.controller == null || binding.prefix == null) return []
+      return [
+        {
+          did: member.id,
+          leafIndex: member.leafIndex,
+          binding: { ...binding, id: binding.controller, prefix: binding.prefix },
+          leafKey: binding.leafKey,
+        },
+      ]
+    }),
+    claims,
+    registry,
+    candidate,
+    controller,
+  )
+  if (value.op === 'reset')
+    cascade.revoked = cascade.revoked.filter(
+      ({ did, cascadedFrom }) => resetDIDs.has(did) || cascadedFrom != null,
+    )
+  const affected = new Set(cascade.removeLeafIndices)
+  const removed = leaves.filter(({ leafIndex }) => affected.has(leafIndex))
   const before = historySize(
     group.state.ratchetTree,
     group.ledger.map(({ verified }) => verified),
   )
   const after =
     before +
-    controllerLogSize(value.proof ?? []) -
+    proofSize(value.proof) -
     removed.reduce((size, leaf) => size + controllerLogSize(leaf.prefix), 0)
   if (after > HISTORY_HORIZON && after > before) throw new RevokeProofError('too-large')
   return {
     controller,
     ...authenticated,
     timeFloor,
-    revoked,
-    removeLeafIndices: removed.map(({ leafIndex }) => leafIndex),
+    ...cascade,
   }
+}
+
+export async function verifyLifecycleProof(
+  group: GroupHandle,
+  verified: VerifiedLedgerEntry<DeviceValue>,
+  registry: DeviceRegistry = group.registry,
+): Promise<LifecycleProofEffects> {
+  const effects = await lifecycleProofEffects(group, verified, registry)
+  const value = verified.entry.value
+  if (
+    (value.op === 'revoke' || value.op === 'reset') &&
+    (!effectsMatch(value.revoked, effects.revoked) || !effectsMatch(value.removed, effects.removed))
+  )
+    throw new RevokeProofError('effects-mismatch')
+  return effects
 }

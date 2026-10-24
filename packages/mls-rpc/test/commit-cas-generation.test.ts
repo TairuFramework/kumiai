@@ -37,6 +37,7 @@ import { expect, test } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
+import { guardedReplace } from '../src/index.js'
 import { createGroupMLS } from '../src/mls.js'
 import { createRealGroup } from './fixtures/real-group.js'
 
@@ -212,7 +213,7 @@ for (const winner of ['policy-refused', 'historical', 'malformed', 'applied'] as
           kind: 'ledger' as const,
           journal: encodeClientState(built.newGroup.state),
           onAccepted: async () => {
-            await access.replace(built.newGroup)
+            await guardedReplace(access, built.newGroup)
           },
         }
       }
@@ -370,7 +371,8 @@ async function reservationPeer(name: string, loseCAS: boolean) {
       kind: 'ledger' as const,
       journal: encodeClientState(built.newState),
       onAccepted: async () => {
-        await access.replace(
+        await guardedReplace(
+          access,
           await restoreGroup({ state: built.newState, credential, ledgerEntries }),
         )
       },

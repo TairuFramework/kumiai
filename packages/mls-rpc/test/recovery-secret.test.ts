@@ -3,6 +3,7 @@ import { commitTopic, rendezvousTopic } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
+import { guardedReplace } from '../src/index.js'
 import { createGroupMLS, deriveRecoverySecret } from '../src/mls.js'
 import { createRealGroup } from './fixtures/real-group.js'
 
@@ -48,7 +49,7 @@ test('the override reads the handle a replacement published', async () => {
     seen.push(handle)
     return new Uint8Array(32).fill(9)
   })
-  await access.replace(group.committer.handle)
+  await guardedReplace(access, group.committer.handle)
   await mls.exportRecoverySecret()
   expect(seen.at(-1)).toBe(group.committer.handle)
 })

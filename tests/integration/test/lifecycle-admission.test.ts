@@ -12,6 +12,7 @@ import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
+  guardedReplace,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import { createGroupPeer } from '@kumiai/rpc'
@@ -50,7 +51,7 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
     value: 'admission',
   })
   const result = await commitLedgerEntries(handle, [token])
-  await access.replace(result.newGroup)
+  await guardedReplace(access, result.newGroup)
   expect(mls.sendAdmission()).toEqual({ epoch: Number(handle.epoch), admissible: true })
   expect(crypto.epoch()).toBe(mls.sendAdmission().epoch)
 })
@@ -130,7 +131,8 @@ test('accepted adoption entries seal at the matching admission epoch once the de
       const state = decodeClientState(blob)
       if (state == null) throw new Error('Invalid journal state')
       if (state.groupContext.epoch <= handle.epoch) return
-      await access.replace(
+      await guardedReplace(
+        access,
         await restoreGroup({
           state,
           credential: handle.credential,
@@ -155,7 +157,7 @@ test('accepted adoption entries seal at the matching admission epoch once the de
         bodies: [token],
         kind: 'ledger',
         journal: encodeClientState(result.newGroup.state),
-        onAccepted: () => access.replace(result.newGroup),
+        onAccepted: () => guardedReplace(access, result.newGroup),
       }))
       .then(() => {
         adopted = true

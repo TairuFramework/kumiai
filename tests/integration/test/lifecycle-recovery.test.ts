@@ -16,11 +16,13 @@ import {
   renewLeaf,
   revokeWithProof,
   signLedgerEntry,
+  verifyLedgerEntry,
 } from '@kumiai/mls'
 import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
+  guardedReplace,
   type HandleAccess,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
@@ -48,6 +50,7 @@ import { createWireHub, type WireHub } from './log-hub-over-wire.js'
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
+  inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
   resetPrefix: () => ControllerBinding['prefix']
@@ -90,6 +93,7 @@ async function setup(
   const bob = fixture.agent(61)
   let aliceGroup = (
     await createGroup(alice, 'lifecycle-recovery', {
+      controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({
         identity: alice,
         iat: 100,
@@ -260,7 +264,14 @@ test('recovery replaces an expired cached binding with one host call', async () 
   expect(retained.groupInfo).toBeInstanceOf(Uint8Array)
   expect(retained.group).not.toBe(s.bobGroup())
   expect(retained.knownRegistry.controllers.get(fixture.controllerID)?.timeFloor).toBe(250)
-  expect(retained.replyLedger).toHaveLength(1)
+  expect(retained.replyLedger).toEqual(s.aliceGroup().ledgerTokens)
+  expect(
+    await Promise.all(retained.replyLedger.map((token) => verifyLedgerEntry(token))),
+  ).toMatchObject([
+    { entry: { value: { op: 'seed' } } },
+    { entry: { value: { op: 'clock', time: 250 } } },
+  ])
+  expect(retained.replyLedger).toHaveLength(2)
   expect(retained.signer).toBe(s.alice.id)
   await s.aliceGroup().processMessage(pending.commit)
   await pending.onAccepted()
@@ -499,7 +510,7 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
         value: 'third',
       }),
     ])
-    await aliceAccess.replace(third.newGroup)
+    await guardedReplace(aliceAccess, third.newGroup)
     await connection.publish({
       senderDID: fixture.agent(75).id,
       topicID,
@@ -593,6 +604,7 @@ test('a delegated replacement that lowers tree time requires renewal before requ
       issuer: OwnIdentity
     }) => Promise<ControllerBinding>
   }
+  if (parent.capability == null) throw new Error('Missing parent capability')
   replacement = await pipeline.timedBinding({
     identity: s.bob,
     iat: 250,
@@ -625,7 +637,10 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
       )
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), { reset: true, log: prefix })
+  const reset = await revokeWithProof(s.aliceGroup(), {
+    reset: true,
+    log: { chain: prefix, events: [] },
+  })
   if (reset.status !== 'built') throw new Error('Expected reset commit')
   s.installAlice(reset.result.newGroup)
   expect(s.aliceGroup().registry.controllers.get(fixture.controllerID)?.genFloor).toBe(1)
@@ -660,6 +675,7 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
   const outsider = fixture.agent(66)
   const group = (
     await createGroup(outsider, 'lifecycle-recovery', {
+      controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({ identity: outsider, iat: 100, exp: 200 }),
     })
   ).group

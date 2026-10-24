@@ -21,7 +21,7 @@ import { leafAt } from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
-import { revokeChain } from './fixtures/controller-chain.js'
+import { denyEffects, revokeChain } from './fixtures/controller-chain.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -149,8 +149,8 @@ async function ownAgents(options: SetupOptions = {}) {
 async function afterIssuerProof(options: SetupOptions = {}) {
   const setup = await ownAgents(options)
   const built = await revokeWithProof(setup.publisher, {
-    subject: setup.issuer.id,
-    log: setup.log,
+    deny: [setup.issuer.id],
+    log: asControllerLog(setup.log),
   })
   if (built.status !== 'built') throw new Error(`Proof not built: ${JSON.stringify(built)}`)
   await publishLedger(setup.tokens, built.result.newGroup)
@@ -177,8 +177,8 @@ describe('revocation cascade', () => {
     const childIndex = setup.publisher.findMemberLeafIndex(setup.child.id)
     expect(childIndex).toBeDefined()
     const built = await revokeWithProof(setup.publisher, {
-      subject: setup.issuer.id,
-      log: setup.log,
+      deny: [setup.issuer.id],
+      log: asControllerLog(setup.log),
     })
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
@@ -204,8 +204,8 @@ describe('revocation cascade', () => {
   test('evidencedChildSurvivesProofAndWelcome', async () => {
     const setup = await ownAgents()
     const built = await revokeWithProof(setup.publisher, {
-      subject: setup.issuer.id,
-      log: setup.log,
+      deny: [setup.issuer.id],
+      log: asControllerLog(setup.log),
     })
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
@@ -269,8 +269,14 @@ describe('revocation cascade', () => {
     const token = await signLedgerEntry(setup.identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: setup.publisher.groupID,
-      subject: setup.issuer.id,
-      value: { op: 'revoke', proof: setup.log, revoked: [{ did: setup.issuer.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects(setup.log.slice(1), setup.issuer.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog(setup.log.slice(1)),
+        revoked: [{ did: setup.issuer.id }],
+      },
     })
     const forged = await rawCommit({
       group: setup.publisher,
@@ -300,10 +306,14 @@ describe('revocation cascade', () => {
     expect(built.status).toBe('built')
     expect(publisher.findMemberLeafIndex(child.id)).toBeDefined()
     expect(childHandle.findMemberLeafIndex(child.id)).toBeDefined()
-    expect(await revokeWithProof(publisher, { subject: issuer.id, log })).toEqual({
+    expect(
+      await revokeWithProof(publisher, { deny: [issuer.id], log: asControllerLog(log) }),
+    ).toEqual({
       status: 'already-revoked',
     })
-    expect(await revokeWithProof(childHandle, { subject: issuer.id, log })).toEqual({
+    expect(
+      await revokeWithProof(childHandle, { deny: [issuer.id], log: asControllerLog(log) }),
+    ).toEqual({
       status: 'already-revoked',
     })
   })
@@ -329,8 +339,8 @@ describe('commit authentication of evidenced children', () => {
   test('survivorPublishesSecondRevocationBeforeRenewal', async () => {
     const { publisher, childHandle, bystander, log, tokens } = await afterIssuerProof()
     const second = await revokeWithProof(childHandle, {
-      subject: bystander.id,
-      log: [...log, revoke(log, bystander.id)],
+      deny: [bystander.id],
+      log: asControllerLog([...log, revoke(log, bystander.id)]),
     })
     expect(second.status).toBe('built')
     if (second.status !== 'built') throw new Error('Missing second proof')
@@ -361,8 +371,8 @@ describe('commit authentication of evidenced children', () => {
     // The same fresh leaf on the path of an otherwise valid proof commit is refused when its
     // credential is authenticated, before any later check sees it.
     const proof = await revokeWithProof(childHandle, {
-      subject: bystander.id,
-      log: [...log, revoke(log, bystander.id)],
+      deny: [bystander.id],
+      log: asControllerLog([...log, revoke(log, bystander.id)]),
     })
     if (proof.status !== 'built') throw new Error('Missing second proof')
     const bystanderIndex = childHandle.findMemberLeafIndex(bystander.id)

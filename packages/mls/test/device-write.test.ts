@@ -9,6 +9,7 @@ import {
 import { describe, expect, test } from 'vitest'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from '../src/anchor.js'
+import { asControllerLog } from '../src/controller-log.js'
 import type { MLSCredentialIdentity } from '../src/credential.js'
 import { encodeControlEnvelope } from '../src/envelope.js'
 import { CommitRejectedError } from '../src/group.js'
@@ -66,7 +67,7 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
       subject: issuer.id,
     }),
   ]
-  const discarded = await revokeWithProof(group, { subject: issuer.id, log })
+  const discarded = await revokeWithProof(group, { deny: [issuer.id], log: asControllerLog(log) })
   if (discarded.status !== 'built') throw new Error('Missing revoke candidate')
   expect(await group.context.authService.validateCredential(credential, child.publicKey)).toBe(true)
   expect(seen).toHaveLength(0)
@@ -82,7 +83,10 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
       child.publicKey,
     ),
   ).toBe(false)
-  const winner = await revokeWithProof(fixture.joined, { subject: issuer.id, log })
+  const winner = await revokeWithProof(fixture.joined, {
+    deny: [issuer.id],
+    log: asControllerLog(log),
+  })
   if (winner.status !== 'built') throw new Error('Missing winning revoke')
   publishTokens(tokens, winner.result.newGroup)
   await group.processMessage(winner.result.commitMessage, { persist: async () => {} })

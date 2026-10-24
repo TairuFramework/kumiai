@@ -28,17 +28,17 @@ export type MemberCredential = {
  * can stop honoring it without refusing leaves nothing is wrong with.
  */
 /**
- * Opt-in binding that makes an MLS leaf a *device of a `did:kokuin:` controller*. Present ⟺ bound.
- * `id` names the profile DID; `prefix` is the authority-only controller-log prefix folded (sync) to
- * verify the delegation; `capability` is the delegation token binding this device under the profile.
- * All three are verification inputs — only the profile `id` is surfaced into `GroupMember`.
+ * Binds a leaf to a controller through a capability or its own membership incarnation.
+ * The prefix supplies controller authority. Membership `iat` orders bindings, never tree time.
  */
 export type ControllerBinding = {
   id: string
   prefix: Array<SignedEvent>
-  capability: string
+  capability?: string
   /** The leaf holder's direct controller grant, required for chained capabilities. */
   holderGrant?: string
+  member?: { add: string; g: number }
+  iat?: number
 }
 
 export type MLSCredentialIdentity = {
@@ -95,7 +95,9 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
   // Absent `v` is v1, permanently — not a default that will one day stop applying. Leaves
   // written before this field existed are signed and can never be rewritten to add it.
   if ('v' in candidate && candidate.v !== 1) {
-    throw new Error(`Invalid MLS credential: unsupported identity version ${String(candidate.v)}`)
+    const version =
+      candidate.v !== null && typeof candidate.v === 'object' ? 'object' : String(candidate.v)
+    throw new Error(`Invalid MLS credential: unsupported identity version ${version}`)
   }
   if (typeof candidate.id !== 'string') {
     throw new Error('Invalid MLS credential: id must be a string')
@@ -120,8 +122,35 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
     if (typeof cc.id !== 'string') {
       throw new Error('Invalid MLS credential: controller.id must be a string')
     }
-    if (typeof cc.capability !== 'string') {
+    if ('capability' in cc === 'member' in cc) {
+      throw new Error('Invalid MLS credential: controller requires exactly one binding form')
+    }
+    if ('capability' in cc && typeof cc.capability !== 'string') {
       throw new Error('Invalid MLS credential: controller.capability must be a string')
+    }
+    let member: ControllerBinding['member']
+    if ('member' in cc) {
+      const claim = cc.member as Record<string, unknown> | null
+      if (
+        claim == null ||
+        typeof claim !== 'object' ||
+        Array.isArray(claim) ||
+        Object.keys(claim).length !== 2 ||
+        typeof claim.add !== 'string' ||
+        claim.add.length === 0 ||
+        typeof claim.g !== 'number' ||
+        !Number.isSafeInteger(claim.g) ||
+        claim.g < 0
+      ) {
+        throw new Error('Invalid MLS credential: controller.member must be a member claim')
+      }
+      member = { add: claim.add, g: claim.g }
+      if (!('iat' in cc) || 'holderGrant' in cc) {
+        throw new Error('Invalid MLS credential: membership requires iat and no holderGrant')
+      }
+    }
+    if ('iat' in cc && (typeof cc.iat !== 'number' || !Number.isFinite(cc.iat))) {
+      throw new Error('Invalid MLS credential: controller.iat must be a finite number')
     }
     if (!Array.isArray(cc.prefix)) {
       throw new Error('Invalid MLS credential: controller.prefix must be an array')
@@ -134,8 +163,10 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
     result.controller = {
       id: cc.id,
       prefix: cc.prefix as Array<SignedEvent>,
-      capability: cc.capability,
+      ...(typeof cc.capability === 'string' ? { capability: cc.capability } : {}),
       ...(typeof cc.holderGrant === 'string' ? { holderGrant: cc.holderGrant } : {}),
+      ...(member == null ? {} : { member }),
+      ...(typeof cc.iat === 'number' ? { iat: cc.iat } : {}),
     }
   }
   return result
