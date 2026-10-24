@@ -58,6 +58,7 @@ import {
   registryRecoveryCoordinator,
 } from './registry/recovery-coordinator.js'
 import {
+  type RegistrySwitchBlock,
   RetainedTrustUnavailableError,
   readRetainedTrust,
   registrySafety,
@@ -314,10 +315,10 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       record.candidate.fill(0)
     })
   let status: RegistryPeerStatus = { kind: 'starting' }
+  let switchBlock: RegistrySwitchBlock | null = null
   const stopSwitchBlock = capability.onSwitchBlocked(key, (block) => {
     if (disposed || status.kind === 'failed') return
-    if (block !== null) status = { kind: 'switch-blocked', ...copyStoredValue(block) }
-    else if (status.kind === 'switch-blocked') status = { kind: 'switching' }
+    switchBlock = copyStoredValue(block)
   })
   let conditionTimer: ReturnType<typeof setTimeout> | undefined
   let pendingReason: RecoveryPendingReason | undefined
@@ -967,6 +968,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       })
   }
   async function activateManual(record: ManualRecoveryRecord): Promise<GroupKey> {
+    assertOpenedDeliveryEntry(openedDeliveryContext, { key: record.source })
     if (disposed) throw new GroupStateConflictError('Recovery peer disposed')
     if (manualCompletion?.id === record.id) return await manualCompletion.promise
     if (manualCompletion !== null)
@@ -1019,10 +1021,11 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
     },
     peer: () => current,
     installedKey: () => ({ ...key }),
-    status: () =>
-      status.kind === 'not-member' || status.kind === 'switch-blocked'
-        ? copyStoredValue(status)
-        : { ...status },
+    status: () => {
+      if (switchBlock !== null && !disposed && status.kind !== 'failed')
+        return { kind: 'switch-blocked', ...copyStoredValue(switchBlock) }
+      return status.kind === 'not-member' ? copyStoredValue(status) : { ...status }
+    },
     ready,
     dispose() {
       assertOpenedDeliveryEntry(openedDeliveryContext, { key })

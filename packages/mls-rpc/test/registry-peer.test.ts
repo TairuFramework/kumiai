@@ -15,7 +15,6 @@ import type {
   GroupPeer,
   GroupProtocolDefinition,
   LogHub,
-  PendingAppFrame,
   RecoveryEvent,
 } from '@kumiai/rpc'
 import {
@@ -32,6 +31,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { createRegistryAppPublication } from '../src/app-publication.js'
 import type { EntryReads } from '../src/entry-capability.js'
 import * as api from '../src/index.js'
+import type { PendingAppFrame } from '../src/persistence-types.js'
 import * as recoveryAPI from '../src/recovery.js'
 import {
   createVerdictJudge,
@@ -397,6 +397,81 @@ describe('registry peer recovery coordination', () => {
       release.resolve()
       owner?.dispose()
       await owner?.drained()
+      await s.f.close()
+    }
+  })
+
+  test('pending recovery events preserve a durable switching block during suspended drainage', async () => {
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const delivered: Array<PendingAppFrame> = []
+    const s = await setup(false, async (record) => {
+      delivered.push(record)
+      entered.resolve()
+      await release.promise
+    })
+    const events: Array<RecoveryEvent> = []
+    const owner = await s.start({
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    try {
+      await owner.ready
+      const options = s.created[0]?.options
+      if (options === undefined) throw new Error('Missing source peer')
+      const entry = registrySafety(s.f.registry)?.entry
+      if (entry === undefined) throw new Error('Missing capability')
+      const record: PendingAppFrame = {
+        frame: {
+          ...source,
+          id: 'suspended',
+          protocol: 'chat',
+          procedure: 'posted',
+          topicID: 'original-topic',
+          segment: 1,
+          position: '1',
+        },
+        payload: encodeEventFrame('posted', {}),
+        senderDID: randomIdentity().id,
+        epoch: 1,
+        idempotencyKey: 'suspended',
+      }
+      await entry.run(
+        { groupID, mutationID: crypto.randomUUID() },
+        async (reads) => ({ expected: await reads.lifetime(), value: null }),
+        async (stores) => {
+          await stores.incarnation(1).pending.put([record])
+        },
+      )
+      await s.f.installRows({ key: source, control: { putRejoin: s.recovery.record } })
+      options.onConfirmedRecovery({ record: s.recovery.record, completion: Promise.resolve() })
+      await entered.promise
+      const blocked = { kind: 'switch-blocked', key: source, reason: 'opened-records', pending: 1 }
+      expect(owner.status()).toEqual(blocked)
+      const event: RecoveryEvent = {
+        groupID: target.topicID,
+        attemptID: s.recovery.record.id,
+        trigger: 'automatic',
+        phase: 'failed',
+        reason: 'error',
+        pendingReason: 'no-reply',
+      }
+      await options.onRecovery?.(event)
+      await Promise.resolve()
+      expect(events).toEqual([event])
+      expect(await entry.read(groupID, (reads) => reads.pendingFrames(1))).toEqual([record])
+      expect(owner.status()).toEqual(blocked)
+      expect(owner.installedKey()).toEqual(source)
+      expect(s.created.map(({ key }) => key)).toEqual([source])
+      release.resolve()
+      await vi.waitFor(() => expect(owner.installedKey()).toEqual(destination))
+      expect(delivered).toEqual([record])
+      expect(owner.status()).toEqual({ kind: 'running' })
+    } finally {
+      release.resolve()
+      owner.dispose()
+      await owner.drained()
       await s.f.close()
     }
   })

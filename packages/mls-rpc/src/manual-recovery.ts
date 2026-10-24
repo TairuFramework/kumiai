@@ -19,6 +19,7 @@ import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js
 import { GroupStateConflictError } from './persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from './persistence-types.js'
 import { recoveryCompletionContexts } from './recovery-completion-context.js'
+import { registryRetirement } from './registry/retirement.js'
 import { registrySafety } from './registry/safety.js'
 import type { GroupHandleRegistry } from './registry/types.js'
 import type { RecoveryTarget } from './safety.js'
@@ -362,6 +363,7 @@ export function createManualRecoveryStore<TTx extends GroupTransaction>(params: 
   }
   const api: ManualRecoveryStore = {
     async authoriseManualRecovery(requested, supplied) {
+      registryRetirement(params.registry).assertEntry(key)
       if (!sameStoredValue(requested, key))
         throw new TypeError('Manual recovery source key mismatch')
       const choice = choiceValue(supplied)

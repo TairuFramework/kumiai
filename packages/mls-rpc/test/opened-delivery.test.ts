@@ -7,6 +7,7 @@ import {
   encodeAppAAD,
   type GroupCrypto,
   type LogHub,
+  type MailboxHub,
   OpenedDeliveryReentryError,
   openedDeliveryBinding,
   protocolTopic,
@@ -565,6 +566,109 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       running.owner.dispose()
       await running.owner.drained()
       await env.fixture.close()
+    })
+
+    test('opened handler refuses manual recovery before authorisation', async () => {
+      const env = await setup(mode, supplied)
+      await env.plant([env.record('manual-authorisation')])
+      const before = await env.capability.read(env.key.groupID, (reads) => reads.checkpoints())
+      let result: unknown
+      try {
+        await env.drain(async () => {
+          await Promise.resolve()
+          try {
+            await env.fixture.manualRecovery().authoriseManualRecovery(env.key, {
+              mode: 'resync',
+              targetID: 'selected-hub',
+              commitTopicID: 'selected-commits',
+              allowOpenFork: false,
+            })
+          } catch (error) {
+            result = error
+          }
+        })
+        expect(result).toBeInstanceOf(OpenedDeliveryReentryError)
+        expect(await env.capability.read(env.key.groupID, (reads) => reads.checkpoints())).toEqual(
+          before,
+        )
+      } finally {
+        await env.fixture.close()
+      }
+    })
+
+    test('opened handler refuses overlapping manual recovery while stopPeer awaits it', async () => {
+      const env = await setup(mode, supplied)
+      await env.plant([env.record('overlapping-recovery')])
+      const entered = Promise.withResolvers<void>()
+      const invoke = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let result: unknown
+      let recoverAgain: (() => Promise<unknown>) | undefined
+      const running = await startLeaseRotationPeer({
+        mode,
+        fixture: env.fixture,
+        key: env.key,
+        outbox: env.fixture.device.groups.ports(env.key).outbox,
+        handler: async () => {
+          entered.resolve()
+          await invoke.promise
+          if (recoverAgain === undefined) throw new Error('Missing repeated recovery')
+          await Promise.race([
+            recoverAgain().catch((error: unknown) => {
+              result = error
+            }),
+            release.promise,
+          ])
+          await release.promise
+        },
+      })
+      await running.owner.ready
+      await entered.promise
+      const peer = running.owner.peer()
+      if (peer === null) throw new Error('Missing source peer')
+      const stopping = Promise.withResolvers<void>()
+      const drained = peer.drained.bind(peer)
+      const stop = vi.spyOn(peer, 'drained').mockImplementation(async () => {
+        stopping.resolve()
+        await drained()
+      })
+      const { FakeHub } = (await import(
+        new URL('../../rpc/test/fixtures/fake-hub.ts', import.meta.url).href
+      )) as { FakeHub: new () => LogHub & MailboxHub }
+      let recovered = false
+      const recovery = env.fixture.safety().recover(env.key, {
+        mode: 'resync',
+        target: { targetID: 'selected-hub', hub: new FakeHub(), commitTopicID: 'selected-commits' },
+      })
+      void recovery.then(
+        () => {
+          recovered = true
+        },
+        () => {},
+      )
+      try {
+        await stopping.promise
+        const records = await env.capability.read(env.key.groupID, (reads) => reads.checkpoints())
+        const saved = records.find((record) => record.kind === 'manual-recovery')
+        if (saved?.kind !== 'manual-recovery') throw new Error('Missing manual authorisation')
+        recoverAgain = () => running.owner.runManualRecovery(saved.value)
+        invoke.resolve()
+        await vi.waitFor(() => expect(result).toBeInstanceOf(OpenedDeliveryReentryError))
+        expect(recovered).toBe(false)
+        expect(await env.pending()).toHaveLength(1)
+        release.resolve()
+        await expect(recovery).resolves.toEqual(env.key)
+        expect(await env.pending()).toEqual([])
+        expect(running.owner.status()).toEqual({ kind: 'running' })
+      } finally {
+        invoke.resolve()
+        release.resolve()
+        stop.mockRestore()
+        running.owner.dispose()
+        await recovery.catch(() => {})
+        await running.owner.drained()
+        await env.fixture.close()
+      }
     })
 
     test('external registry disposal waits for an admitted handler without using its live completion facade', async () => {
