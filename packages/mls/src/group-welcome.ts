@@ -230,6 +230,10 @@ export type JoinGroupExternalResult = {
   sourceRegistry: DeviceRegistry
 }
 
+/**
+ * Core callers holding known state must call assertRetainsKnownEffects in beforeBinding.
+ * mls-rpc installs this check before binding and rechecks at adoption.
+ */
 export async function joinGroupExternal(
   params: JoinGroupExternalParams,
 ): Promise<JoinGroupExternalResult> {

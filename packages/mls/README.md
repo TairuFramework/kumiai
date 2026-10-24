@@ -125,6 +125,9 @@ const { commitMessage, group } = await joinGroupExternal({
 // epoch — ready to encrypt/decrypt.
 ```
 
+Core callers holding known state must call `assertRetainsKnownEffects` in `beforeBinding` before adoption. mls-rpc installs this check.
+
+
 ### Trust model
 
 An external commit is enforced as a **resync of an existing roster member**, never a new join. Every receiver runs the commit policy on it: the committing DID (resolved from the commit's own UpdatePath leaf credential) must be in the roster, and the commit's proposals must be exactly one `external_init` plus one `remove` of the leaf whose DID equals that committer — nothing else. A stranger in no roster who obtains a leaked `GroupInfo` is rejected; a legitimate member rejoining is accepted. New members never arrive this way — they join through Welcome.
