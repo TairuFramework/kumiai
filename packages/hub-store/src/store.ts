@@ -85,7 +85,15 @@ export type CreateHubStoreParams = {
   options?: HubStoreOptions
 }
 
-export function createHubStore(params: CreateHubStoreParams): HubStore {
+export type HubSubscriptionReaper = {
+  purgeSubscriptions(params: {
+    olderThan: number
+  }): Promise<Array<{ topicID: string; subscriberDID: string }>>
+}
+
+export type SQLHubStore = HubStore & HubSubscriptionReaper
+
+export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
   const { db, adapter, options = {} } = params
   const defaultRetention = options.defaultRetention ?? 0
   const maxRetention = options.maxRetention ?? 30 * 24 * 60 * 60
@@ -141,14 +149,15 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
   // Take the topic's row lock before touching its frames. `publish` locks the row (head write)
   // and only then evicts frames, so a sweep that deleted frames first and wrote the row after
   // would take the same two locks in the opposite order and deadlock on Postgres.
-  async function lockTopic(trx: Kysely<HubTables>, topicID: string): Promise<void> {
-    await trx
+  async function lockTopic(trx: Kysely<HubTables>, topicID: string): Promise<string | null> {
+    const row = await trx
       .selectFrom('hub_topics')
-      .select('topic_id')
+      .select('head')
       .where('topic_id', '=', topicID)
       // SQLite has no row locks (and rejects the clause); its one writer already serialises.
       .$if(adapter.kind === 'postgres', (qb) => qb.forUpdate())
-      .execute()
+      .executeTakeFirst()
+    return row?.head ?? null
   }
 
   // Mint the next sequenceID inside the accepting transaction, from a persistent global counter.
@@ -523,7 +532,7 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
       const threshold = now - effective * 1000
 
       const ids = await withStoreTransaction(db, async (trx) => {
-        await lockTopic(trx, topic_id)
+        const head = await lockTopic(trx, topic_id)
 
         // Log removal is prefix-only by position. A clock that moved backwards can leave a due
         // frame above one that is not; removing it would punch a hole a cursor cannot see.
@@ -541,12 +550,12 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
           .select(['sequence_id', 'retain'])
           .where('topic_id', '=', topic_id)
           .where((eb) => {
-            return eb.or([
-              eb.and([eb('retain', '=', 'mailbox'), eb('stored_at', '<=', threshold)]),
-              firstKept == null
-                ? eb('retain', '=', 'log')
-                : eb.and([eb('retain', '=', 'log'), eb('sequence_id', '<', firstKept)]),
-            ])
+            const mailbox = eb.and([eb('retain', '=', 'mailbox'), eb('stored_at', '<=', threshold)])
+            // A mailbox-only topic has no row to lock. Never admit its first concurrent log.
+            if (head == null) return mailbox
+            const log = [eb('retain', '=', 'log'), eb('sequence_id', '<=', head)]
+            if (firstKept != null) log.push(eb('sequence_id', '<', firstKept))
+            return eb.or([mailbox, eb.and(log)])
           })
           .orderBy('sequence_id', 'asc')
           .execute()
@@ -567,6 +576,20 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
     if (removed.length === 0) return []
     await events.emit('purge', { sequenceIDs: removed })
     return removed
+  }
+
+  async function purgeSubscriptions({
+    olderThan,
+  }: {
+    olderThan: number
+  }): Promise<Array<{ topicID: string; subscriberDID: string }>> {
+    // Strict boundary and atomic return: a refreshed subscriber is neither deleted nor reported.
+    const rows = await db
+      .deleteFrom('hub_subscriptions')
+      .where('last_active_at', '<', Date.now() - olderThan * 1000)
+      .returning(['topic_id', 'subscriber_did'])
+      .execute()
+    return rows.map((row) => ({ topicID: row.topic_id, subscriberDID: row.subscriber_did }))
   }
 
   async function deleteExpiredKeyPackages(ownerDID: string): Promise<void> {
@@ -772,6 +795,7 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
     fetchTopic,
     ack,
     purge,
+    purgeSubscriptions,
     trim,
     storeKeyPackage,
     fetchKeyPackages,

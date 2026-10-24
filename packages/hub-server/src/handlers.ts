@@ -92,6 +92,7 @@ function normalizeAuthorizeDecision(decision: AuthorizeDecision): {
  */
 export type HubStoreErrorEvent =
   | { method: 'purge'; error: unknown }
+  | { method: 'purgeSubscriptions'; error: unknown }
   /** The DID whose ack the store refused. */
   | { method: 'ack'; did: string; error: unknown }
   /** The DID whose last-resort slot was being read. */
@@ -123,6 +124,8 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
     'redelivers every frame forever.',
   purge:
     'Retried on the next interval. A purge that keeps failing means the store grows without bound.',
+  purgeSubscriptions:
+    'Retried on the next interval. Persistent failure leaves stale subscriptions consuming storage and quota.',
   getSubscribers:
     'The frame is committed and queued, but the live push to connected subscribers was skipped: ' +
     'each of them stops receiving new frames until it reconnects. A getSubscribers that keeps ' +
@@ -140,6 +143,7 @@ const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-serv
 function subjectOf(event: HubStoreErrorEvent): string {
   switch (event.method) {
     case 'purge':
+    case 'purgeSubscriptions':
       return ''
     case 'getSubscribers':
       return ` on topic ${event.topicID}`

@@ -84,6 +84,11 @@ request belongs to the store, because the store is what refuses the subscribe â€
 pin a topic's frames forever with `subscribe({ retention: 2 ** 31 })`. A subscribe above the ceiling
 is refused with `RetentionExceededError`, never clamped.
 
+When the store supports subscription reaping, each tick also removes inactive subscriptions after message purge settles.
+`purge.subscriptionOlderThan` sets the inactivity window in seconds, defaulting to `7776000` (90 days).
+The effective window is `Math.max(subscriptionOlderThan, olderThan)`, so subscriptions outlive the message retention window.
+Both operations report failures through `onStoreError` independently. Disposal waits for both operations.
+
 `createMemoryStore`'s `maxDepth` (default 1000) evicts the oldest **log** frames beyond that count.
 Mailbox frames on the same topic are not counted, so a member cannot evict the log with a mailbox
 flood.

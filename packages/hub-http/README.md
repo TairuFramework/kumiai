@@ -69,6 +69,12 @@ Clients behind NAT share one budget. Size the limit for that traffic, or set `ra
 The hub's publish limits remain configurable through `rateLimits`.
 HTTP server and hub resource settings share the `limits` option.
 
+`createHubServer({ plugins: [...] })` appends extra HTTP plugins after the hub and its internal handle plugin.
+Extra plugins may declare `dependsOn: [KUMIAI_HUB, HOZON_DB]` to consume the hub and database.
+Read the hub's store with `await getHubStore(ctx.use(HOZON_DB))`; this returns the same instance the hub uses.
+Import `KUMIAI_HUB` from `@kumiai/hub-http`, `HOZON_DB` from `@teikyo/hozon`, and `getHubStore` from `@kumiai/hub-store`.
+Extra plugin routes share the HTTP server, and their close hooks run during `server.dispose()`.
+
 For custom composition, use `hubPlugin(params)` with `hozonDBPlugin`.
 Include the matching access plugins when enabling grants or revocation.
 Dependent plugins consume `KUMIAI_HUB` to read `{ registry, server, grants?, revocation? }`.
