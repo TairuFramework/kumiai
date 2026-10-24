@@ -196,7 +196,7 @@ type FixtureParams = {
   groupID: string
   options?: GroupOptions
   effects?: TransactionalGroupEffects<MemoryTransaction>
-  openedDeliveryContext?: OwnershipContextPort
+  openedDeliveryContext?: OwnershipContextPort | null
   deliverOpened?: (record: PendingAppFrame) => Promise<void>
   ownershipContext?: OwnershipContextPort
   backgroundMaintenance?: 'gated'
@@ -516,7 +516,10 @@ async function assemble(
       owner = createGroupHandleRegistry({
         persistence: fixture.device,
         providerID: fixture.device.providerID,
-        openedDeliveryContext: params.openedDeliveryContext ?? openedDeliveryContext,
+        openedDeliveryContext:
+          params.openedDeliveryContext === null
+            ? undefined
+            : (params.openedDeliveryContext ?? openedDeliveryContext),
         deliverOpened: params.deliverOpened,
         recovery: environment,
         restore: (record) => {

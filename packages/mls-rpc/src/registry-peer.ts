@@ -57,6 +57,7 @@ import {
   bindRegistryManualRunner,
   registryRecoveryCoordinator,
 } from './registry/recovery-coordinator.js'
+import { registryRetirement } from './registry/retirement.js'
 import {
   type RegistrySwitchBlock,
   RetainedTrustUnavailableError,
@@ -968,7 +969,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
       })
   }
   async function activateManual(record: ManualRecoveryRecord): Promise<GroupKey> {
-    assertOpenedDeliveryEntry(openedDeliveryContext, { key: record.source })
+    registryRetirement(registry).assertEntry(record.source)
     if (disposed) throw new GroupStateConflictError('Recovery peer disposed')
     if (manualCompletion?.id === record.id) return await manualCompletion.promise
     if (manualCompletion !== null)

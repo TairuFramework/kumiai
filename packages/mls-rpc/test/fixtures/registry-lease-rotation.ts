@@ -1,5 +1,11 @@
 import { decodeClientState, type GroupHandle, restoreGroup } from '@kumiai/mls'
-import { type AppOutbox, createGroupPeer, decodeAppAAD, type LogHub } from '@kumiai/rpc'
+import {
+  type AppOutbox,
+  createGroupPeer,
+  decodeAppAAD,
+  type LogHub,
+  type OpenedDeliveryContext,
+} from '@kumiai/rpc'
 import { expect } from 'vitest'
 
 import { decodeAutoRotationCandidate } from '../../src/auto-rotation.js'
@@ -19,6 +25,7 @@ export async function startLeaseRotationPeer(params: {
   key: GroupKey
   outbox: AppOutbox
   handler?: () => Promise<void>
+  openedDeliveryContext?: OpenedDeliveryContext
 }) {
   const { mode, fixture, key } = params
   const { FakeHub } = (await import(
@@ -93,6 +100,7 @@ export async function startLeaseRotationPeer(params: {
       })
       return createGroupPeer({
         ...options,
+        openedDeliveryContext: options.openedDeliveryContext ?? params.openedDeliveryContext,
         hub,
         crypto: groupCrypto,
         control: ports.control,

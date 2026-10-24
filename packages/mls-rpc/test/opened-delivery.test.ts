@@ -18,7 +18,7 @@ import { describe, expect, test, vi } from 'vitest'
 import type { createAppLane as CreateAppLane } from '../../rpc/lib/app-lane.js'
 import type { createHubMux as CreateHubMux } from '../../rpc/lib/hub-mux.js'
 import { entryCapability } from '../src/entry-capability.js'
-import { drainStoredOpened } from '../src/opened-delivery.js'
+import { drainStoredOpened, registryOpenedDeliveryContext } from '../src/opened-delivery.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
 import type { PendingAppFrame } from '../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
@@ -38,7 +38,11 @@ const protocols = {
   },
 } as const
 
-async function setup(mode: 'real-mls' | 'double', supplied: boolean) {
+async function setup(
+  mode: 'real-mls' | 'double',
+  supplied: boolean,
+  contextBinding: 'registry' | 'peer factory' = 'registry',
+) {
   const context = createAsyncLocalOwnershipContext()
   const groupID = crypto.randomUUID()
   const fixture = await createRegistryFixture({
@@ -46,8 +50,8 @@ async function setup(mode: 'real-mls' | 'double', supplied: boolean) {
     setup: 'seeded',
     groupID,
     backgroundMaintenance: 'gated',
-    openedDeliveryContext: context,
-    deliverOpened: async () => {},
+    openedDeliveryContext: contextBinding === 'registry' ? context : null,
+    deliverOpened: contextBinding === 'registry' ? async () => {} : undefined,
     ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
   })
   const key = { groupID, incarnation: 1 }
@@ -596,80 +600,91 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       }
     })
 
-    test('opened handler refuses overlapping manual recovery while stopPeer awaits it', async () => {
-      const env = await setup(mode, supplied)
-      await env.plant([env.record('overlapping-recovery')])
-      const entered = Promise.withResolvers<void>()
-      const invoke = Promise.withResolvers<void>()
-      const release = Promise.withResolvers<void>()
-      let result: unknown
-      let recoverAgain: (() => Promise<unknown>) | undefined
-      const running = await startLeaseRotationPeer({
-        mode,
-        fixture: env.fixture,
-        key: env.key,
-        outbox: env.fixture.device.groups.ports(env.key).outbox,
-        handler: async () => {
-          entered.resolve()
-          await invoke.promise
-          if (recoverAgain === undefined) throw new Error('Missing repeated recovery')
-          await Promise.race([
-            recoverAgain().catch((error: unknown) => {
-              result = error
-            }),
-            release.promise,
-          ])
-          await release.promise
-        },
-      })
-      await running.owner.ready
-      await entered.promise
-      const peer = running.owner.peer()
-      if (peer === null) throw new Error('Missing source peer')
-      const stopping = Promise.withResolvers<void>()
-      const drained = peer.drained.bind(peer)
-      const stop = vi.spyOn(peer, 'drained').mockImplementation(async () => {
-        stopping.resolve()
-        await drained()
-      })
-      const { FakeHub } = (await import(
-        new URL('../../rpc/test/fixtures/fake-hub.ts', import.meta.url).href
-      )) as { FakeHub: new () => LogHub & MailboxHub }
-      let recovered = false
-      const recovery = env.fixture.safety().recover(env.key, {
-        mode: 'resync',
-        target: { targetID: 'selected-hub', hub: new FakeHub(), commitTopicID: 'selected-commits' },
-      })
-      void recovery.then(
-        () => {
-          recovered = true
-        },
-        () => {},
-      )
-      try {
-        await stopping.promise
-        const records = await env.capability.read(env.key.groupID, (reads) => reads.checkpoints())
-        const saved = records.find((record) => record.kind === 'manual-recovery')
-        if (saved?.kind !== 'manual-recovery') throw new Error('Missing manual authorisation')
-        recoverAgain = () => running.owner.runManualRecovery(saved.value)
-        invoke.resolve()
-        await vi.waitFor(() => expect(result).toBeInstanceOf(OpenedDeliveryReentryError))
-        expect(recovered).toBe(false)
-        expect(await env.pending()).toHaveLength(1)
-        release.resolve()
-        await expect(recovery).resolves.toEqual(env.key)
-        expect(await env.pending()).toEqual([])
-        expect(running.owner.status()).toEqual({ kind: 'running' })
-      } finally {
-        invoke.resolve()
-        release.resolve()
-        stop.mockRestore()
-        running.owner.dispose()
-        await recovery.catch(() => {})
-        await running.owner.drained()
-        await env.fixture.close()
-      }
-    })
+    test.each(['registry', 'peer factory'] as const)(
+      'opened handler refuses overlapping manual recovery while stopPeer awaits it (%s)',
+      async (contextBinding) => {
+        const env = await setup(mode, supplied, contextBinding)
+        expect(registryOpenedDeliveryContext(env.fixture.registry)).toBe(
+          contextBinding === 'registry' ? env.context : undefined,
+        )
+        await env.plant([env.record('overlapping-recovery')])
+        const entered = Promise.withResolvers<void>()
+        const invoke = Promise.withResolvers<void>()
+        const release = Promise.withResolvers<void>()
+        let result: unknown
+        let recoverAgain: (() => Promise<unknown>) | undefined
+        const running = await startLeaseRotationPeer({
+          mode,
+          fixture: env.fixture,
+          key: env.key,
+          outbox: env.fixture.device.groups.ports(env.key).outbox,
+          openedDeliveryContext: contextBinding === 'peer factory' ? env.context : undefined,
+          handler: async () => {
+            entered.resolve()
+            await invoke.promise
+            if (recoverAgain === undefined) throw new Error('Missing repeated recovery')
+            await Promise.race([
+              recoverAgain().catch((error: unknown) => {
+                result = error
+              }),
+              release.promise,
+            ])
+            await release.promise
+          },
+        })
+        await running.owner.ready
+        await entered.promise
+        const peer = running.owner.peer()
+        if (peer === null) throw new Error('Missing source peer')
+        const stopping = Promise.withResolvers<void>()
+        const drained = peer.drained.bind(peer)
+        const stop = vi.spyOn(peer, 'drained').mockImplementation(async () => {
+          stopping.resolve()
+          await drained()
+        })
+        const { FakeHub } = (await import(
+          new URL('../../rpc/test/fixtures/fake-hub.ts', import.meta.url).href
+        )) as { FakeHub: new () => LogHub & MailboxHub }
+        let recovered = false
+        const recovery = env.fixture.safety().recover(env.key, {
+          mode: 'resync',
+          target: {
+            targetID: 'selected-hub',
+            hub: new FakeHub(),
+            commitTopicID: 'selected-commits',
+          },
+        })
+        void recovery.then(
+          () => {
+            recovered = true
+          },
+          () => {},
+        )
+        try {
+          await stopping.promise
+          const records = await env.capability.read(env.key.groupID, (reads) => reads.checkpoints())
+          const saved = records.find((record) => record.kind === 'manual-recovery')
+          if (saved?.kind !== 'manual-recovery') throw new Error('Missing manual authorisation')
+          recoverAgain = () => running.owner.runManualRecovery(saved.value)
+          invoke.resolve()
+          await vi.waitFor(() => expect(result).toBeInstanceOf(OpenedDeliveryReentryError))
+          expect(recovered).toBe(false)
+          expect(await env.pending()).toHaveLength(1)
+          release.resolve()
+          await expect(recovery).resolves.toEqual(env.key)
+          expect(await env.pending()).toEqual([])
+          expect(running.owner.status()).toEqual({ kind: 'running' })
+        } finally {
+          invoke.resolve()
+          release.resolve()
+          stop.mockRestore()
+          running.owner.dispose()
+          await recovery.catch(() => {})
+          await running.owner.drained()
+          await env.fixture.close()
+        }
+      },
+    )
 
     test('external registry disposal waits for an admitted handler without using its live completion facade', async () => {
       const env = await setup(mode, supplied)
