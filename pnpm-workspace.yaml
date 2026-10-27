@@ -25,7 +25,7 @@ catalog:
   '@enkaku/transport': ^0.22.3
   '@kokuin/capability': ^0.5.2
   '@kokuin/controller': ^0.2.5
-  '@kokuin/token': ^0.6.3
+  '@kokuin/token': ^0.6.4
   '@sozai/async': ^0.4.3
   '@sozai/codec': ^0.4.3
   '@sozai/event': ^0.1.6

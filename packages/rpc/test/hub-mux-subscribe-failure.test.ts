@@ -13,10 +13,11 @@ import {
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
 } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { APP_TOPIC_LABEL, inboxTopic, protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, inboxTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { DEFAULT_MAX_RETENTION, FakeHub } from './fixtures/fake-hub.js'
+import { deferred } from './fixtures/single-connection-host.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
 
@@ -24,6 +25,53 @@ const flush = () => new Promise((r) => setTimeout(r, 30))
 const FAST_RETRIES = [1, 1, 1]
 
 describe('a subscribe the hub refuses', () => {
+  test('a first control-log fetch waits for its subscription to be accepted', async () => {
+    const topicID = commitTopic(new Uint8Array(32).fill(0x41))
+    const gate = deferred<void>()
+    const hub = new FakeHub()
+    const subscribe = hub.subscribe.bind(hub)
+    hub.subscribe = async (subscriberDID, topic, options) => {
+      await gate.promise
+      subscribe(subscriberDID, topic, options)
+    }
+    const mux = createHubMux({ hub, localDID: 'bob' })
+    mux.retainTopic(topicID)
+
+    const fetch = mux.fetchTopic({ topicID })
+    let settled = false
+    void fetch.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    gate.resolve()
+    await expect(fetch).resolves.toMatchObject({ messages: [] })
+    await mux.dispose()
+  })
+
+  test('a first control-log fetch surfaces a delayed hub refusal', async () => {
+    const topicID = commitTopic(new Uint8Array(32).fill(0x42))
+    const gate = deferred<void>()
+    const hub = new FakeHub()
+    hub.subscribe = async () => {
+      await gate.promise
+      throw new AuthorizationDeniedError('policy says no')
+    }
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+    mux.retainTopic(topicID)
+
+    const fetch = mux.fetchTopic({ topicID })
+    gate.resolve()
+    await expect(fetch).rejects.toThrow(AuthorizationDeniedError)
+    await mux.dispose()
+  })
+
   test('the refusal reaches the host instead of being swallowed', async () => {
     const hub = new FakeHub({ maxRetention: 100 })
     const failures: Array<SubscribeFailure> = []

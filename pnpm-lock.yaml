@@ -207,8 +207,8 @@ catalogs:
       specifier: ^0.4.2
       version: 0.4.2
     '@kokuin/token':
-      specifier: ^0.6.3
-      version: 0.6.3
+      specifier: ^0.6.4
+      version: 0.6.4
     '@noble/ciphers':
       specifier: ^2.4.0
       version: 2.4.0
@@ -341,7 +341,7 @@ importers:
         version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-server':
         specifier: workspace:^
         version: link:../hub-server
@@ -409,7 +409,7 @@ importers:
         version: 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
 
   packages/hub-protocol:
     dependencies:
@@ -449,7 +449,7 @@ importers:
         version: 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -508,7 +508,7 @@ importers:
         version: 0.2.0
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -551,7 +551,7 @@ importers:
         version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -588,7 +588,7 @@ importers:
         version: 0.2.5(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@noble/ciphers':
         specifier: 'catalog:'
         version: 2.4.0
@@ -621,7 +621,7 @@ importers:
         version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-client':
         specifier: workspace:^
         version: link:../hub-client
@@ -649,7 +649,7 @@ importers:
     dependencies:
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../mls
@@ -689,7 +689,7 @@ importers:
         version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/broadcast':
         specifier: workspace:^
         version: link:../broadcast
@@ -744,7 +744,7 @@ importers:
         version: 0.4.2(@logtape/logtape@2.4.2)(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../../packages/mls
@@ -802,7 +802,7 @@ importers:
         version: 0.2.5(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.6.3(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-client':
         specifier: workspace:^
         version: link:../../packages/hub-client
@@ -1750,8 +1750,8 @@ packages:
   '@kokuin/otel@0.3.1':
     resolution: {integrity: sha512-dXv3mA8NG/EnCfJFGkfnxlofWuJxkXO7+w91UdQbl4gd4KlMWHnOhSwH1B9zenW72aVX9oM2YK6J95jZqmoz2w==}
 
-  '@kokuin/token@0.6.3':
-    resolution: {integrity: sha512-9M8rwpuHlc9fBhLTD+l2shsn0davmoWnEEKiAG65yZmnBsjs6WLHvsMPP8nnvT440pbNIxEXAMlkyUK/+XTopA==}
+  '@kokuin/token@0.6.4':
+    resolution: {integrity: sha512-kfJekuEV9cVA9ccOmQb86k7+mWlKqqyYn7EyjFO/aZ+XOSTc9eHorqHrnQKvCS/7egW0SHXPYu2wyX3RjP2Khw==}
 
   '@kwsites/file-exists@1.1.1':
     resolution: {integrity: sha512-m9/5YGR18lIwxSFDwfE3oA7bWuq9kdau6ugN4H2rJeyhFQZcG9AgSHkQtSD15a8WvTgfz9aikZMrKPHvbpqFiw==}
@@ -5346,7 +5346,7 @@ snapshots:
   '@enkaku/client@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
       '@enkaku/otel': 0.22.3(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.6.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/execution': 0.2.3
@@ -5390,7 +5390,7 @@ snapshots:
 
   '@enkaku/protocol@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
-      '@kokuin/token': 0.6.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/schema': 0.1.6
     transitivePeerDependencies:
       - '@logtape/logtape'
@@ -5400,7 +5400,7 @@ snapshots:
       '@enkaku/otel': 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/protocol': 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/capability': 0.5.2(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.6.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
@@ -6025,13 +6025,13 @@ snapshots:
 
   '@kokuin/capability@0.5.2(@logtape/logtape@2.4.2)':
     dependencies:
-      '@kokuin/token': 0.6.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
   '@kokuin/controller@0.2.5(@logtape/logtape@2.4.2)':
     dependencies:
-      '@kokuin/token': 0.6.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
@@ -6043,7 +6043,7 @@ snapshots:
   '@kokuin/expo@0.4.2(@logtape/logtape@2.4.2)(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))':
     dependencies:
       '@kokuin/otel': 0.3.1(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.6.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/codec': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
@@ -6060,7 +6060,7 @@ snapshots:
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@kokuin/token@0.6.3(@logtape/logtape@2.4.2)':
+  '@kokuin/token@0.6.4(@logtape/logtape@2.4.2)':
     dependencies:
       '@kokuin/otel': 0.3.1(@logtape/logtape@2.4.2)
       '@noble/curves': 2.4.0
@@ -6518,7 +6518,7 @@ snapshots:
       '@enkaku/server': 0.22.3(@logtape/logtape@2.4.2)
       '@hozon/db': 0.5.0(@logtape/logtape@2.4.2)
       '@kokuin/capability': 0.5.2(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.6.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/codec': 0.4.3
       '@sozai/http-server': 0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
