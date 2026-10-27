@@ -219,8 +219,8 @@ catalogs:
       specifier: ^2.4.0
       version: 2.4.0
     '@sozai/async':
-      specifier: ^0.4.1
-      version: 0.4.1
+      specifier: ^0.4.3
+      version: 0.4.3
     '@sozai/codec':
       specifier: ^0.4.3
       version: 0.4.3
@@ -297,7 +297,7 @@ importers:
         version: 2.4.0
       '@sozai/async':
         specifier: 'catalog:'
-        version: 0.4.1
+        version: 0.4.3
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.3
@@ -529,7 +529,7 @@ importers:
         version: link:../hub-protocol
       '@sozai/async':
         specifier: 'catalog:'
-        version: 0.4.1
+        version: 0.4.3
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.3
@@ -598,6 +598,9 @@ importers:
       '@noble/hashes':
         specifier: 'catalog:'
         version: 2.4.0
+      '@sozai/async':
+        specifier: 'catalog:'
+        version: 0.4.3
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.3
@@ -2170,8 +2173,8 @@ packages:
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
 
-  '@sozai/async@0.4.1':
-    resolution: {integrity: sha512-B026uyunAkdGARhXsIA0KgHjE7rZyndAN8W/LCG01rEHJilFFC1NX4MISs1hTmXqHMMzxIkLLkoNzNVAe7pwdQ==}
+  '@sozai/async@0.4.3':
+    resolution: {integrity: sha512-8Yc+4zLoQgOb/9OZcJq+OCouy8s0SuFX71VRwJznvXGKwu9YMRuFZbaPSDuwoefJX3hDzwtJ2Mnypd+BuCmEqw==}
 
   '@sozai/codec@0.4.3':
     resolution: {integrity: sha512-C2WtBwspVIRtCS4AS4qXTQUxgTN2RjzKH/eK6nInh0/MeCZUBtkxrp40GwKy6VCA3lim2Ta8bFNXet9l8QbxCg==}
@@ -5344,7 +5347,7 @@ snapshots:
     dependencies:
       '@enkaku/otel': 0.22.2(@logtape/logtape@2.4.2)
       '@kokuin/token': 0.6.2(@logtape/logtape@2.4.2)
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/execution': 0.2.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
@@ -5371,7 +5374,7 @@ snapshots:
       '@enkaku/otel': 0.22.2(@logtape/logtape@2.4.2)
       '@enkaku/protocol': 0.22.2(@logtape/logtape@2.4.2)
       '@enkaku/transport': 0.22.2(@logtape/logtape@2.4.2)
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/runtime': 0.1.0
       '@sozai/stream': 0.2.2
@@ -5398,7 +5401,7 @@ snapshots:
       '@enkaku/protocol': 0.22.2(@logtape/logtape@2.4.2)
       '@kokuin/capability': 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/token': 0.6.2(@logtape/logtape@2.4.2)
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
@@ -5410,7 +5413,7 @@ snapshots:
 
   '@enkaku/transport@0.22.2(@logtape/logtape@2.4.2)':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/stream': 0.2.2
     transitivePeerDependencies:
@@ -5905,7 +5908,7 @@ snapshots:
   '@hozon/db@0.5.0(@logtape/logtape@2.4.2)':
     dependencies:
       '@hozon/adapter': 0.2.1
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
       kysely: 0.29.7
     transitivePeerDependencies:
@@ -6361,7 +6364,7 @@ snapshots:
 
   '@sindresorhus/merge-streams@4.0.0': {}
 
-  '@sozai/async@0.4.1': {}
+  '@sozai/async@0.4.3': {}
 
   '@sozai/codec@0.4.3':
     dependencies:
@@ -6369,21 +6372,21 @@ snapshots:
 
   '@sozai/event@0.1.6(@logtape/logtape@2.4.2)':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
   '@sozai/execution@0.2.3':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/result': 0.2.2
 
   '@sozai/http-server@0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
       '@hono/node-server': 2.1.5(hono@4.13.13)
       '@hono/otel': 1.2.0(hono@4.13.13)
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       get-port: 7.2.0
@@ -6407,7 +6410,7 @@ snapshots:
 
   '@sozai/result@0.2.2':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
 
   '@sozai/runtime-expo@0.3.0(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))':
     dependencies:
@@ -6428,7 +6431,7 @@ snapshots:
 
   '@sozai/stream@0.2.2':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
 
   '@standard-schema/spec@1.1.0': {}
 

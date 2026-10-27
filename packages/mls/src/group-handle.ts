@@ -1,4 +1,5 @@
 import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
+import { maybeYield } from '@sozai/async'
 import { toB64 } from '@sozai/codec'
 import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
@@ -421,6 +422,38 @@ export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 const VERIFIED_LEDGER_ENTRIES = new WeakMap<VerifiedLedgerEntry, HeldLedgerEntry>()
 const VERIFIED_LEDGER_TOKENS = new WeakMap<Array<string>, Array<HeldLedgerEntry | undefined>>()
+export const VERIFIED_LEDGER_TOKEN_CACHE_SIZE = 4096
+const VERIFIED_LEDGER_TOKEN_CACHE = new Map<string, VerifiedLedgerEntry>()
+
+function cachedLedgerEntry(token: string): VerifiedLedgerEntry | null | undefined {
+  const verified = VERIFIED_LEDGER_TOKEN_CACHE.get(token)
+  if (verified == null) return undefined
+  VERIFIED_LEDGER_TOKEN_CACHE.delete(token)
+  VERIFIED_LEDGER_TOKEN_CACHE.set(token, verified)
+  try {
+    assertTimeClaimsValid(decodeSignedToken(token).payload)
+    return structuredClone(verified)
+  } catch {
+    return null
+  }
+}
+
+function cacheLedgerEntry(token: string, verified: VerifiedLedgerEntry): void {
+  VERIFIED_LEDGER_TOKEN_CACHE.delete(token)
+  VERIFIED_LEDGER_TOKEN_CACHE.set(token, structuredClone(verified))
+  if (VERIFIED_LEDGER_TOKEN_CACHE.size > VERIFIED_LEDGER_TOKEN_CACHE_SIZE) {
+    const oldest = VERIFIED_LEDGER_TOKEN_CACHE.keys().next().value
+    if (oldest != null) VERIFIED_LEDGER_TOKEN_CACHE.delete(oldest)
+  }
+}
+
+async function verifyCachedLedgerEntry(token: string): Promise<VerifiedLedgerEntry | null> {
+  const cached = cachedLedgerEntry(token)
+  if (cached !== undefined) return cached
+  const verified = await verifyLedgerEntry(token)
+  if (verified != null) cacheLedgerEntry(token, verified)
+  return verified
+}
 
 // Record provenance before exposing claims; re-enactments keep the original snapshot.
 function ledgerLogEntry(
@@ -806,6 +839,7 @@ export class GroupHandle {
       const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
       const nextMemo: Array<HeldLedgerEntry | undefined> = []
       for (const [index, token] of tokens.entries()) {
+        await maybeYield()
         const held = memo?.[index]
         let verified: VerifiedLedgerEntry | null
         if (held?.token === token) {
@@ -816,7 +850,7 @@ export class GroupHandle {
           }
           verified = structuredClone(held.verified)
         } else {
-          verified = await verifyLedgerEntry(token)
+          verified = await verifyCachedLedgerEntry(token)
         }
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
@@ -929,8 +963,9 @@ export class GroupHandle {
 
       const log: Array<LedgerLogEntry> = []
       for (let index = 0; index < tokens.length; index++) {
+        await maybeYield()
         const token = tokens[index] as string
-        const verified = await verifyLedgerEntry(token)
+        const verified = await verifyCachedLedgerEntry(token)
         if (verified == null || verified.entry.groupID !== this.groupID) {
           // Unreachable past the gate — the chain digests the token bytes, so an
           // unverifiable or cross-group token cannot sit at a position the head
@@ -1572,10 +1607,11 @@ export class GroupHandle {
             }
             const tokens = await this.#resolveLedgerEntries(missing)
             for (const token of tokens) {
+              await maybeYield()
               const id = ledgerEntryDigest(token)
               // Content-addressing binds the untrusted body to the requested id.
               if (resolved.has(id) || !missing.includes(id)) continue
-              const verified = await verifyLedgerEntry(token)
+              const verified = await verifyCachedLedgerEntry(token)
               if (verified == null) continue
               resolved.set(id, ledgerLogEntry(id, token, verified))
             }

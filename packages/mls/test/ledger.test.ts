@@ -2,8 +2,10 @@ import { createIdentity, createUnsignedToken, normalizeDID, stringifyToken } fro
 import { describe, expect, test } from 'vitest'
 
 import {
+  LEDGER_ENTRY_DIGEST_CACHE_SIZE,
   type LedgerEntry,
   ledgerEntryDigest,
+  ledgerEntryDigestCacheSize,
   signLedgerEntry,
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
@@ -208,5 +210,12 @@ describe('ledgerEntryDigest', () => {
       value: 'admin',
     })
     expect(ledgerEntryDigest(tokenA)).not.toBe(ledgerEntryDigest(tokenB))
+  })
+
+  test('keeps its cache within the exported bound', () => {
+    for (let index = 0; index <= LEDGER_ENTRY_DIGEST_CACHE_SIZE; index++) {
+      ledgerEntryDigest(`token-${index}`)
+    }
+    expect(ledgerEntryDigestCacheSize()).toBe(LEDGER_ENTRY_DIGEST_CACHE_SIZE)
   })
 })

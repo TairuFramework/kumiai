@@ -10,6 +10,13 @@ import {
 } from '@kokuin/token'
 
 const textEncoder = new TextEncoder()
+export const LEDGER_ENTRY_DIGEST_CACHE_SIZE = 4096
+const LEDGER_ENTRY_DIGEST_CACHE = new Map<string, string>()
+
+/** @internal */
+export function ledgerEntryDigestCacheSize(): number {
+  return LEDGER_ENTRY_DIGEST_CACHE.size
+}
 
 /**
  * A control-ledger claim. The payload of a signed ledger token: `type` selects
@@ -107,5 +114,17 @@ export async function verifyLedgerEntry<TValue = unknown>(
  * store's dedup key. Multibase-encoded SHA-256 multihash over the token bytes.
  */
 export function ledgerEntryDigest(signedToken: string): string {
-  return encodeMultibase(multihashSHA256(textEncoder.encode(signedToken)))
+  const cached = LEDGER_ENTRY_DIGEST_CACHE.get(signedToken)
+  if (cached != null) {
+    LEDGER_ENTRY_DIGEST_CACHE.delete(signedToken)
+    LEDGER_ENTRY_DIGEST_CACHE.set(signedToken, cached)
+    return cached
+  }
+  const digest = encodeMultibase(multihashSHA256(textEncoder.encode(signedToken)))
+  LEDGER_ENTRY_DIGEST_CACHE.set(signedToken, digest)
+  if (LEDGER_ENTRY_DIGEST_CACHE.size > LEDGER_ENTRY_DIGEST_CACHE_SIZE) {
+    const oldest = LEDGER_ENTRY_DIGEST_CACHE.keys().next().value
+    if (oldest != null) LEDGER_ENTRY_DIGEST_CACHE.delete(oldest)
+  }
+  return digest
 }
