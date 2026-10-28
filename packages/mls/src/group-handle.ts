@@ -108,6 +108,10 @@ import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
  *  the handle carries no reference back to it. */
 const MUTEXES = new WeakMap<GroupHandle, Mutex>()
 
+// Module-private construction path: only clone can supply an already-folded snapshot.
+const CLONE_SOURCE = Symbol('cloneSource')
+type CloneGroupHandleParams = GroupHandleParams & { [CLONE_SOURCE]: GroupHandle }
+
 const HISTORICAL_REGISTRIES = new WeakMap<GroupHandle, Map<string, DeviceRegistry>>()
 
 export function registryAt(group: GroupHandle, head: Uint8Array): DeviceRegistry {
@@ -568,25 +572,53 @@ export class GroupHandle {
     this.#commitPolicy = params.commitPolicy
     this.#resolveLedgerEntries = params.resolveLedgerEntries
     this.#onLedgerEntries = params.onLedgerEntries
-    // Seed control state from the genesis anchor in the group's GroupContext. Reading
-    // it here makes the constructor the single choke no anchorless handle slips
-    // through: an absent anchor fails closed rather than installing a permissive roster.
-    const anchor = readGroupAnchor(this)
-    if (anchor == null) {
-      throw new Error('group has no anchor extension; cannot seed a control roster')
+    const source = (params as Partial<CloneGroupHandleParams>)[CLONE_SOURCE]
+    let admission: SendAdmission | undefined
+    if (source != null) {
+      const snapshot = structuredClone({
+        anchor: source.#anchor,
+        ledger: source.#ledger,
+        entryBodies: source.#entryBodies,
+        roster: source.#roster,
+        registry: source.#registry,
+        admission: source.#admission,
+      })
+      this.#anchor = snapshot.anchor
+      this.#ledger = snapshot.ledger
+      this.#entryBodies = snapshot.entryBodies
+      this.#roster = snapshot.roster
+      this.#registry = snapshot.registry
+      admission = Object.freeze(snapshot.admission)
+      // Preserve the trusted snapshot, never promote caller-mutated exposed claims.
+      for (const [index, held] of source.#ledger.entries()) {
+        const copied = this.#ledger[index]
+        const verified = VERIFIED_LEDGER_ENTRIES.get(held.verified)
+        if (copied != null && verified != null) {
+          VERIFIED_LEDGER_ENTRIES.set(copied.verified, structuredClone(verified))
+        }
+      }
+    } else {
+      // Seed control state from the genesis anchor in the group's GroupContext. Reading
+      // it here makes the constructor the single choke no anchorless handle slips
+      // through: an absent anchor fails closed rather than installing a permissive roster.
+      const anchor = readGroupAnchor(this)
+      if (anchor == null) {
+        throw new Error('group has no anchor extension; cannot seed a control roster')
+      }
+      this.#anchor = anchor
+      this.#ledger = [...(params.ledger ?? [])]
+      this.#entryBodies = new Map(
+        this.#ledger.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
+      )
+      const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
+      this.#roster = folded.roster
+      this.#registry = registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+      )
     }
-    this.#anchor = anchor
-    this.#ledger = [...(params.ledger ?? [])]
-    this.#entryBodies = new Map(
-      this.#ledger.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
-    )
-    const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
-    this.#roster = folded.roster
-    this.#registry = registryWithTreeBindings(
-      folded.registry,
-      this.#state.ratchetTree,
-      this.#anchor,
-    )
+    const anchor = this.#anchor
     // Authentication reads only this handle's registry and lifetime limits.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
@@ -603,7 +635,51 @@ export class GroupHandle {
     }
     EMITTERS.set(this, params.events ?? new EventEmitter<GroupHandleEvents>())
     this.#pendingControlEvents = params.speculative ? [] : undefined
-    this.#admission = this.#computeAdmission()
+    this.#admission = admission ?? this.#computeAdmission()
+  }
+
+  /** Copy the current checkpoint without replaying ledger tokens or sharing mutable state.
+   * Pending adoption notifications belong to the source; the copy starts non-speculative. */
+  clone(options?: {
+    resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
+    onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
+  }): GroupHandle {
+    const context: MlsContext =
+      deviceDenyHolderFor(this.#context) == null
+        ? {
+            ...this.#context,
+            // External authentication is caller-owned behaviour, like the cipher suite and callbacks.
+            authService: {
+              validateCredential: this.#context.authService.validateCredential.bind(
+                this.#context.authService,
+              ),
+            },
+          }
+        : createMlsContext(this.#context.cipherSuite, this.#anchor)
+    const config = this.#context.clientConfig
+    if (config != null) {
+      const equality = config.keyPackageEqualityConfig
+      context.clientConfig = {
+        keyRetentionConfig: structuredClone(config.keyRetentionConfig),
+        lifetimeConfig: structuredClone(config.lifetimeConfig),
+        paddingConfig: structuredClone(config.paddingConfig),
+        keyPackageEqualityConfig: {
+          compareKeyPackages: equality.compareKeyPackages.bind(equality),
+          compareKeyPackageToLeafNode: equality.compareKeyPackageToLeafNode.bind(equality),
+        },
+      }
+    }
+    context.externalPsks = structuredClone(this.#context.externalPsks)
+    const params: CloneGroupHandleParams = {
+      [CLONE_SOURCE]: this,
+      state: structuredClone(this.#state),
+      credential: structuredClone(this.#credential),
+      context,
+      commitPolicy: this.#commitPolicy,
+      resolveLedgerEntries: options?.resolveLedgerEntries ?? this.#resolveLedgerEntries,
+      onLedgerEntries: options?.onLedgerEntries ?? this.#onLedgerEntries,
+    }
+    return new GroupHandle(params)
   }
 
   #computeAdmission(): SendAdmission {
