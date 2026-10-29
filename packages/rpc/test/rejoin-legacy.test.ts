@@ -50,7 +50,9 @@ test('continuation and completion must be supplied together', async () => {
   expect(() => makeMLSPeer(s.hub, 'bob', secret, { continuation: s.continuation })).toThrow(
     TypeError,
   )
-  expect(() => makeMLSPeer(s.hub, 'bob', secret, { completion: async () => {} })).toThrow(TypeError)
+  expect(() => makeMLSPeer(s.hub, 'bob', secret, { recoveryCompletion: async () => {} })).toThrow(
+    TypeError,
+  )
 })
 
 test('destination retries completion after verified bootstrap and returns reenact once without enqueue', async () => {
@@ -88,7 +90,7 @@ test('destination retries completion after verified bootstrap and returns reenac
     mls: destinationMLS,
     anchorStore: s.source.anchorStore,
     continuation: s.continuation,
-    completion: async ({ ledger }) => {
+    recoveryCompletion: async ({ ledger }) => {
       expect(complete).toBe(true)
       ledgers.push(ledger)
       if (++finishes === 1) throw new Error('Completion rolled back')
@@ -147,7 +149,7 @@ test('destination head-verifies a gathered ledger before completing the retired 
       ...s.continuation,
       record: { ...s.continuation.record, ledgerBefore: ['missing', 'present', 'missing'] },
     },
-    completion: async ({ ledger }) => {
+    recoveryCompletion: async ({ ledger }) => {
       expect(await mls.isLedgerComplete()).toBe(true)
       ledgers.push(ledger)
     },
@@ -190,7 +192,7 @@ test('destination defers signed confirmation judgment and memoization until head
   const destination = makeMLSPeer(s.hub, 'bob', secret, {
     mls,
     continuation: s.continuation,
-    completion: async () => {},
+    recoveryCompletion: async () => {},
     recovery: { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 },
   })
   peers.push(destination)
@@ -270,7 +272,7 @@ test('destination bounded commit walks wait for a complete ledger', async () => 
   const destination = makeMLSPeer(s.hub, 'bob', secret, {
     mls,
     continuation: s.continuation,
-    completion: async () => {},
+    recoveryCompletion: async () => {},
     recovery: { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 },
   })
   peers.push(destination)
@@ -299,7 +301,7 @@ test('disposal during source completion emits no bootstrap notice', async () => 
   const destination = makeMLSPeer(s.hub, 'bob', secret, {
     mls: s.source.mls,
     continuation: s.continuation,
-    completion: async () => {
+    recoveryCompletion: async () => {
       entered.resolve()
       await release.promise
     },

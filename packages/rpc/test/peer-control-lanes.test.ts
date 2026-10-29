@@ -10,7 +10,7 @@ import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { memoryApplicationPorts } from './fixtures/app-publication.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
@@ -36,6 +36,7 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -106,6 +107,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -134,6 +136,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -169,6 +172,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -208,6 +212,7 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -251,6 +256,7 @@ describe('control lane lifecycle', () => {
     const recoverySecret = new Uint8Array(32).fill(0x33)
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       hub,
       crypto,
       localDID: 'alice',
@@ -268,6 +274,7 @@ describe('control lane lifecycle', () => {
     const hub = new FakeHub()
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       hub,
       crypto,
       localDID: 'alice',
@@ -380,6 +387,7 @@ describe('control lane lifecycle', () => {
     const hub = new FakeHub()
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       hub,
       crypto,
       localDID: 'alice',

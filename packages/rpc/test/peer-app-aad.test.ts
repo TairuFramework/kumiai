@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { decodeAppAAD } from '../src/app-aad.js'
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 const room = defineGroupProtocol({
@@ -32,6 +32,7 @@ function peer(hub: FakeHub, localDID: string, handlers: Record<string, unknown>)
   }
   return {
     peer: createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       hub,
       crypto,
       localDID,

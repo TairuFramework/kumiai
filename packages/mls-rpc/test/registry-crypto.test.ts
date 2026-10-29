@@ -93,6 +93,7 @@ async function setup(mode: 'real-mls' | 'double') {
         ciphertext,
         expectedAAD,
         frame: {
+          ...key,
           id: frameID(topicID, ciphertext),
           topicID,
           protocol: 'chat',
@@ -158,12 +159,18 @@ for (const mode of ['real-mls', 'double'] as const) {
           payload: encodeEventFrame('posted', { text: 'hello' }),
           senderDID: s.senderDID,
           epoch: s.access.epoch(),
+          frameEpoch: s.access.epoch(),
         })
         const after = await s.snapshot()
         expect(after.lifetime?.revision).toBe((before.lifetime?.revision ?? 0) + 1)
         expect(after.state?.version).toBe((before.state?.version ?? 0) + 1)
         expect(await s.crypto.pending.list()).toMatchObject([
-          { frame: { ...s.key, ...input.frame, procedure: 'posted' }, ...result },
+          {
+            frame: { ...s.key, ...input.frame, procedure: 'posted' },
+            payload: result.payload,
+            senderDID: result.senderDID,
+            epoch: result.frameEpoch,
+          },
         ])
         await s.crypto.pending.complete(input.frame.id)
         expect(await s.crypto.pending.list()).toEqual([])
@@ -589,6 +596,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           payload,
           senderDID: s.senderDID,
           epoch: s.access.epoch(),
+          frameEpoch: s.access.epoch(),
         })
         expect(seal).toHaveBeenCalledExactlyOnceWith(payload, { aad, intent: 'ephemeral' })
         expect(receive).toHaveBeenCalledExactlyOnceWith([{ ciphertext, expectedAAD: aad }])
@@ -848,6 +856,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           payload: bytes,
           senderDID: s.senderDID,
           epoch: 9,
+          frameEpoch: 2,
         })
       }))
 
@@ -884,5 +893,30 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(s.crypto.frameEpoch(bytes)).toBeNull()
         expect(s.crypto.frameAAD(bytes)).toBeNull()
       }))
+  })
+}
+
+for (const field of ['senderDID', 'epoch', 'idempotencyKey', 'procedure', 'origin'] as const) {
+  test(`registry durable unwrap rejects incomplete saved metadata: ${field}`, async () => {
+    const s = await setup('double')
+    try {
+      const input = await s.seal()
+      const [opened] = await s.crypto.unwrapBatch([input])
+      if (opened?.kind !== 'opened') throw new Error('Missing opened record')
+      const record = structuredClone(opened.record) as unknown as Record<string, unknown>
+      const frame = record.frame as Record<string, unknown>
+      if (field === 'procedure') delete frame.procedure
+      else if (field === 'origin') frame.incarnation = s.key.incarnation + 1
+      else delete record[field]
+      vi.spyOn(s.access, 'openBatch').mockResolvedValue([
+        { ...opened, record: record as unknown as PendingAppFrame },
+      ])
+      await expect(
+        s.crypto.unwrap(input.ciphertext, { frame: input.frame }),
+      ).rejects.toBeInstanceOf(AppFrameStorageError)
+      await expect(s.crypto.unwrapBatch([input])).rejects.toBeInstanceOf(AppFrameStorageError)
+    } finally {
+      await s.f.close()
+    }
   })
 }

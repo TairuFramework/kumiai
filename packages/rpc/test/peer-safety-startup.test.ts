@@ -11,7 +11,7 @@ import * as muxModule from '../src/hub-mux.js'
 import type { EpochRuntime, EpochRuntimeParams } from '../src/peer-epoch.js'
 import * as epochModule from '../src/peer-epoch.js'
 import { commitTopic } from '../src/topic.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { completeTestRecord, createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
@@ -433,17 +433,22 @@ test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, re
   'opened plaintext completes under %s, restart=%s',
   async (reason, restart) => {
     const hub = new FakeHub()
-    const record: PendingAppFrame = {
-      frame: {
-        id: 'opened',
-        topicID: 'owed-app-topic',
-        protocol: 'chat',
-        segment: 1,
-        position: '000001',
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: {
+          id: 'opened',
+          topicID: 'owed-app-topic',
+          protocol: 'chat',
+          segment: 1,
+          position: '000001',
+        },
+        payload: encodeEventFrame('chat/posted', { text: 'owed plaintext' }),
+        senderDID: 'bob',
       },
-      payload: encodeEventFrame('chat/posted', { text: 'owed plaintext' }),
-      senderDID: 'bob',
-    }
+      { groupID: 'memory-group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     const records = new Map([[record.frame.id, record]])
     const complete = vi.fn(async (id: string) => {
       records.delete(id)

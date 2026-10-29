@@ -1,4 +1,3 @@
-import type { EventProcedureDefinition, ProtocolDefinition } from '@enkaku/protocol'
 import type { EventHandlerContext, ProcedureHandlers } from '@enkaku/server'
 import {
   type BroadcastHandler,
@@ -11,17 +10,61 @@ import { getReporter } from '@sozai/log'
 import { createValidator, type Validator } from '@sozai/schema'
 
 import type { AppFrameRef } from './crypto.js'
+import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
+import type { GroupProtocolDefinition } from './protocol.js'
 
 /** Log deliveries carry a stable frame ref; live ephemeral events have no frame.
  * A handler that never settles blocks later log events in its protocol. Disposal does not cancel
  * it; the host must settle its work or restart the peer to retry the pending record.
  */
-export type GroupProcedureHandlers<Protocol extends ProtocolDefinition> = {
-  [Procedure in keyof Protocol & string]: Protocol[Procedure] extends EventProcedureDefinition
-    ? (
-        context: EventHandlerContext<Protocol, Procedure> & { frame?: AppFrameRef },
-      ) => void | Promise<void>
-    : ProcedureHandlers<Protocol>[Procedure]
+export type GroupHandlerMetadata = {
+  epoch: number
+  incarnation: number
+  frame?: AppFrameRef
+  idempotencyKey?: string
+}
+
+export type DurableHandler<TContext, TTx extends GroupTransaction> =
+  | {
+      mode?: 'at-least-once'
+      handle(
+        context: TContext &
+          GroupHandlerMetadata & {
+            frame: AppFrameRef
+            idempotencyKey: string
+          },
+      ): Promise<void>
+    }
+  | {
+      mode: 'transactional'
+      handle(
+        context: TContext &
+          GroupHandlerMetadata & {
+            frame: AppFrameRef
+            idempotencyKey: string
+            tx: TTx
+          },
+      ): Promise<void>
+    }
+
+export type MetadataHandler<THandler> = THandler extends (context: infer TContext) => infer TResult
+  ? (context: TContext & GroupHandlerMetadata) => TResult
+  : never
+
+export type GroupProcedureHandlers<
+  TProtocol extends GroupProtocolDefinition,
+  TTx extends GroupTransaction = GroupTransaction,
+> = {
+  [TProcedure in keyof TProtocol & string]: TProtocol[TProcedure] extends {
+    type: 'event'
+    retain: 'log'
+  }
+    ?
+        | DurableHandler<EventHandlerContext<TProtocol, TProcedure>, TTx>
+        | ((
+            context: EventHandlerContext<TProtocol, TProcedure> & GroupHandlerMetadata,
+          ) => void | Promise<void>)
+    : MetadataHandler<ProcedureHandlers<TProtocol>[TProcedure]>
 }
 
 export type BusHandlerMaps = {
@@ -56,11 +99,15 @@ type LooseHandler = (context: {
  * is dropped and logged. The authenticated sender is exposed at `ctx.message.payload.iss` and
  * the responder-supplied cancellation signal at `ctx.signal`.
  */
-export function adaptBusHandlers(
-  protocol: ProtocolDefinition,
-  handlers: Record<string, unknown>,
-  suppress: SuppressConfig = {},
+export function adaptBusHandlers<
+  TProtocol extends GroupProtocolDefinition,
+  TTx extends GroupTransaction,
+>(
+  protocol: TProtocol,
+  handlers: GroupProcedureHandlers<TProtocol, TTx>,
+  options: { completion: HandlerCompletion<TTx>; suppress?: SuppressConfig },
 ): BusHandlerMaps {
+  const { suppress = {} } = options
   const events = new EventEmitter<BusEvents>()
   const requestHandlers: BusHandlerMaps['requestHandlers'] = {}
 

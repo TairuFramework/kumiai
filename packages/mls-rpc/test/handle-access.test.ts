@@ -357,7 +357,26 @@ test('replace saves before adoption and open passes through the staged writer', 
   expect(member.handle).toBe(next)
   expect(access.epoch()).toBe(Number(next.epoch))
   const record = {
-    frame: { id: 'one', topicID: 'topic', protocol: 'chat', segment: 1, position: '1' },
+    epoch: Number(next.epoch),
+    idempotencyKey: JSON.stringify([
+      'kumiai/frame/v1',
+      next.groupID,
+      1,
+      'topic',
+      '1',
+      'chat',
+      'posted',
+    ]),
+    frame: {
+      groupID: next.groupID,
+      incarnation: 1,
+      procedure: 'posted',
+      id: 'one',
+      topicID: 'topic',
+      protocol: 'chat',
+      segment: 1,
+      position: '1',
+    },
     payload: new Uint8Array(),
     senderDID: member.identity.id,
   }

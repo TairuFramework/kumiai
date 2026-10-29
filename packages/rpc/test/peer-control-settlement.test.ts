@@ -15,7 +15,7 @@ import { createGroupPeer } from '../src/peer.js'
 import { decodeRecoveryRequest, encodeRecoveryReply } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
@@ -40,6 +40,7 @@ test('a synchronous report dependency failure releases the reporting latch for r
   const load = vi.spyOn(bob.control, 'load')
   // JavaScript hosts can supply control storage without the required MLS ports.
   const peer = createGroupPeer({
+    completion: createTestCompletion(),
     hub,
     crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
     localDID: 'bob',

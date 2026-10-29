@@ -26,6 +26,7 @@ describe('hub log paging', () => {
   test('the app drain bounds a repeated full page without raising', async () => {
     let fetches = 0
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic() {

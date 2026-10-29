@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import type { GroupCrypto } from '../src/crypto.js'
 import { createGroupPeer } from '../src/peer.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
@@ -22,6 +22,7 @@ function makePeer(
   crypto: GroupCrypto = createFakeCrypto({ epoch: 1, localDID }),
 ) {
   return createGroupPeer<Protocols>({
+    completion: createTestCompletion(),
     hub,
     crypto,
     localDID,
@@ -47,7 +48,12 @@ function senderStrippingCrypto(localDID: string): GroupCrypto {
     ...inner,
     unwrap: async (bytes: Uint8Array) => {
       const { payload } = await inner.unwrap(bytes)
-      return { payload } as unknown as { payload: Uint8Array; senderDID: string; epoch: number }
+      return { payload } as unknown as {
+        payload: Uint8Array
+        senderDID: string
+        epoch: number
+        frameEpoch: number
+      }
     },
   }
 }

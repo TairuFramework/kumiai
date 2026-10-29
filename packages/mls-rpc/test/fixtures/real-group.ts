@@ -19,7 +19,13 @@ import {
   restoreGroup,
   revokeWithProof,
 } from '@kumiai/mls'
-import type { ControlStore } from '@kumiai/rpc'
+import type {
+  ControlStore,
+  GroupKey,
+  GroupTransaction,
+  HandlerCompletion,
+  PendingAppFrames,
+} from '@kumiai/rpc'
 import { createMemoryControlStore } from '@kumiai/rpc-conformance'
 import {
   bytesToBase64,
@@ -575,4 +581,20 @@ export async function bareTestHandle(handle: GroupHandle): Promise<GroupHandle> 
       onLedgerEntries: handle.onLedgerEntries,
     },
   })
+}
+
+export function createTestCompletion(
+  key: GroupKey,
+  pending?: PendingAppFrames,
+): HandlerCompletion<GroupTransaction> {
+  return {
+    key,
+    async complete(ids) {
+      if (pending === undefined && ids.length !== 0) throw new Error('No pending frame store')
+      for (const id of ids) await pending?.complete(id)
+    },
+    async transact() {
+      throw new Error('Transactional completion requires a persistence fixture')
+    },
+  }
 }

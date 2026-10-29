@@ -12,7 +12,12 @@ import { createHubMux } from '../src/hub-mux.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  completeTestRecord,
+  createFakeCrypto,
+  createTestCompletion,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 const captured = vi.hoisted(
@@ -87,18 +92,23 @@ function fixture(
       : {}),
   })
   const seen: Array<string> = []
-  const events = adaptBusHandlers(chat, {
-    'chat/posted': ({ data }: { data: { text: string } }) => {
-      seen.push(data.text)
-      return options.handler?.()
-    },
-  }).events
+  const events = adaptBusHandlers(
+    chat,
+    {
+      'chat/posted': ({ data }: { data: { text: string } }) => {
+        seen.push(data.text)
+        return options.handler?.()
+      },
+    } as never,
+    { completion: createTestCompletion() },
+  ).events
   const cursor = createMemoryAppCursorStore()
   const hub = new DurableFakeHub()
   const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
   const pruned = vi.fn()
   const drains = { pending: 0, peak: 0, starts: 0 }
   const lane = createAppLane({
+    groupKey: { groupID: 'group', incarnation: 1 },
     mux,
     crypto: reader,
     appliedEpoch: () => reader.epoch(),
@@ -926,11 +936,18 @@ describe('app pulls against a faulty hub', () => {
 
   test('one comparator orders restore after restart', async () => {
     const f = fixture({ durable: true })
-    const records = ['9', 'a', '100', 'B', '10'].map((seq) => ({
-      frame: { id: `restored-${seq}`, topicID, protocol: 'chat', segment: 1, position: seq },
-      payload: encodeEventFrame('chat/posted', { text: seq }),
-      senderDID: 'alice',
-    }))
+    const records = ['9', 'a', '100', 'B', '10'].map((seq) =>
+      completeTestRecord(
+        {
+          frame: { id: `restored-${seq}`, topicID, protocol: 'chat', segment: 1, position: seq },
+          payload: encodeEventFrame('chat/posted', { text: seq }),
+          senderDID: 'alice',
+        },
+        { groupID: 'group', incarnation: 1 },
+        'chat/posted',
+        1,
+      ),
+    )
     await f.lane.restore(records)
     expect(f.lane.pendingRecords().map((record) => record.frame.position)).toEqual([
       '10',

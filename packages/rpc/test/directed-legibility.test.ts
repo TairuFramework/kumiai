@@ -13,7 +13,7 @@ import {
 import { decodeDirectedPayload } from '../src/directed-tag.js'
 import type { HubMux } from '../src/hub-mux.js'
 import { createGroupPeer } from '../src/peer.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
@@ -33,6 +33,7 @@ type RecipientProtocols = { alpha: typeof alpha }
 
 function makeCaller(hub: FakeHub, localDID: string) {
   return createGroupPeer<CallerProtocols>({
+    completion: createTestCompletion(),
     hub,
     crypto: createFakeCrypto({ epoch: 1, localDID }),
     localDID,
@@ -43,6 +44,7 @@ function makeCaller(hub: FakeHub, localDID: string) {
 
 function makeRecipientAlphaOnly(hub: FakeHub, localDID: string) {
   return createGroupPeer<RecipientProtocols>({
+    completion: createTestCompletion(),
     hub,
     crypto: createFakeCrypto({ epoch: 1, localDID }),
     localDID,

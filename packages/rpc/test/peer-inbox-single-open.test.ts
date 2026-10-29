@@ -2,7 +2,7 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 import { describe, expect, test } from 'vitest'
 
 import { createGroupPeer } from '../src/peer.js'
-import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, type FakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
@@ -30,6 +30,7 @@ function countingCrypto(base: FakeCrypto): { crypto: FakeCrypto; opens: Array<st
 function makePeer(hub: FakeHub, localDID: string, handlers: Record<string, unknown>) {
   const { crypto, opens } = countingCrypto(createFakeCrypto({ epoch: 1, localDID }))
   const peer = createGroupPeer<Protocols>({
+    completion: createTestCompletion(),
     hub,
     crypto,
     localDID,

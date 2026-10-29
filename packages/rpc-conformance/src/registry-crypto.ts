@@ -117,6 +117,65 @@ export function testRegistryCryptoConformance(params: RegistryCryptoConformanceP
         }
       }))
 
+    test('registry durable unwrap preserves saved record metadata', () =>
+      run('saved-metadata', async (fixture) => {
+        const frame = await input(fixture, '000000000001')
+        const crypto = await fixture.crypto()
+        const first = await crypto.unwrap(frame.ciphertext, { frame: frame.frame })
+        const epoch = first.epoch
+        const key = JSON.stringify([
+          'kumiai/frame/v1',
+          fixture.key.groupID,
+          fixture.key.incarnation,
+          fixture.topicID,
+          frame.frame.position,
+          'chat',
+          'posted',
+        ])
+        const saved = {
+          frame: { ...frame.frame, procedure: 'posted' },
+          payload: encode('000000000001'),
+          senderDID: fixture.senderDID,
+          epoch,
+          idempotencyKey: key,
+        }
+        expect(first).toEqual({
+          payload: saved.payload,
+          senderDID: saved.senderDID,
+          frameEpoch: epoch,
+          epoch,
+        })
+        expect(await crypto.pending.list()).toEqual([saved])
+        await fixture.advanceRegistry()
+        const restarted = await fixture.reopen()
+        try {
+          const restored = await restarted.crypto()
+          expect(await restored.unwrap(frame.ciphertext, { frame: frame.frame })).toEqual({
+            payload: saved.payload,
+            senderDID: saved.senderDID,
+            frameEpoch: epoch,
+            epoch: epoch + 1,
+          })
+          expect(await restored.unwrapBatch([frame])).toEqual([
+            { kind: 'opened', record: saved, handleEpoch: epoch + 1 },
+          ])
+          expect(await restored.pending.list()).toEqual([saved])
+          for (const wrong of [
+            { ...frame.frame, groupID: `${frame.frame.groupID}-wrong` },
+            { ...frame.frame, incarnation: frame.frame.incarnation + 1 },
+          ]) {
+            await expect(restored.unwrap(frame.ciphertext, { frame: wrong })).rejects.toMatchObject(
+              { name: 'AppFrameStorageError' },
+            )
+            await expect(restored.unwrapBatch([{ ...frame, frame: wrong }])).rejects.toMatchObject({
+              name: 'AppFrameStorageError',
+            })
+          }
+        } finally {
+          await restarted.close()
+        }
+      }))
+
     test('replay resolves saved pending before reopening', () =>
       run('replay', async (fixture) => {
         const frame = await input(fixture, '000000000001')

@@ -24,6 +24,7 @@ import { listRetiredOutcomes, retireIncarnation } from '../src/registry/retired.
 import { registryRetirement } from '../src/registry/retirement.js'
 import { registryLeaseSnapshot } from '../src/testing.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 import {
   buildSealedMemoryOperation,
@@ -72,6 +73,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
       entrySlot: api.createLedgerEntrySlot(),
     })
     const peer = createGroupPeer({
+      completion: createTestCompletion(f.key, f.access().pending),
       openedDeliveryContext,
       mls,
       hub: new FakeHub(),
@@ -405,6 +407,7 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
             newID: () => crypto.randomUUID(),
           })
           const peer = createGroupPeer({
+            completion: createTestCompletion(key, rawAccess.pending),
             openedDeliveryContext,
             ...options,
             hub,

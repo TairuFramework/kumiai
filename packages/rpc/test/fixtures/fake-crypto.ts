@@ -2,15 +2,23 @@ import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
-import { RETAINED_EPOCHS_DEFAULT } from '../../src/app-frame.js'
+import {
+  appFrameIdempotencyKey,
+  decodeAppEventPlaintext,
+  InvalidAppEntryError,
+  RETAINED_EPOCHS_DEFAULT,
+} from '../../src/app-frame.js'
+import type { GroupKey } from '../../src/control/types.js'
 import {
   AppFrameStorageError,
   FrameEpochError,
   type GroupCrypto,
   type PendingAppFrame,
   type PendingAppFrames,
+  type PreOpenAppFrameRef,
   sortPendingAppFrames,
 } from '../../src/crypto.js'
+import type { GroupTransaction, HandlerCompletion } from '../../src/handler-completion.js'
 import { LedgerEntryRefusedError } from '../../src/ledger-entries.js'
 import { decodeMemoryCommit } from './memory-group-mls.js'
 
@@ -359,19 +367,28 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     }
     if (consume) spent.add(spentKey)
     const payload = framed.subarray(headerEnd + didLen + aadLen, framed.length - TAG_BYTES)
-    return { payload, senderDID, spentKey }
+    return { payload, senderDID, spentKey, frameEpoch: sealedAt }
   }
   const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
     starts.unwrap++
     if (opts?.frame == null) {
-      const { payload, senderDID } = open(bytes, opts, true)
-      return { payload, senderDID, epoch }
+      const { payload, senderDID, frameEpoch } = open(bytes, opts, true)
+      return { payload, senderDID, epoch, frameEpoch }
     }
     const pending = options.pending
     if (pending == null) throw new Error('unwrap: pending store required for durable open')
     const openedAt = epoch
-    const { payload, senderDID, spentKey } = open(bytes, opts, false)
-    const record = { frame: opts.frame, payload, senderDID }
+    const { payload, senderDID, spentKey, frameEpoch } = open(bytes, opts, false)
+    const plaintext = decodeAppEventPlaintext(payload)
+    if (plaintext === null) throw new InvalidAppEntryError('unwrap: malformed app event plaintext')
+    const frame = { ...opts.frame, procedure: plaintext.procedure }
+    const record = {
+      frame,
+      payload,
+      senderDID,
+      epoch: frameEpoch,
+      idempotencyKey: appFrameIdempotencyKey(frame),
+    }
     return (async () => {
       try {
         await pending.persistOpened(saveState(spentKey), record)
@@ -379,7 +396,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
         throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
       }
       spent.add(spentKey)
-      return { payload, senderDID, epoch: openedAt }
+      return { payload, senderDID, epoch: openedAt, frameEpoch }
     })()
   }
   const pending = options.pending
@@ -498,4 +515,34 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       }
     },
   }
+}
+
+export function createTestCompletion(
+  key: GroupKey = { groupID: 'handler-test', incarnation: 1 },
+  pending?: PendingAppFrames,
+): HandlerCompletion<GroupTransaction> {
+  return {
+    key,
+    async complete(ids) {
+      if (pending === undefined && ids.length !== 0) throw new Error('No pending frame store')
+      for (const id of ids) await pending?.complete(id)
+    },
+    async transact() {
+      throw new Error('Transactional completion requires a persistence fixture')
+    },
+  }
+}
+
+export function completeTestRecord(
+  record: {
+    frame: Omit<PreOpenAppFrameRef, 'groupID' | 'incarnation'> & Partial<GroupKey>
+    payload: Uint8Array
+    senderDID: string
+  },
+  key: GroupKey,
+  procedure: string,
+  epoch: number,
+): PendingAppFrame {
+  const frame = { ...key, ...record.frame, procedure }
+  return { ...record, frame, epoch, idempotencyKey: appFrameIdempotencyKey(frame) }
 }

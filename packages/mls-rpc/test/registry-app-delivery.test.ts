@@ -15,13 +15,17 @@ import { createControlAdoptionPort } from '../src/control-adoption.js'
 import * as api from '../src/index.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import { restoreHost } from './fixtures/registry.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
 
 const chat = {
   'chat/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
 } as const
-type Handler = GroupProcedureHandlers<typeof chat>['chat/posted']
+type Handler = Extract<
+  GroupProcedureHandlers<typeof chat>['chat/posted'],
+  (context: never) => unknown
+>
 type Delivery = Parameters<Handler>[0]
 const { DurableFakeHub } = (await import(
   new URL('../../rpc/test/fixtures/durable-fake-hub.ts', import.meta.url).href
@@ -67,6 +71,7 @@ async function setup(mode: 'real-mls' | 'double', name: string) {
       createPeer: async (key, options) => {
         const ports = f.device.groups.ports(key)
         return createGroupPeer({
+          completion: createTestCompletion(key, crypto.pending),
           openedDeliveryContext,
           ...options,
           hub,
@@ -283,6 +288,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const version = (await fixture.device.groups.readEvidence(f.group.key)).source.stateVersion
       const payload = await f.seal()
       const frame = {
+        ...f.group.key,
         id: frameID(f.topicID, payload),
         topicID: f.topicID,
         protocol: 'chat',

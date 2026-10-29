@@ -2,6 +2,7 @@ import { EventEmitter } from '@sozai/event'
 import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { adaptBusHandlers } from '../src/handlers.js'
+import { createTestCompletion } from './fixtures/fake-crypto.js'
 
 // A minimal protocol: one request with an integer `param`, one event with an
 // object `data` requiring a string `id`.
@@ -38,18 +39,26 @@ const protocolWithStreamChannel = {
 
 describe('adaptBusHandlers', () => {
   test('rejects a request whose param fails schema validation', async () => {
-    const { requestHandlers } = adaptBusHandlers(protocol as never, {
-      compute: ({ param }: { param: number }) => param + 1,
-    })
+    const { requestHandlers } = adaptBusHandlers(
+      protocol as never,
+      {
+        compute: ({ param }: { param: number }) => param + 1,
+      } as never,
+      { completion: createTestCompletion() },
+    )
     const { compute } = requestHandlers
     if (compute === undefined) throw new Error('compute handler missing')
     await expect(Promise.resolve(compute('not-a-number', {}))).rejects.toThrow()
   })
 
   test('accepts a request whose param passes validation', async () => {
-    const { requestHandlers } = adaptBusHandlers(protocol as never, {
-      compute: ({ param }: { param: number }) => param + 1,
-    })
+    const { requestHandlers } = adaptBusHandlers(
+      protocol as never,
+      {
+        compute: ({ param }: { param: number }) => param + 1,
+      } as never,
+      { completion: createTestCompletion() },
+    )
     const { compute } = requestHandlers
     if (compute === undefined) throw new Error('compute handler missing')
     await expect(Promise.resolve(compute(41, {}))).resolves.toBe(42)
@@ -63,18 +72,24 @@ describe('adaptBusHandlers', () => {
       expect(calls.length).toBeGreaterThan(0)
     })
     const handler = vi.fn()
-    const { events } = adaptBusHandlers(protocol as never, { notify: handler })
+    const { events } = adaptBusHandlers(protocol as never, { notify: handler } as never, {
+      completion: createTestCompletion(),
+    })
     await events.emit('notify', { data: { id: 123 }, senderDID: 'did:x' }) // id must be a string
     expect(handler).not.toHaveBeenCalled()
   })
 
   test('delivers a valid event to the handler with the authenticated sender', async () => {
     const seen: Array<unknown> = []
-    const { events } = adaptBusHandlers(protocol as never, {
-      notify: (ctx: { data?: unknown; message: { payload: { iss?: string } } }) => {
-        seen.push({ data: ctx.data, iss: ctx.message.payload.iss })
-      },
-    })
+    const { events } = adaptBusHandlers(
+      protocol as never,
+      {
+        notify: (ctx: { data?: unknown; message: { payload: { iss?: string } } }) => {
+          seen.push({ data: ctx.data, iss: ctx.message.payload.iss })
+        },
+      } as never,
+      { completion: createTestCompletion() },
+    )
     await events.emit('notify', { data: { id: 'abc' }, senderDID: 'did:sender' })
     expect(seen).toEqual([{ data: { id: 'abc' }, iss: 'did:sender' }])
   })
@@ -82,12 +97,16 @@ describe('adaptBusHandlers', () => {
   test('forwards the responder-supplied signal into the request handler', async () => {
     const controller = new AbortController()
     let seen: AbortSignal | undefined
-    const { requestHandlers } = adaptBusHandlers(protocol as never, {
-      compute: ({ signal }: { signal?: AbortSignal }) => {
-        seen = signal
-        return 0
-      },
-    })
+    const { requestHandlers } = adaptBusHandlers(
+      protocol as never,
+      {
+        compute: ({ signal }: { signal?: AbortSignal }) => {
+          seen = signal
+          return 0
+        },
+      } as never,
+      { completion: createTestCompletion() },
+    )
     const { compute } = requestHandlers
     if (compute === undefined) throw new Error('compute handler missing')
     await Promise.resolve(compute(1, { signal: controller.signal }))
@@ -95,15 +114,21 @@ describe('adaptBusHandlers', () => {
   })
 
   test('events is an EventEmitter', () => {
-    const { events } = adaptBusHandlers(protocol as never, {})
+    const { events } = adaptBusHandlers(protocol as never, {} as never, {
+      completion: createTestCompletion(),
+    })
     expect(events).toBeInstanceOf(EventEmitter)
   })
 
   test('omits stream and channel procedures from requestHandlers and eventHandlers', () => {
-    const { requestHandlers } = adaptBusHandlers(protocolWithStreamChannel as never, {
-      streamProc: () => {},
-      channelProc: () => {},
-    })
+    const { requestHandlers } = adaptBusHandlers(
+      protocolWithStreamChannel as never,
+      {
+        streamProc: () => {},
+        channelProc: () => {},
+      } as never,
+      { completion: createTestCompletion() },
+    )
     expect(Object.keys(requestHandlers)).not.toContain('streamProc')
     expect(Object.keys(requestHandlers)).not.toContain('channelProc')
   })
@@ -111,8 +136,8 @@ describe('adaptBusHandlers', () => {
   test('tags request handlers suppressible when a suppress config is given', () => {
     const { requestHandlers } = adaptBusHandlers(
       protocol as never,
-      { compute: ({ param }: { param: number }) => param },
-      { jitterMs: 50 },
+      { compute: ({ param }: { param: number }) => param } as never,
+      { completion: createTestCompletion(), suppress: { jitterMs: 50 } },
     )
     expect((requestHandlers.compute as { suppress?: unknown }).suppress).toBeDefined()
   })

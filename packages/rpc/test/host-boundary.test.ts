@@ -24,7 +24,7 @@ import type { GroupProtocolDefinition } from '../src/protocol.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { memoryApplicationPorts } from './fixtures/app-publication.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { memoryControlPorts } from './fixtures/peer.js'
@@ -729,6 +729,7 @@ test('manual authority cannot construct an ordinary peer', async () => {
   try {
     expect(() => {
       created = createGroupPeerWithControlWalk({
+        completion: createTestCompletion(),
         hub,
         crypto,
         mls,

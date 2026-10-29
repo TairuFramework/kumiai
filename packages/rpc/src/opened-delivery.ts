@@ -5,6 +5,7 @@ import { toUTF } from '@sozai/codec'
 
 import type { GroupKey } from './control/types.js'
 import type { PendingAppFrame, PendingAppFrames } from './crypto.js'
+import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
 import { adaptBusHandlers, type BusHandlerMaps, type GroupProcedureHandlers } from './handlers.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 import { retentionOf } from './protocol.js'
@@ -130,18 +131,24 @@ export function createOpenedRecordHandler(params: {
   }
 }
 
-export function createOpenedAppHandler<P extends Record<string, GroupProtocolDefinition>>(params: {
+export function createOpenedAppHandler<
+  P extends Record<string, GroupProtocolDefinition>,
+  TTx extends GroupTransaction,
+>(params: {
   localDID: string
   protocols: P
-  handlers: { [K in keyof P]: GroupProcedureHandlers<P[K]> }
+  handlers: { [K in keyof P]: GroupProcedureHandlers<P[K], TTx> }
+  completion: HandlerCompletion<TTx>
   suppress?: SuppressConfig
 }): (record: PendingAppFrame) => Promise<void> {
   const events = new Map<string, BusHandlerMaps['events']>()
   for (const [name, protocol] of Object.entries(params.protocols))
     events.set(
       name,
-      adaptBusHandlers(protocol, params.handlers[name] as Record<string, unknown>, params.suppress)
-        .events,
+      adaptBusHandlers<GroupProtocolDefinition, TTx>(protocol, params.handlers[name] as never, {
+        completion: params.completion,
+        suppress: params.suppress,
+      }).events,
     )
   return createOpenedRecordHandler({ ...params, events })
 }

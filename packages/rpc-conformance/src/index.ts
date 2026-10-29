@@ -181,6 +181,10 @@ export {
   type OwnershipPhasesConformanceParams,
   testOwnershipPhasesConformance,
 } from './ownership-phases.js'
+export type {
+  ConformanceDurableHandler,
+  ConformanceGroupHandlerMetadata,
+} from './pending-group-crypto.js'
 export {
   type ConformanceAppFrameRef,
   type ConformancePendingAppFrame,

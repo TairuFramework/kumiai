@@ -8,7 +8,7 @@ import { createGroupPeer } from '../src/peer.js'
 import { detectRosterChange } from '../src/roster.js'
 import { APP_TOPIC_LABEL, inboxTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
@@ -28,6 +28,7 @@ type Protocols = { proto: typeof proto }
 function makePeer(hub: FakeHub, localDID: string, handlers: Record<string, unknown> = {}) {
   const crypto = createFakeCrypto({ epoch: 1, localDID })
   return createGroupPeer<Protocols>({
+    completion: createTestCompletion(),
     hub,
     crypto,
     localDID,

@@ -111,7 +111,7 @@ export type RegistryPeerOptions = {
     reply: CapturedRecapture,
   ) => Promise<RecoveryReconciliation>
   continuation: RecoveryContinuation | null
-  completion: RecoveryCompletion | null
+  recoveryCompletion?: RecoveryCompletion | null
 }
 export type RegistryPeerStatus =
   | { kind: 'starting' | 'running' | 'switching' | 'disposed' }
@@ -643,7 +643,7 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
           },
           reconcileConfirmedRecovery,
           continuation,
-          completion:
+          recoveryCompletion:
             continuation === null
               ? null
               : (input) =>

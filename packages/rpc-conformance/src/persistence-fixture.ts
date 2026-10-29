@@ -13,6 +13,7 @@ import type {
   ConformanceGroupSafetyEvent,
   ConformanceRecoveryUnavailableEvent,
 } from './control-store.js'
+import type { ConformanceGroupCrypto, ConformanceUnwrapResult } from './group-crypto.js'
 import type { ConformanceSendAdmission } from './group-mls.js'
 
 export type ConformanceMemberCredential = { id: string; groupID: string }
@@ -629,6 +630,15 @@ export type ConformanceOpenAppResult =
       handleEpoch: number
     }
   | { kind: 'held'; frame: ConformancePreOpenAppFrameRef; reason: 'unsupported-version' }
+export type ConformanceHandlerCompletion<TTx extends ConformanceGroupTransaction> = {
+  key: ConformanceGroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(
+    ids: Array<string>,
+    handle: (tx: TTx, records: Array<ConformanceStoragePendingAppFrame>) => Promise<void>,
+  ): Promise<void>
+}
+
 export type ConformancePendingAppFrames = {
   list(): Promise<Array<ConformanceStoragePendingAppFrame>>
   complete(id: string): Promise<void>
@@ -739,6 +749,16 @@ export type RegistryCryptoFixture = {
     openBatch(frames: Array<ConformanceOpenAppInput>): Promise<Array<ConformanceOpenAppResult>>
     pending: ConformancePendingAppFrames
   }>
+  crypto(): Promise<
+    ConformanceGroupCrypto & {
+      unwrap(
+        bytes: Uint8Array,
+        opts?: { frame?: ConformancePreOpenAppFrameRef; expectedAAD?: Uint8Array },
+      ): ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
+      unwrapBatch(frames: Array<ConformanceOpenAppInput>): Promise<Array<ConformanceOpenAppResult>>
+      pending: ConformancePendingAppFrames
+    }
+  >
   seal(plaintext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array>
   sealAhead(plaintext: Uint8Array): Promise<Uint8Array>
   advanceRegistry(): Promise<void>

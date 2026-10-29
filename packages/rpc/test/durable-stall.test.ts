@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -10,7 +11,12 @@ import * as hostNotice from '../src/host-notice.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  completeTestRecord,
+  createFakeCrypto,
+  createTestCompletion,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
@@ -48,7 +54,9 @@ async function publish(
     topicID,
     senderDID: 'alice',
     payload: await sender.wrap(
-      fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } })),
+      fromUTF(
+        JSON.stringify({ v: 2, payload: { typ: 'event', prc: 'chat/posted', data: { text } } }),
+      ),
       { aad: encodeAppAAD({ topicID, intent: 'log' }) },
     ),
     retain: 'log',
@@ -120,6 +128,7 @@ describe('durable storage stall', () => {
     const notices = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ topicID: requested, after }: { topicID: string; after?: string }) {
@@ -175,6 +184,7 @@ describe('durable storage stall', () => {
     expect(resumed).toHaveBeenCalledTimes(4)
 
     const withoutStalled = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ topicID: requested, after }: { topicID: string; after?: string }) {
@@ -218,18 +228,23 @@ describe('durable storage stall', () => {
   test('a completed pending frame resumes even when cursor save rejects', async () => {
     const position = '000000000001'
     const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
-    const sealed = await sender.wrap(fromUTF('saved'), {
+    const sealed = await sender.wrap(encodeEventFrame('chat/posted', {}), {
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     })
+    const rows = new Map<string, PendingAppFrame>()
     const reader = createFakeCrypto({
       epoch: 1,
       localDID: 'bob',
       pending: {
-        async persistOpened() {},
-        async list() {
-          return []
+        async persistOpened(_state, record) {
+          rows.set(record.frame.id, record)
         },
-        async complete() {},
+        async list() {
+          return [...rows.values()]
+        },
+        async complete(id) {
+          rows.delete(id)
+        },
       },
     })
     const stalled = vi.fn()
@@ -238,6 +253,7 @@ describe('durable storage stall', () => {
       throw new Error('cursor unavailable')
     })
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -293,6 +309,7 @@ describe('durable storage stall', () => {
       throw new Error('cursor unavailable')
     })
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -362,6 +379,7 @@ describe('durable storage stall', () => {
       }
     })
     lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         fetchTopic,
@@ -427,6 +445,7 @@ describe('durable storage stall', () => {
       }
     })
     lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         fetchTopic,
@@ -483,6 +502,7 @@ describe('durable storage stall', () => {
     const stalled = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -535,6 +555,7 @@ describe('durable storage stall', () => {
       throw new Error('resume observer failed')
     })
     lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -589,6 +610,7 @@ describe('durable storage stall', () => {
     const stalled = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -636,6 +658,7 @@ describe('durable storage stall', () => {
     const resumed = vi.fn()
     const cursor = createMemoryAppCursorStore()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -681,23 +704,29 @@ describe('durable storage stall', () => {
   test('a future-epoch stall resumes after its record completes', async () => {
     const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
     const sealed = await sender.wrap(
-      fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: {} } })),
+      fromUTF(JSON.stringify({ v: 2, payload: { typ: 'event', prc: 'chat/posted', data: {} } })),
       { aad: encodeAppAAD({ topicID, intent: 'log' }) },
     )
+    const rows = new Map<string, PendingAppFrame>()
     const reader = createFakeCrypto({
       epoch: 1,
       localDID: 'bob',
       pending: {
-        async persistOpened() {},
-        async list() {
-          return []
+        async persistOpened(_state, record) {
+          rows.set(record.frame.id, record)
         },
-        async complete() {},
+        async list() {
+          return [...rows.values()]
+        },
+        async complete(id) {
+          rows.delete(id)
+        },
       },
     })
     const stalled = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -740,14 +769,26 @@ describe('durable storage stall', () => {
   })
 
   test('an unknown-protocol stall resumes on drop, and disposal does not resume a stall', async () => {
-    const frame: PendingAppFrame = {
-      frame: { id: 'missing', topicID, protocol: 'missing', segment: 1, position: '000000000002' },
-      payload: fromUTF('saved'),
-      senderDID: 'alice',
-    }
+    const frame: PendingAppFrame = completeTestRecord(
+      {
+        frame: {
+          id: 'missing',
+          topicID,
+          protocol: 'missing',
+          segment: 1,
+          position: '000000000002',
+        },
+        payload: fromUTF('saved'),
+        senderDID: 'alice',
+      },
+      { groupID: 'group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     const stalled = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic() {
@@ -790,17 +831,25 @@ describe('durable storage stall', () => {
   })
 
   test('an unknown-protocol stall resumes after registration and delivery', async () => {
-    const record: PendingAppFrame = {
-      frame: { id: 'saved', topicID, protocol: 'missing', segment: 1, position: '000000000003' },
-      payload: fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: {} } })),
-      senderDID: 'alice',
-    }
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: { id: 'saved', topicID, protocol: 'missing', segment: 1, position: '000000000003' },
+        payload: fromUTF(
+          JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: {} } }),
+        ),
+        senderDID: 'alice',
+      },
+      { groupID: 'group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     const protocols: Record<string, typeof chat> = {}
     const events = new Map()
     const handler = vi.fn()
     const stalled = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic() {
@@ -830,7 +879,12 @@ describe('durable storage stall', () => {
     await lane.restore([record])
     expect(stalled).toHaveBeenCalledTimes(1)
     protocols.missing = chat
-    events.set('missing', adaptBusHandlers(chat, { 'chat/posted': handler }).events)
+    events.set(
+      'missing',
+      adaptBusHandlers(chat, { 'chat/posted': handler } as never, {
+        completion: createTestCompletion(),
+      }).events,
+    )
     await lane.deliver()
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
     await vi.waitFor(() =>

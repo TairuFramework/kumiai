@@ -26,6 +26,7 @@ import {
 } from './directed.js'
 import { GroupSafetyHeldError, SendNotAdmissibleError } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
+import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
 import { adaptBusHandlers } from './handlers.js'
 import { type HostBoundary, wrapGatherOptions } from './host-boundary.js'
 import type { HubMux } from './hub-mux.js'
@@ -50,13 +51,17 @@ type ProtocolRuntime = {
 /** A frame sealed for, and addressed to, the segment its seal epoch belongs to. */
 export type SegmentFrame = { topicID: string; payload: Uint8Array }
 
-export type EpochRuntimeParams<Protocols extends Record<string, ProtocolDefinition>> = {
+export type EpochRuntimeParams<
+  Protocols extends Record<string, ProtocolDefinition>,
+  TTx extends GroupTransaction = GroupTransaction,
+> = {
   boundary: HostBoundary
   mux: HubMux
   crypto: GroupCrypto
   localDID: string
   protocols: Protocols
-  handlers: GroupPeerParams<Protocols>['handlers']
+  handlers: GroupPeerParams<Protocols, TTx>['handlers']
+  completion: HandlerCompletion<TTx>
   suppress: SuppressConfig | undefined
   runtime: Runtime | undefined
   appLogRetentionSeconds: number
@@ -92,9 +97,10 @@ export type EpochRuntime = {
 }
 
 /** The app lane's anchor-bound runtimes per protocol, plus the peer's one inbox lane. */
-export function createEpochRuntime<Protocols extends Record<string, ProtocolDefinition>>(
-  params: EpochRuntimeParams<Protocols>,
-): EpochRuntime {
+export function createEpochRuntime<
+  Protocols extends Record<string, ProtocolDefinition>,
+  TTx extends GroupTransaction,
+>(params: EpochRuntimeParams<Protocols, TTx>): EpochRuntime {
   const {
     boundary,
     mux,
@@ -296,10 +302,10 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         transport: segmentBoundTransport(name, topicID, inbound),
         ...(params.runtime != null ? { runtime: params.runtime } : {}),
       })
-      const { events, requestHandlers } = adaptBusHandlers(
+      const { events, requestHandlers } = adaptBusHandlers<ProtocolDefinition, TTx>(
         protocol,
-        handlers[name] as Record<string, unknown>,
-        suppress,
+        handlers[name] as never,
+        { completion: params.completion, suppress },
       )
       const busServer = createBroadcastResponder({
         transport: segmentBoundTransport(name, topicID, inbound),

@@ -181,10 +181,13 @@ export {
   isAppFrameStorageError,
   isMissingLedgerEntries,
   type LegacyPendingRecovery,
+  type OpenAppInput,
+  type OpenAppResult,
   type OpenedRecoveryVerdict,
   type PendingAppFrame,
   type PendingAppFrames,
   type PendingRecovery,
+  type PreOpenAppFrameRef,
   type ProcessCommitResult,
   type RecoveryCommitValidation,
   type RecoveryConfirmationBinding,
@@ -234,7 +237,13 @@ export {
   type ReportCoverage,
 } from './fork-notice.js'
 export { assertFrameFits, FrameTooLargeError } from './frame-size.js'
-export type { GroupProcedureHandlers } from './handlers.js'
+export type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
+export type {
+  DurableHandler,
+  GroupHandlerMetadata,
+  GroupProcedureHandlers,
+  MetadataHandler,
+} from './handlers.js'
 export {
   decodeHandshakeFrame,
   encodeHandshakeFrame,

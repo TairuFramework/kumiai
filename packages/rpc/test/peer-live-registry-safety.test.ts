@@ -147,7 +147,7 @@ test.each(reasons)(
       crypto: alice.crypto,
       anchorStore: alice.anchorStore,
       continuation: { source: record.source.key, destination: destinationKey, record },
-      completion: async () => {},
+      recoveryCompletion: async () => {},
     })
     peers.push(destination)
     await destination.peer.replay()

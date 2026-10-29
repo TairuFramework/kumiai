@@ -1,9 +1,12 @@
 import { type GroupHandle, readMessageAAD, readMessageEpoch } from '@kumiai/mls'
 import {
   AppFrameStorageError,
+  appFrameIdempotencyKey,
+  decodeAppEventPlaintext,
   FrameEpochError,
   type GroupCrypto,
   GroupSafetyHeldError,
+  InvalidAppEntryError,
   isAppFrameStorageError,
   LedgerEntryRefusedError,
   type PendingAppFrame,
@@ -183,8 +186,9 @@ function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         let openError: unknown
         const open = async (group: GroupHandle, persistStaged: typeof persistOpened) => {
           assertDurableCryptoSafety(access)
+          const ciphertext = Uint8Array.from(bytes)
           const epoch = Number(group.epoch)
-          const frameEpoch = readMessageEpoch(bytes)
+          const frameEpoch = readMessageEpoch(ciphertext)
           if (
             frameEpoch != null &&
             Number(frameEpoch) !== epoch &&
@@ -192,21 +196,32 @@ function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           ) {
             throw new FrameEpochError(Number(frameEpoch), epoch)
           }
-          const result = await group.decryptStaged(bytes, opts, async (stagedState, result) => {
-            // The handle adopts the staged state only after this returns: a fault here leaves
-            // the key unspent, so the frame must be retried, not dropped.
-            try {
-              await persistStaged(stagedState, {
-                frame,
-                payload: result.payload,
-                senderDID: result.senderDID,
-              })
-            } catch (error) {
-              if (isAppFrameStorageError(error)) throw error
-              throw new AppFrameStorageError('failed to stage opened app frame', { cause: error })
-            }
-          })
-          return { ...result, epoch }
+          const result = await group.decryptStaged(
+            ciphertext,
+            opts,
+            async (stagedState, result) => {
+              // The handle adopts the staged state only after this returns: a fault here leaves
+              // the key unspent, so the frame must be retried, not dropped.
+              try {
+                const plaintext = decodeAppEventPlaintext(result.payload)
+                if (plaintext === null)
+                  throw new InvalidAppEntryError('unwrap: malformed app event plaintext')
+                const openedFrame = { ...frame, procedure: plaintext.procedure }
+                if (frameEpoch == null) throw new Error('unwrap: opened frame has no epoch')
+                await persistStaged(stagedState, {
+                  frame: openedFrame,
+                  payload: result.payload,
+                  senderDID: result.senderDID,
+                  epoch: Number(frameEpoch),
+                  idempotencyKey: appFrameIdempotencyKey(openedFrame),
+                })
+              } catch (error) {
+                if (isAppFrameStorageError(error)) throw error
+                throw new AppFrameStorageError('failed to stage opened app frame', { cause: error })
+              }
+            },
+          )
+          return { ...result, epoch, frameEpoch: Number(frameEpoch) }
         }
         let opened: Awaited<ReturnType<typeof open>>
         try {
@@ -231,7 +246,12 @@ function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
             cause: error,
           })
         }
-        return { payload: opened.payload, senderDID: opened.senderDID, epoch: opened.epoch }
+        return {
+          payload: opened.payload,
+          senderDID: opened.senderDID,
+          epoch: opened.epoch,
+          frameEpoch: opened.frameEpoch,
+        }
       }
       return base.unwrap(bytes, opts)
     },
@@ -337,17 +357,19 @@ export function createGroupCryptoBase(
 
     unwrap: async (bytes, opts) => {
       assertSafety()
-      const { payload, senderDID, epoch } = await access.mutate(async (group) => {
+      const { payload, senderDID, epoch, frameEpoch } = await access.mutate(async (group) => {
         assertSafety()
         const epoch = Number(group.epoch)
-        assertOpenableEpoch(group, bytes)
-        const opened = await group.decrypt(bytes, opts)
-        return { ...opened, epoch }
+        const ciphertext = Uint8Array.from(bytes)
+        assertOpenableEpoch(group, ciphertext)
+        const opened = await group.decrypt(ciphertext, opts)
+        if (opened.senderDID == null)
+          throw new Error('unwrap: opened frame has no authenticated sender')
+        const frameEpoch = readMessageEpoch(ciphertext)
+        if (frameEpoch == null) throw new Error('unwrap: opened frame has no epoch')
+        return { ...opened, senderDID: opened.senderDID, epoch, frameEpoch: Number(frameEpoch) }
       })
-      if (senderDID == null) {
-        throw new Error('unwrap: opened frame has no authenticated sender')
-      }
-      return { payload, senderDID, epoch }
+      return { payload, senderDID, epoch, frameEpoch }
     },
 
     frameEpoch: (bytes) => {

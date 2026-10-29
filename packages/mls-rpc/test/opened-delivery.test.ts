@@ -25,6 +25,7 @@ import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { retireToSuccessor } from '../src/successor.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture, registryFixtureForceOwnerMarker } from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
 
@@ -240,6 +241,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       const sealed = (await env.fixture.inspectRows()).pending
       let registered = false
       const handler = createOpenedAppHandler({
+        completion: createTestCompletion(env.key),
         localDID: 'bob',
         protocols,
         handlers: { chat: { posted: async () => {} } },
@@ -909,6 +911,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
             handoff: async () => {},
             completed: async () => {},
             deliver: createOpenedAppHandler({
+              completion: createTestCompletion(env.key),
               localDID: env.fixture.identity.id,
               protocols,
               handlers: {
@@ -1056,6 +1059,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           await save(topicID, position)
         }
         const lane = createAppLane({
+          groupKey: env.key,
           mux,
           crypto: receiver,
           localDID,

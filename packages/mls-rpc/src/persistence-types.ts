@@ -19,6 +19,9 @@ import type {
   GroupConditionEvent,
   GroupKey,
   GroupSafetyEvent,
+  GroupTransaction,
+  PendingAppFrame,
+  PreOpenAppFrameRef,
   RecoveryUnavailableEvent,
 } from '@kumiai/rpc'
 
@@ -32,6 +35,7 @@ export type OwnershipContextPort = {
 export type {
   AbandonedEpochRange,
   AppAttempt,
+  AppFrameRef,
   AppOutbox,
   AppOutboxEntry,
   AppPublicationOutcome,
@@ -48,10 +52,15 @@ export type {
   GroupForkEvidence,
   GroupKey,
   GroupSafetyEvent,
+  GroupTransaction,
   ManualRecoveryRecord,
   ManualRecoveryStatus,
+  OpenAppInput,
+  OpenAppResult,
   OwnBranchMessage,
+  PendingAppFrame,
   PersistedManualRecovery,
+  PreOpenAppFrameRef,
   RecoveryUnavailableEvent,
   SafetyHold,
 } from '@kumiai/rpc'
@@ -92,13 +101,6 @@ export type GroupRecoveryTrust = {
   ledger: Array<string>
   ciphersuiteName: string
   spentEpochAuthenticators: Array<Uint8Array>
-}
-
-export type GroupTransaction = {
-  providerID: string
-  groupID: string | null
-  onCommit(fn: () => void): void
-  onRollback(fn: () => void): void
 }
 
 export type IncarnationStores = {
@@ -346,61 +348,12 @@ export type PersistenceFixture<TPorts> = {
   close(): Promise<void>
 }
 
-export type PreOpenAppFrameRef = GroupKey & {
-  id: string
-  protocol: string
-  topicID: string
-  segment: number
-  position: string // segment = anchor epoch
-}
-
-export type OpenAppInput = {
-  frame: PreOpenAppFrameRef
-  ciphertext: Uint8Array
-  expectedAAD?: Uint8Array
-}
-export type OpenAppResult =
-  | { kind: 'opened'; record: PendingAppFrame; handleEpoch: number }
-  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'malformed-plaintext'; keyConsumed: true }
-  | {
-      kind: 'refused'
-      frame: PreOpenAppFrameRef
-      reason: 'invalid-ciphertext' | 'wrong-aad' | 'duplicate' | 'invalid-position'
-      keyConsumed: false
-    }
-  | {
-      kind: 'refused'
-      frame: PreOpenAppFrameRef
-      reason: 'past-epoch'
-      keyConsumed: false
-      frameEpoch: number
-      handleEpoch: number
-    }
-  | {
-      kind: 'held'
-      frame: PreOpenAppFrameRef
-      reason: 'future-epoch'
-      frameEpoch: number
-      handleEpoch: number
-    }
-  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'unsupported-version' }
 export type PendingAppFrames = {
   list(): Promise<Array<PendingAppFrame>>
   complete(id: string): Promise<void>
 }
 export const MAX_OPEN_BATCH_FRAMES = 64
 export const RECEIVE_SAVE_ATTEMPTS = 3
-
-export type AppFrameRef = PreOpenAppFrameRef & { procedure: string }
-// GroupCrypto.unwrap opts.frame changes to PreOpenAppFrameRef (r16 decision).
-
-export type PendingAppFrame = {
-  frame: AppFrameRef
-  payload: Uint8Array
-  senderDID: string
-  epoch: number
-  idempotencyKey: string
-}
 
 export type AppPoisonRecord = { frame: PreOpenAppFrameRef; reason: string; keyConsumed: boolean }
 

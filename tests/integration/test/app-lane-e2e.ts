@@ -85,6 +85,7 @@ import {
   bareTestHandle,
   buildRealUnavailableCommit,
   createRealGroup,
+  createTestCompletion,
   testGroupMLSDependencies,
   testHandleAccess,
 } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
@@ -526,6 +527,7 @@ export function makeMember(params: MakeMemberParams): Member {
     return result
   }
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
+    completion: createTestCompletion(stateStore.control.key, crypto.pending),
     openedDeliveryContext,
     appOutboxLimit: 128,
     onRecovery: params.onRecovery,
@@ -792,6 +794,7 @@ export function createOperationHost(access: HandleAccess, identity: OwnIdentity)
   })
   return {
     ...createHostApplicationPorts(access),
+    completion: createTestCompletion(control.key),
     builders,
     welcomes,
     control,

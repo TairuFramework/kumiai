@@ -10,7 +10,7 @@ import { createSingleConnectionHost, deferred } from './fixtures/single-connecti
 
 const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 const payload = (text: string) =>
-  fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
+  fromUTF(JSON.stringify({ v: 2, payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 const timeout = (ms = 250): Promise<'timeout'> =>
   new Promise((resolve) => setTimeout(() => resolve('timeout'), ms))
 

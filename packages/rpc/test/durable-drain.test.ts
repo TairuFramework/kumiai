@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
@@ -47,6 +48,7 @@ function retainedLane() {
   const messages: Array<{ sequenceID: string; payload: Uint8Array }> = []
   const cursor = createMemoryAppCursorStore()
   const lane = createAppLane({
+    groupKey: { groupID: 'group', incarnation: 1 },
     mux: {
       retainTopic() {},
       async fetchTopic({ after }: { after?: string }) {
@@ -70,18 +72,87 @@ function retainedLane() {
   const append = async (position: string, intent: 'log' | 'ephemeral') => {
     messages.push({
       sequenceID: position,
-      payload: await sender.wrap(
-        fromUTF('{"payload":{"typ":"event","prc":"chat/posted","data":{}}}'),
-        {
-          aad: encodeAppAAD({ topicID, intent }),
-        },
-      ),
+      payload: await sender.wrap(encodeEventFrame('chat/posted', {}), {
+        aad: encodeAppAAD({ topicID, intent }),
+      }),
     })
   }
   return { lane, reader, store, cursor, topicID, append }
 }
 
 describe('durable retained drain', () => {
+  test('durable delivery reloads the saved record with its original frame epoch and origin', async () => {
+    const { lane, reader, store, append } = retainedLane()
+    onTestFinished(() => lane.dispose())
+    await append('000000000001', 'log')
+    reader.setEpoch(2)
+    await lane.deliver()
+    const saved = [...store.records.values()][0]
+    expect(saved).toBeDefined()
+    expect(lane.pendingRecords()).toEqual([saved])
+    expect(saved).toMatchObject({
+      epoch: 1,
+      senderDID: 'alice',
+      frame: { groupID: 'group', incarnation: 1, procedure: 'chat/posted' },
+    })
+    expect(saved?.idempotencyKey).toBe(
+      JSON.stringify([
+        'kumiai/frame/v1',
+        'group',
+        1,
+        saved?.frame.topicID,
+        '000000000001',
+        'chat',
+        'chat/posted',
+      ]),
+    )
+  })
+
+  test('a failed saved-record read retries without opening twice or advancing the cursor', async () => {
+    const { lane, reader, store, cursor, topicID, append } = retainedLane()
+    onTestFinished(() => lane.dispose())
+    await append('000000000001', 'log')
+    const list = store.port.list.bind(store.port)
+    const failure = new Error('saved-record read unavailable')
+    vi.spyOn(store.port, 'list').mockImplementation(async () => {
+      if (store.records.size > 0) throw failure
+      return list()
+    })
+    await expect(lane.deliver()).rejects.toSatisfy(isAppFrameStorageError)
+    expect(cursor.stored(topicID)).toBeNull()
+    expect(store.records.size).toBe(1)
+    await expect(lane.dropFrame(topicID, '000000000001')).rejects.toThrow('app frame is pending')
+    vi.mocked(store.port.list).mockImplementation(list)
+    await lane.deliver()
+    expect(reader.starts.unwrap).toBe(1)
+    expect(lane.pendingRecords()).toEqual([...store.records.values()])
+    expect(cursor.stored(topicID)).toBeNull()
+  })
+
+  test('a saved-record read retry survives resetting the app lane without reopening', async () => {
+    const { lane, reader, store, cursor, topicID, append } = retainedLane()
+    onTestFinished(() => lane.dispose())
+    await append('000000000001', 'log')
+    vi.spyOn(store.port, 'list').mockRejectedValue(new Error('saved-record read unavailable'))
+    await expect(lane.deliver()).rejects.toSatisfy(isAppFrameStorageError)
+    lane.reset()
+    vi.mocked(store.port.list).mockResolvedValue([...store.records.values()])
+    await lane.deliver()
+    expect(reader.starts.unwrap).toBe(1)
+    expect(lane.pendingRecords()).toEqual([...store.records.values()])
+    expect(cursor.stored(topicID)).toBeNull()
+  })
+
+  test('a durable open with no saved record refuses delivery and cursor advancement', async () => {
+    const { lane, store, cursor, topicID, append } = retainedLane()
+    onTestFinished(() => lane.dispose())
+    vi.spyOn(store.port, 'list').mockResolvedValue([])
+    await append('000000000001', 'log')
+    await expect(lane.deliver()).rejects.toSatisfy(isAppFrameStorageError)
+    expect(lane.pendingRecords()).toEqual([])
+    expect(cursor.stored(topicID)).toBeNull()
+  })
+
   test('a storage fault leaves the frame sealed, and a durable open leaves the cursor behind pending', async () => {
     const { lane, store, cursor, topicID, append } = retainedLane()
     await append('000000000001', 'log')
@@ -149,6 +220,7 @@ describe('durable retained drain', () => {
     let chatFetches = 0
     let otherFetches = 0
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic(params: { topicID: string }) {

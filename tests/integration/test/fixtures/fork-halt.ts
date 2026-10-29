@@ -59,6 +59,7 @@ import { recoveryTrustFor } from '../../../../packages/mls-rpc/src/registry/trus
 import {
   bareTestHandle,
   createRealGroup,
+  createTestCompletion,
   type RealMember,
   testGroupMLSDependencies,
 } from '../../../../packages/mls-rpc/test/fixtures/real-group.js'
@@ -269,6 +270,7 @@ export async function createCapturedRecoveryFixture(
             },
           })
           const peer = createGroupPeerWithControlWalk<Protocols>({
+            completion: createTestCompletion(current, access.pending),
             openedDeliveryContext,
             ...options,
             hub,
@@ -488,6 +490,7 @@ export async function makeCheckpointPeer(
   })
   const readEvidence = vi.fn(() => groups.readEvidence(key))
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
+    completion: createTestCompletion(key, cryptoPort.pending),
     openedDeliveryContext,
     ...callbacks,
     appOutboxLimit: 128,

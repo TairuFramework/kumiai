@@ -40,6 +40,7 @@ import type {
   RecoveryRefusalReason,
 } from './crypto.js'
 import type { LogPosition } from './cursor.js'
+import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
 import type { GroupProcedureHandlers } from './handlers.js'
 import type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
 import type { AppOutboxCleared } from './log-delivery.js'
@@ -113,7 +114,7 @@ export type GroupPeerMLSParams = {
   ) => Promise<RecoveryReconciliation>
   reconcileConfirmedRecovery?: string
   continuation?: RecoveryContinuation | null
-  completion?: RecoveryCompletion | null
+  recoveryCompletion?: RecoveryCompletion | null
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
   mls: GroupMLS
   /** Durable log plaintext. The host owns encryption at rest and erasure. */
@@ -244,7 +245,11 @@ export type RecoveryFailureDetails = {
   anchorRecovery?: boolean
 }
 
-export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
+export type GroupPeerParams<
+  Protocols extends Record<string, GroupProtocolDefinition>,
+  TTx extends GroupTransaction = GroupTransaction,
+> = {
+  completion: HandlerCompletion<TTx>
   hub: LogHub
   crypto: GroupCrypto
   /** Required with crypto.pending; propagates delivery tokens across awaits. */
@@ -252,7 +257,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   localDID: string
   checkpoints?: CheckpointService
   protocols: Protocols
-  handlers: { [K in keyof Protocols]: GroupProcedureHandlers<Protocols[K]> }
+  handlers: { [K in keyof Protocols]: GroupProcedureHandlers<Protocols[K], TTx> }
   suppress?: SuppressConfig
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
@@ -334,7 +339,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
       reconcileAcceptedRecovery?: undefined
       reconcileConfirmedRecovery?: undefined
       continuation?: undefined
-      completion?: undefined
+      recoveryCompletion?: undefined
       appPublication?: undefined
       appOutbox?: undefined
       appOutboxLimit?: undefined

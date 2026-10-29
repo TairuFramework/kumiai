@@ -149,6 +149,7 @@ export async function createRegistryCryptoFixture(
     topicID,
     senderDID: group.sender.identity.id,
     access: async () => group.access(),
+    crypto: async () => group.receiver(),
     seal: (plaintext, aad) => group.sender.handle.encrypt(plaintext, { aad }),
     sealAhead: group.sealAhead,
     advanceRegistry: () => group.advance(),
@@ -222,7 +223,7 @@ export async function createRegistryPendingCryptoFixture(
       new TextEncoder().encode(
         JSON.stringify({ payload: { typ: 'event', prc: 'posted', data: { text } }, v: 2 }),
       ),
-    frame: (ciphertext, ref) => ({ ...ref, id: frameID(ref.topicID, ciphertext) }),
+    frame: (ciphertext, ref) => ({ ...ref, id: frameID(ref.topicID, ciphertext), ...group.key }),
     async restore() {
       await group.reopen()
       return receiver()

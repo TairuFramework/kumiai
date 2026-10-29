@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import { decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
 import type { PendingAppFrame } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
@@ -79,8 +80,10 @@ describe('real MLS durable host save ordering', () => {
       pending,
     })
     const aad = utf8.encode('topic')
-    const sealed = await sender.wrap(utf8.encode('hello'), { aad })
+    const sealed = await sender.wrap(encodeEventFrame('posted', { text: 'hello' }), { aad })
     const frame = {
+      groupID: receiver.handle.groupID,
+      incarnation: 1,
       id: 'real-port-frame',
       topicID: 'topic',
       protocol: 'chat',
@@ -96,7 +99,7 @@ describe('real MLS durable host save ordering', () => {
     gate.resolve()
     await earlierSave
     await expect(opening).resolves.toMatchObject({
-      payload: utf8.encode('hello'),
+      payload: encodeEventFrame('posted', { text: 'hello' }),
       senderDID: group.committer.identity.id,
     })
     expect(order).toEqual(['earlier', 'opened'])

@@ -51,6 +51,7 @@ import {
   createAsyncLocalOwnershipContext,
   openedDeliveryContext,
 } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import {
   createNotMemberFixture,
   createRegistryFixture,
@@ -729,6 +730,7 @@ async function liveManualPeer(
       cryptos.push(crypto)
       const ports = fixture.device.groups.ports(key)
       return createGroupPeer({
+        completion: createTestCompletion(key, crypto.pending),
         openedDeliveryContext,
         hub,
         crypto,

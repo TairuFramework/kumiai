@@ -8,7 +8,12 @@ import { createMemoryAnchorStore, type MemoryAnchorStore } from './fixtures/anch
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { memoryApplicationPorts } from './fixtures/app-publication.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  createFakeCrypto,
+  createTestCompletion,
+  type FakeCrypto,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   createMemoryGroupMLS,
@@ -76,6 +81,7 @@ function makeRoomPeer(
   const anchorStore = options.anchorStore ?? createMemoryAnchorStore({ backing: mls.anchorStore() })
   const appCursorStore = options.appCursorStore ?? createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
+    completion: createTestCompletion(),
     ...memoryApplicationPorts(mls, crypto),
     appOutboxLimit: 128,
     hub,

@@ -1,6 +1,7 @@
 import { readMessageAAD } from '@kumiai/mls'
 import {
   AppFrameStorageError,
+  appFrameIdempotencyKey,
   decodeAppAAD,
   FrameEpochError,
   type GroupCrypto,
@@ -33,7 +34,24 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
     assertDurableCryptoSafety(access)
     if (frames.length > MAX_OPEN_BATCH_FRAMES) throw new RangeError('App batch exceeds 64 frames')
     try {
-      return await access.openBatch(frames)
+      const results = await access.openBatch(frames)
+      for (const result of results) {
+        if (result.kind !== 'opened') continue
+        const record = result.record
+        if (
+          record.frame.groupID !== access.key.groupID ||
+          record.frame.incarnation !== access.key.incarnation ||
+          typeof record.frame.procedure !== 'string' ||
+          record.frame.procedure.length === 0 ||
+          typeof record.senderDID !== 'string' ||
+          record.senderDID.length === 0 ||
+          !Number.isSafeInteger(record.epoch) ||
+          record.epoch < 0 ||
+          record.idempotencyKey !== appFrameIdempotencyKey(record.frame)
+        )
+          throw new AppFrameStorageError('unwrap: incomplete or wrong-origin saved app frame')
+      }
+      return results
     } catch (error) {
       if (error instanceof GroupSafetyHeldError) throw error
       throw new AppFrameStorageError('handle access failed during durable open', { cause: error })
@@ -67,11 +85,11 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
         ])
         if (result == null) throw new Error('unwrap: invalid app frame')
         if (result.kind === 'opened') {
-          const { payload, senderDID, handleEpoch } = result
+          const { payload, senderDID, handleEpoch, frameEpoch } = result
           if (senderDID == null) {
             throw new Error('unwrap: opened frame has no authenticated sender')
           }
-          return { payload, senderDID, epoch: handleEpoch }
+          return { payload, senderDID, epoch: handleEpoch, frameEpoch }
         }
         if (result.reason === 'past-epoch' || result.reason === 'future-epoch') {
           throw new FrameEpochError(result.frameEpoch, result.handleEpoch)
@@ -83,7 +101,7 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
       }
       const results = await unwrapBatch([
         {
-          frame: { ...access.key, ...opts.frame },
+          frame: opts.frame,
           ciphertext: bytes,
           expectedAAD: opts.expectedAAD,
         },
@@ -93,8 +111,8 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
         throw new AppFrameStorageError('unwrap: openBatch must return exactly one result')
       }
       if (result.kind === 'opened') {
-        const { payload, senderDID } = result.record
-        return { payload, senderDID, epoch: result.handleEpoch }
+        const { payload, senderDID, epoch: frameEpoch } = result.record
+        return { payload, senderDID, epoch: result.handleEpoch, frameEpoch }
       }
       if (result.reason === 'past-epoch' || result.reason === 'future-epoch') {
         throw new FrameEpochError(result.frameEpoch, result.handleEpoch)

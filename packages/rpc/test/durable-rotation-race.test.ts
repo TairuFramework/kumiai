@@ -6,7 +6,7 @@ import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
@@ -99,6 +99,7 @@ describe('durable app rotation', () => {
     expect(bob.crypto.frameEpoch(appPublications[0]?.payload ?? new Uint8Array())).toBe(2)
     const records = new Map<string, PendingAppFrame>()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ after }: { after?: string }) {
@@ -129,7 +130,14 @@ describe('durable app rotation', () => {
       }),
       localDID: 'alice',
       protocols: { chat },
-      eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': seen }).events]]),
+      eventHandlers: new Map([
+        [
+          'chat',
+          adaptBusHandlers(chat, { 'chat/posted': seen } as never, {
+            completion: createTestCompletion(),
+          }).events,
+        ],
+      ]),
       retentionSeconds: 60,
       anchor: () => ({ epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }),
       groupID: () => 'group',

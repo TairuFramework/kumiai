@@ -378,6 +378,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
       },
     }
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: mux as never,
       appliedEpoch: () => 1,
       crypto: { pending: null, frameEpoch: () => null } as never,

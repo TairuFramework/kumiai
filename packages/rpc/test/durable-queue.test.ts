@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import { fromUTF } from '@sozai/codec'
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 
@@ -8,14 +9,19 @@ import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  completeTestRecord,
+  createFakeCrypto,
+  createTestCompletion,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 afterEach(() => vi.useRealTimers())
 
 const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 const payload = (text: string) =>
-  fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
+  fromUTF(JSON.stringify({ v: 2, payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 
 function fixture(
   handler: (context: { data: { text: string }; frame?: PendingAppFrame['frame'] }) => unknown,
@@ -40,8 +46,22 @@ function fixture(
   const sender2 = createFakeCrypto({ epoch: 2, localDID: 'alice' })
   const messages: Array<{ sequenceID: string; payload: Uint8Array }> = []
   const cursor = createMemoryAppCursorStore()
+  const protocols = {
+    chat: {
+      ...chat,
+      'chat/posted': {
+        ...chat['chat/posted'],
+        data: {
+          type: 'object',
+          properties: { text: { type: 'string' } },
+          required: ['text'],
+        },
+      },
+    },
+  } as const
   const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
   const lane = createAppLane({
+    groupKey: { groupID: 'group', incarnation: 1 },
     mux: {
       retainTopic() {},
       async fetchTopic({ after }: { after?: string }) {
@@ -56,8 +76,15 @@ function fixture(
     appliedEpoch: () => reader.epoch(),
     crypto: reader,
     localDID: 'bob',
-    protocols: { chat },
-    eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': handler }).events]]),
+    protocols,
+    eventHandlers: new Map([
+      [
+        'chat',
+        adaptBusHandlers(protocols.chat, { 'chat/posted': handler } as never, {
+          completion: createTestCompletion(),
+        }).events,
+      ],
+    ]),
     retentionSeconds: 60,
     appCursorStore: cursor,
     anchor: () => anchor,
@@ -150,14 +177,20 @@ describe('durable delivery queue', () => {
   })
 
   test('a failed fetch for another protocol still starts a restored record', async () => {
-    const record: PendingAppFrame = {
-      frame: { id: 'saved-a', topicID, protocol: 'chat', segment: 1, position: '000000000001' },
-      payload: payload('A'),
-      senderDID: 'alice',
-    }
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: { id: 'saved-a', topicID, protocol: 'chat', segment: 1, position: '000000000001' },
+        payload: payload('A'),
+        senderDID: 'alice',
+      },
+      { groupID: 'group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     const seen = vi.fn()
     const complete = vi.fn(async () => {})
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ topicID: requested }: { topicID: string }) {
@@ -178,7 +211,14 @@ describe('durable delivery queue', () => {
       }),
       localDID: 'bob',
       protocols: { chat, other: chat },
-      eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': seen }).events]]),
+      eventHandlers: new Map([
+        [
+          'chat',
+          adaptBusHandlers(chat, { 'chat/posted': seen } as never, {
+            completion: createTestCompletion(),
+          }).events,
+        ],
+      ]),
       retentionSeconds: 60,
       anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
@@ -220,14 +260,8 @@ describe('durable delivery queue', () => {
     })
     await appendRaw('000000000001', fromUTF('{'))
     await appendRaw('000000000002', fromUTF('{"payload":{"typ":"request","prc":"chat/posted"}}'))
-    await appendRaw(
-      '000000000003',
-      fromUTF('{"payload":{"typ":"event","prc":"chat/changed","data":{}}}'),
-    )
-    await appendRaw(
-      '000000000004',
-      fromUTF('{"payload":{"typ":"event","prc":"chat/posted","data":"invalid"}}'),
-    )
+    await appendRaw('000000000003', encodeEventFrame('chat/changed', {}))
+    await appendRaw('000000000004', encodeEventFrame('chat/posted', { text: 42 }))
     await appendRaw('000000000005', payload('echo'), true)
     await append('000000000006', 'valid')
     await lane.deliver()

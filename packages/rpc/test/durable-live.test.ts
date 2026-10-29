@@ -11,7 +11,7 @@ import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 const payload = (text: string) =>
-  fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
+  fromUTF(JSON.stringify({ v: 2, payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 
 class PushMetadataHub extends DurableFakeHub {
   transform: (message: StoredMessage) => StoredMessage = (message) => message

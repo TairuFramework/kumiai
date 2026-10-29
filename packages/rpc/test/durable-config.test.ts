@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import { createGroupPeer } from '../src/peer.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { chat } from './fixtures/peer.js'
 
 describe('durable peer configuration', () => {
@@ -19,6 +19,7 @@ describe('durable peer configuration', () => {
     })
     expect(() =>
       createGroupPeer({
+        completion: createTestCompletion(),
         hub: new DurableFakeHub(),
         crypto,
         localDID: 'bob',

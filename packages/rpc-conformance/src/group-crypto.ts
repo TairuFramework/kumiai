@@ -15,6 +15,13 @@
  */
 import { describe, expect, test } from 'vitest'
 
+import type {
+  ConformanceOpenAppInput,
+  ConformanceOpenAppResult,
+  ConformancePendingAppFrames,
+  ConformancePreOpenAppFrameRef,
+} from './persistence-fixture.js'
+
 /**
  * The `GroupUnwrapResult` of `@kumiai/rpc`, re-declared — NOT `@kumiai/broadcast`'s
  * `UnwrapResult`, and the difference is load-bearing: `senderDID` is REQUIRED here, matching the
@@ -24,7 +31,12 @@ import { describe, expect, test } from 'vitest'
  * that returns one with the sender missing satisfy this suite, which is exactly the silent hole
  * the real type was narrowed to close.
  */
-export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID: string; epoch: number }
+export type ConformanceUnwrapResult = {
+  payload: Uint8Array
+  senderDID: string
+  epoch: number
+  frameEpoch: number
+}
 
 /** The `GroupCrypto` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceGroupCrypto = {
@@ -36,8 +48,10 @@ export type ConformanceGroupCrypto = {
   wrap: (bytes: Uint8Array, opts?: { aad?: Uint8Array }) => Uint8Array | Promise<Uint8Array>
   unwrap: (
     bytes: Uint8Array,
-    opts?: { expectedAAD?: Uint8Array },
+    opts?: { expectedAAD?: Uint8Array; frame?: ConformancePreOpenAppFrameRef },
   ) => ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
+  unwrapBatch?(frames: Array<ConformanceOpenAppInput>): Promise<Array<ConformanceOpenAppResult>>
+  pending?: ConformancePendingAppFrames
   frameAAD: (bytes: Uint8Array) => Uint8Array | null
   frameEpoch: (bytes: Uint8Array) => number | null
   sealEntries: (
@@ -350,6 +364,31 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         })
       })
 
+      test('base crypto reports authenticated retained frame epoch despite false hints', async () => {
+        await withGroup(2, 'authenticated-frame-epoch', async (group) => {
+          const alice = memberAt(group.members, 1)
+          const bob = memberAt(group.members, 0)
+          const epoch = bob.crypto.epoch()
+          const same = await alice.crypto.wrap(utf8.encode('same epoch'))
+          expect(await bob.crypto.unwrap(same)).toMatchObject({ frameEpoch: epoch, epoch })
+          const frames: Array<Uint8Array> = []
+          for (const offset of [0, -1, 1])
+            frames.push(await alice.crypto.wrap(utf8.encode(`retained ${offset}`)))
+          await group.advance()
+          for (const [index, offset] of [0, -1, 1].entries()) {
+            const frame = frames[index]
+            if (frame === undefined) throw new Error('Missing retained frame')
+            group.setEpochHintOffset(offset)
+            expect(await bob.crypto.unwrap(frame)).toEqual({
+              payload: utf8.encode(`retained ${offset}`),
+              senderDID: alice.did,
+              frameEpoch: epoch,
+              epoch: epoch + 1,
+            })
+          }
+        })
+      })
+
       test('a retained past-epoch frame opens', async () => {
         await withGroup(2, 'unwrap-retained', async (group) => {
           const alice = memberAt(group.members, 0)
@@ -363,6 +402,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
             payload,
             senderDID: alice.did,
             epoch: from + advances,
+            frameEpoch: from,
           })
           await refuses(() => bob.crypto.unwrap(sealed))
         })

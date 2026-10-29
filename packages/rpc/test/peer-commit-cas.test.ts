@@ -7,7 +7,7 @@ import { OperationOutcomeError } from '../src/errors.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
@@ -174,6 +174,7 @@ describe('operation compare and set', () => {
 
   test('a peer with no MLS port refuses a commit', async () => {
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       hub: new FakeHub(),
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
       localDID: 'bob',

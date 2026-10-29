@@ -15,7 +15,7 @@ import {
 import { defineGroupProtocol } from '../src/protocol.js'
 import { APP_TOPIC_LABEL, commitTopic, inboxTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { DEFAULT_MAX_RETENTION, FakeHub } from './fixtures/fake-hub.js'
 import { deferred } from './fixtures/single-connection-host.js'
 
@@ -563,6 +563,7 @@ describe('a peer whose app-topic subscribe is refused', () => {
     const failures: Array<SubscribeFailure> = []
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       hub,
       crypto,
       localDID: 'bob',

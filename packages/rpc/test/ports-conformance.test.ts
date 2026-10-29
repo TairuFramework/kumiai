@@ -1,4 +1,5 @@
 import { createIdentity, encodeMultibase } from '@kokuin/token'
+import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   type ConformanceAppOutbox,
   type ConformanceCryptoMember,
@@ -124,6 +125,7 @@ testPendingGroupCryptoConformance({
     const receiver = createFakeCrypto({ epoch: 1, localDID: 'did:key:bob', pending })
     store.state = receiver.saveState()
     return {
+      encode: (text: string) => encodeEventFrame('posted', { text }),
       senderDID: 'did:key:alice',
       sender,
       receiver,

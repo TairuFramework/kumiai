@@ -3,6 +3,7 @@ import { createGroupCrypto, createLedgerEntrySlot, simpleHandleAccess } from '@k
 import { APP_TOPIC_LABEL, createGroupPeer, protocolTopic } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createTestCompletion } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import { createFoundingGroup } from './app-lane-e2e.js'
 import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createWireHub } from './log-hub-over-wire.js'
@@ -47,6 +48,7 @@ describe('peer drain over the wire hub', () => {
     }
     const chat = { 'chat/changed': { type: 'event', data: { type: 'object' } } } as const
     const peer = createGroupPeer({
+      completion: createTestCompletion({ groupID: group.groupID, incarnation: 1 }),
       openedDeliveryContext,
       hub: {
         publish: (params) => connection.publish(params),

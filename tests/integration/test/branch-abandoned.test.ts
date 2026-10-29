@@ -23,6 +23,7 @@ import {
 } from '../../../packages/mls-rpc/src/index.js'
 import { decodeStoredValue } from '../../../packages/mls-rpc/src/persistence-codec.js'
 import { createForkRecoveryRealFixture } from '../../../packages/mls-rpc/test/fixtures/captured-recovery.js'
+import { createTestCompletion } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import type { RegistryFixture } from '../../../packages/mls-rpc/test/fixtures/registry.js'
 import { createGroupPeerWithControlWalk } from '../../../packages/rpc/src/peer.js'
 import { FakeHub } from '../../../packages/rpc/test/fixtures/fake-hub.js'
@@ -221,6 +222,7 @@ async function startPeerOwner(
         })
       }
       return createGroupPeerWithControlWalk({
+        completion: createTestCompletion(key, access.pending),
         openedDeliveryContext,
         ...options,
         hub,

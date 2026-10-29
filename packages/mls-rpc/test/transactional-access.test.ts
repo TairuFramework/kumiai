@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   commitKeyRotation,
   commitLedgerEntries,
@@ -56,7 +57,16 @@ async function failureOf(work: () => unknown): Promise<unknown> {
 }
 
 function frameRef(id: string): AppFrameRef {
-  return { id, topicID: 'topic', protocol: 'chat', segment: 1, position: '000000000001' }
+  return {
+    groupID: 'transactional-access',
+    incarnation: 1,
+    procedure: 'posted',
+    id,
+    topicID: 'topic',
+    protocol: 'chat',
+    segment: 1,
+    position: '000000000001',
+  }
 }
 
 async function setup(name: string) {
@@ -69,7 +79,8 @@ async function setup(name: string) {
   const sender = createGroupCrypto({
     access: testHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
   })
-  const seal = async (text: string) => await sender.wrap(utf8.encode(text), { aad })
+  const seal = async (text: string) =>
+    await sender.wrap(encodeEventFrame('posted', { text }), { aad })
   return { group, store, host, crypto, seal }
 }
 
@@ -163,7 +174,7 @@ describe('transactional access: atomic durable open', () => {
     release.resolve()
 
     const opened = await opening
-    expect(new TextDecoder().decode(opened.payload)).toBe('hello')
+    expect(opened.payload).toEqual(encodeEventFrame('posted', { text: 'hello' }))
     expect(store.records.has('f1')).toBe(true)
     expect(store.snapshot().revision).toBe(1)
     expect(host.live()).not.toBe(before)
@@ -210,7 +221,7 @@ describe('transactional access: atomic durable open', () => {
     store.beforeWrite = undefined
     await expect(
       crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
-    ).resolves.toMatchObject({ payload: utf8.encode('hello') })
+    ).resolves.toMatchObject({ payload: encodeEventFrame('posted', { text: 'hello' }) })
     expect(store.records.size).toBe(1)
   })
 
@@ -264,6 +275,16 @@ describe('transactional access: atomic durable open', () => {
   test('a duplicate frame ID keeps its first record and consumes the key once', async () => {
     const { store, crypto, seal } = await setup('tx-duplicate')
     const earlier = {
+      epoch: 1,
+      idempotencyKey: JSON.stringify([
+        'kumiai/frame/v1',
+        'transactional-access',
+        1,
+        'topic',
+        '000000000001',
+        'chat',
+        'posted',
+      ]),
       frame: frameRef('f1'),
       payload: utf8.encode('first'),
       senderDID: 'did:example:first',
@@ -363,7 +384,7 @@ describe('adapter faults around a durable open', () => {
     busy = false
     await expect(
       crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
-    ).resolves.toMatchObject({ payload: utf8.encode('hello') })
+    ).resolves.toMatchObject({ payload: encodeEventFrame('posted', { text: 'hello' }) })
   })
 })
 

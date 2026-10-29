@@ -11,7 +11,12 @@ import { createHubMux } from '../src/hub-mux.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  completeTestRecord,
+  createFakeCrypto,
+  createTestCompletion,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { chat, makeMLSPeer } from './fixtures/peer.js'
 
 const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
@@ -55,6 +60,7 @@ describe('durable app lane hygiene', () => {
       await save(topic, position)
     }
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
       appliedEpoch: () => 1,
@@ -168,6 +174,7 @@ describe('durable app lane hygiene', () => {
       await save(topic, position)
     }
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
       appliedEpoch: () => 1,
@@ -218,6 +225,7 @@ describe('durable app lane hygiene', () => {
       await save(topic, position)
     }
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
       appliedEpoch: () => 1,
@@ -303,12 +311,20 @@ describe('durable app lane hygiene', () => {
     const resumed = vi.fn()
     const handler = vi.fn()
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
       appliedEpoch: () => 1,
       localDID: 'bob',
       protocols: { chat },
-      eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': handler }).events]]),
+      eventHandlers: new Map([
+        [
+          'chat',
+          adaptBusHandlers(chat, { 'chat/posted': handler } as never, {
+            completion: createTestCompletion(),
+          }).events,
+        ],
+      ]),
       retentionSeconds: 60,
       onAppDeliveryStalled: stalled,
       onAppDeliveryResumed: resumed,
@@ -331,17 +347,22 @@ describe('durable app lane hygiene', () => {
     const ySealed = await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(yPayload, {
       aad,
     })
-    const record: PendingAppFrame = {
-      frame: {
-        id: frameID(topicID, ySealed),
-        topicID,
-        position: frame.sequenceID,
-        protocol: 'chat',
-        segment: 1,
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: {
+          id: frameID(topicID, ySealed),
+          topicID,
+          position: frame.sequenceID,
+          protocol: 'chat',
+          segment: 1,
+        },
+        senderDID: 'alice',
+        payload: yPayload,
       },
-      senderDID: 'alice',
-      payload: yPayload,
-    }
+      { groupID: 'group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     pending.rows.set(record.frame.id, record)
     await lane.restore([record])
     await lane.deliver()
@@ -378,12 +399,20 @@ describe('durable app lane hygiene', () => {
     let appliedEpoch = 1
     const reader = createFakeCrypto({ epoch: 1, localDID: 'bob', pending })
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux,
       crypto: reader,
       appliedEpoch: () => appliedEpoch,
       localDID: 'bob',
       protocols,
-      eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': handler }).events]]),
+      eventHandlers: new Map([
+        [
+          'chat',
+          adaptBusHandlers(chat, { 'chat/posted': handler } as never, {
+            completion: createTestCompletion(),
+          }).events,
+        ],
+      ]),
       retentionSeconds: 60,
       onAppDeliveryStalled: stalled,
       onAppDeliveryResumed: resumed,
@@ -409,17 +438,22 @@ describe('durable app lane hygiene', () => {
     })
     const yPayload = encodeEventFrame('chat/posted', { text: 'Y' })
     const ySealed = await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(yPayload, { aad })
-    const record: PendingAppFrame = {
-      frame: {
-        id: frameID(topicID, ySealed),
-        topicID,
-        position: frame.sequenceID,
-        protocol: 'chat',
-        segment: 1,
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: {
+          id: frameID(topicID, ySealed),
+          topicID,
+          position: frame.sequenceID,
+          protocol: 'chat',
+          segment: 1,
+        },
+        senderDID: 'alice',
+        payload: yPayload,
       },
-      senderDID: 'alice',
-      payload: yPayload,
-    }
+      { groupID: 'group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     pending.rows.set(record.frame.id, record)
     await lane.restore([record])
     expect(stalled).toHaveBeenCalledExactlyOnceWith(

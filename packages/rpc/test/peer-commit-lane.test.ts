@@ -5,7 +5,7 @@ import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../s
 import { createGroupPeer } from '../src/peer.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishNextCommit } from './fixtures/commits.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer, type Protocols } from './fixtures/peer.js'
@@ -211,6 +211,7 @@ describe('the commit lane is pull-driven', () => {
     // MailboxHub ever became assignable here, @ts-expect-error would fail the build.
     const wire = (): void => {
       createGroupPeer<Protocols>({
+        completion: createTestCompletion(),
         // @ts-expect-error a MailboxHub is not a LogHub: the commit lane reads a log
         hub: mailboxOnly,
         crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),

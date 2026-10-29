@@ -46,7 +46,7 @@ import { decodeStoredValue, encodeStoredValue } from '../src/persistence-codec.j
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
-import { createRealGroup } from './fixtures/real-group.js'
+import { createRealGroup, createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 import {
@@ -275,6 +275,7 @@ async function setup(
       return result
     }
     peer = createGroupPeer({
+      completion: createTestCompletion(key, registryAccess.pending),
       openedDeliveryContext,
       hub,
       recoveryTarget: target,

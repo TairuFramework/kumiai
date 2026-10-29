@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   confirmationTag,
   decodeClientState,
@@ -184,6 +185,7 @@ testPendingGroupCryptoConformance({
       return createGroupCrypto({ access, pending })
     }
     return {
+      encode: (text: string) => encodeEventFrame('posted', { text }),
       senderDID: group.committer.identity.id,
       sender: createGroupCrypto({
         access: testHandleAccess({

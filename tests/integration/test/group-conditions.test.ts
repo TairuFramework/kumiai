@@ -34,6 +34,7 @@ import {
 } from '../../../packages/mls-rpc/src/index.js'
 import { capturedRecord } from '../../../packages/mls-rpc/test/fixtures/captured-recovery.js'
 import { createAsyncLocalOwnershipContext } from '../../../packages/mls-rpc/test/fixtures/ownership-context.js'
+import { createTestCompletion } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   createNotMemberFixture,
   type RegistryFixture,
@@ -98,6 +99,7 @@ async function start(
       const access = await f.registry.access(current.groupID)
       const ports = f.device.groups.ports(current)
       return createGroupPeer({
+        completion: createTestCompletion(current, access.pending),
         ...options,
         hub,
         crypto: createGroupCrypto({ access }),

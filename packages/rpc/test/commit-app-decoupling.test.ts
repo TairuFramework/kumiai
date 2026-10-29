@@ -11,7 +11,7 @@ import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
@@ -253,6 +253,7 @@ describe('app work leaves the commit queue', () => {
     const pause = gate()
     let fetches = 0
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic() {
@@ -503,6 +504,7 @@ describe('app work leaves the commit queue', () => {
       }
       const seen: Array<string> = []
       const lane = createAppLane({
+        groupKey: { groupID: 'group', incarnation: 1 },
         mux: {
           retainTopic() {},
           async fetchTopic({ topicID: topic, after }: { topicID: string; after?: string }) {
@@ -526,9 +528,13 @@ describe('app work leaves the commit queue', () => {
         eventHandlers: new Map([
           [
             'chat',
-            adaptBusHandlers(chat, {
-              'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
-            }).events,
+            adaptBusHandlers(
+              chat,
+              {
+                'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
+              } as never,
+              { completion: createTestCompletion() },
+            ).events,
           ],
         ]),
         retentionSeconds: 60,

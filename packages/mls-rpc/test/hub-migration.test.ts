@@ -23,6 +23,7 @@ import {
   createAsyncLocalOwnershipContext,
   openedDeliveryContext,
 } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import {
   createNotMemberFixture,
   createGatedRegistryFixture as createRegistryFixture,
@@ -146,6 +147,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           cryptos.push(crypto)
           const ports = fixture.device.groups.ports(current)
           return createGroupPeer({
+            completion: createTestCompletion(current, crypto.pending),
             openedDeliveryContext,
             ...options,
             hub: options.hub ?? original,

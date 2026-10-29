@@ -1,3 +1,4 @@
+import { encodeEventFrame } from '@kumiai/broadcast'
 import { confirmationTag, decodeClientState, encodeClientState } from '@kumiai/mls'
 import {
   type AuthenticatedRosterAbsence,
@@ -125,6 +126,7 @@ testPendingGroupCryptoConformance({
       await store.save(store.snapshot().revision, encodeClientState(live.state), live.ledgerTokens)
     }
     return {
+      encode: (text: string) => encodeEventFrame('posted', { text }),
       senderDID: group.committer.identity.id,
       sender: createGroupCrypto({
         access: testHandleAccess({

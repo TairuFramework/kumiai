@@ -1,5 +1,5 @@
 import type { SafetyHold } from './control/safety.js'
-import type { AdoptionExpected, AdoptionWriteFactory } from './control/types.js'
+import type { AdoptionExpected, AdoptionWriteFactory, GroupKey } from './control/types.js'
 import { compareLogPositions, type LogPosition } from './cursor.js'
 import type { CapturedRecoveryPort } from './recovery-types.js'
 
@@ -77,8 +77,9 @@ export type GroupCrypto = {
    */
   unwrap(
     bytes: Uint8Array,
-    opts?: { expectedAAD?: Uint8Array; frame?: AppFrameRef },
+    opts?: { expectedAAD?: Uint8Array; frame?: PreOpenAppFrameRef },
   ): GroupUnwrapResult | Promise<GroupUnwrapResult>
+  unwrapBatch?(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>
   /** Cleartext app AAD for pre-open routing. Untrusted until unwrap authenticates it. Never throws. */
   frameAAD(bytes: Uint8Array): Uint8Array | null
   /** Present iff opened app frames and their consumed handle state are saved atomically. */
@@ -135,7 +136,7 @@ export type GroupCrypto = {
   openEntries(sealed: Uint8Array): Uint8Array | Promise<Uint8Array>
 }
 
-export type AppFrameRef = {
+export type PreOpenAppFrameRef = GroupKey & {
   /** Stable identity derived from topic and ciphertext. */
   id: string
   topicID: string
@@ -144,6 +145,14 @@ export type AppFrameRef = {
   segment: number
   /** Position in this topic's log. */
   position: string
+}
+
+export type AppFrameRef = PreOpenAppFrameRef & { procedure: string }
+
+export type OpenAppInput = {
+  frame: PreOpenAppFrameRef
+  ciphertext: Uint8Array
+  expectedAAD?: Uint8Array
 }
 
 export type ExportSecretResult = { secret: Uint8Array; epoch: number }
@@ -210,10 +219,38 @@ export class FrameEpochError extends Error {
   }
 }
 
+export type OpenAppResult =
+  | { kind: 'opened'; record: PendingAppFrame; handleEpoch: number }
+  | { kind: 'refused'; frame: PreOpenAppFrameRef; reason: 'malformed-plaintext'; keyConsumed: true }
+  | {
+      kind: 'refused'
+      frame: PreOpenAppFrameRef
+      reason: 'invalid-ciphertext' | 'wrong-aad' | 'duplicate' | 'invalid-position'
+      keyConsumed: false
+    }
+  | {
+      kind: 'refused'
+      frame: PreOpenAppFrameRef
+      reason: 'past-epoch'
+      keyConsumed: false
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | {
+      kind: 'held'
+      frame: PreOpenAppFrameRef
+      reason: 'future-epoch'
+      frameEpoch: number
+      handleEpoch: number
+    }
+  | { kind: 'held'; frame: PreOpenAppFrameRef; reason: 'unsupported-version' }
+
 export type PendingAppFrame = {
   frame: AppFrameRef
   payload: Uint8Array
   senderDID: string
+  epoch: number
+  idempotencyKey: string
 }
 
 export type PendingAppFrames = {
@@ -265,12 +302,13 @@ export function sortPendingAppFrames<T extends PendingAppFrame>(frames: Array<T>
  * always MLS-sealed, so there's no identity-less case to accommodate: a sender is either PRESENT
  * and CORRECT, or the open throws. Optional would type-check against an implementation that has
  * no sender to give and quietly returns one anyway. Do not widen this back to optional.
- * `epoch` is the locked handle epoch that opened the frame.
+ * `epoch` is the locked handle epoch. `frameEpoch` is the authenticated sealing epoch.
  */
 export type GroupUnwrapResult = {
   payload: Uint8Array
   senderDID: string
   epoch: number
+  frameEpoch: number
 }
 
 /**

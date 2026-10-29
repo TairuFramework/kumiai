@@ -7,6 +7,8 @@ import { deferred } from '../src/runtime.js'
 import { createRealGroup, testHandleAccess } from './fixtures/real-group.js'
 
 const frame = {
+  groupID: 'crypto-safety',
+  incarnation: 1,
   id: 'safety-frame',
   protocol: 'safety',
   segment: 0,

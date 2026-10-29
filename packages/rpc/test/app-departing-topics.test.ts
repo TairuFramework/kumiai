@@ -14,7 +14,7 @@ import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
@@ -78,11 +78,15 @@ function fixture(
           },
   })
   const seen: Array<string> = []
-  const handlers = adaptBusHandlers(chat, {
-    'chat/posted': ({ data }: { data: { text: string } }) => {
-      seen.push(data.text)
-    },
-  }).events
+  const handlers = adaptBusHandlers(
+    chat,
+    {
+      'chat/posted': ({ data }: { data: { text: string } }) => {
+        seen.push(data.text)
+      },
+    } as never,
+    { completion: createTestCompletion() },
+  ).events
   const hub = new DurableFakeHub()
   const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
   const cursor = createMemoryAppCursorStore()
@@ -90,6 +94,7 @@ function fixture(
   const resumed = vi.fn()
   const pruned = vi.fn()
   const lane = createAppLane({
+    groupKey: { groupID: 'group', incarnation: 1 },
     mux,
     crypto: reader,
     appliedEpoch: () => applied,

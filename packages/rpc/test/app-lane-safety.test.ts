@@ -8,7 +8,7 @@ import type { PendingAppFrame } from '../src/crypto.js'
 import { GroupSafetyHeldError } from '../src/errors.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { completeTestRecord, createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { chat } from './fixtures/peer.js'
 
 const lanes: Array<AppLane> = []
@@ -61,6 +61,7 @@ async function fixture() {
     hold ??= reason
   })
   const lane = createAppLane({
+    groupKey: { groupID: 'group', incarnation: 1 },
     mux: { retainTopic: retain, fetchTopic: fetch } as never,
     appliedEpoch: () => reader.epoch(),
     crypto: reader,
@@ -141,17 +142,22 @@ test('terminal plaintext completion ignores sealed predecessors without fetching
       gap: false,
     }))
     await f.lane.deliver()
-    const record = {
-      frame: {
-        id: 'already-opened',
-        topicID: f.topicID,
-        protocol: 'chat',
-        segment: 1,
-        position: '000000000002',
+    const record = completeTestRecord(
+      {
+        frame: {
+          id: 'already-opened',
+          topicID: f.topicID,
+          protocol: 'chat',
+          segment: 1,
+          position: '000000000002',
+        },
+        senderDID: 'alice',
+        payload: encodeEventFrame('chat/posted', { opened: true }),
       },
-      senderDID: 'alice',
-      payload: encodeEventFrame('chat/posted', { opened: true }),
-    }
+      { groupID: 'group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     f.records.set(record.frame.id, record)
     await f.lane.restore([record])
     const fetches = f.fetch.mock.calls.length

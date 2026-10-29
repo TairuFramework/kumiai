@@ -9,14 +9,19 @@ import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  completeTestRecord,
+  createFakeCrypto,
+  createTestCompletion,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { chat, makeMLSPeer } from './fixtures/peer.js'
 
 const recoverySecret = new Uint8Array(32).fill(0x91)
 const oldTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 const newTopic = protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')
 const payload = (text: string) =>
-  fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
+  fromUTF(JSON.stringify({ v: 2, payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 
 describe('durable pending restoration', () => {
   test('terminal restart completes an already opened frame without crypto or network work', async () => {
@@ -61,6 +66,7 @@ describe('durable pending restoration', () => {
         retain: 'log',
       })
       const frame = {
+        ...first.control.key,
         id: frameID(oldTopic, sealed),
         topicID: oldTopic,
         protocol: 'chat',
@@ -68,7 +74,12 @@ describe('durable pending restoration', () => {
         position: occurrence.sequenceID,
       }
       await first.crypto.unwrap(sealed, { expectedAAD: aad, frame })
-      const opened = { frame, payload: plaintext, senderDID: 'alice' }
+      const opened = completeTestRecord(
+        { frame, payload: plaintext, senderDID: 'alice' },
+        { groupID: 'memory-group', incarnation: 1 },
+        'chat/posted',
+        1,
+      )
       expect([...rows.values()]).toEqual([opened])
       expect(firstSeen).toEqual([])
       first.database.seam('after-save', () => {
@@ -232,6 +243,7 @@ describe('durable pending restoration', () => {
       }),
       retain: 'log',
     })
+    const rows = new Map<string, PendingAppFrame>()
     let lists = 0
     const persist = vi.fn(async (_state: Uint8Array, _record: PendingAppFrame) => {})
     const seen = vi.fn()
@@ -242,13 +254,16 @@ describe('durable pending restoration', () => {
         pending: {
           async persistOpened(state, record) {
             await persist(state, record)
+            rows.set(record.frame.id, record)
           },
           async list() {
             lists += 1
             if (lists === 1) throw new Error('transient list failure')
-            return []
+            return [...rows.values()]
           },
-          async complete() {},
+          async complete(id) {
+            rows.delete(id)
+          },
         },
       }),
       handlers: { 'chat/posted': seen },
@@ -267,17 +282,22 @@ describe('durable pending restoration', () => {
     const sealed = await old.wrap(payload('old'), {
       aad: encodeAppAAD({ topicID: oldTopic, intent: 'log' }),
     })
-    const record: PendingAppFrame = {
-      frame: {
-        id: frameID(oldTopic, sealed),
-        topicID: oldTopic,
-        protocol: 'chat',
-        segment: 1,
-        position: '000000000001',
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: {
+          id: frameID(oldTopic, sealed),
+          topicID: oldTopic,
+          protocol: 'chat',
+          segment: 1,
+          position: '000000000001',
+        },
+        payload: payload('old'),
+        senderDID: 'alice',
       },
-      payload: payload('old'),
-      senderDID: 'alice',
-    }
+      { groupID: 'memory-group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     const rows = new Map([[record.frame.id, record]])
     const unknown: PendingAppFrame = {
       ...record,
@@ -291,6 +311,7 @@ describe('durable pending restoration', () => {
     const notices = vi.fn()
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: {
         retainTopic() {},
         async fetchTopic({ topicID }: { topicID: string }) {
@@ -318,7 +339,14 @@ describe('durable pending restoration', () => {
       }),
       localDID: 'bob',
       protocols: { chat },
-      eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': seen }).events]]),
+      eventHandlers: new Map([
+        [
+          'chat',
+          adaptBusHandlers(chat, { 'chat/posted': seen } as never, {
+            completion: createTestCompletion(),
+          }).events,
+        ],
+      ]),
       retentionSeconds: 60,
       appCursorStore: cursor,
       anchor: () => anchor,
@@ -350,17 +378,22 @@ describe('durable pending restoration', () => {
   })
 
   test('a missing-protocol record survives one start and delivers when registered on the next', async () => {
-    const record: PendingAppFrame = {
-      frame: {
-        id: 'later-id',
-        topicID: oldTopic,
-        protocol: 'later',
-        segment: 1,
-        position: '000000000001',
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: {
+          id: 'later-id',
+          topicID: oldTopic,
+          protocol: 'later',
+          segment: 1,
+          position: '000000000001',
+        },
+        payload: payload('saved'),
+        senderDID: 'alice',
       },
-      payload: payload('saved'),
-      senderDID: 'alice',
-    }
+      { groupID: 'memory-group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     const rows = new Map([[record.frame.id, record]])
     const complete = vi.fn(async (id: string) => {
       rows.delete(id)
@@ -376,6 +409,7 @@ describe('durable pending restoration', () => {
     const seen = vi.fn()
     const makeLane = (registered: boolean) =>
       createAppLane({
+        groupKey: { groupID: 'group', incarnation: 1 },
         mux: {
           retainTopic() {},
           async fetchTopic() {
@@ -387,7 +421,14 @@ describe('durable pending restoration', () => {
         localDID: 'bob',
         protocols: registered ? { later: chat } : {},
         eventHandlers: registered
-          ? new Map([['later', adaptBusHandlers(chat, { 'chat/posted': seen }).events]])
+          ? new Map([
+              [
+                'later',
+                adaptBusHandlers(chat, { 'chat/posted': seen } as never, {
+                  completion: createTestCompletion(),
+                }).events,
+              ],
+            ])
           : new Map(),
         retentionSeconds: 60,
         anchor: () => ({ epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }),
@@ -410,17 +451,22 @@ describe('durable pending restoration', () => {
   })
 
   test('startup reports a missing protocol after the group id is available', async () => {
-    const record: PendingAppFrame = {
-      frame: {
-        id: 'missing-at-start',
-        topicID: oldTopic,
-        protocol: 'missing',
-        segment: 1,
-        position: '000000000001',
+    const record: PendingAppFrame = completeTestRecord(
+      {
+        frame: {
+          id: 'missing-at-start',
+          topicID: oldTopic,
+          protocol: 'missing',
+          segment: 1,
+          position: '000000000001',
+        },
+        payload: payload('saved'),
+        senderDID: 'alice',
       },
-      payload: payload('saved'),
-      senderDID: 'alice',
-    }
+      { groupID: 'memory-group', incarnation: 1 },
+      'chat/posted',
+      1,
+    )
     const rows = new Map([[record.frame.id, record]])
     const notices = vi.fn()
     const bob = makeMLSPeer(new DurableFakeHub(), 'bob', recoverySecret, {
@@ -478,23 +524,29 @@ describe('durable pending restoration', () => {
       // A fresh hub mints the same position for a different frame.
       const fetched = served === 'same' ? waiting : await wrap('new hub')
       const position = '000000000001'
-      const record: PendingAppFrame = {
-        frame: {
-          id: frameID(oldTopic, waiting),
-          topicID: oldTopic,
-          protocol: 'chat',
-          segment: 1,
-          position,
+      const record: PendingAppFrame = completeTestRecord(
+        {
+          frame: {
+            id: frameID(oldTopic, waiting),
+            topicID: oldTopic,
+            protocol: 'chat',
+            segment: 1,
+            position,
+          },
+          payload: payload('old hub'),
+          senderDID: 'alice',
         },
-        payload: payload('old hub'),
-        senderDID: 'alice',
-      }
+        { groupID: 'memory-group', incarnation: 1 },
+        'chat/posted',
+        1,
+      )
       const rows = new Map([[record.frame.id, record]])
       const persistOpened = vi.fn(async (_state: Uint8Array, opened: PendingAppFrame) => {
         rows.set(opened.frame.id, opened)
       })
       const seen: Array<string> = []
       const lane = createAppLane({
+        groupKey: { groupID: 'group', incarnation: 1 },
         mux: {
           retainTopic() {},
           async fetchTopic({ topicID, after }: { topicID: string; after?: string }) {
@@ -527,9 +579,13 @@ describe('durable pending restoration', () => {
         eventHandlers: new Map([
           [
             'chat',
-            adaptBusHandlers(chat, {
-              'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
-            }).events,
+            adaptBusHandlers(
+              chat,
+              {
+                'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
+              } as never,
+              { completion: createTestCompletion() },
+            ).events,
           ],
         ]),
         retentionSeconds: 60,

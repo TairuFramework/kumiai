@@ -107,6 +107,7 @@ test('terminal restart retains the outbox until real MLS plaintext delivery comp
     const plaintext = encodeEventFrame('chat/posted', { text: 'opened before removal' })
     const sealed = await alice.crypto.wrap(plaintext, { aad })
     const frame = {
+      ...bob.control.key,
       id: 'opened-before-removal',
       topicID,
       protocol: 'chat',

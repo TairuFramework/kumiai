@@ -28,7 +28,7 @@ import { decodeStoredValue, encodeStoredValue } from '../src/persistence-codec.j
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
-import { createRealGroup } from './fixtures/real-group.js'
+import { createRealGroup, createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
 
@@ -120,6 +120,7 @@ async function fixture() {
     restoreCandidate,
   })
   const running = createGroupPeerWithControlWalk({
+    completion: createTestCompletion(key),
     openedDeliveryContext,
     hub,
     recoveryTarget: target,

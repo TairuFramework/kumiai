@@ -3,7 +3,7 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { PeerDisposedError } from '../src/errors.js'
 import { createGroupPeer } from '../src/peer.js'
-import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, type FakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 const SHORT_BOB = 'did:peer:4zBobShort'
@@ -20,6 +20,7 @@ function makePeer(
   crypto?: FakeCrypto,
 ) {
   return createGroupPeer<Protocols>({
+    completion: createTestCompletion(),
     hub,
     crypto: crypto ?? createFakeCrypto({ epoch: 1, localDID }),
     localDID,

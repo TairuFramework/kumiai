@@ -25,6 +25,7 @@ import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { deferred } from '../src/runtime.js'
 import { dropRegistryOwner, gateRegistryMaintenance } from '../src/testing.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 import { restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
@@ -1334,6 +1335,7 @@ test.each([
       recoveryModes.push(options.recoveryOnly)
       const ports = base.device.groups.ports(key)
       typedPeer = createGroupPeer({
+        completion: createTestCompletion(key, fixture.access().pending),
         openedDeliveryContext,
         ...options,
         onConfirmedRecovery: undefined,

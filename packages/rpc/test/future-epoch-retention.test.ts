@@ -545,6 +545,7 @@ async function futureLane(
   }))
   const create = () => {
     const lane = createAppLane({
+      groupKey: { groupID: 'group', incarnation: 1 },
       mux: { retainTopic() {}, fetchTopic: fetch } as never,
       appliedEpoch: () => reader.epoch(),
       crypto: reader,

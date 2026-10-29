@@ -35,6 +35,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       if (payload === undefined) throw new Error('Missing event encoder')
       const sealed = await fixture.sender.wrap(payload)
       const frame = fixture.frame?.(sealed, {
+        groupID: 'pending-group',
+        incarnation: 1,
         id: 'invalid-position',
         topicID: 'app-topic',
         protocol: 'chat',

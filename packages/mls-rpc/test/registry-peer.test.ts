@@ -52,6 +52,7 @@ import * as verdictAPI from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
 import { drainRegistryMaintenance } from '../src/testing.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import {
   createNotMemberFixture,
   createRegistryFixture,
@@ -618,6 +619,7 @@ describe('registry peer recovery coordination', () => {
           createPeer: async (key, options) => {
             const ports = f.device.groups.ports(key)
             return createGroupPeer({
+              completion: createTestCompletion(key),
               openedDeliveryContext,
               ...options,
               hub,
@@ -822,7 +824,7 @@ describe('registry peer recovery coordination', () => {
       expect(s.created[0]?.options).toMatchObject({
         recoveryOnly: false,
         continuation: { source, destination },
-        completion: expect.any(Function),
+        recoveryCompletion: expect.any(Function),
       })
       expect((await s.f.device.groups.ports(source).control.load()).rejoin).toMatchObject({
         stage: 'adopted',
@@ -1143,7 +1145,10 @@ describe('registry peer recovery coordination', () => {
       await owner.ready
       expect(s.created[0]?.options.continuation).toMatchObject({ source, destination })
       expect(s.created[0]?.options.mls.sendAdmission().epoch).toBe(Number(advanced.epoch))
-      await s.created[0]?.options.completion?.({ ledger: [], mutationID: 'complete-after-restart' })
+      await s.created[0]?.options.recoveryCompletion?.({
+        ledger: [],
+        mutationID: 'complete-after-restart',
+      })
       expect((await s.f.device.groups.ports(source).control.load()).rejoin).toBeNull()
     } finally {
       owner?.dispose()

@@ -58,7 +58,7 @@ import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
 import { memoryApplicationPorts } from './app-publication.js'
 import { publishCommit } from './commits.js'
-import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
+import { createFakeCrypto, createTestCompletion, type FakeCrypto } from './fake-crypto.js'
 import { FakeHub } from './fake-hub.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import { memoryCapturedRecord } from './memory-captured-recovery.js'
@@ -141,7 +141,7 @@ export type MakeMLSPeerOptions = {
   openedDeliveryContext?: OpenedDeliveryContext
   recoveryOnly?: boolean
   continuation?: RecoveryContinuation | null
-  completion?: RecoveryCompletion | null
+  recoveryCompletion?: RecoveryCompletion | null
   appOutbox?: AppOutbox
   appOutboxLimit?: number
   onAppOutboxCleared?: (notice: AppOutboxCleared) => void | Promise<void>
@@ -278,6 +278,7 @@ export function makeMLSPeer(
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const ports = memoryControlPorts(mls, crypto, options.build ?? buildOperation, recoverySecret)
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
+    completion: createTestCompletion(mls.control().key, crypto.pending),
     openedDeliveryContext:
       'openedDeliveryContext' in options ? options.openedDeliveryContext : openedDeliveryContext,
     hub,
@@ -302,7 +303,7 @@ export function makeMLSPeer(
               }),
     reconcileConfirmedRecovery: options.reconcileConfirmedRecovery,
     continuation: options.continuation,
-    completion: options.completion,
+    recoveryCompletion: options.recoveryCompletion,
     ...ports,
     readEvidence: options.readEvidence ?? ports.readEvidence,
     deliverWelcome:

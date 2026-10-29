@@ -13,7 +13,7 @@ import {
   publishedCommitBytes,
   publishedCommitDigest,
 } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { completeTestRecord, createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import {
@@ -337,17 +337,22 @@ test('terminal clearing requires pending restoration when safety latches just af
     lastAttempt: null,
     status: 'accepted',
   })
-  const record: PendingAppFrame = {
-    frame: {
-      id: 'opened-before-removal',
-      topicID: 'old-topic',
-      protocol: 'chat',
-      segment: 1,
-      position: '000000000001',
+  const record: PendingAppFrame = completeTestRecord(
+    {
+      frame: {
+        id: 'opened-before-removal',
+        topicID: 'old-topic',
+        protocol: 'chat',
+        segment: 1,
+        position: '000000000001',
+      },
+      senderDID: 'alice',
+      payload: encodeEventFrame('chat/posted', { restored: true }),
     },
-    senderDID: 'alice',
-    payload: encodeEventFrame('chat/posted', { restored: true }),
-  }
+    { groupID: 'memory-group', incarnation: 1 },
+    'chat/posted',
+    1,
+  )
   const records = new Map([[record.frame.id, record]])
   const restore = Promise.withResolvers<void>()
   const handler = Promise.withResolvers<void>()

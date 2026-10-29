@@ -11,7 +11,9 @@ import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import { createMonotoneClock } from './clock.js'
 import type { SafetyHold } from './control/safety.js'
+import type { GroupKey } from './control/types.js'
 import {
+  AppFrameStorageError,
   type GroupCrypto,
   type GroupUnwrapResult,
   isAppFrameStorageError,
@@ -148,6 +150,7 @@ export type AppLaneParams = {
   departing?: () => Array<{ anchor: Anchor; departedAt: number }>
   /** The group's commit topic, or `undefined` before the control lanes are up. */
   groupID: () => string | undefined
+  groupKey: GroupKey
 }
 
 export type AppLane = {
@@ -254,6 +257,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let segment = new Map<string, Array<AppFrame>>()
   let segmentGeneration = 0
   const pendingRecords: Array<PendingAppFrame> = []
+  // Buffer resets must not reopen consumed frames whose saved records still need reloading.
+  const openedFrameIDs = new Set<string>()
   const finishingRecords = new Set<Promise<void>>()
   const deliveringRecords = new Set<Promise<void>>()
   let openedFailure: unknown
@@ -1174,6 +1179,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           crypto.pending == null
             ? undefined
             : {
+                ...params.groupKey,
                 id,
                 topicID: cursor.topicID,
                 protocol: name,
@@ -1184,12 +1190,36 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const workVersion = commitWorkVersion()
         let opened: GroupUnwrapResult
         try {
+          if (ref != null) {
+            const load = async () => {
+              try {
+                return (await crypto.pending?.list())?.find((saved) => saved.frame.id === ref.id)
+              } catch (cause) {
+                throw new AppFrameStorageError('Failed to reload saved app frame', { cause })
+              }
+            }
+            // A successful open may need its saved record reloaded again after a read fault.
+            if (!openedFrameIDs.has(id)) {
+              await crypto.unwrap(sealed, {
+                expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
+                frame: ref,
+              })
+              openedFrameIDs.add(id)
+            }
+            const record = await load()
+            if (record == null)
+              throw new AppFrameStorageError('Durable open has no saved app frame')
+            openedFrameIDs.delete(id)
+            frame.sealed = { state: 'pending', id: record.frame.id }
+            pendingRecords.push(record)
+            progress = true
+            continue
+          }
           // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
           // no bare-`Uint8Array` shortcut left to normalize away here. `expectedAAD` is bound to
           // the cursor's own topic, the authoritative answer to "what lane is this drain reading".
           opened = await crypto.unwrap(sealed, {
             expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
-            ...(ref == null ? {} : { frame: ref }),
           })
         } catch (error) {
           if (error instanceof GroupSafetyHeldError) {
@@ -1239,17 +1269,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
           // A past epoch is not retained. Other refusals also finish without delivery.
           frame.sealed = { state: 'done' }
           resumeBlocked(cursor.topicID, frame.position, id)
-          continue
-        }
-        if (ref != null) {
-          const record = {
-            frame: ref,
-            payload: opened.payload,
-            senderDID: opened.senderDID,
-          }
-          frame.sealed = { state: 'pending', id: record.frame.id }
-          pendingRecords.push(record)
-          progress = true
           continue
         }
         // Opened, so it is done whatever the payload turns out to be — every path below either
@@ -1410,7 +1429,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const frames = segment.get(topicID)
         const frame = frames?.find((item) => item.position === position)
         if (frames == null || frame == null) throw new Error('app frame is not buffered')
-        if (frame.sealed.state === 'pending') throw new Error('app frame is pending')
+        if (
+          frame.sealed.state === 'pending' ||
+          (frame.sealed.state === 'sealed' &&
+            openedFrameIDs.has(frameID(topicID, frame.sealed.bytes)))
+        )
+          throw new Error('app frame is pending')
         if (frame.sealed.state !== 'sealed') throw new Error('app frame is already done')
         if (
           frames.some(
@@ -1482,6 +1506,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     restore: async (records): Promise<void> => {
       await runAppLane(async () => {
         for (const record of records) {
+          openedFrameIDs.delete(record.frame.id)
           reportUnknown(record)
           if (!pendingRecords.some((item) => item.frame.id === record.frame.id)) {
             pendingRecords.push(record)

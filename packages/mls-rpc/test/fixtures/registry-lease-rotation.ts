@@ -11,6 +11,7 @@ import { expect } from 'vitest'
 import { decodeAutoRotationCandidate } from '../../src/auto-rotation.js'
 import * as api from '../../src/index.js'
 import type { GroupKey } from '../../src/persistence-types.js'
+import { createTestCompletion } from './real-group.js'
 import type { createRegistryFixture } from './registry.js'
 import {
   buildSealedMemoryOperation,
@@ -99,6 +100,7 @@ export async function startLeaseRotationPeer(params: {
         newID: () => crypto.randomUUID(),
       })
       return createGroupPeer({
+        completion: createTestCompletion(key, groupCrypto.pending),
         ...options,
         openedDeliveryContext: options.openedDeliveryContext ?? params.openedDeliveryContext,
         hub,

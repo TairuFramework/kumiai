@@ -84,6 +84,7 @@ import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import {
   buildRealCommit,
   createRealGroup,
+  createTestCompletion,
   testGroupMLSDependencies,
   testHandleAccess,
 } from './fixtures/real-group.js'
@@ -1561,6 +1562,7 @@ async function expectPolicyPoison(
   const store = createTransactionalStore(f.member.handle)
   const onStrand = vi.fn()
   const peer = createGroupPeer({
+    completion: createTestCompletion(store.control.key),
     openedDeliveryContext,
     hub,
     crypto: createGroupCrypto({ access }),
@@ -2068,6 +2070,7 @@ test.each(['outer', 'inner'] as const)(
     const onRecovery = vi.fn()
     const deliverWelcome = vi.fn(async () => {})
     const peer = createGroupPeer({
+      completion: createTestCompletion(store.control.key),
       openedDeliveryContext,
       hub,
       crypto: createGroupCrypto({ access }),

@@ -20,6 +20,7 @@ import {
   createAsyncLocalOwnershipContext,
   openedDeliveryContext,
 } from './fixtures/ownership-context.js'
+import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 
 const { FakeHub } = (await import(
@@ -129,6 +130,7 @@ for (const context of ['supplied', 'absent'] as const) {
           throw new Error('No control work expected')
         }
         peer = createGroupPeer({
+          completion: createTestCompletion(key, reader.pending),
           openedDeliveryContext,
           hub,
           crypto: reader,

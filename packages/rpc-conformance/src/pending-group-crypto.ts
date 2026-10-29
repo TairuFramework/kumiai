@@ -1,25 +1,50 @@
 import { describe, expect, test } from 'vitest'
 
 import type { ConformanceGroupCrypto, ConformanceUnwrapResult } from './group-crypto.js'
+import type {
+  ConformanceGroupTransaction,
+  ConformancePreOpenAppFrameRef,
+  ConformanceStorageAppFrameRef,
+  ConformanceStoragePendingAppFrame,
+} from './persistence-fixture.js'
 
-export type ConformanceAppFrameRef = {
-  id: string
-  topicID: string
-  protocol: string
-  segment: number
-  position: string
+export type ConformanceAppFrameRef = ConformanceStorageAppFrameRef
+export type ConformancePendingAppFrame = ConformanceStoragePendingAppFrame
+
+export type ConformanceGroupHandlerMetadata = {
+  epoch: number
+  incarnation: number
+  frame?: ConformanceAppFrameRef
+  idempotencyKey?: string
 }
 
-export type ConformancePendingAppFrame = {
-  frame: ConformanceAppFrameRef
-  payload: Uint8Array
-  senderDID: string
-}
+export type ConformanceDurableHandler<TContext, TTx extends ConformanceGroupTransaction> =
+  | {
+      mode?: 'at-least-once'
+      handle(
+        context: TContext &
+          ConformanceGroupHandlerMetadata & {
+            frame: ConformanceAppFrameRef
+            idempotencyKey: string
+          },
+      ): Promise<void>
+    }
+  | {
+      mode: 'transactional'
+      handle(
+        context: TContext &
+          ConformanceGroupHandlerMetadata & {
+            frame: ConformanceAppFrameRef
+            idempotencyKey: string
+            tx: TTx
+          },
+      ): Promise<void>
+    }
 
 export type PendingCrypto = Omit<ConformanceGroupCrypto, 'unwrap'> & {
   unwrap(
     bytes: Uint8Array,
-    opts?: { expectedAAD?: Uint8Array; frame?: ConformanceAppFrameRef },
+    opts?: { expectedAAD?: Uint8Array; frame?: ConformancePreOpenAppFrameRef },
   ): ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
   pending: {
     list(): Promise<Array<ConformancePendingAppFrame>>
@@ -38,7 +63,7 @@ export type PendingCryptoFixture = {
   /** Make an otherwise valid frame resolve without an authenticated sender. */
   unnamedSender?(): () => void
   encode?(text: string): Uint8Array
-  frame?(ciphertext: Uint8Array, ref: ConformanceAppFrameRef): ConformanceAppFrameRef
+  frame?(ciphertext: Uint8Array, ref: ConformancePreOpenAppFrameRef): ConformancePreOpenAppFrameRef
   probeRestored?(): Promise<{
     unwrap(bytes: Uint8Array, opts?: { expectedAAD?: Uint8Array }): Promise<ConformanceUnwrapResult>
   }>
@@ -58,7 +83,9 @@ export type PendingCryptoConformanceParams = {
 }
 
 const bytes = new TextEncoder()
-const frame = (id: string, segment = 1, position = '1'): ConformanceAppFrameRef => ({
+const frame = (id: string, segment = 1, position = '1'): ConformancePreOpenAppFrameRef => ({
+  groupID: 'pending-group',
+  incarnation: 1,
   id,
   topicID: 'app-topic',
   protocol: 'chat',
@@ -76,7 +103,7 @@ function reference(
   id: string,
   segment = 1,
   position = '1',
-): ConformanceAppFrameRef {
+): ConformancePreOpenAppFrameRef {
   const ref = frame(id, segment, position)
   return fixture.frame?.(ciphertext, ref) ?? ref
 }
@@ -146,6 +173,7 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
         payload,
         senderDID: fixture.senderDID,
         epoch: from + advances,
+        frameEpoch: from,
       })
       expect(fixture.persistCalls()).toBe(calls + 1)
       const records = await fixture.receiver.pending.list()
@@ -274,7 +302,7 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
 
     test('records survive restart, sort by segment and position, and complete idempotently', async () => {
       const fixture = await createFixture('records')
-      const refs = new Map<string, ConformanceAppFrameRef>()
+      const refs = new Map<string, ConformancePreOpenAppFrameRef>()
       for (const [id, segment, position] of [
         ['late', 2, '000000000010'],
         ['first', 1, '000000000002'],

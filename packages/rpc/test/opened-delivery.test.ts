@@ -5,7 +5,11 @@ import { describe, expect, test, vi } from 'vitest'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { createHostBoundary, wrapPeerHost } from '../src/host-boundary.js'
 import { createOpenedAppHandler, OpenedDeliveryReentryError } from '../src/opened-delivery.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import {
+  completeTestRecord,
+  createFakeCrypto,
+  createTestCompletion,
+} from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
@@ -18,11 +22,16 @@ const protocols = {
     },
   },
 } as const
-const record: PendingAppFrame = {
-  frame: { id: 'saved-frame', protocol: 'chat', topicID: 'old-topic', segment: 4, position: 'Z' },
-  payload: encodeEventFrame('posted', { text: 'original' }),
-  senderDID: 'alice',
-}
+const record: PendingAppFrame = completeTestRecord(
+  {
+    frame: { id: 'saved-frame', protocol: 'chat', topicID: 'old-topic', segment: 4, position: 'Z' },
+    payload: encodeEventFrame('posted', { text: 'original' }),
+    senderDID: 'alice',
+  },
+  { groupID: 'group', incarnation: 1 },
+  'posted',
+  4,
+)
 function observe(promise: Promise<void>) {
   let state = 'pending'
   void promise.then(
@@ -40,6 +49,7 @@ describe('opened delivery', () => {
   test('stored delivery reuses validation and authenticated sender policy', async () => {
     const handler = vi.fn()
     const deliver = createOpenedAppHandler({
+      completion: createTestCompletion(record.frame),
       localDID: 'bob',
       protocols,
       handlers: { chat: { posted: handler } },
@@ -64,6 +74,7 @@ describe('opened delivery', () => {
   test('handler mutation cannot change the saved frame identity', async () => {
     const saved = { ...record, frame: { ...record.frame } }
     const deliver = createOpenedAppHandler({
+      completion: createTestCompletion(record.frame),
       localDID: 'bob',
       protocols,
       handlers: {
@@ -100,6 +111,7 @@ describe('opened delivery', () => {
 
   test('unknown inherited procedures cannot complete opened records', async () => {
     const deliver = createOpenedAppHandler({
+      completion: createTestCompletion(record.frame),
       localDID: 'bob',
       protocols,
       handlers: { chat: { posted: () => {} } },

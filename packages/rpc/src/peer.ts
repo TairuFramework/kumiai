@@ -1,4 +1,3 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
 import { normalizeDID } from '@kokuin/token'
 import { defaultJitter, encodeEventFrame } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
@@ -99,6 +98,7 @@ import {
   SendNotAdmissibleError,
 } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
+import type { GroupTransaction } from './handler-completion.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import {
   decodeHandshakeFrame,
@@ -142,7 +142,7 @@ import {
   type StrandConfidence,
   type StrandObservation,
 } from './peer-types.js'
-import { retentionOf } from './protocol.js'
+import { type GroupProtocolDefinition, retentionOf } from './protocol.js'
 import {
   decodeLedgerReply,
   decodeLedgerRequest,
@@ -325,17 +325,19 @@ export function canMoveCurrent(params: CurrentMoveInputs): boolean {
   )
 }
 
-export function createGroupPeer<Protocols extends Record<string, ProtocolDefinition>>(
-  input: GroupPeerParams<Protocols>,
-): GroupPeer<Protocols> {
-  return createGroupPeerWithControlWalk<Protocols>(input).peer
+export function createGroupPeer<
+  Protocols extends Record<string, GroupProtocolDefinition>,
+  TTx extends GroupTransaction = GroupTransaction,
+>(input: GroupPeerParams<Protocols, TTx>): GroupPeer<Protocols> {
+  return createGroupPeerWithControlWalk<Protocols, TTx>(input).peer
 }
 
 /** Internal construction seam for bounded control reconciliation. */
 export function createGroupPeerWithControlWalk<
-  Protocols extends Record<string, ProtocolDefinition>,
+  Protocols extends Record<string, GroupProtocolDefinition>,
+  TTx extends GroupTransaction = GroupTransaction,
 >(
-  input: GroupPeerParams<Protocols>,
+  input: GroupPeerParams<Protocols, TTx>,
 ): {
   peer: GroupPeer<Protocols>
   controlWalk: {
@@ -361,7 +363,7 @@ export function createGroupPeerWithControlWalk<
     typeof input.settleAcceptedRecovery !== 'function'
   )
     throw new TypeError('Captured recovery coordinator requires an accepted settlement sink')
-  if ((input.continuation == null) !== (input.completion == null))
+  if ((input.continuation == null) !== (input.recoveryCompletion == null))
     throw new TypeError('Recovery continuation and completion must be supplied together')
   if (
     input.continuation != null &&
@@ -534,17 +536,24 @@ export function createGroupPeerWithControlWalk<
    * drain outlives any one epoch's runtime (it runs mid-walk, when the app lane has been torn
    * down and not yet rebuilt).
    */
+  const inputBusHandlers = input.handlers as unknown as Record<string, Record<string, unknown>>
+  const busHandlers = handlers as unknown as Record<string, Record<string, unknown>>
   const appEventHandlers = new Map<string, BusHandlerMaps['events']>()
   const openedEvents = new Map<string, BusHandlerMaps['events']>()
   for (const [name, protocol] of Object.entries(protocols)) {
     openedEvents.set(
       name,
-      adaptBusHandlers(protocol, input.handlers[name] as Record<string, unknown>, input.suppress)
-        .events,
+      adaptBusHandlers<GroupProtocolDefinition, TTx>(protocol, inputBusHandlers[name] as never, {
+        completion: input.completion,
+        suppress: input.suppress,
+      }).events,
     )
     appEventHandlers.set(
       name,
-      adaptBusHandlers(protocol, handlers[name] as Record<string, unknown>, suppress).events,
+      adaptBusHandlers<GroupProtocolDefinition, TTx>(protocol, busHandlers[name] as never, {
+        completion: params.completion,
+        suppress,
+      }).events,
     )
   }
 
@@ -630,6 +639,7 @@ export function createGroupPeerWithControlWalk<
     anchor: () => anchor,
     departing: () => departing,
     groupID: () => commitTopicID,
+    groupKey: params.completion.key,
     safetyHold,
     commitLaneCaughtUp: () => commitLaneCaughtUp,
     commitWorkVersion: () => commitWorkVersion,
@@ -901,7 +911,7 @@ export function createGroupPeerWithControlWalk<
     armAppPull(0)
   }
 
-  const epochRuntime = createEpochRuntime<Protocols>({
+  const epochRuntime = createEpochRuntime<Record<string, GroupProtocolDefinition>, TTx>({
     boundary,
     mux,
     crypto: {
@@ -941,7 +951,8 @@ export function createGroupPeerWithControlWalk<
     },
     localDID,
     protocols,
-    handlers,
+    handlers: busHandlers as never,
+    completion: params.completion,
     suppress,
     runtime: params.runtime,
     appLogRetentionSeconds,
@@ -3808,7 +3819,7 @@ export function createGroupPeerWithControlWalk<
     if (safetyHold() !== null) return
     if (continuation !== null) {
       completionMutationID ??= newPublishID()
-      await params.completion?.({ ledger: [...held], mutationID: completionMutationID })
+      await params.recoveryCompletion?.({ ledger: [...held], mutationID: completionMutationID })
       continuation = null
       completionMutationID = null
       await refreshControl()

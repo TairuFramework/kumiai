@@ -2,7 +2,7 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 import { describe, expect, test } from 'vitest'
 
 import { createGroupPeer } from '../src/peer.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 const chat = {
@@ -15,6 +15,7 @@ describe('to() is gated on readiness', () => {
   test('to() called before init resolves instead of throwing Unknown protocol', async () => {
     const hub = new FakeHub()
     const peer = createGroupPeer<Protocols>({
+      completion: createTestCompletion(),
       hub,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'alice' }),
       localDID: 'alice',

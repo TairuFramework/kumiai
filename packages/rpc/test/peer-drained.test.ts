@@ -9,7 +9,7 @@ import { encodeLedgerRequest, encodeRecoveryRequest } from '../src/recovery.js'
 import { rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS, requireCapturedRecovery } from './fixtures/memory-group-mls.js'
@@ -363,6 +363,7 @@ describe('peer host drain', { concurrent: false }, () => {
         return unwrap(...args)
       }
       const bob = createGroupPeer({
+        completion: createTestCompletion(),
         hub,
         crypto,
         localDID: 'bob',
@@ -380,6 +381,7 @@ describe('peer host drain', { concurrent: false }, () => {
         },
       })
       const alice = createGroupPeer({
+        completion: createTestCompletion(),
         hub,
         crypto: createFakeCrypto({ epoch: 1, localDID: 'alice' }),
         localDID: 'alice',
