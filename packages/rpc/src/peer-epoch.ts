@@ -23,6 +23,7 @@ import {
   createUnroutedTagResponder,
   type InboundPath,
 } from './directed.js'
+import { PeerDisposedError } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
 import { adaptBusHandlers } from './handlers.js'
 import { type HostBoundary, wrapGatherOptions } from './host-boundary.js'
@@ -335,6 +336,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     intent: 'ephemeral' | 'log' = 'ephemeral',
   ): Promise<SegmentFrame> => {
     while (true) {
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
       const refused = sealError()
       if (refused != null) throw refused
       const barrier = sealBarrier()
@@ -345,6 +347,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
       const at = anchor()
       const topicID = protocolTopic(at.secret, at.epoch, name)
       const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
       const refusedAfter = sealError()
       if (refusedAfter != null) throw refusedAfter
       if (anchor() === at && sealBarrier() == null) {
