@@ -2969,6 +2969,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      // Rotation can no longer release sealing writes that transport teardown must drain.
+      sealError = new PeerDisposedError('Peer is disposed')
+      finishSealBarrier()
       appOutboxAcceptance?.close()
       logDelivery?.close()
       clearRecoveryRetry()
