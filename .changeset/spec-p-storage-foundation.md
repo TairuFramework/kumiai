@@ -53,9 +53,9 @@ Export portable source/proof types, concrete registry source/write types, captur
 Recover missing private state using retained trust. Complete source accepted operations idempotently after destination bootstrap.
 Unadopted legacy records stop unchanged; successor retirement is their explicit exit. Custom recovery secrets require equivalent retained-trust derivation at construction.
 Origin-authorised removed signers retain attestation authority. Busy responders can cause accepted-unadoptable churn.
-Opened-record drain remains 2.3c.
+Opened-record drain is supplied by phase 2.3c below.
 Real-MLS memory reconstruction and sensitivity witnesses provide phase-2 evidence. Phase-6 child-process SIGKILL evidence remains outstanding.
-Restart frozen-settlement publication under safety remains a 2.3 obligation. A crash before durable writing can still lose volatile host evidence.
+Phase 2.3c supplies restart finalisation of certified publication under safety. A crash before durable writing can still lose volatile host evidence.
 
 Hosts derive Welcome admission's `held.forkHalted` from `forkHalt` alone.
 A recovery-unavailable field permits otherwise admissible readmission with valid retained trust. Missing, unreadable or empty-spent trust refuses seed without reconstruction.
@@ -71,17 +71,46 @@ Expired evidence stays target-behind until manual resync. Coherent fake GroupInf
 Surface non-terminal `not-member` (distinct responder DIDs and count, optional pendingReason) and `spent-set-corrupt` conditions through status and events; `SpentSetCorruptError` is one class, re-exported by mls-rpc.
 Add manual recovery: resync to a registered or call-time target (current move or rejoin) and successor retirement with an app-clearable tombstone.
 A current move resets app-topic cursors with its other hub positions. `clearHold` lifts only app-reported halts.
-Phase-2.3c opened-record drain, phase-3 providers and child-process SIGKILL evidence remain excluded.
+Phase-3 providers and child-process SIGKILL evidence remain excluded.
 
 Phase 2.3a adds exact CAS for every MLS state write, with pending, poison and app-cursor metadata off the version clock. App-cursor writes no longer notify registry listeners. Own-commit adoption and build retry use journal compatibility over referenced proposals, allowing retained-history eviction. Skipped-key and retained-tuple guards enforce configurable epoch retention (default 4, range 1–32), including past-epoch opens. Registry `openBatch`/`pending` and `createGroupCrypto` atomically persist durable opens, refuse occurrences at or before the durable cursor and reject `frame.id !== frameID(topicID, ciphertext)`. Opened results carry `handleEpoch`, and `GroupUnwrapResult.epoch` reports that locked epoch while pending records keep the seal epoch. App work leaves the commit queue, with notices and delivery starts sharing one self-draining FIFO independent of `runSerial`, bounded pulls, durable departing topics, one code-unit position comparator and `idle`/`drained` completion ordering. Departing-topic expiry settles stalls through optional `AppDeliveryResumed.settlement: 'expired'`. Cleanups release a proven ambiguous clear-hold latch, keep unresolved switch proof visibly pending without a bound, and diagnose spent-set corruption before moving current.
 
 - `@kumiai/mls` behaviour change: private commit builders and `proposeSelfRemoval` permanently throw `CommitAuthoringRefusedError` on access-issued or mls-rpc-issued handles and their derivatives, including a host handle once `simpleHandleAccess` issues it. Bare handles are unchanged. New exports: `CommitAuthoringRefusedError`, `CommitReceipt`, `restrictCommitAuthoring`, `withCommitPermit`. `authorPrivateCommit` is internal and no longer exported. The permit receipt binds the commit, candidate and Welcome.
 - `@kumiai/mls-rpc` breaking change: `buildRevokeProofOperation` requires the control-build callback's `group` handle. `createControlBuildPort` requires `restoreCandidate`, accepts optional `restoreSource`, and builds on a handle restored from journal `sourceState`. `prepareBuild` rejects host commit bytes differing from the permit receipt. Undecodable candidates throw exported `InvalidCandidateError`, while other host-candidate restore faults propagate. Library rotation candidate faults reject with scheduler backoff. Null-state control adoption fails with `ControlAdoptionMovedError` (registry `adopt` reports `'moved'`) instead of `GroupStateConflictError`. Registry durable unwrap maps non-safety availability failures, including `RegistryRetiringError`, to retryable `AppFrameStorageError`.
 - Frames older than key retention can be refused without notice when a peer catches up across more than `retainKeysForEpochs` commits.
-- Deferred/residual: 2.3c supplies resync/retirement opened-record drain, `drainOpened` and `switch-blocked`. Opened retired records stay durable and undelivered. Out-of-scope crypto obligations remain ts-mls skipped-cache chain secrets and retained spent own handshake secrets from private Commit creation. Other known residuals: hub response decoding in hub-protocol/hub-client remains unbounded by rpc, pull rate limiting remains outstanding, and `mux.retainTopic`/durable cursor rows grow per rotation. A future-epoch old-topic frame can delay a newer segment up to 32 epochs. Raw-key holders can restore unrestricted handles through journal `sourceState`/`GroupHandle.state` (trusted-code exception Q3).
+- Phase 2.3c supplies resync/retirement opened-record drain, `drainOpened` and `switch-blocked`; opened retired records remain durable until handler completion. Out-of-scope crypto obligations remain ts-mls skipped-cache chain secrets and retained spent own handshake secrets from private Commit creation. Other known residuals: hub response decoding in hub-protocol/hub-client remains unbounded by rpc, pull rate limiting remains outstanding, and `mux.retainTopic`/durable cursor rows grow per rotation. A future-epoch old-topic frame can delay a newer segment up to 32 epochs. Raw-key holders can restore unrestricted handles through journal `sourceState`/`GroupHandle.state` (trusted-code exception Q3).
 
 Phase 2.3b adds committed application leases, byte-level registry `seal`/`receive`, automatic any-member key rotation and `MLSEncryptor` for hub tunnels. Each installation or renewal performs up to 16 discarded encryptions to reserve its range, renewing below four remaining with a 500-generation epoch ceiling. Registry ephemeral receive refuses legacy senders' generations at or above 500 per epoch. Durable opens keep their existing rules. Ephemeral crypto initiates no provider transaction. Cold ephemeral seals reject until independently committed warm-up. The first log seal waits for bounded maintenance, and one ephemeral replay after restart remains possible. An upstream ts-mls ratchet-skip export remains required to replace encrypt-and-discard advancement.
 
 Control settlement is epoch-scoped: walker consumption closes the saved build, `acceptedAs` is acknowledgement evidence only, and deadlines report provisional unknown without freeing the slot. Final outcomes use fresh IDs. Abandonment deletes executable material and leaves a durable spent-source marker. Welcome obligations survive separately. Internal rotation outcomes stay hidden from public outcome readers and callbacks, and public reserved-prefix operation IDs throw `TypeError`. Candidate adapters must accept the library rotation envelope through `decodeAutoRotationCandidate`. Before legacy activation, importing hosts supply a transaction-bound main-journal adapter or explicit null. An omitted decision for unmarked control state throws `LegacyJournalDecisionRequiredError`. Activation migrates every incarnation before callbacks or workers. Both memory models now authenticate commits against the saved source identity.
 
 Export candidate-free `inspectRecoveryGroupInfo`; captured recovery authenticates public advancement before preparing recovery while failed delivered copies preserve live control work and retry eligibility.
+
+Phase 2.3c adds durable application publication and retirement drainage:
+
+- **Breaking — rpc host ports:** durable `appOutbox` now requires `appPublication: AppPublicationPort`.
+  `AppOutbox.recordSettlement`, `loadSettlement`, `events` and `ackEvent` are mandatory. Entries carry
+  `status`, and `decodeAppEntry` strictly validates bounded event plaintext. Preparation atomically saves
+  the attempt with consumed send state/lease; registry hosts use `createRegistryAppPublication(access)`.
+- Both publication proof paths compare incarnation/epoch/authenticator, state/seal versions, attempt,
+  topic and acknowledgement cutoff. Certification persists a frozen obligation before removal.
+  Rollback retries retain FIFO ownership ahead of queued retirement. Frozen finalisation emits
+  `published` without crypto or hub work, including per-group reconstruction under a safety hold.
+- **Breaking — durable handlers:** peers with `crypto.pending` require `openedDeliveryContext` at
+  construction. Registry `deliverOpened` requires the same async delivery context. Storage dispatch
+  uses an explicit callback first, otherwise an attached source peer's durable handler until detach.
+  Handoff preserves exclusive admission and waits for in-flight completion.
+  Custom `OpenedDeliveryBinding.attach` sources must also supply `deliver(record)`.
+- `peer.drainOpened()` permanently stops new pulls/opens and drains only persisted opened plaintext.
+  Registry resync, readmission, successor retirement and deletion drain opened work and certified
+  publications before erasure. **Breaking — lifecycle:** the retirement timeout is removed; lifecycle
+  waits until drained. `RegistryPeer.status()` adds `switch-blocked` with key, reason and pending count.
+  `OpenedDeliveryReentryError` checks synchronously before waits/mutations and rejects same-group
+  lifecycle self-joins, including across awaits with the shared context.
+- Superseded manual resync attempts are collected against their exact source. A successor choice
+  prevents resuming superseded resync work while preserving owed outcomes and Welcome obligations.
+- Accepted plaintext and capture-inspection byte fields own their bytes even for Node Buffer inputs.
+
+Default handlers, publication and external status delivery remain at least once. HandlerCompletion
+atomicity and metadata migration (2.3d), declared restore (2.3e), HTTP smoke (2.4), real provider faults
+and child-process SIGKILL evidence remain outstanding.

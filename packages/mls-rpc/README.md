@@ -21,6 +21,9 @@ depend on both.
   `HandleAccess` type for a host that brings its own.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
   Registry access supplies `pending` and `unwrapBatch(frames)` automatically.
+- `createRegistryAppPublication(access)` — the peer's `appPublication` preparation/snapshot port.
+- `drainStoredOpened({ persistence, key, deliver, openedDeliveryContext })` — storage-only plaintext delivery.
+- `finaliseAppSettlements({ persistence, key })` — frozen publication finalisation without crypto or hub access.
 - `createGroupMLS({ access, control, readRecoverySource, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
   over the same access.
 - `createGroupSafety({ registry, persistence, mls, resolveTarget })` — incarnation safety reports,
@@ -210,6 +213,14 @@ restart, ordered by `(frame.segment, frame.position)` by this port. `complete(id
 record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
 
 ```ts
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { createGroupPeer } from '@kumiai/rpc'
+
+const deliveryTokens = new AsyncLocalStorage<object>()
+const openedDeliveryContext = {
+  run: <T>(token: object, fn: () => T): T => deliveryTokens.run(token, fn),
+  get: () => deliveryTokens.getStore(),
+}
 const access = simpleHandleAccess({
   key: store.control.key,
   handle: () => handle,
@@ -232,7 +243,13 @@ const crypto = createGroupCrypto({
     complete: (id) => store.completePending(id),
   },
 })
+const peer = createGroupPeer({ ...peerParams, crypto, openedDeliveryContext })
 ```
+
+`peerParams` supplies the remaining ports, including `appPublication` for durable publication.
+Any peer whose crypto exposes `pending` requires a valid `openedDeliveryContext`; omission throws
+`TypeError('Durable handlers require openedDeliveryContext')` at construction. Other runtimes
+supply equivalent async token propagation through `run(token, fn)` and `get()`.
 
 For simple access, the example's `saveHandleState` must enforce save ordering and exact version CAS.
 Saves issued before `persistOpened` must finish before it, and stale saves must be rejected.
@@ -730,6 +747,61 @@ Singleton unwrap maps unretained past and future epochs to `FrameEpochError`, an
 Storage failures become `AppFrameStorageError` with the original cause. Safety and batch-size errors pass through unchanged.
 Other crypto refusals throw plain `Error` instances. `wrap` and frame-less `unwrap` use `mutate`.
 
+## Application settlement and retirement drain
+
+Registry peers wire durable publication with the current access:
+
+```ts
+const access = await registry.access(key.groupID)
+const peer = createGroupPeer({
+  ...peerParams,
+  crypto: createGroupCrypto({ access }),
+  appOutbox: device.groups.ports(key).outbox,
+  appPublication: createRegistryAppPublication(access),
+  openedDeliveryContext,
+})
+```
+
+`appPublication.prepare(entry, floor)` commits the attempt together with consumed MLS send state
+and its lease, returning prepared bytes and a proof snapshot. `snapshot(protocol)` reports the
+current identity, state/seal versions and topic, or `null` when unavailable; `assertRoot()` rejects
+ownership reentry synchronously. Ciphertext stays in memory; uncertified restart may reseal with a
+fresh publish ID and repeat delivery.
+
+Host `AppOutbox` implementations must supply `recordSettlement(seq, obligation, expected)`,
+`loadSettlement(seq)`, `events()` and `ackEvent(id)`, in addition to their existing storage methods.
+Settlement compares identity, state version and attempt atomically before persisting the obligation.
+Events replay accepted/published/failed statuses until acknowledged. Absent event IDs are no-ops;
+safety event IDs must go through `GroupSafety.ackEvent`.
+The frozen finaliser removes certified entries and writes `published` from stored obligations,
+without opening crypto or contacting the hub, including under safety holds after restart.
+`finaliseAppSettlements({ persistence, key })` exposes this service; registry startup/access and
+retirement join it per group. Pending declared restore blocks ordinary finalisation.
+
+`peer.drainOpened()` is one-way: it permanently stops new pulls and opens on that peer and waits
+for persisted opened records and admitted completions. It does not decrypt sealed backlog.
+Create a replacement peer to resume opening. `dispose()`/`drained()` alone wait for admitted callbacks.
+`registry.drainOpened(key)` and `drainStoredOpened` serve stored plaintext without restoring old crypto.
+
+Pass optional `deliverOpened(record)` and `openedDeliveryContext` to `createGroupHandleRegistry`
+for delivery without an attached peer. `deliverOpened` requires the context. Reuse that exact context
+for registry peers and storage delivery; `createRegistryPeer` forwards a registry-supplied context
+through its factory options. `createOpenedAppHandler` from `@kumiai/rpc` can adapt protocol handlers.
+An explicit registry delivery callback takes precedence. Without it, an attached source peer's durable
+handler serves that source's unadmitted records until detachment. Live handoff and storage claims
+remain exclusive through completion. Without either handler, opened records remain pending.
+
+Resync, Welcome readmission, successor retirement and deletion wait for opened records and certified
+publication obligations before clearing transport. The retirement timeout has been removed: a failed
+or never-settling handler can block lifecycle indefinitely while preserving plaintext.
+`RegistryPeer.status()` reports `{ kind: 'switch-blocked', key, reason, pending }`, where `reason` is
+`'opened-records'` or `'publication-settlement'`; successful drainage clears the block.
+
+`OpenedDeliveryReentryError` (from `@kumiai/rpc`) refuses a handler joining its own peer's drain/disposal
+or a same-group registry lifecycle. The check runs synchronously before waits or mutations;
+Promise-returning entry points return a rejected Promise. The shared delivery context preserves
+this refusal across awaits independently of the ownership context.
+
 ## Captured registry recovery
 
 `createRegistryGroupMLS` constructs asynchronously from retained trust and stored identity, without restoring private MLS state.
@@ -758,7 +830,7 @@ const registryPeer = await createRegistryPeer({
 await registryPeer.ready
 ```
 
-`registryPeer.status()` reports `starting`, `running`, `switching`, `pending`, `spent-set-corrupt`, `not-member`, `failed` or `disposed`.
+`registryPeer.status()` reports `starting`, `running`, `switching`, `switch-blocked`, `pending`, `spent-set-corrupt`, `not-member`, `failed` or `disposed`.
 `failed` includes the terminal `error`, available without disposing the owner. `drained()` still rethrows that error after disposal.
 Pass `onRecovery` to receive coordinator failures through the existing rpc `RecoveryEvent` shape (`phase: 'failed'`, `reason: 'error'`).
 The event identifies the saved attempt and uses `target.topicID` as `groupID`. Callback failures cannot replace the coordinator error.
@@ -766,9 +838,9 @@ Use the same callback for the incarnation peer's `onRecovery` to observe both re
 An unresolved switch proof exposes `pending`, with no peer. Initial `ready` keeps waiting while that proof remains unresolved.
 Retries have no count or elapsed-time bound. Their backoff caps at 15 seconds, and disposal stops retries.
 
-The host's `createPeerForIncarnation(key, options)` supplies the actual incarnation's control, crypto, anchor, cursor and outbox ports.
+The host's `createPeerForIncarnation(key, options)` supplies the actual incarnation's control, crypto, anchor, cursor, outbox and `appPublication` ports.
 It spreads `options` into `createGroupPeer`, preferring `options.hub` and `options.control` over its own.
-That forwards `internalOperations`, `mls`, `checkpoints`, `manualRecovery`, `recoveryTarget`, `onNotMember`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`,
+That forwards `openedDeliveryContext`, `internalOperations`, `mls`, `checkpoints`, `manualRecovery`, `recoveryTarget`, `onNotMember`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`,
 both reconciliation callbacks, `continuation` and `completion`.
 Forward `internalOperations` unchanged so the registry can bind its private rotation enqueue and consume internal outcomes.
 `onConfirmedRecovery` requires `settleAcceptedRecovery`. Direct construction without the settlement callback throws `TypeError`.

@@ -71,6 +71,28 @@ when it is safe to open stops existing rather than being managed.
 
 ### Durable delivery (opt-in)
 
+Peers with `crypto.pending` require an `openedDeliveryContext` that propagates tokens across
+awaits. Missing or invalid context throws `TypeError('Durable handlers require openedDeliveryContext')`
+at construction. For Node hosts:
+
+```ts
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { createGroupCrypto } from '@kumiai/mls-rpc'
+import { createGroupPeer } from '@kumiai/rpc'
+
+const deliveryTokens = new AsyncLocalStorage<object>()
+const openedDeliveryContext = {
+  run: <T>(token: object, fn: () => T): T => deliveryTokens.run(token, fn),
+  get: () => deliveryTokens.getStore(),
+}
+const crypto = createGroupCrypto({ access, pending })
+const peer = createGroupPeer({ ...peerParams, crypto, openedDeliveryContext })
+```
+
+`peerParams` supplies the remaining peer ports, including `appPublication` for a durable outbox.
+Other runtimes supply an equivalent async context; reuse the same context for the registry,
+its peers and storage-only delivery.
+
 Supplying `GroupCrypto.pending` enables acknowledged delivery for events declared `retain: 'log'`.
 For a conforming hub that appends and retains the frame until it is durably opened, the peer
 delivers these events **at least once**, in log order per protocol, across process restarts and
@@ -107,6 +129,29 @@ App pulls, opens and handlers run outside the commit queue. App notices and deli
 one self-draining FIFO. `AppLane.idle()` awaits a snapshot of durable record completions already
 in flight, including cursor saves. After `dispose()`, `GroupPeer.drained()` awaits the peer boundary,
 then app idle, then the commit tail. It does not guarantee delivery of every retained frame.
+
+`peer.drainOpened()` permanently stops new pulls and opens on that peer, then waits for already
+persisted opened records and in-flight handler completions. It never opens sealed backlog.
+This is a one-way lifecycle operation: start a replacement peer to resume opening.
+`dispose()` followed by `drained()` waits for admitted callbacks; it does not flush unadmitted records.
+
+With `@kumiai/mls-rpc`, `registry.drainOpened(key)` drains persisted plaintext through the shared
+storage worker. Registry `deliverOpened(record)` takes precedence; without it, an attached source
+peer's durable handler serves that source's backlog until detachment. Handoff stops the live lane
+before storage delivery, retaining exclusive admission through completion. With neither handler,
+records remain pending and lifecycle waits. `deliverOpened` requires the shared `openedDeliveryContext`.
+`createOpenedAppHandler({ localDID, protocols, handlers, suppress? })` builds a storage dispatcher.
+Custom `OpenedDeliveryBinding.attach` sources supply `deliver(record)`, `handoff()` and `completed(id)`.
+Unknown protocols/procedures or handler failures retain records and retry.
+
+`OpenedDeliveryReentryError` refuses a handler joining its own peer drain/disposal or same-group
+registry lifecycle. The refusal check runs synchronously before any wait or mutation; Promise-returning
+entry points return a rejected Promise. Async context carries this protection across awaits.
+
+Registry resync, readmission, successor retirement and deletion wait until opened work and certified
+publication settlement drain. There is no retirement timeout. `RegistryPeer.status()` can report
+`{ kind: 'switch-blocked', key, reason: 'opened-records' | 'publication-settlement', pending }`.
+A never-settling handler keeps lifecycle blocked; elapsed time never permits erasure.
 
 Durable delivery is off when `GroupCrypto.pending` is absent. Ephemeral events remain best effort;
 directed traffic and anycast requests and replies keep their existing live completion or expiry
@@ -189,9 +234,35 @@ the frames that survived are delivered either way. It over-reports (a peer whose
 aged out cannot prove nothing was published between it and the floor) and never stays quiet about a
 real gap.
 
+## Durable application publication
+
+A durable `appOutbox` requires `appPublication: AppPublicationPort` alongside `appOutboxLimit`.
+`prepare(entry, floor)` atomically saves the attempt and consumed send state/lease before returning
+`{ entry, payload, snapshot }`; ciphertext remains in memory. `snapshot(protocol)` returns the current
+incarnation/epoch/authenticator, state version, seal version, segment and topic, or `null` while unavailable.
+`assertRoot()` synchronously rejects forbidden ownership reentry. Registry hosts use
+`createRegistryAppPublication(access)` from `@kumiai/mls-rpc`.
+
+In addition to `put`, `list`, `remove` and `clear`, every `AppOutbox` must implement:
+
+| Method | Contract |
+| --- | --- |
+| `recordSettlement(seq, obligation, expected)` | Atomically compare identity, state version and attempt; persist the publication obligation only on a match. |
+| `loadSettlement(seq)` | Return that durable obligation or `null`. |
+| `events()` | Replay unacknowledged accepted, published and failed status events. |
+| `ackEvent(id)` | Acknowledge one event; absent IDs are no-ops. |
+
+Accepted entries persist immutable plaintext, a status and `lastAttempt`; `decodeAppEntry` validates
+bounded event plaintext. Retries within a process reuse prepared bytes and publish ID. Restart may
+reseal an uncertified entry with a fresh ID, so publication remains at least once.
+After certification, a frozen finaliser removes the entry and emits `published` from the persisted
+obligation without resealing, crypto access or hub work, including after restart under a safety hold.
+The mls-rpc registry resumes these finalisers per group before access and during lifecycle drains.
+Status delivery remains at least once until `ackEvent`; acknowledgements never clear safety fields.
+
 ## What a host must supply for the commit lane
 
-`mls`, `control`, `anchorStore`, `appCursorStore`, `appOutbox`, `appOutboxLimit`, `build`, `adopt`
+`mls`, `control`, `anchorStore`, `appCursorStore`, `appOutbox`, `appPublication`, `appOutboxLimit`, `build`, `adopt`
 and `deliverWelcome` arrive together — the params type requires the complete commit lane.
 The stores preserve different durable state:
 
@@ -316,7 +387,7 @@ Enqueue, direct crypto, registry mutation, resync, reauthorize and consumer `rec
 `reauthorize()` throws synchronously. Held crypto/resolver refusals latch the reason and retain the unprocessed frame and cursor for retry.
 New opens, control publication and automatic recovery stop. Already opened handlers may finish.
 Stored outcomes/events, opened-record restoration, committed Welcome delivery and existing live certified settlement remain serviceable.
-Restart publication of frozen settlement under a safety hold remains a 2.3 obligation.
+Persisted certified settlement also finalises after restart under a safety hold, without opening crypto.
 
 Peers latch self-detected evidence and held port refusals immediately.
 Registry safety sinks synchronously hold live consumers before durable writes finish. Restart loads committed safety fields before network work.
