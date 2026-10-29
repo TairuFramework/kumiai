@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { stdout } from 'node:process'
 import { createSigningIdentity } from '@kokuin/token'
 import { afterEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
@@ -779,28 +780,33 @@ test('application preparation participates in host drain and disposal fencing', 
   expect(finished).toBe(true)
 })
 
-test('capture inspection owns request buffers and returned authenticated facts', async () => {
-  const authenticator = new Uint8Array([3])
-  const host = wrapPeerHost(createHostBoundary(), {
-    mls: {
-      capturedRecovery: {
-        inspectCapture: async (reply: { sealed: Uint8Array; requestKey: Uint8Array }) => {
-          reply.sealed.fill(9)
-          reply.requestKey.fill(8)
-          return { groupID: 'group', epoch: 2, authenticator }
+test.each(['Uint8Array', 'Buffer'] as const)(
+  'capture inspection owns %s request buffers and returned authenticated facts',
+  async (kind) => {
+    const bytes = (value: number) =>
+      kind === 'Buffer' ? Buffer.from([value]) : new Uint8Array([value])
+    const authenticator = bytes(3)
+    const host = wrapPeerHost(createHostBoundary(), {
+      mls: {
+        capturedRecovery: {
+          inspectCapture: async (reply: { sealed: Uint8Array; requestKey: Uint8Array }) => {
+            reply.sealed.fill(9)
+            reply.requestKey.fill(8)
+            return { groupID: 'group', epoch: 2, authenticator }
+          },
         },
       },
-    },
-  })
-  const reply = {
-    sealed: new Uint8Array([1]),
-    requestKey: new Uint8Array([2]),
-    requestID: 'request',
-    epochFloor: null,
-  }
-  const facts = await host.mls.capturedRecovery.inspectCapture(reply)
-  expect(reply.sealed).toEqual(new Uint8Array([1]))
-  expect(reply.requestKey).toEqual(new Uint8Array([2]))
-  facts.authenticator.fill(0)
-  expect(authenticator).toEqual(new Uint8Array([3]))
-})
+    })
+    const reply = {
+      sealed: bytes(1),
+      requestKey: bytes(2),
+      requestID: 'request',
+      epochFloor: null,
+    }
+    const facts = await host.mls.capturedRecovery.inspectCapture(reply)
+    expect(Array.from(reply.sealed)).toEqual([1])
+    expect(Array.from(reply.requestKey)).toEqual([2])
+    facts.authenticator.fill(0)
+    expect(Array.from(authenticator)).toEqual([3])
+  },
+)

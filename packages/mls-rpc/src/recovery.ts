@@ -151,7 +151,7 @@ export async function inspectRecoveryCapture(params: {
           !sameBytes(verified.groupInfoAuthenticator, source.identity.authenticator))
       )
         return null
-      return { ...facts, authenticator: verified.groupInfoAuthenticator.slice() }
+      return { ...facts, authenticator: Uint8Array.from(verified.groupInfoAuthenticator) }
     } catch (cause) {
       if (
         attempt === 0 &&

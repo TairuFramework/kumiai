@@ -374,7 +374,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                 deleted: false as const,
                 terminal: candidate.state.groupActiveState.kind === 'removedFromGroup',
                 epoch: Number(candidate.epoch),
-                epochAuthenticator: candidate.state.keySchedule.epochAuthenticator.slice(),
+                epochAuthenticator: Uint8Array.from(candidate.state.keySchedule.epochAuthenticator),
                 state: reserved.state,
                 credential: captured.credential,
                 ledger: captured.ledgerTokens,

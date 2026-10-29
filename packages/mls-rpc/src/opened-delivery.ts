@@ -170,7 +170,7 @@ export async function drainStoredOpened<TTx extends GroupTransaction>(params: {
 export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
   persistence: GroupPersistence<TTx>
   key: GroupKey
-  deliver(record: PendingAppFrame): Promise<void>
+  deliver?(record: PendingAppFrame): Promise<void>
   openedDeliveryContext: OpenedDeliveryContext
 }): Promise<void> {
   const key = { ...params.key }
@@ -207,9 +207,11 @@ export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
                 (record) => record.frame.protocol === protocol,
               )
               if (record === undefined) return false
-              await runOpenedDelivery(context, { key }, () =>
-                params.deliver(copyStoredValue(record)),
-              )
+              await runOpenedDelivery(context, { key }, async () => {
+                const deliver = params.deliver ?? state.sources.values().next().value?.deliver
+                if (deliver === undefined) throw new Error('Missing opened delivery handler')
+                await deliver(copyStoredValue(record))
+              })
               let completionDelay = 100
               for (;;) {
                 assertHealthy(capability)

@@ -24,7 +24,7 @@ export async function startLeaseRotationPeer(params: {
   fixture: Awaited<ReturnType<typeof createRegistryFixture>>
   key: GroupKey
   outbox: AppOutbox
-  handler?: () => Promise<void>
+  handler?: (event: { data: unknown }) => Promise<void>
   openedDeliveryContext?: OpenedDeliveryContext
 }) {
   const { mode, fixture, key } = params

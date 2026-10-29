@@ -613,11 +613,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       persistence: persistence.groups,
       key,
       openedDeliveryContext: context,
-      deliver:
-        params.deliverOpened ??
-        (async () => {
-          throw new Error('Missing opened delivery handler')
-        }),
+      deliver: params.deliverOpened,
     })
   }
   async function drainRetirementOpened(key: GroupKey): Promise<void> {

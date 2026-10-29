@@ -62,7 +62,7 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
       identity: {
         ...owner.key,
         epoch: record.epoch,
-        authenticator: record.epochAuthenticator.slice(),
+        authenticator: Uint8Array.from(record.epochAuthenticator),
       },
       stateVersion: record.version,
       sealVersion: live.frontier(),
@@ -100,7 +100,7 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
       identity: {
         ...owner.key,
         epoch: source.epoch,
-        authenticator: source.epochAuthenticator.slice(),
+        authenticator: Uint8Array.from(source.epochAuthenticator),
       },
       stateVersion: source.version,
     }
@@ -146,7 +146,7 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
             }
             result = {
               entry: updated,
-              payload: sealed.sealed.ciphertext.slice(),
+              payload: Uint8Array.from(sealed.sealed.ciphertext),
               snapshot: {
                 ...captured,
                 stateVersion: sealed.record.version,

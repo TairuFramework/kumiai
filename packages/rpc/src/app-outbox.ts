@@ -167,7 +167,7 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): Ap
     const entry: AppOutboxEntry = {
       protocol: input.protocol,
       prc: input.prc,
-      data: input.data.slice(),
+      data: Uint8Array.from(input.data),
       seq,
       lastAttempt: null,
       status: 'accepted',

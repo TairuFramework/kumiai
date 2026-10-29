@@ -71,7 +71,11 @@ export type OpenedDeliveryBinding = {
   claim(record: PendingAppFrame, fn: () => Promise<void>): Promise<boolean>
   attach(
     context: OpenedDeliveryContext,
-    source: { handoff(): Promise<void>; completed(id: string): Promise<void> },
+    source: {
+      handoff(): Promise<void>
+      completed(id: string): Promise<void>
+      deliver(record: PendingAppFrame): Promise<void>
+    },
   ): () => void
 }
 const bindings = new WeakMap<PendingAppFrames, OpenedDeliveryBinding>()

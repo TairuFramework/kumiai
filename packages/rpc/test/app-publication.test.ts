@@ -156,6 +156,30 @@ test('failed and null handoff retry the same prepared bytes and ID', async () =>
   }
 })
 
+test('accepted Buffer mutation cannot change the plaintext prepared for publication', async () => {
+  const f = fixture()
+  const original = encodeEventFrame('chat/posted', { text: 'original' })
+  const input = Buffer.from(original)
+  const prepare = f.prepare.getMockImplementation()
+  if (prepare === undefined) throw new Error('Missing preparation')
+  f.prepare.mockImplementation(async (entry, floor) => {
+    return { ...(await prepare(entry, floor)), payload: Uint8Array.from(entry.data) }
+  })
+  try {
+    await f.queue.accept({ protocol: 'chat', prc: 'chat/posted', data: input })
+    input.fill(0)
+    f.worker.trigger()
+    await f.tick()
+    expect(f.prepare).toHaveBeenCalledTimes(1)
+    expect(f.prepare.mock.calls[0]?.[0].data).toEqual(original)
+    expect(f.publish).toHaveBeenCalledTimes(1)
+    expect(f.publish.mock.calls[0]?.[0].payload).toEqual(original)
+  } finally {
+    f.worker.close()
+    f.queue.close()
+  }
+})
+
 test.each(['payload', 'plaintext', 'authenticator'] as const)(
   'prepared Buffer %s stays isolated from producer mutation across handoffs',
   async (field) => {

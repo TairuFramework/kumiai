@@ -321,7 +321,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
                 deleted: false as const,
                 terminal: false,
                 epoch: Number(installed.epoch),
-                epochAuthenticator: installed.state.keySchedule.epochAuthenticator.slice(),
+                epochAuthenticator: Uint8Array.from(installed.state.keySchedule.epochAuthenticator),
                 state: reserved.state,
                 credential: captured.credential,
                 ledger: captured.ledgerTokens,

@@ -459,15 +459,15 @@ export function wrapPeerHost<TParams extends object>(
               async inspectCapture(reply: Parameters<CapturedRecoveryPort['inspectCapture']>[0]) {
                 const facts = await captured.inspectCapture({
                   ...reply,
-                  sealed: reply.sealed.slice(),
-                  requestKey: reply.requestKey.slice(),
+                  sealed: Uint8Array.from(reply.sealed),
+                  requestKey: Uint8Array.from(reply.requestKey),
                 })
                 return facts === null
                   ? null
                   : {
                       groupID: facts.groupID,
                       epoch: facts.epoch,
-                      authenticator: facts.authenticator.slice(),
+                      authenticator: Uint8Array.from(facts.authenticator),
                     }
               },
             }).inspectCapture,

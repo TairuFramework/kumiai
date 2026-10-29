@@ -950,7 +950,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         copy: handle,
         identity: reservation.identity,
         limit: reservation.limit,
-        eligibility: reservation.eligibility.slice(),
+        eligibility: Uint8Array.from(reservation.eligibility),
       }
       const staged = copy
       bindSendCeiling(handle, () => staged.limit)
@@ -963,7 +963,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       return {
         record: saved,
         reservation,
-        eligibility: copy.eligibility.slice(),
+        eligibility: Uint8Array.from(copy.eligibility),
         publicationCopy: copy,
         sealed,
       }

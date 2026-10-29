@@ -152,6 +152,45 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       await reconstructed.close()
     })
 
+    test('detaching a source removes its handler fallback', async () => {
+      const env = await setup(mode, supplied, 'peer factory')
+      await env.plant([env.record('detached')])
+      const access = await env.fixture.registry.access(env.key.groupID)
+      const binding = openedDeliveryBinding(access.pending)
+      if (binding === undefined) throw new Error('Missing opened binding')
+      const delivered: Array<string> = []
+      const source = (name: string) => ({
+        handoff: async () => {},
+        completed: async () => {},
+        deliver: async () => {
+          delivered.push(name)
+        },
+      })
+      const detach = binding.attach(env.context, source('detached'))
+      detach()
+      let settled = false
+      const drain = env.fixture.registry.drainOpened(env.key).then(() => {
+        settled = true
+      })
+      let removeReplacement: (() => void) | undefined
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        expect(delivered).toEqual([])
+        expect(settled).toBe(false)
+        expect(await env.pending()).toHaveLength(1)
+        removeReplacement = binding.attach(env.context, source('replacement'))
+        await vi.waitFor(() => expect(settled).toBe(true), { timeout: 2000 })
+        await drain
+        expect(delivered).toEqual(['replacement'])
+        expect(await env.pending()).toEqual([])
+      } finally {
+        removeReplacement ??= binding.attach(env.context, source('cleanup'))
+        await drain
+        removeReplacement()
+        await env.fixture.close()
+      }
+    })
+
     test('failed old anchor blocks newer work in the same protocol only', async () => {
       const env = await setup(mode, supplied)
       await env.plant([
@@ -956,6 +995,10 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
         const detach = binding.attach(env.context, {
           handoff: () => lane.handoffOpened(),
           completed: (id) => lane.acknowledgeOpened(id),
+          deliver: async () => {
+            entered.resolve()
+            await releaseHandler.promise
+          },
         })
         let lifecycle: () => Promise<unknown> = () => env.fixture.registry.delete(env.key)
         if (entry === 'readmit') {

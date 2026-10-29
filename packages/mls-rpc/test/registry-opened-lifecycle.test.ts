@@ -19,7 +19,7 @@ import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
 for (const mode of ['real-mls', 'double'] as const) {
   for (const supplied of [true, false]) {
     describe(`opened lifecycle (${mode}, ownership context ${supplied})`, () => {
-      async function setup() {
+      async function setup(coldDelivery = true) {
         const context = createAsyncLocalOwnershipContext()
         const groupID = crypto.randomUUID()
         const entered = Promise.withResolvers<void>()
@@ -32,11 +32,13 @@ for (const mode of ['real-mls', 'double'] as const) {
           backgroundMaintenance: 'gated',
           openedDeliveryContext: context,
           ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
-          deliverOpened: async (record) => {
-            delivered.push(record.frame.id)
-            entered.resolve()
-            await release.promise
-          },
+          deliverOpened: !coldDelivery
+            ? undefined
+            : async (record) => {
+                delivered.push(record.frame.id)
+                entered.resolve()
+                await release.promise
+              },
         })
         const key = { groupID, incarnation: 1 }
         const capability = entryCapability(fixture.device.groups)
@@ -230,6 +232,64 @@ for (const mode of ['real-mls', 'double'] as const) {
           } finally {
             env.release.resolve()
             await work?.catch(() => {})
+            await env.fixture.close()
+          }
+        },
+      )
+
+      test.each(['resync', 'delete'] as const)(
+        'live handler drains unadmitted backlog without registry delivery: %s',
+        async (kind) => {
+          const env = await setup(false)
+          const release = Promise.withResolvers<void>()
+          const calls: Array<unknown> = []
+          let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
+          let work: Promise<unknown> | undefined
+          let settled = false
+          try {
+            await env.plant('first')
+            await env.plant('second')
+            running = await startLeaseRotationPeer({
+              mode,
+              fixture: env.fixture,
+              key: env.key,
+              outbox: env.fixture.device.groups.ports(env.key).outbox,
+              handler: async (event) => {
+                calls.push(event.data)
+                await release.promise
+              },
+            })
+            await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 2000 })
+            expect(calls).toEqual([{ text: 'first' }])
+            const begin = await lifecycle(env, kind)
+            work = begin().then(() => {
+              settled = true
+            })
+            void work.catch(() => {})
+            await vi.waitFor(() => expect(running?.owner.status().kind).toBe('switch-blocked'), {
+              timeout: 2000,
+            })
+            expect(await env.pending()).toHaveLength(2)
+            release.resolve()
+            await vi.waitFor(() => expect(settled).toBe(true), { timeout: 2000 })
+            await work
+            expect(calls).toEqual([{ text: 'first' }, { text: 'second' }])
+            expect(await env.pending()).toEqual([])
+            expect(running.owner.status().kind).not.toBe('switch-blocked')
+          } finally {
+            release.resolve()
+            if (work !== undefined && !settled) {
+              await env.capability.run(
+                { groupID: env.key.groupID, mutationID: crypto.randomUUID() },
+                async (reads) => ({ expected: await reads.lifetime(), value: null }),
+                async (stores) => {
+                  await stores.incarnation(1).pending.complete(['first', 'second'])
+                },
+              )
+            }
+            await work?.catch(() => {})
+            running?.owner.dispose()
+            await running?.owner.drained()
             await env.fixture.close()
           }
         },
