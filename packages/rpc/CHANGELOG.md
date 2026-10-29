@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.12.2
+
+### Patch Changes
+
+- Release anchor-rotation seal waiters with PeerDisposedError before draining transports during peer disposal.
+
 ## 0.12.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # @kumiai/mls
 
+## 0.12.3
+
+### Patch Changes
+
+- Add `GroupHandle.clone()`, an independent in-process copy of a group handle that skips serialization, ledger replay and signature verification. Use it in place of a serialize-and-restore round trip to get a private copy of a live handle.
+
 ## 0.12.1
 
 ### Patch Changes

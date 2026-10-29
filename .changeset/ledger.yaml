@@ -417,6 +417,10 @@
   dir: packages/mls
   intents:
     - settled-removal-tombstones
+"@kumiai/mls@0.12.3":
+  dir: packages/mls
+  intents:
+    - mls-group-handle-clone
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -517,6 +521,10 @@
   dir: packages/rpc
   intents:
     - management-tier-0-12
+"@kumiai/rpc@0.12.2":
+  dir: packages/rpc
+  intents:
+    - rpc-dispose-seal-barrier
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:
