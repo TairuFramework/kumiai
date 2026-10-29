@@ -72,7 +72,6 @@ async function start(
   }
   const created: Array<RegistryPeerOptions> = []
   const owner = await createRegistryPeer({
-    openedDeliveryContext,
     registry: f.registry,
     key,
     target,
@@ -99,7 +98,6 @@ async function start(
       const access = await f.registry.access(current.groupID)
       const ports = f.device.groups.ports(current)
       return createGroupPeer({
-        openedDeliveryContext,
         ...options,
         hub,
         crypto: createGroupCrypto({ access }),
