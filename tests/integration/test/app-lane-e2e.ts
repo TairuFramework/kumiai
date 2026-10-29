@@ -488,7 +488,7 @@ export function makeMember(params: MakeMemberParams): Member {
                 ...built.welcome,
                 bytes: encodeOperationBody({
                   welcome: built.welcome.bytes,
-                  invite: body.material.invite,
+                  invite: { ...body.material.invite, ledgerEntries: built.bodies },
                 }),
               },
             }
@@ -681,12 +681,12 @@ export function operationRequest(
 export function buildInviteCommit(
   member: Member,
   material: InviteMaterial,
-  deliverWelcome: (welcome: Uint8Array) => void,
+  deliverWelcome: (welcome: Uint8Array, invite: Invite) => void,
 ): OperationRequest {
   const request = operationRequest('invite', { type: 'invite', material })
   member.deliveries.set(request.id, (artifact) => {
-    const decoded = decodeOperationBody(artifact) as { welcome: Uint8Array }
-    deliverWelcome(decoded.welcome)
+    const decoded = decodeOperationBody(artifact) as { welcome: Uint8Array; invite: Invite }
+    deliverWelcome(decoded.welcome, decoded.invite)
   })
   return request
 }

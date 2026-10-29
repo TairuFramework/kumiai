@@ -51,10 +51,10 @@ test('the spec describes startup cursor fallback separately from a full readmiss
   expect(doc).toMatch(/co-committed.*epoch mismatch/)
 })
 
-test.each(['rpc', 'mls-rpc', 'version-band-0-11'])(
+test.each(['rpc', 'mls-rpc', 'version-band-0-13'])(
   '%s release guidance includes durable rejoin, required adoption writes and renewal retry',
   async (name) => {
-    const path = name === 'version-band-0-11' ? name : `crash-safe-control-${name}`
+    const path = name === 'version-band-0-13' ? name : `crash-safe-control-${name}`
     const doc = await guidance(`.changeset/${path}.md`)
     expect(doc).toMatch(/durable rejoin record/)
     expect(doc).toMatch(/required.*AdoptionWrite/)

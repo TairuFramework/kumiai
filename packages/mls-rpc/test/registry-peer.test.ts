@@ -940,13 +940,13 @@ describe('registry peer recovery coordination', () => {
     const s = await setup()
     let owner: api.RegistryPeer | undefined
     try {
+      const access = await s.f.registry.access(groupID)
+      await drainRegistryMaintenance(access)
       const trust = await s.f.device.groups.loadTrust(groupID)
       if (trust === null) throw new Error('Missing trust')
       const state = await s.f.device.groups.loadState(source)
       if (state === null || state.deleted) throw new Error('Missing state')
-      const advanced = await s.f.advance(
-        await (await s.f.registry.access(groupID)).read((handle) => handle),
-      )
+      const advanced = await s.f.advance(await access.read((handle) => handle))
       await s.f.installRows({
         key: source,
         state: {

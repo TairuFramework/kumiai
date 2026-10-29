@@ -524,7 +524,8 @@ test.each([
   }
   blockCommit = false
   await local.owner.peer()?.recover()
-  await expect.poll(() => local.owner.installedKey().incarnation, { timeout: 10000 }).toBe(2)
+  // Recapture can wait for the spec's 15-second backoff before confirmation.
+  await expect.poll(() => local.owner.installedKey().incarnation, { timeout: 20_000 }).toBe(2)
   expect(await f.local().safety().status(f.key)).toMatchObject({ condition: null, evidence: null })
   expect(
     (await f.local().safety().events(f.key)).some((event) => event.kind === 'not-member'),
@@ -804,7 +805,8 @@ test('roster reply flood shares bounded group admission', async () => {
   )
   try {
     await Promise.all(requests.map((request) => hub.publish(request)))
-    await expect.poll(() => active).toBe(8)
+    // Prefix reconciliation is serial and can outlast the default poll budget.
+    await expect.poll(() => active, { timeout: 15_000 }).toBe(8)
     expect(maximum).toBe(8)
     expect(calls).toBe(8)
   } finally {
@@ -982,10 +984,12 @@ test('hard hold installed while sealing prevents roster publication', async () =
   const recovering = local.owner.peer()?.recover()
   try {
     await started
-    await f.remote.installRows({
-      key: f.remoteKey,
-      control: { controlHold: { reason: 'unsupported-version', position: null } },
-    })
+    await f.remote.device.groups
+      .ports(f.remoteKey)
+      .control.apply(
+        { controlHold: { reason: 'unsupported-version', position: null } },
+        crypto.randomUUID(),
+      )
   } finally {
     release()
   }

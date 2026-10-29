@@ -445,6 +445,18 @@ test.each([false, true])(
     bob.entrySlot.install(async () => next.bodies)
     await bob.handle().processMessage(next.commit)
     await bob.adopt(bob.handle())
+    let releaseReply: (() => void) | undefined
+    if (unwalked) {
+      const replyReady = new Promise<void>((resolve) => {
+        releaseReply = resolve
+      })
+      // Capture after the unwalked commit so confirmation reaches source revalidation.
+      const seal = alice.mls.sealGroupInfo.bind(alice.mls)
+      vi.spyOn(alice.mls, 'sealGroupInfo').mockImplementation(async (...args) => {
+        await replyReady
+        return seal(...args)
+      })
+    }
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'in process repair' } })
     if (unwalked) {
       let confirmed = false
@@ -460,7 +472,11 @@ test.each([false, true])(
         }
         await apply(changes, id)
       })
-      await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
+      try {
+        await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
+      } finally {
+        releaseReply?.()
+      }
       const blockingPosition = (await alice.control.load()).applied.find(
         (row) => row.epoch === epochBefore + 2,
       )?.sequenceID

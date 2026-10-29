@@ -116,8 +116,10 @@ test('the app-lane invite build publishes its preservation clock and delivers th
       }),
     })
     let welcome: Uint8Array | undefined
-    const request = buildInviteCommit(alice, { invite, bundle }, (message) => {
+    let deliveredInvite: typeof invite | undefined
+    const request = buildInviteCommit(alice, { invite, bundle }, (message, acceptedInvite) => {
       welcome = message
+      deliveredInvite = acceptedInvite
     })
     await alice.peer.commit(request)
     const clock = alice.handle().ledgerTokens.at(-1)
@@ -125,10 +127,11 @@ test('the app-lane invite build publishes its preservation clock and delivers th
     expect((await verifyLedgerEntry(clock))?.entry.value).toEqual({ op: 'clock', time: now - 10 })
     await vi.waitFor(() => expect(carol.handle().epoch).toBe(alice.handle().epoch))
     expect(carol.handle().ledgerTokens).toEqual(alice.handle().ledgerTokens)
-    if (welcome == null) throw new Error('Missing accepted Welcome')
+    expect(deliveredInvite?.ledgerEntries).toEqual(alice.handle().ledgerTokens)
+    if (welcome == null || deliveredInvite == null) throw new Error('Missing accepted Welcome')
     const joined = await joinFromWelcome({
       identity: bobID,
-      invite,
+      invite: deliveredInvite,
       welcome,
       bundle,
       ratchetTree: alice.handle().state.ratchetTree,
