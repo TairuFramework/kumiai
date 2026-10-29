@@ -674,6 +674,7 @@ export function createGroupPeerWithControlWalk<
       : openedBinding?.attach(openedContext, {
           handoff: () => appLane.handoffOpened(),
           completed: (id) => appLane.acknowledgeOpened(id),
+          canDeliver: () => !disposed,
           deliver: openedHandler,
         })
   let openedDrain: Promise<void> | undefined

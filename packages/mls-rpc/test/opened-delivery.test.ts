@@ -861,6 +861,87 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       }
     })
 
+    test.each(['dispose start', 'drained'] as const)(
+      'disposed peers withdraw fallback while retaining their opened waiter: %s',
+      async (stage) => {
+        const env = await setup(mode, supplied, 'peer factory')
+        const records = [env.record('first'), env.record('second', 'chat', 5)]
+        await env.plant(records)
+        const entered = Promise.withResolvers<void>()
+        const release = Promise.withResolvers<void>()
+        const oldCalls: Array<unknown> = []
+        const replacementCalls: Array<unknown> = []
+        const running = await startLeaseRotationPeer({
+          mode,
+          fixture: env.fixture,
+          key: env.key,
+          outbox: env.fixture.device.groups.ports(env.key).outbox,
+          openedDeliveryContext: env.context,
+          handler: async (event) => {
+            oldCalls.push(event.data)
+            entered.resolve()
+            await release.promise
+          },
+        })
+        await entered.promise
+        const peer = running.owner.peer()
+        if (peer === null) throw new Error('Missing peer')
+        const access = await env.fixture.registry.access(env.key.groupID)
+        const binding = openedDeliveryBinding(access.pending)
+        if (binding === undefined) throw new Error('Missing opened binding')
+        let opened = false
+        const openedDrain = peer.drainOpened().then(() => {
+          opened = true
+        })
+        let detachReplacement: (() => void) | undefined
+        try {
+          const disposal = peer.dispose()
+          expect(opened).toBe(false)
+          if (stage === 'drained') {
+            await disposal
+            release.resolve()
+            await peer.drained()
+            expect(oldCalls).toEqual([{ text: 'first' }])
+            expect(await env.pending()).toEqual(records.slice(1))
+            expect(opened).toBe(false)
+          }
+          detachReplacement = binding.attach(env.context, {
+            handoff: async () => {},
+            completed: async () => {},
+            deliver: createOpenedAppHandler({
+              localDID: env.fixture.identity.id,
+              protocols,
+              handlers: {
+                chat: {
+                  posted: async (event) => {
+                    replacementCalls.push(event.data)
+                  },
+                },
+              },
+            }),
+          })
+          const storedDrain = env.fixture.registry.drainOpened(env.key)
+          release.resolve()
+          await storedDrain
+          await disposal
+          await peer.drained()
+          await openedDrain
+          await env.fixture.registry.drainOpened(env.key)
+          expect(oldCalls).toEqual([{ text: 'first' }])
+          expect(replacementCalls).toEqual([{ text: 'second' }])
+          expect(await env.pending()).toEqual([])
+        } finally {
+          release.resolve()
+          detachReplacement?.()
+          await env.drain(async () => {})
+          await openedDrain
+          running.owner.dispose()
+          await running.owner.drained()
+          await env.fixture.close()
+        }
+      },
+    )
+
     test('suspended live delivery does not block another protocol during cold handoff', async () => {
       const env = await setup(mode, supplied)
       const records = [env.record('A4'), env.record('A5', 'chat', 5), env.record('B', 'other')]

@@ -208,7 +208,9 @@ export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
               )
               if (record === undefined) return false
               await runOpenedDelivery(context, { key }, async () => {
-                const deliver = params.deliver ?? state.sources.values().next().value?.deliver
+                const deliver =
+                  params.deliver ??
+                  [...state.sources].find((source) => source.canDeliver?.() !== false)?.deliver
                 if (deliver === undefined) throw new Error('Missing opened delivery handler')
                 await deliver(copyStoredValue(record))
               })

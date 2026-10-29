@@ -32,7 +32,7 @@ Add registry core with validated ownership on the shared database binding, retir
 
 After drainage, fail every uncertified old entry with incarnation-abandoned events and preserve certified settlement. Retain adopted bootstrap/reenact continuation in source storage across destination advancement and reconstruction. Require explicit simple-access keys and normative spent-first Welcome judgment.
 
-Captured recovery maps AdoptionWrite into restricted RegistrySwitchWrite and drains source peers before switching. Opened-record drain and provider work remain outstanding. `@kumiai/mls` exports its lapse/membership rule as a pure helper.
+Captured recovery maps AdoptionWrite into restricted RegistrySwitchWrite and drains source peers before switching. Provider work remains outstanding. `@kumiai/mls` exports its lapse/membership rule as a pure helper.
 
 Add `GroupSafety` and immutable incarnation-scoped `forkHalt`/`recoveryUnavailable` fields with atomic durable safety events.
 Retain old-incarnation evidence through retirement and deletion. Event acknowledgement never clears safety fields or recreates acknowledged events on identical reapplication.

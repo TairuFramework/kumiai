@@ -74,6 +74,8 @@ export type OpenedDeliveryBinding = {
     source: {
       handoff(): Promise<void>
       completed(id: string): Promise<void>
+      /** Withdraw fallback admission independently of in-flight completion tracking. */
+      canDeliver?(): boolean
       deliver(record: PendingAppFrame): Promise<void>
     },
   ): () => void
