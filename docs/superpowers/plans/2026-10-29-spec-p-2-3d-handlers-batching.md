@@ -10,54 +10,44 @@
 
 **Spec:** [Spec P](../specs/2026-10-08-spec-p-transactional-persistence.md), binding r28i through History S:2922.
 
-Baseline: `feat/spec-p-phase-2`, HEAD `162d6fd2`, 2026-10-29. Main 0.12.1 is already merged at `535ad3ef`.
-Status: **revision 3 draft; Q1=A and Q2=A settled** in `.superpowers/sdd/plan-2-3d-draft/decisions-for-review.md`.
+Baseline: `feat/spec-p-phase-2`, HEAD `77d2b2e9`, 2026-10-29. Main 0.12.1 is already merged at `535ad3ef`.
+Status: **revision 6 draft; Q1=A and Q2=A settled** in `.superpowers/sdd/plan-2-3d-draft/decisions-for-review.md`.
 Inventory: `.superpowers/sdd/plan-2-3d-draft/inventory.md` -- 28 candidates: 10 DONE, 11 PARTIAL, 7 OPEN.
-Nine implementation tasks. Review dispositions: `.superpowers/sdd/plan-2-3d-draft/{revise1-notes,revise2-notes,revise3-notes}.md`.
+Eleven implementation tasks. Review6 dispositions: `.superpowers/sdd/plan-2-3d-draft/revise6-notes.md`.
 
-This revision permits writes only to this plan and the draft's `inventory.md` and `revise3-notes.md`.
+This revision permits writes only to this plan and the draft's `inventory.md` and `revise6-notes.md`.
 Source/test/spec edits, git mutations and package test suites are unauthorised during drafting.
 Commands and commit steps below apply only to a subsequent implementation session.
 
 ## Global Constraints
 
-- Applied authenticated state supplies authority. Hub bytes, positions and claimed epochs supply no acceptance or lifecycle authority (S:10-18).
-- Hub faults mean non-delivery. Never infer durable halt/hold, discard, rebuild, owed-work deletion or permanent stranding (S:14-18).
-- Keep r28i saved-work preservation, retry bans, authenticated recovery authority and independent Welcome obligations unchanged (S:2922).
-- Group writes and supplied host effects share one transaction. Crypto prepares under ownership outside storage (S:497-502).
-- Publish plaintext, runtime changes, acknowledgements and events only after proven commit (S:501).
-- Default durable handlers are at least once, outside both owner scope and transaction (S:531-535).
-- Transactional opt-in co-commits effect, completion and eligible cursor. Callback invocation may repeat after rollback (S:537-540).
-- Transactional handlers stay short, use supplied tx stores and perform no network I/O, root-store call, cross-group wait or timer (S:538-539).
-- Invoke transactional handlers in D8 `effects`, after `finalise`. Domain writes refuse with `PersistencePhaseError` through every transaction view (S:913-970).
-- A failed handler blocks its lane, not other lanes. Unknown/duplicate completion is harmless (S:534-535).
-- Multiple listeners declare one completion policy. Mixed policies refuse registration (S:539,2840).
+- Authority comes from authenticated applied state. Hub bytes/positions/epochs grant no acceptance, hold/halt, deletion, rebuild or permanent stranding (S:10-18).
+- Preserve r28i saved work, retry prohibition, authenticated recovery and independent Welcome obligations (S:2922).
+- Group writes/host effects share one transaction. Prepare crypto under ownership, outside storage. Publish only after proof (S:497-502).
+- Default handlers are at least once, outside owner/transaction. Transactional effects/completion/eligible cursor co-commit (S:531-540).
+- Transactional callbacks run in D8 effects after finalise. Every domain-store view rejects writes with PersistencePhaseError (S:913-970).
+- Callbacks stay short, using supplied stores. No network, root-store calls, cross-group waits or timers (S:538-539).
+- Failure blocks only its protocol lane. Unknown/duplicate completion is harmless. Mixed listener policies refuse (S:534-539,2840).
 - Frame key is JSON `['kumiai/frame/v1', groupID, incarnation, topicID, position, protocol, procedure]` (S:540).
-- Defaults remain `maxBatchFrames: 64`, `maxBatchDelayMs: 2`, `maxBatchWorkMs: 8` (S:506-510).
-- Size/work bounds are finite/positive; delay is finite/non-negative. Idle lone work starts immediately (S:512-515).
-- `openBatch` accepts at most 64 inputs and rejects larger arrays before reads (S:1460). Supplied atomic calls never split.
-- At each batch boundary, release owner/transaction, service ready control, then round-robin ready sources (S:517-520).
-- With only A/B/control ready, B and control finish within three batches including active A (S:519-520).
-- Enqueue and completion receive service before repeated burst batches. Groups have independent schedulers and owners (S:517-521).
-- D8 FIFO remains authoritative once work is admitted. Scheduler priority cannot reorder admitted owner entries or unresolved proof.
-- Buffered control advertises before ownership-dependent prerequisites. Its selected entry performs local reads, authentication and adoption through entry-bound preparation.
-- Metadata uses original authenticated frame epoch and origin incarnation, with no current-epoch fallback (S:883-885,2841).
-- Ephemeral requests/responses/signals/streams/channels/decrypt batches initiate zero persistence transactions (S:525-529,2842).
-- Only authenticated malformed plaintext persists poison. Other refusals/expiry persist no poison row (S:1393,1476-1483).
-- Validated rowless dead prefixes complete through the canonical coverage binding, independently of saved-ID completion (S:1393,1463,1476).
-- Pending/poison/cursor writes stay off the MLS state-version clock (S:1165,1981).
-- Positions remain opaque, ordered by the existing code-unit comparator within a topic (S:488-493,1483).
-- Drain persisted plaintext before terminal/lifecycle clearing. No new crypto/fetch/publication and no timeout erasure (S:543-547,878-881).
-- Keep the required shared openedDeliveryContext and optional D8 ownershipContext contracts (S:997-1005; 2.3c carry-forward).
-- Scheduled root facades call `capability.assertRoot()` before collecting, enqueueing or yielding. Entry-bound helpers remain direct (S:997-1008).
-- Seal every persisted namespace with existing AAD. Retain D8 proof ownership, hooks and fail-stop rules (S:836-861).
-- Preserve leases `16`, renewal below `4`, ceiling `500`, codec v2, candidate v3 and controller/management knowledge.
-- Doubles may be stricter than ports, never more permissive. Port changes gate both contract families on real implementations and doubles.
-- Memory reconstruction supplies phase-2 crash evidence. Real provider faults and SIGKILL remain phases 3 and 6 (S:2724-2725,2850).
-- Use pnpm through `rtk proxy`. Heavy gates require the existing machine-wide slot protocol. Never run concurrent heavy lanes without its permission.
-- Do not edit generated `lib/`, dependency versions, package scripts or build/lint configuration.
-- Internal dependencies remain `workspace:^`. Cross-repo dependencies remain catalog published `^` ranges. Add no dependency here.
-- Keep the existing shared version band and release intent. Do not merge or push before phase 2 completes.
+- Defaults: maxBatchFrames 64, maxBatchDelayMs 2, maxBatchWorkMs 8. Size/work finite/positive; delay finite/non-negative; idle starts immediately (S:506-515).
+- Explicit openBatch rejects >64 inputs before reads and never splits. Release transaction/owner between streaming batches (S:1460,517).
+- Before repeated bursts, service ready control, then round-robin ordinary sources/enqueue/completion. Only A/B/control: `[A,control,B]` within three batches (S:517-520).
+- Select before D8 FIFO admission. Never reorder admitted work or unresolved proof. Groups remain independent (S:517-521,D8).
+- Control advertises before ownership-dependent reads. Its selected entry authenticates/prepares/adopts using local entry-bound capabilities.
+- Registry observation rechecks enter the same arbiter before FIFO admission, including expected own versions and fallback starts.
+- Ordinary known rollbacks release ownership. D6 certification, certified finalisation retry and unresolved proof retain ownership.
+- Metadata uses authenticated original frame epoch/origin incarnation. Ephemeral kinds/decrypt batches initiate zero persistence (S:883-885,525-529,2841-2842).
+- Only authenticated malformed plaintext persists poison. Canonical rowless dead-prefix advancement uses coverage, independently of saved-ID completion (S:1393,1463,1476).
+- Pending/poison/cursors do not advance MLS versions. Positions use code-unit order within one topic (S:1165,1981,488-493).
+- Drain saved plaintext before lifecycle clearing. No additional crypto/fetch/publication, timeout erasure or disposal escape (S:543-547,878-881).
+- Keep shared required openedDeliveryContext and optional ownershipContext. Scheduled roots assertRoot before reads/collection/scheduling/yielding (S:997-1008).
+- Entry-bound helpers stay direct. Seal every namespace with existing AAD; retain proof ownership, hooks and fail-stop (S:836-861).
+- Preserve lease size 16, renewal below 4, ceiling 500, codec v2, candidate v3 and controller/management knowledge.
+- Doubles cannot weaken ports. Port changes gate both contract families against implementations and doubles.
+- Memory reconstruction is phase-2 evidence. Provider faults/SIGKILL remain phases 3/6 (S:2724-2725,2850).
+- Use pnpm through rtk proxy and the existing heavy-run slot. No simultaneous heavy lanes without that protocol.
+- Leave generated lib/, dependencies, scripts/config and version band unchanged. Internal deps remain workspace:^; cross-repo catalog ranges remain published ^.
+- Do not merge, push or release before phase 2 completes.
 
 ## Review Focus
 
@@ -66,28 +56,10 @@ Each failure mode has an explicit owning-task witness.
 1. **A held occurrence precedes a completed record.** Cursor must not cross it, including after cold handoff. Task 2: `completion cannot cross a held prefix`.
 2. **COMMIT rejects after a transactional effect was staged.** Pending/cursor/effect remain hidden until proof, then settle together. Task 2: `unknown completion exposes no effect before proof`.
 3. **A frame opens from a retained epoch after an anchor or runtime advance.** Handler metadata must retain that frame's authenticated epoch. Task 4: `retained frame metadata survives runtime advance`.
-4. **Burst A holds ownership when buffered control and B arrive.** Task 7 advertises control before root reads and proves `[A, control, B]`.
-5. **A transactional handler starts during live-to-cold retirement handoff.** Exactly one delivery owner awaits completion proof before clearing. Task 8: `transactional handoff commits once before retirement clears`.
+4. **Burst A holds ownership when buffered control and B arrive.** Tasks 7/8 advertise control before root reads and prove `[A, control, B]`.
+5. **A transactional handler starts during live-to-cold retirement handoff.** Exactly one delivery owner awaits completion proof before clearing. Task 10: `transactional handoff commits once before retirement clears`.
 
 ---
-
-## Scope and evidence
-
-| Requirement | Tasks | Current spec |
-| --- | --- | --- |
-| Full rpc frame/ref/result migration, portable batch consumption | 1,6 | S:1351-1405,1361,1974-1975 |
-| Atomic completion/cursor, poison removal and exact-key service | 2,6,8 | S:531-540,1393,1950-1956,2752,2805 |
-| Public policy union, legacy functions, mixed-policy refusal | 1,3 | S:1412-1433,1924-1964,2840 |
-| Authenticated metadata on durable/live/anycast/all directed kinds | 3,4,8 | S:883-885,1406-1433,2841 |
-| Adaptive 64/2/8, idle latency, work bounds | 5,6,7 | S:504-515,2802-2803 |
-| Control priority, topic readiness, round-robin, enqueue/completion, independent groups | 5,6,7 | S:517-521,2803-2804 |
-| Original completion and batch bindings reach the wrapped peer's lane | 4,6 | S:531-540,901-902 |
-| Terminal and cold-drain integration of both policies | 8 | S:543-547,2743,2808 |
-| Conformance, opaque side rows, ambiguity and mutation evidence | Every task, assembled in 9 | S:2739-2743,2801-2809,2840-2842 |
-
-The old scope's complete registry crypto, leases and terminal-drain implementation are already present.
-This plan connects them to rpc's richer handler boundary. It does not replace them.
-Historical 2.3c row references shifted after r28i: use the current coordinates above.
 
 ### Settled decisions
 
@@ -95,17 +67,6 @@ Historical 2.3c row references shifted after r28i: use the current coordinates a
   Without proof, remove completed rows and preserve the cursor. Add no persisted frontier or namespace.
 - **Q2=A -- multiple listeners:** use `combineDurableHandlers`, unchanged mapped handler types, and a retained-emitter registration guard.
   Hosts wrap homogeneous listener lists explicitly. Mixed policies refuse before registration.
-
-Builder decisions within r28i:
-
-- Move shared transaction/frame/result types to rpc. Mls-rpc imports/re-exports aliases. Conformance mirrors independently.
-- Reserve `completion` for HandlerCompletion as specified. Rename the existing recovery callback field to `recoveryCompletion` everywhere.
-- Keep GroupUnwrapResult.epoch as the locked handle epoch. Add required `frameEpoch` for the authenticated opened frame's epoch.
-- Resolve incarnation from the exact completion/access GroupKey. Never infer incarnation 1 or use a current registry pointer during old delivery.
-- Preserve explicit atomic `openBatch` calls. A separate internal streaming seam applies the budget inside owned preparation.
-- Arbitrate above D8 admission. Do not add priority to owner-queue acquisition or retain ownership across distinct streaming batches.
-- Use fake clocks, deferred stages and structural transaction/batch logs. No wall-clock performance thresholds or load benchmark.
-- Keep controller-log persisted format and management policies unchanged. Retain knowledge when staged MLS state is saved.
 
 ### Out of scope and handoff owners
 
@@ -117,325 +78,16 @@ No task revisits commit-once, source retirement authority, revoke holds or the m
 
 ## File Structure
 
-Paths below describe future implementation, not current write permission.
+Task Files blocks give exact ownership. These are future implementation paths, outside current drafting write permission.
 
-| Responsibility | Files |
-| --- | --- |
-| Portable contracts | `packages/rpc/src/crypto.ts`, new `handler-completion.ts`, `app-batch.ts` and `control-batch.ts`, `handlers.ts`, `peer-types.ts`, `index.ts` |
-| Type aliases and registry integration | `packages/mls-rpc/src/persistence-types.ts`, `registry/types.ts`, `registry-crypto.ts`, `crypto.ts`, `index.ts` |
-| Completion implementation | New `packages/mls-rpc/src/handler-completion.ts`, existing `entry-capability.ts`, `memory-group-persistence.ts`, `opened-delivery.ts` |
-| Coverage binding and live ordering | New `packages/rpc/src/app-completion-coverage.ts`, existing `app-lane.ts`, `opened-delivery.ts` |
-| Metadata transport | `packages/broadcast/src/{transport,responder}.ts`, `packages/rpc/src/{peer,peer-epoch,directed,open-once}.ts` |
-| Scheduler | New `packages/mls-rpc/src/group-batch.ts`, new `group-batch-binding.ts`, `registry/types.ts`, `registry/registry.ts` |
-| Streaming open staging | `packages/mls-rpc/src/registry/app-open.ts`, new `registry/app-open-binding.ts`, `registry/access.ts`, `registry-crypto.ts`, `packages/rpc/src/app-lane.ts` |
-| Other scheduled sources | `packages/mls-rpc/src/{memory-group-persistence,memory-group-ports,app-settlement,entry-capability}.ts`, `registry/{access,app-publication}.ts` |
-| Buffered control producer and preparation | `packages/rpc/src/peer.ts`, `control-batch.ts`, `packages/mls-rpc/src/{mls,crypto,control-adoption}.ts`, new `registry/control-batch.ts`, existing `registry/access.ts` |
-| Peer host/lifecycle integration | `packages/rpc/src/{peer,peer-types,host-boundary,opened-delivery}.ts`, `packages/mls-rpc/src/{registry-peer,opened-delivery}.ts` |
-| Completion-only persistence guard | `packages/mls-rpc/src/memory-incarnation-stores.ts` only if exact retired-key cursor completion requires a narrow capability |
-| Shared contracts | New `packages/rpc-conformance/src/handler-completion.ts`, new `handler-batching.ts`, existing `{group-crypto,persistence-fixture,pending-group-crypto,registry-crypto,index}.ts` |
-| Real/double adapters | `packages/mls-rpc/test/fixtures/{storage-persistence,registry-crypto,registry}.ts`, new `handler-completion.ts`; rpc `test/fixtures/{peer,fake-crypto}.ts` and actual callers from typecheck |
-| Focused tests | New rpc `test/{handler-types,handler-metadata}.test.ts`, existing `test/{handlers,opened-delivery,durable-drain}.test.ts`; new mls-rpc `test/{handler-completion,group-batch,group-batch-integration,handler-batching-conformance}.test.ts` |
-| Existing regression witnesses | `packages/mls-rpc/test/{registry-open-batch,registry-crypto-conformance,opened-delivery,registry-opened-lifecycle}.test.ts`, rpc directed/peer drain tests, `tests/integration/test/{app-lane-delivery,directed-lane,terminal-drain}.test.ts` |
-| Documentation/release intent | `packages/{rpc,mls-rpc,broadcast}/README.md`, `docs/reference/app-lane.md`, `.changeset/spec-p-storage-foundation.md`, existing `.changeset/version-band-0-13.md` only if summary alignment is needed |
-
-Mechanical type migrations may touch callers found by repository typechecking. Preserve their assertions and port strictness.
-
-## Shared interface decisions
-
-### Portable types (Task 1)
-
-Copy the spec's PreOpenAppFrameRef, AppFrameRef, PendingAppFrame, GroupHandlerMetadata and DurableHandler shapes exactly.
-Pre-open references include GroupKey and exclude procedure. Opened references add procedure.
-Keep OpenAppResult's current `handleEpoch` on the opened arm because rpc catch-up decisions already require that locked answer.
-Move OpenAppInput/OpenAppResult into rpc and re-export them from mls-rpc without a reverse dependency.
-
-```ts
-export type GroupTransaction = {
-  providerID: string
-  groupID: string | null
-  onCommit(fn: () => void): void
-  onRollback(fn: () => void): void
-}
-export type HandlerCompletion<TTx extends GroupTransaction> = {
-  key: GroupKey
-  complete(ids: Array<string>): Promise<void>
-  transact(
-    ids: Array<string>,
-    handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>,
-  ): Promise<void>
-}
-```
-
-GroupCrypto.unwrap opts.frame becomes PreOpenAppFrameRef.
-Add optional `unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>` to the portable crypto port.
-Registry crypto always supplies it. Other adapters may retain singleton unwrap, with one atomic open per scheduling turn.
-There is no sequential single-open emulation promising multi-frame atomicity.
-The singleton compatibility path reloads the saved full record after unwrap; it never fabricates procedure/epoch/key from current runtime state.
-GroupUnwrapResult gains required `frameEpoch: number`; its existing `epoch` retains locked-handle semantics.
-
-GroupProcedureHandlers gains `TTx extends GroupTransaction = GroupTransaction`, with the exact log-event policy conditional in S:1927-1940.
-GroupPeerParams and createPeer thread the same transaction generic to handlers/completion.
-GroupPeerParams.completion is required and origin-key-bound. The MLS recovery option becomes `recoveryCompletion?: RecoveryCompletion | null`.
-Rename `RegistryPeerOptions.completion` and its producer/consumer arguments to `recoveryCompletion`.
-Do not rename `ConfirmedRecoveryHandoff.completion`'s promise.
-
-`adaptBusHandlers(protocol, handlers, { completion, suppress? }): BusHandlerMaps` replaces positional suppress.
-Ephemeral paths may receive the port for key metadata but never call complete/transact.
-
-### Exact-key completion (Task 2, Q1=A)
-
-```ts
-export function createHandlerCompletion<TTx extends GroupTransaction>(params: {
-  persistence: GroupPersistence<TTx>
-  key: GroupKey
-}): HandlerCompletion<TTx>
-```
-
-The factory requires registered entry capability and coordinator binding. It does not load or manufacture a crypto handle.
-Return the canonical service for `(coordinator binding, groupID, incarnation)`, retaining its coverage binding across repeated factory calls.
-Both callers use the module export `handlerCompletionForEntry<TTx extends GroupTransaction>(params: { capability: EntryCapability<TTx>; binding: object; key: GroupKey }): HandlerCompletion<TTx>`.
-The public factory resolves capability/binding from persistence. RegistryPeer resolves them from registrySafety's existing entry/binding fields.
-Both paths use the same canonical cache. Neither requires a root load or a reconstructed crypto handle.
-Complete delegates to the same internal runner as transact, with no host callback.
-Extend the internal `EntryCapability.run` contract with an entry-bound effects callback:
-
-```ts
-run<P, T>(
-  request: { groupID: string; mutationID: string | null },
-  prepare: (reads: EntryReads) => Promise<Prepared<P>>,
-  work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
-  effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
-): Promise<T>
-```
-
-Capture the callable before `finalise`. `memory-group-persistence.ts` invokes it through `entry.callback` only after entering `effects`.
-Run this entry-bound callback before the existing outbox/delete effects. Never expose the private coordinator writer to it.
-Keep existing outbox/delete effects, drainage, account validation, proof and hooks in their existing order.
-Completion `work` rechecks saved records and coverage. Its `effects` callback invokes the handler, then completes pending/poison and saves eligible cursors.
-All three side writes use the same supplied transaction. Domain stores remain refused throughout that callback.
-The runner snapshots unique IDs, loads saved pending/poison by exact key, and invokes callbacks only for still-pending records.
-All missing IDs is a no-op, including when live dead-prefix coverage exists. Only the internal binding explicitly requests rowless advancement.
-Poison never invokes a handler. Mixed IDs use existing records in stable occurrence order.
-Provider/group mismatch refuses before the callback. No caller-provided plaintext replaces saved records.
-
-The internal coverage contract lives in rpc's new `app-completion-coverage.ts`:
-
-```ts
-export type AppCompletionCoverage = {
-  key: GroupKey
-  topicID: string
-  generation: number
-  previous: string | null
-  through: string | null
-  prefix: Array<{ frame: PreOpenAppFrameRef; state: 'pending' | 'dead' | 'completed' }>
-}
-export type AppCompletionCoverageSource = {
-  capture(ids: Array<string>): Array<AppCompletionCoverage>
-  current(coverage: AppCompletionCoverage): boolean
-  committed(ids: Array<string>, coverage: Array<AppCompletionCoverage>): void
-}
-export type AppCompletionCoverageBinding = {
-  advance(): Promise<void>
-  unbind(): void
-}
-export function registerAppCompletionCoverage<TTx extends GroupTransaction>(
-  completion: HandlerCompletion<TTx>,
-  bind: (source: AppCompletionCoverageSource) => AppCompletionCoverageBinding,
-): void
-export function bindAppCompletionCoverage<TTx extends GroupTransaction>(
-  completion: HandlerCompletion<TTx>,
-  source: AppCompletionCoverageSource,
-): AppCompletionCoverageBinding
-```
-
-The factory calls registerAppCompletionCoverage once per canonical service. Rpc stores that source-binding callback by completion identity in a WeakMap.
-`bindAppCompletionCoverage` requires that registration and forwards to it. The canonical service retains the source for complete/transact and advance.
-Its returned `advance()` assertsRoot, then captures `source.capture([])` synchronously before its first await.
-It enters the service's runner without a host callback or completion IDs. Wrappers cannot manufacture a replacement identity.
-An empty capture is a no-op. `unbind()` withdraws the source and invalidates queued captures. Later advance calls refuse.
-The binding accepts no caller-supplied coverage or positions. It does not extend the public HandlerCompletion port.
-`capture([])` includes validated dead/completed prefixes even when no pending/poison rows exist. Pending or held members still block crossing.
-
-The prefix contains the lane's validated ordered traversal from its durable cursor, not consecutive numeric positions.
-`through` is the last eligible position after this completion, or `previous` when an earlier member blocks it.
-Capture is synchronous and reads only a maintained immutable lane snapshot. It cannot acquire the app mutex while holding the owner.
-Under ownership, compare key, topic, generation/cursor and saved pending/poison occurrence identities.
-Use source.current before callbacks and final writes to detect lane reset without acquiring another mutex.
-Capture retains the traversed suffix when an earlier pending member prevents advancement.
-Every crossed member must be validated dead, already completed, or belong to this successful completion set.
-Rowless dead classification requires the lane's validated traversal and settled refusal/expiry. Hub hints cannot supply it.
-Held/sealed inputs terminate eligible advancement. They do not erase later completed coverage.
-Stale proof refuses/re-prepares without calling the transactional handler on an invalid prefix.
-For a proven prefix, pending/poison removal and cursor save occur in the same transaction as host effects.
-The committed notification marks completed occurrences even when the cursor cannot advance yet.
-Retain their occurrence identity until a later prefix closes, or an explicit generation reset invalidates the proof.
-The notification updates only volatile state after proof. It performs no durable repair transaction.
-With no surviving proof, preserve the durable cursor. Never select max(pending.position) as inferred coverage.
-Dead-only live prefix advancement uses binding.advance through the same internal runner, even when no pending ID remains.
-The runner rechecks key, generation, durable cursor and any saved occurrence identities under ownership before saving the eligible cursor.
-That path removes covered poison in the cursor transaction. It creates no pending/poison rows and invokes no handler.
-Rollback retains volatile coverage for retry. Only proven commit calls `source.committed([], coverage)` and retires the traversed prefix.
-
-The coverage binding is an internal coordination channel, not a public hub-attestation or host security proof.
-Copied/unbound completion wrappers must not silently lose it. Attach it to the stable original port before host wrapping.
-Retired-key completion may service saved rows but cannot follow activeIncarnation or clear another incarnation's cursor.
-If the provider's active-only cursor guard needs an exception, grant only this completion entry the exact-key operation.
-Do not weaken public root cursor.save or all inactive-incarnation writes.
-
-### Scheduler and compatible batch boundaries (types in Task 1, implementation in Tasks 5-7)
-
-```ts
-export type BatchBudget = {
-  maxFrames: number
-  maxWorkMs: number
-  now(): number
-  begin(): void
-  take(): boolean
-}
-export type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue'
-export type GroupBatchScheduler = {
-  schedule<T>(work: {
-    source: string
-    kind: BatchKind
-    signal?: AbortSignal
-    run(budget: BatchBudget): Promise<T>
-  }): Promise<T>
-  close(reason: Error): void
-}
-export type StreamingOpenResult = {
-  consumed: number
-  results: Array<OpenAppResult>
-}
-export type AppBatchBinding = {
-  key: GroupKey
-  scheduler: GroupBatchScheduler
-  openReady(frames: Array<OpenAppInput>, budget: BatchBudget): Promise<StreamingOpenResult>
-}
-export function bindAppBatch(crypto: GroupCrypto, binding: AppBatchBinding): void
-export function appBatch(crypto: GroupCrypto): AppBatchBinding | undefined
-```
-
-`app-batch.ts` supplies these rpc coordination types and a WeakMap binding, like the existing opened-delivery binding.
-The registry adapter binds its crypto object before host wrapping. Task 4 captures this binding from the original crypto.
-Task 4 supplies the canonical completion and captured batch binding explicitly to AppLane before Task 6 begins.
-No new method is required on the published `RegistryHandleAccess` shape.
-
-Task 6 adds internal `RegistryStreamingOpen = AppBatchBinding['openReady']` in `registry/app-open-binding.ts`.
-`bindRegistryStreamingOpen(access: RegistryHandleAccess, binding: AppBatchBinding): void` registers key, scheduler and prepared-open implementation.
-`registryStreamingOpen(access: RegistryHandleAccess): AppBatchBinding | undefined` retrieves that binding for registry crypto.
-`registry/access.ts` binds `{ key: owner.key, scheduler: groupBatchFor(params.binding, owner.key.groupID), openReady }` from createRegistryAppOpen.
-Registry crypto forwards that retrieved binding through bindAppBatch. Its existing access-only parameters need no unpublished coordinator token.
-
-`openReady` considers an input prefix in order. Each attempted input, including a refusal or replay, consumes one operation.
-For k consumed inputs, `results.length === consumed === k`. Results correspond exactly to `frames.slice(0, k)`.
-The caller owns the unchanged suffix. It resubmits that suffix on its next source turn, after releasing ownership.
-Empty input returns `{ consumed: 0, results: [] }`. Non-empty input consumes at least one operation unless the call rejects.
-Rejection exposes no results and consumes no caller inputs. Unknown COMMIT retains ownership and publishes nothing until proof.
-All staged state/pending/poison for that prefix co-commit. A refusal-only prefix uses the existing no-write path.
-Receive conflicts return to the scheduler for a fresh turn. Streaming opens cannot hide additional committed batches inside one run.
-Explicit `openBatch` retains its whole-array contract, hard limit, and existing retry semantics.
-
-`createGroupBatchScheduler({ options?, now? }): GroupBatchScheduler` normalises GroupBatchOptions.
-Use monotone performance time in production and an injected clock in tests.
-`groupBatchFor(binding: object, groupID: string): GroupBatchScheduler` supplies one coordinator-shared arbiter.
-Initialise its options from createGroupHandleRegistry's new batch parameter before application work starts.
-Conflicting options on an already-live binding refuse instead of creating a second scheduler.
-Registry disposal closes its runtime sources, not unrelated storage-only obligations on the shared binding.
-Use each runtime source's abort signal to withdraw its queued work. Scheduler.close applies only to shutdown of the whole binding.
-
-One run callback executes one bounded compatible transaction. The source owns its queued inputs and resolves individual caller promises after proof.
-Domain collectors snapshot ready inputs before scheduling. Owned preparation decides how many opens fit the actual staging budget.
-Every scheduled root facade calls `capability.assertRoot()` synchronously before collector insertion, scheduler.schedule or its first await.
-This includes complete/transact, coverage advance, pending.complete, outbox enqueue/certification/removal, certified finalisation and scheduled registry control/publication roots.
-Retain the owner-queue admission check as well. Checking only inside a scheduled run callback cannot diagnose scheduler self-wait.
-Collector flushes call entry-bound primitives directly. They never invoke another scheduled root facade from their owned callback.
-Default completions and compatible settlement operations collect homogeneously.
-Transactional completions combine only when policy, origin and callback ordering are compatible. They never nest transactions.
-Different domains may take separate transactions. Do not invent a universal transaction-command language.
-Call `budget.begin()` once on entering owned staging, excluding scheduler and owner-queue waiting time.
-For opens, begin in `prepare`, before isolated-handle preparation. Call `take()` inside the decrypt loop before each input.
-For completion/settlement work, begin at owned operation staging. Do not charge work twice across prepare and effects.
-`begin()` cannot reset an active budget. Each new scheduled batch receives a fresh budget.
-`take()` counts operations and refuses another operation at count/work bounds, including equality at 8 ms.
-The first operation starts even when setup has consumed the work budget, because admitted calls cannot be pre-empted.
-Stop waiting for additional compatible inputs at the coalescing bound. End immediately when none are ready.
-An in-progress operation may exceed 8 ms; it cannot be pre-empted. No timer or network wait occurs inside the storage callback.
-The 2 ms bound limits deliberate coalescing, excluding active work. Idle work starts without installing a batching delay timer.
-The public 64-input openBatch remains one atomic call. The separate streaming seam stops its preparation loop at host caps.
-Values above 64 cannot produce a registry open batch above 64. Fractional frame limits are invalid; valid work budgets may be fractional.
-
-The scheduler admits only one batch at a time to D8. Arrivals during active work remain outside its FIFO.
-At release, choose ready control first, then ordinary sources round-robin, at most one capped batch per source per round.
-Control is also limited to one turn per source per round. Replenished control cannot starve ordinary sources.
-Repeated readiness in one source cannot acquire a second turn before other already-ready sources.
-No ready batch waits for a source's network fetch or default handler. Control inputs must already be locally actionable.
-Select control before owner admission. Its crypto preparation still runs under that selected entry's owner, outside storage.
-Priority supplies no authentication authority. Actual adoption validates the commit before domain writes.
-Existing certification retry retains its owner entry until proof, as 2.3c requires. Fairness assumes settling operations.
-Atomic seed/switch/terminal transitions and external root calls keep D8 admission semantics; backlog cannot be pre-admitted ahead of them.
-
-### Buffered control preparation (types in Task 1, implementation and peer wiring in Task 7)
-
-Rpc's internal `control-batch.ts` binds the original GroupMLS to a ControlBatchBinding through a WeakMap.
-These coordination types do not extend the published GroupMLS or RegistryHandleAccess ports.
-The scope exposes local reads and provisional staging, distinct from durable root operations.
-
-```ts
-export type ReadyControlScope = {
-  source: AdoptionExpected
-  control(): ControlSnapshot
-  anchor(): AnchorSlot | null
-  readEpoch: GroupMLS['readEpoch']
-  readCommitHeader: GroupMLS['readCommitHeader']
-  rosterEntries: GroupMLS['rosterEntries']
-  isLedgerComplete: GroupMLS['isLedgerComplete']
-  openEntries: GroupCrypto['openEntries']
-  exportSecret: GroupCrypto['exportSecret']
-  validation: ControlValidationPort
-  prepareCommit: GroupMLS['processCommit']
-  prepareOwn: ControlAdoptionPort['adopt']
-  stageControl(changes: ControlChanges, mutationID: string): void
-  stageAnchor(slot: AnchorSlot): void
-}
-export type ControlBatchBinding = {
-  key: GroupKey
-  run<T>(input: {
-    source: string
-    signal?: AbortSignal
-    prepare(scope: ReadyControlScope): Promise<T>
-  }): Promise<{ value: T; epoch: number; control: ControlSnapshot; anchor: AnchorSlot | null }>
-}
-export function bindControlBatch(mls: GroupMLS, binding: ControlBatchBinding): void
-export function controlBatch(mls: GroupMLS): ControlBatchBinding | undefined
-```
-
-The registry implements run with synchronous assertRoot, then the shared scheduler's `kind: 'control'`, then one `live.run` entry.
-The registry access binding supplies that entry and its isolated-handle preparation to the MLS adapter.
-One control occurrence consumes one operation. A replenished commit source still gets only one turn per round.
-Rpc buffers checked fetch results independently of runSerial's persistence work. Pushed metadata only wakes that fetch.
-For each next buffered occurrence, advertise run synchronously before any root read, including pull/walker prologues.
-Readiness means the occurrence and local inputs are available for an attempt. It implies neither authentication nor acceptance.
-Startup replay, ledger bootstrap or confirmed recovery still pending are protocol prerequisites, outside the three-batch adoption bound.
-They cannot hide an already-buffered actionable occurrence behind a fresh control.load, isLedgerComplete or readEpoch call.
-
-The selected entry uses EntryReads for source/control/anchor/lifetime and restores its isolated handle under ownership.
-The callback classifies against that handle, verifies commit-content signatures, and prepares the existing foreign or recognised-own adoption.
-prepareCommit refactors processCommit's eligibility read and mutation into this same prepare scope.
-Its named-entry resolver uses scope.openEntries on the isolated pre-adoption handle, never the root crypto.openEntries.
-prepareOwn reuses journal, occurrence, compatibility and saved-candidate validation through entry-bound staging, never root adopt/replace.
-Scope control/anchor reads observe staged changes. Stage methods change only the prepared write set, with one consistent mutation identity.
-Read-only validation/candidate restoration stays local. No fetch, ledger bootstrap, confirmation, handler, timer or root store runs in the callback.
-When a prerequisite is missing, return a prerequisite outcome without staging adoption. Request external work after run releases.
-Refusal/skip changes follow existing r28i rules. Failed delivered copies preserve live bytes, retry eligibility and independent obligations.
-
-Move advanceHandle's local roster/anchor preparation into this scope for buffered occurrences.
-Stage the pending/landed anchor and final capture or keep decision using the existing AnchorSlot shape, preserving departing anchors.
-The work callback revalidates source key, identity/version, lifetime and safety before atomically writing state/control/anchor/checkpoint changes.
-Reuse existing inbound-commit provenance, receive-progress handoff, controller retention, finalise/account and proof handling.
-Scope capabilities expire when prepare ends. Exceptions discard staged results. No staged result or peer mutation escapes before proof.
-After run proves, apply returned control/anchor/epoch observations and schedule runtime rebuilds outside ownership.
-Do not call the root advanceHandle or entire walker from the selected entry. Their root calls and external continuations remain unlawful there.
-Unbound adapters keep their existing path. Registry MLS adapters must register this binding before peer construction.
+| Unit | Owning source files | Tasks |
+| --- | --- | --- |
+| Portable contracts/policies | rpc `crypto.ts`, `handler-completion.ts`, `handlers.ts`, `opened-delivery.ts` | 1,3 |
+| Atomic completion/coverage | mls-rpc `handler-completion.ts`, `entry-capability.ts`, `memory-group-persistence.ts`; rpc `app-completion-coverage.ts` | 2 |
+| Metadata/peer integration | broadcast `transport.ts`, `responder.ts`; rpc `peer.ts`, `directed.ts`, `peer-epoch.ts`, `host-boundary.ts` | 4,10 |
+| Scheduler/streaming | mls-rpc `group-batch*.ts`, `registry/app-open*.ts`, `registry-crypto.ts`; rpc `app-batch.ts`, `app-lane.ts` | 5,6 |
+| Control intake/preparation/accounting | rpc `buffered-control.ts`, `control-batch.ts`, `peer.ts`; mls-rpc `registry/{control-batch,accounting,live-send,registry}.ts`, `mls.ts`, `crypto.ts`, `control-adoption.ts`, `registry-group-mls.ts` | 7,8 |
+| Settlement/conformance | mls-rpc `app-settlement.ts`, `memory-group-ports.ts`; rpc-conformance `handler-{completion,batching}.ts` | 9,11 |
 
 ## Verification commands and gates
 
@@ -466,17 +118,24 @@ kports() {
 }
 ```
 
-Task 9 adds its new conformance wrapper to these gates once created.
+Task 11 adds its new conformance wrapper to these gates once created.
 Both contract packages run through consumers; they have no standalone test:unit shortcut.
 SQL wrappers require configured engines actually executing, including PostgreSQL where required. Skipped/unavailable engines remain an explicit incomplete gate.
 Build package exports before cross-package tests. Run repo-wide `rtk proxy pnpm exec turbo run test:types` for public type changes.
 The forced helper records uncached evidence. Do not replace this gate with package-only typechecks.
-Use one portable-contract gate after Task 1, then focused tests and relevant package typechecks during Tasks 2-8.
+Use one portable-contract gate after Task 1, then focused tests and relevant package typechecks during the remaining tasks.
 Refresh prerequisite builds only when exported code changes or a focused import needs them.
-Run both contract families, full affected suites and the final forced repo-wide typecheck once at Task 9.
+Run both contract families, full affected suites and the final forced repo-wide typecheck once at Task 11.
 Repeat a broad gate only when a later change or unresolved failure invalidates its evidence.
-Run full affected package suites at the assembled gate, following 2.3c's missed-regression lesson.
-For each guard mutation, capture named-test RED, restore the guard and capture GREEN. A timeout alone is not the expected RED reason.
+
+## Brief dispatch and evidence rules
+
+Each dispatched brief includes binding r28i, its complete task, Global Constraints, settled Q1/Q2 decisions, and verification helpers.
+Its Interfaces block repeats every new shared contract it consumes. Existing source/spec types retain their named definitions.
+Attach dependency commits and any new question markers. Never dispatch a task with an unresolved spec-dependent contract.
+Task test tables are the normative evidence matrix. Later gates reference them without repeating assertions.
+Each Step 4 reruns its Step 2 command GREEN plus relevant package typechecks.
+Each mutation needs the owning named assertion's RED and restored GREEN. Timeouts alone establish no mutation result.
 
 ## Tasks
 
@@ -485,20 +144,66 @@ For each guard mutation, capture named-test RED, restore the guard and capture G
 **Files:**
 
 - Modify rpc `src/{crypto,handlers,peer,peer-types,host-boundary,index}.ts`; create `src/handler-completion.ts`.
-- Create rpc `src/app-batch.ts` for the portable scheduler types and stable crypto coordination binding.
-- Create rpc `src/control-batch.ts` for the internal ready-control scope and original-MLS binding types above.
 - Modify mls-rpc `src/{persistence-types,crypto,registry-crypto,registry-peer,index}.ts` aliases/call sites.
 - Modify conformance `src/{group-crypto,pending-group-crypto,persistence-fixture,registry-crypto,index}.ts` independent mirrors.
 - Test new `packages/rpc/test/handler-types.test.ts`; migrate existing real/double crypto and peer fixture callers named by typechecking.
 
 **Interfaces:**
 
-- Produces the portable contracts and generic mapping defined above, including frameEpoch and optional unwrapBatch.
-- Produces recoveryCompletion rename throughout GroupPeerMLSParams/RegistryPeerOptions/createPeer adapters and no-MLS union branch.
-- Produces BatchBudget, GroupBatchScheduler, StreamingOpenResult and AppBatchBinding for Tasks 5/6.
-- Produces ReadyControlScope, ControlBatchBinding and bindControlBatch/controlBatch for Task 7.
-- Requires `ConformanceUnwrapResult.frameEpoch: number` in the independent base crypto mirror, including every fake/adapter implementation.
-- Classifies new port members in host-boundary.ts. Completion is a port; recoveryCompletion remains a callback.
+Produces the following rpc contracts. Mls-rpc imports/re-exports aliases. Conformance mirrors them independently.
+
+```ts
+type GroupTransaction = {
+  providerID: string; groupID: string | null
+  onCommit(fn: () => void): void
+  onRollback(fn: () => void): void
+}
+type GroupKey = { groupID: string; incarnation: number }
+type PreOpenAppFrameRef = GroupKey & {
+  id: string; protocol: string; topicID: string; segment: number; position: string
+}
+type AppFrameRef = PreOpenAppFrameRef & { procedure: string }
+type PendingAppFrame = {
+  frame: AppFrameRef; payload: Uint8Array; senderDID: string; epoch: number; idempotencyKey: string
+}
+type OpenAppInput = { frame: PreOpenAppFrameRef; ciphertext: Uint8Array; expectedAAD?: Uint8Array }
+type GroupHandlerMetadata = {
+  epoch: number; incarnation: number; frame?: AppFrameRef; idempotencyKey?: string
+}
+type DurableHandler<TContext, TTx extends GroupTransaction> =
+  | { mode?: 'at-least-once'; handle(context: TContext & GroupHandlerMetadata & {
+      frame: AppFrameRef; idempotencyKey: string
+    }): Promise<void> }
+  | { mode: 'transactional'; handle(context: TContext & GroupHandlerMetadata & {
+      frame: AppFrameRef; idempotencyKey: string; tx: TTx
+    }): Promise<void> }
+type MetadataHandler<THandler> = THandler extends (context: infer TContext) => infer TResult
+  ? (context: TContext & GroupHandlerMetadata) => TResult : never
+type GroupProcedureHandlers<TProtocol extends GroupProtocolDefinition, TTx extends GroupTransaction = GroupTransaction> = {
+  [TProcedure in keyof TProtocol & string]: TProtocol[TProcedure] extends { type: 'event'; retain: 'log' }
+    ? DurableHandler<EventHandlerContext<TProtocol, TProcedure>, TTx>
+      | ((context: EventHandlerContext<TProtocol, TProcedure> & GroupHandlerMetadata) => void | Promise<void>)
+    : MetadataHandler<ProcedureHandlers<TProtocol>[TProcedure]>
+}
+function adaptBusHandlers<TProtocol extends GroupProtocolDefinition, TTx extends GroupTransaction>(
+  protocol: TProtocol, handlers: GroupProcedureHandlers<TProtocol, TTx>,
+  options: { completion: HandlerCompletion<TTx>; suppress?: SuppressConfig },
+): BusHandlerMaps
+type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void>
+}
+```
+
+- Move OpenAppResult from mls-rpc into rpc with every S:1367-1391 arm unchanged.
+  Retain the existing opened arm's `handleEpoch: number` for locked-handle decisions.
+- GroupCrypto.unwrap opts.frame becomes PreOpenAppFrameRef. Add `unwrapBatch?(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>>`.
+- GroupUnwrapResult adds required `frameEpoch: number`. Existing `epoch` remains the locked handle epoch.
+- GroupPeerParams/createPeer thread TTx. Handler `completion: HandlerCompletion<TTx>` is required, including the no-MLS branch.
+- Rename recovery callback options to `recoveryCompletion?: RecoveryCompletion | null`, including RegistryPeerOptions and its producer/consumer arguments.
+  Keep ConfirmedRecoveryHandoff.completion's promise unchanged. Host-boundary classifies completion as a port and recoveryCompletion as a callback.
+- Base `ConformanceUnwrapResult.frameEpoch: number` is required on every implementation/double.
 
 - [ ] **Step 1: Write failing type and shape witnesses.**
 
@@ -506,11 +211,11 @@ Use expectTypeOf and necessary @ts-expect-error assertions for these cases:
 
 | Witness | Assertions |
 | --- | --- |
-| `pre-open refs exclude procedure and opened refs require origin` | Missing GroupKey refuses. Pre-open object needs no procedure; opened record requires procedure/epoch/key. |
+| `pre-open refs exclude procedure and opened refs require origin` | Missing GroupKey rejects. Pre-open needs no procedure; opened records require procedure/epoch/key. |
 | `transactional policy is available only on retained events` | A log event infers tx. Legacy functions remain valid. Ephemeral event/request/stream/channel transactional declarations refuse. |
-| `recovery and handler completion occupy distinct fields` | Both can coexist with distinct types. The no-MLS branch still accepts handler completion. |
-| `registry durable unwrap preserves saved record metadata` | Replayed singleton/batch use saved sender/frame epoch/procedure/key; supplied wrong key is a storage failure. |
-| `base crypto reports authenticated retained frame epoch despite false hints` | Seal distinct frames at E, advance once to E+1, then open them with hint offsets `[0, -1, 1]`. Assert `result.frameEpoch === E` and `result.epoch === E+1` for each. Same-epoch success also asserts `frameEpoch === epoch`. |
+| `recovery and handler completion occupy distinct fields` | Both fields coexist with distinct types. The no-MLS branch accepts handler completion. |
+| `registry durable unwrap preserves saved record metadata` | Singleton/batch replay returns saved sender/frame epoch/procedure/key. Wrong origin is a storage failure. |
+| `base crypto reports authenticated retained frame epoch despite false hints` | Seal three distinct frames at E; advance to E+1. With hint offsets `[0,-1,1]`, each yields `frameEpoch === E`, `epoch === E+1`. Same-epoch open yields equal epochs. |
 
 - [ ] **Step 2: Run RED.**
 
@@ -520,15 +225,14 @@ Expected failures are absent contracts or incompatible shapes, not runtime fixtu
 
 - [ ] **Step 3: Implement the portable contracts and migrate callers.**
 
-Move/re-export shared types without circular imports. Preserve locked-handle epoch semantics separately from frameEpoch.
-For successful non-registry decrypt, derive frameEpoch from the successfully authenticated sealed frame, never an unverified hint fallback.
-Preserve full saved records on durable replay. Reject genuinely incomplete legacy records instead of fabricating metadata from current state.
-Current registry persisted records already have the required fields; do not add a migration or rewrite sealed rows unnecessarily.
-Update fixtures to supply actual origin/transaction providers. Never fabricate a lost-state crypto handle.
+Move/re-export rpc types without circular imports. Preserve registry sealed records; no format migration is needed.
+Derive frameEpoch only from the authenticated open. Singleton replay reloads the full saved record; reject incomplete legacy records.
+Registry supplies unwrapBatch. Unbound adapters may remain singleton, without pretending sequential opens are atomic.
+Migrate every real/double caller and distinct recoveryCompletion option, preserving assertions and port strictness.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run the focused tests GREEN and one kbuild/ktypes portable-contract gate. Defer both-family execution to Task 9.
+Run one kbuild/ktypes portable-contract gate; both contract families gate at Task 11.
 Remove the retained-event policy conditional: the ephemeral transactional type witness must fail.
 Overwrite saved frameEpoch with runtime epoch: the replay metadata assertion must fail.
 Omit frameEpoch, substitute the current handle epoch, or copy the false hint separately in the base crypto adapter.
@@ -541,7 +245,7 @@ Commit with `feat(rpc): define durable handler and completion contracts`.
 
 ### Task 2: Implement exact-key atomic completion and poison pruning
 
-**Dependency:** Task 1. Q1=A is settled.
+**Dependency:** Tasks 1/5. Q1=A: no surviving prefix proof means row removal with the durable cursor unchanged.
 
 **Files:**
 
@@ -553,11 +257,77 @@ Commit with `feat(rpc): define durable handler and completion contracts`.
 
 **Interfaces:**
 
-- Consumes HandlerCompletion and registered EntryCapability; produces createHandlerCompletion, internal handlerCompletionForEntry and the coverage binding contract above.
-- Produces one internal transaction-bound completion routine shared by complete, transact and AppCompletionCoverageBinding.advance.
-- Produces the binding's callable advance/unbind lifecycle without changing the public HandlerCompletion shape.
-- Extends EntryCapability.run with the effects callback specified above. The production coordinator owns its phase transition.
-- Existing PendingAppFrames.complete(id) delegates through the same completion service for its originating key.
+Consumes HandlerCompletion and the scheduler contract. Produces both canonical factory paths and optional coverage coordination.
+
+```ts
+type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void>
+}
+function createHandlerCompletion<TTx extends GroupTransaction>(params: {
+  persistence: GroupPersistence<TTx>; key: GroupKey
+}): HandlerCompletion<TTx>
+function handlerCompletionForEntry<TTx extends GroupTransaction>(params: {
+  capability: EntryCapability<TTx>; binding: object; key: GroupKey
+}): HandlerCompletion<TTx>
+type BatchBudget = { maxFrames: number; maxWorkMs: number; now(): number; begin(): void; take(): boolean }
+type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue' | 'accounting'
+type GroupBatchScheduler = {
+  schedule<T>(work: { source: string; kind: BatchKind; signal?: AbortSignal; run(budget: BatchBudget): Promise<T> }): Promise<T>
+  close(reason: Error): void
+}
+function groupBatchFor(binding: object, groupID: string): GroupBatchScheduler
+type AppCompletionCoverage = {
+  key: GroupKey; topicID: string; generation: number
+  previous: string | null; through: string | null
+  prefix: Array<{ frame: PreOpenAppFrameRef; state: 'pending' | 'dead' | 'completed' }>
+}
+type AppCompletionCoverageSource = {
+  capture(ids: Array<string>): Array<AppCompletionCoverage>
+  current(coverage: AppCompletionCoverage): boolean
+  committed(ids: Array<string>, coverage: Array<AppCompletionCoverage>): void
+}
+type AppCompletionCoverageBinding = { advance(): Promise<void>; unbind(): void }
+function registerAppCompletionCoverage<TTx extends GroupTransaction>(
+  completion: HandlerCompletion<TTx>,
+  bind: (source: AppCompletionCoverageSource) => AppCompletionCoverageBinding,
+): void
+function bindAppCompletionCoverage<TTx extends GroupTransaction>(
+  completion: HandlerCompletion<TTx>, source: AppCompletionCoverageSource,
+): AppCompletionCoverageBinding | undefined
+```
+
+EntryCapability.run gains this exact effects parameter. The coordinator owns its phase transition.
+
+```ts
+run<P, T>(
+  request: { groupID: string; mutationID: string | null },
+  prepare: (reads: EntryReads) => Promise<Prepared<P>>,
+  work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
+  effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
+): Promise<T>
+```
+
+- Cache by `(coordinator binding, groupID, incarnation)`. Both factories return that same identity without loading a crypto handle.
+- The factory registers coverage once by completion identity. Bind returns undefined for an independent, unregistered completion port.
+- Registered bindings retain the source. advance assertsRoot and captures `source.capture([])` synchronously before awaiting anything.
+- unbind withdraws the source and invalidates queued captures. Later advance calls refuse. No public completion-port member is added.
+- PendingAppFrames.complete(id) delegates to the exact-key canonical service.
+- complete/transact/advance assertRoot synchronously before collector insertion, scheduling, reads or their first await.
+- Each complete call snapshots/deduplicates IDs and resolves after every bounded prefix proves. It releases owner/transaction between prefixes.
+- Missing IDs never invoke a callback. Duplicate IDs affect a saved row at most once. Each newly completed pending/poison/dead occurrence consumes one shared budget unit, deduplicated by occurrence.
+- A failure rejects the call. Earlier proven prefixes remain completed. Retrying the original array safely services its surviving suffix.
+- transact is one atomic callback over all its saved pending records, in stable occurrence order. Never split or reinvoke it on subsets.
+- Begin the budget at owned record staging. Take before each saved pending/poison occurrence; do not charge it twice.
+- Count pending/poison records during owned preparation. If the atomic set exceeds maxFrames, reject RangeError before effects or writes.
+- If staging cannot admit the whole atomic set within maxWorkMs, reject RangeError with no callback or durable changes.
+  A callback already started is non-preemptible. No further completion operation joins after it exhausts the work budget.
+- Defer excess dead-prefix progress to another turn, retaining later completed coverage. Poison never invokes a host callback.
+- Empty/all-missing calls are no-ops. Caller arrays and plaintext never replace saved records.
+- Use stable per-protocol transactional source IDs containing the exact key. Composite explicit calls own a distinct source.
+- Coalesce only callback-free completions. Separate transact calls always use separate transactions, regardless of policy/key/arrival ordering.
+  An explicit aggregate transact call retains its host-chosen atomic set. The collector never adds another callback or lane to it.
 
 - [ ] **Step 1: Write production-boundary failure witnesses.**
 
@@ -565,36 +335,52 @@ Run every storage case in real-MLS/double modes and supplied/absent ownershipCon
 
 | Test name | Assertions |
 | --- | --- |
-| `transactional completion commits effect pending and cursor atomically` | Open two records. Complete a proven prefix with a supplied-tx side row. Fail after first write/before commit: all rows equal pre-state. Commit: effect exists, pending/covered poison absent, cursor equals proven prefix. |
-| `transactional completion enters effects with domain writes refused` | Enter through completion.transact. Observe phase order `work, finalise, effects, account`. Capture the actual supplied stores in the fixture. Callback state/trust/lifetime writes through supplied, copied and independently constructed tx stores reject with `PersistencePhaseError`. Domain rows remain byte-identical. A lawful supplied-tx side row and completion commit together. |
-| `completion cannot cross a held prefix` | Held/sealed A precedes opened B. Completing B never advances past A. Test opaque positions `10` and `2` by code-unit order and separate topics. No numeric successor assumption. |
-| `later completion retains live coverage until the earlier prefix closes` | Persist A at `10` and B at `2` in one topic, cursor null. Complete B first: B absent, A pending, cursor null, B coverage retained. Complete A: A absent and cursor `2` in that same proven transaction. Reopen: cursor `2`, neither pending/effect repeats. A later held `20` stays uncrossed, using code-unit order `10 < 2 < 20`. |
-| `unknown completion exposes no effect before proof` | Backend COMMIT remains unfinished, then commits or rolls back. Before proof no handler result/hook/cursor is visible. Resolve both outcomes; repeated proof does not duplicate effect/hook. Conflict fail-stops. |
-| `unknown and duplicate IDs never invoke a completed handler` | Empty/missing/duplicate IDs are harmless. Mixed IDs invoke once with only saved still-pending records. Restart after committed completion does not invoke again. |
-| `poison pruning and cursor roll back together` | Authenticated malformed plaintext produces poison. Cover its contiguous dead prefix; prune in cursor transaction. Rollback retains row/cursor. Wrong-AAD/junk/expired future inputs create no poison. |
-| `coverage binding advances without saved IDs and preserves unknown-ID no-op` | Bind validated dead occurrences at positions `10`, `2`, with no pending/poison. `complete(['missing'])` leaves cursor null and coverage intact. Fail binding.advance before COMMIT: cursor stays null and coverage remains. Retry commits cursor `2` without handler/MLS writes; reopen preserves `2`. Empty capture does nothing. Unbound/stale-generation/wrong-key captures cannot save a cursor. |
-| `stale coverage cannot cross a moved cursor or incarnation` | Change cursor/lane generation/current hub between capture and work. Reject/re-prepare. Late old completion changes no new-incarnation state/cursor. |
-| `cold completion without coverage preserves the cursor` | Saved record has an unknown preceding gap. Complete without crypto/fetch; row disappears, cursor stays. Reconstruction/refetch never repeats its committed transactional effect. |
-| `transactional root reentry obeys ownership diagnostics` | Synchronous same-group root calls refuse with both context modes. After await, refuse with supplied ownershipContext. Retained tx/store access expires. Document absent-context async limitation, without a hanging test. |
+| `one oversized complete call yields bounded proven prefixes` | One complete(130 saved IDs): committed sizes `[64,64,2]`; cap 32: `[32,32,32,32,2]`. Promise settles after all proofs. Ready B commits between prefixes 1/2. Deduplicate IDs; missing IDs invoke nothing. Roll back prefix 2: prefix 1 stays complete, suffix pending. Retry all IDs without repeated effects. Repeat with poison-only rows and dead-only advance. With mixed saved/dead coverage, each transaction completes at most 64/32 distinct occurrences and queues excess proof. |
+| `oversized atomic transact refuses without invoking its aggregate callback` | 130 saved IDs/default cap, or 33/cap 32: RangeError, callback count 0, all rows/cursors unchanged. Exactly 64/32: one callback with full ordered array. Advance staging clock to 8/host 3 after record 1: whole call refuses, callback 0, no writes. |
+| `transactional failures cannot couple independent protocol lanes` | Queue separate same-key/policy A/B transact calls behind active open. A always throws; retry twice after known rollback. B effect/removal commits once before next A retry. No transaction contains both callbacks. A rows/effect/cursor remain unchanged. |
+| `transactional completion commits effect pending and cursor atomically` | Two opened records plus covered poison and supplied-tx side row. Fail first write/before COMMIT: exact pre-state. Proven commit: effect exists, pending/poison absent, cursor equals proven prefix. |
+| `transactional completion enters effects with domain writes refused` | Production transact phase order: `work,finalise,effects,account`. Supplied/copied/constructed tx state/trust/lifetime writes reject PersistencePhaseError. Domain bytes unchanged. Lawful side row/completion co-commit. |
+| `completion cannot cross a held prefix` | Held/sealed A before opened B blocks B cursor advancement. Exercise opaque `10 < 2` and distinct topics. |
+| `later completion retains live coverage until the earlier prefix closes` | A=`10`, B=`2`, held=`20`, cursor null. Complete B: only A pending, cursor null, B coverage retained. Complete A: cursor `2` atomically. Reopen: cursor `2`, no repeated effect/pending; held `20` uncrossed. |
+| `unknown completion exposes no effect before proof` | Unfinished COMMIT: no effect/result/hook/cursor visible. Prove commit and rollback separately. Repeated proof duplicates no effect/hook; conflicting proof fail-stops. |
+| `unknown and duplicate IDs never invoke a completed handler` | Empty/all-missing/duplicate IDs are harmless. Mixed array invokes once for saved still-pending records only. Committed restart invokes nothing again. |
+| `poison pruning and cursor roll back together` | Authenticated malformed plaintext creates poison. Cursor/pruning commit or roll back together. Wrong-AAD/junk/expired future creates no poison. |
+| `coverage binding advances without saved IDs and preserves unknown-ID no-op` | Bound dead `10`,`2`, no rows: complete(missing) leaves cursor null/coverage intact. advance rollback retains proof; retry commits cursor `2` with no handler/MLS writes. Reopen preserves `2`. Empty capture does nothing; stale/unbound/wrong-key proof cannot write. |
+| `stale coverage cannot cross a moved cursor or incarnation` | Move cursor/generation/current hub between capture/work: reject/reprepare. Old-key completion changes no successor state/cursor. |
+| `cold completion without coverage preserves the cursor` | Saved record behind unknown gap: complete without crypto/fetch, remove row, preserve cursor. Reconstruction/refetch repeats no committed transactional effect. |
+| `transactional root reentry obeys ownership diagnostics` | Synchronous same-group root calls reject in both context modes; after await reject with ownershipContext. Retained stores/tx expire. No absent-context asynchronous hang witness. |
 
 - [ ] **Step 2: Run RED.**
 
 Run `ktest @kumiai/mls-rpc test/handler-completion.test.ts`.
 Baseline fails at missing runner or pending/cursor split. Raw manual stores composition is not an acceptable substitute witness.
+Task 2's later-prefix witness binds its explicit ordered-proof fixture to the production completion runner.
+Task 6 repeats it through the production AppLane. Storage/crypto ports alone provide no ordered-prefix proof.
 
-- [ ] **Step 3: Implement one retained D8 entry per compatible completion batch.**
+- [ ] **Step 3: Implement bounded completion through retained D8 entries.**
 
-Prepare saved records and coverage under ownership. Revalidate them in work and capture the entry-bound callback before finalise.
-Implement binding.advance as an explicit runner mode, independent of the missing-ID no-op. Capture from its bound source only.
-Invoke the handler only in effects with stores.tx and defensive saved records.
-After handler success, complete pending/covered poison and save eligible cursors through lawful effects-phase side stores.
-Use existing proof/account/hooks. Never call GroupPersistence.transition or root cursor.save from an entry callback.
-Only proof updates volatile coverage. Completion-only writes preserve MLS version, receive state, retained trust and controller knowledge.
-Keep exact-key service available during retirement. Preserve fail-stop and provider error identity.
+Capture immutable lane coverage synchronously, outside any app mutex. Read and revalidate saved occurrence identities under ownership.
+The source snapshot records ordered traversal from the durable cursor, including held boundaries and completed suffixes.
+`through` is the last eligible position. Never infer it from max(position), numeric succession or hub claims.
+Check key/topic/generation/durable cursor and source.current before effects and final writes. Stale captures reprepare without invoking handlers.
+Every crossed member must be validated dead, already completed, or in this successful completion set.
+Retain completed B's occurrence when earlier A blocks advancement. Only committed prefix retirement or generation reset drops that evidence.
+Truncate dead-only advance to the same count/work budget. Re-advertise eligible remainder after release.
+Missing-ID complete cannot trigger dead-only advancement. Only the bound advance operation requests that mode.
+Capture the entry-bound callable before finalise. Invoke it through entry.callback after entering effects, before existing outbox/delete effects.
+Invoke the host with stores.tx and saved records. Complete pending/covered poison and save proven cursor through effects-phase side stores.
+Keep existing account/proof/hook ordering and every domain-write restriction. Never call root stores or transition from that callback.
+Only proven commit calls source.committed(ids, consumedCoverage). Rollback retains captures for retry and exposes no results.
+Without coverage, complete rows and preserve the cursor. Exact retired-key completion cannot follow activeIncarnation or clear another cursor.
+If necessary, grant only that entry a narrow retired-key cursor capability. Public root cursor.save remains active-only.
+Completion-only work preserves MLS version, receive state, trust and controller knowledge. Preserve provider error identity and fail-stop.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run Step 2 GREEN and focused affected storage/ownership phase witnesses. Use relevant package typechecks.
+Run affected storage/ownership phase witnesses.
+Collapse one complete(130 IDs) into one transaction: its exact size/release assertions must fail.
+Split transact's callback or remove its oversize/work refusal: the zero-callback/full-array assertions must fail.
+Fuse separate transactional A/B callbacks: B's committed effect assertion must fail after A throws.
 Move cursor save or side effect outside the transaction: the atomic witness must fail.
 Move the host callback into work: the completion phase/refusal witness must fail.
 Advance max(position) across a held gap: the held-prefix witness must fail.
@@ -618,55 +404,68 @@ Commit with `feat(mls-rpc): complete handler effects and cursors atomically`.
 
 **Interfaces:**
 
-- Produces the specified adaptBusHandlers options signature and GroupProcedureHandlers runtime normalisation.
-- Owns every event/request context projection in handlers.ts. Task 4 supplies authenticated transit and depends on this task.
-- Produces `groupHandlerMetadata(transit: { epoch?: number }, key: GroupKey): GroupHandlerMetadata`.
-- This projection requires authenticated epoch and obtains incarnation from key. Missing epoch refuses group delivery.
-- Produces `combineDurableHandlers<TContext, TTx extends GroupTransaction>(handlers: [DurableHandler<TContext, TTx>, ...Array<DurableHandler<TContext, TTx>>]): DurableHandler<TContext, TTx>`.
-- Produces the following dispatcher and raw-callback normaliser. Both require the shared context explicitly.
+Consumes the following completion and metadata contracts. Produces the dispatcher, normaliser and listener helper.
 
 ```ts
-export type OpenedAppHandler<TTx extends GroupTransaction> = {
+type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void>
+}
+type GroupHandlerMetadata = {
+  epoch: number; incarnation: number; frame?: AppFrameRef; idempotencyKey?: string
+}
+function groupHandlerMetadata(transit: { epoch?: number }, key: GroupKey): GroupHandlerMetadata
+type OpenedAppHandler<TTx extends GroupTransaction> = {
   completion: HandlerCompletion<TTx>
   openedDeliveryContext: OpenedDeliveryContext
   deliver(record: PendingAppFrame): Promise<void>
 }
-export function createOpenedAppHandler<
+function createOpenedAppHandler<
   P extends Record<string, GroupProtocolDefinition>, TTx extends GroupTransaction,
 >(params: {
-  localDID: string
-  protocols: P
+  localDID: string; protocols: P
   handlers: { [K in keyof P]: GroupProcedureHandlers<P[K], TTx> }
   suppress?: SuppressConfig
   completion: HandlerCompletion<TTx>
   openedDeliveryContext: OpenedDeliveryContext
   owner?: object
 }): OpenedAppHandler<TTx>
-export function normaliseOpenedAppHandler<TTx extends GroupTransaction>(params: {
+function normaliseOpenedAppHandler<TTx extends GroupTransaction>(params: {
   deliver: OpenedAppHandler<TTx> | ((record: PendingAppFrame) => Promise<void>)
   completion: HandlerCompletion<TTx>
   openedDeliveryContext: OpenedDeliveryContext
   owner?: object
 }): OpenedAppHandler<TTx>
+function combineDurableHandlers<TContext, TTx extends GroupTransaction>(
+  handlers: [DurableHandler<TContext, TTx>, ...Array<DurableHandler<TContext, TTx>>],
+): DurableHandler<TContext, TTx>
+function adaptBusHandlers<TProtocol extends GroupProtocolDefinition, TTx extends GroupTransaction>(
+  protocol: TProtocol, handlers: GroupProcedureHandlers<TProtocol, TTx>,
+  options: { completion: HandlerCompletion<TTx>; suppress?: SuppressConfig },
+): BusHandlerMaps
 ```
 
-- A successful durable dispatch includes proven completion. Callers must not append a second complete step.
-- Existing raw deliverOpened callbacks remain at-least-once callbacks. Normalise them into an OpenedAppHandler using the exact-key completion service.
-- Reject a dispatcher with a mismatched key, completion identity or shared context before invocation.
+- DurableHandler uses mode omitted/'at-least-once' without tx, or mode 'transactional' with tx: TTx.
+  Both require saved frame/idempotencyKey plus authenticated epoch/incarnation in the callback context.
+- Q2=A: unchanged GroupProcedureHandlers mapping, explicit combineDurableHandlers for listener lists, retained-emitter registration guard.
+- Successful deliver includes proven completion. Default callbacks run outside ownership, then complete. Transactional callbacks run via transact.
+- Raw callbacks normalise to at-least-once. Reject mismatched key, completion identity or shared context before invocation.
+- groupHandlerMetadata requires authenticated epoch. It takes incarnation from the supplied key, with no fallback.
 
 - [ ] **Step 1: Write policy and registration witnesses.**
 
 | Test name | Assertions |
 | --- | --- |
-| `legacy and omitted mode handlers complete after success outside ownership` | Legacy and mode omitted are at least once. Handler runs with no owner/tx and receives persisted frame/key/epoch/incarnation. Failure retains pending. |
-| `transactional dispatch uses saved records and one supplied transaction` | Handler context comes from records loaded by transact. Effect/completion share tx. No second completion. Duplicate completed dispatch invokes no host callback. |
-| `production transactional handler preserves effects-phase restrictions` | Enter through createOpenedAppHandler backed by createHandlerCompletion. Repeat Task 2's supplied/copied/constructed domain-write refusals after await. Assert `PersistencePhaseError`, unchanged domain bytes and one committed side row/completion. Run with and without ownershipContext. |
-| `mixed durable listener policies refuse before registration` | Helper rejects mixed policy, empty runtime list and invalid modes before any listener/source installation. Same-policy listeners run in declaration order and complete once. |
-| `retained event listeners cannot bypass completion policy` | Attempt extra unclassified registration through returned events.on. Reject for retained procedure; ordinary ephemeral listener use remains available. |
-| `ephemeral handlers never invoke completion` | Event/request/stream/channel metadata path has no tx/frame/key or complete/transact call. Transactional object on ephemeral procedure refuses registration. A retained-procedure input on ephemeral ingress cannot invoke its durable policy. |
-| `handler failure isolates its lane` | Failing A keeps pending and blocks later A, while B succeeds. Default fan-out failure can repeat earlier callbacks; transactional fan-out rolls back all durable side effects. |
-| `standalone opened helper retains lifecycle context after await` | Use the required shared context with default and transactional handlers. After await, same-group lifecycle entry rejects with `OpenedDeliveryReentryError`. Independent callers/groups remain unbound. Missing context refuses construction. |
-| `handler adapter projects authenticated event and request transit` | Transit epoch `7`, completion key incarnation `3`: host context has `{epoch: 7, incarnation: 3}`. Missing epoch invokes no host callback. Durable saved frame/key survive. Ephemeral contexts omit frame/key/tx. |
+| `legacy and omitted mode handlers complete after success outside ownership` | Legacy/omitted-mode callback has no owner/tx; gets saved frame/key/epoch/incarnation. Success completes once; failure retains pending. |
+| `transactional dispatch uses saved records and one supplied transaction` | Context uses transact-loaded records. Effect/completion share tx; no appended completion. Duplicate completed dispatch invokes no callback. |
+| `production transactional handler preserves effects-phase restrictions` | createOpenedAppHandler + createHandlerCompletion: after-await domain writes through supplied/copied/constructed tx reject PersistencePhaseError. Domain unchanged, one side row/completion; both ownershipContext modes. |
+| `mixed durable listener policies refuse before registration` | Mixed policy, empty runtime list or invalid mode rejects before listeners/sources install. Homogeneous listeners run in declaration order, one completion. |
+| `retained event listeners cannot bypass completion policy` | Extra unclassified retained events.on registration rejects. Ordinary ephemeral listeners remain available. |
+| `ephemeral handlers never invoke completion` | All ephemeral kinds omit frame/key/tx and call complete/transact 0 times. Transactional ephemeral registration rejects. Wrong-retention ingress invokes no durable policy. |
+| `handler failure isolates its lane` | A failure retains pending/blocks later A; B succeeds. Default fan-out may repeat earlier callbacks. Transactional fan-out rolls back every durable effect. |
+| `standalone opened helper retains lifecycle context after await` | Both policies retain required shared context. After await, same-group lifecycle rejects OpenedDeliveryReentryError. Independent callers/groups stay unbound; missing context rejects construction. |
+| `handler adapter projects authenticated event and request transit` | Transit epoch 7/key incarnation 3 yields `{epoch:7,incarnation:3}`. Missing epoch invokes nothing. Durable frame/key persist; ephemeral frame/key/tx absent. |
 
 - [ ] **Step 2: Run RED.**
 
@@ -675,20 +474,13 @@ Expected missing policy support or missing metadata/completion, not an unrelated
 
 - [ ] **Step 3: Implement policy registration and durable dispatch.**
 
-Normalise legacy functions to at-least-once. Validate policy and retention at registration.
-Build one owned durable listener boundary per procedure. Schema/retention checks remain rpc responsibilities.
-Unknown protocol or missing handler keeps the record pending, matching current cold drain behaviour.
-Use completion.transact for transactional dispatch. Default dispatch awaits the handler outside ownership, then completion.complete.
-Adapt the raw emitter surface so adding listeners cannot introduce undeclared retained effects.
-Validate required openedDeliveryContext at dispatcher/normaliser construction and retain its identity on the resulting dispatcher.
-Project event/request host metadata in handlers.ts, including saved durable metadata from createOpenedAppHandler.
-Preserve the shared context around each actual host callback, including transactional fan-out listeners.
-The dispatcher owns that callback scope. Enter completion from outside it; do not wrap the whole dispatcher in runOpenedDelivery.
-Otherwise the completion entry would diagnose its own callback scope as forbidden root re-entry.
+Normalise legacy functions to at-least-once; validate policy and retention before listener installation.
+Unknown protocol/missing handler retains pending. Default callbacks run outside ownership, then complete; transactional callbacks use transact.
+Bind openedDeliveryContext only around actual host callbacks. Enter completion outside that context to avoid diagnosing its own scope.
+Guard retained emitter registration; preserve homogeneous listener order and authenticated context projection.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run Step 2 GREEN and relevant package typechecks.
 Remove mixed-mode refusal: its registration test must fail before any handler runs.
 Invoke transactional callback outside transact or append duplicate default completion: the respective boundary witness must fail.
 Move the actual coordinator callback into work: the assembled production-handler phase assertion must fail.
@@ -702,8 +494,7 @@ Commit with `feat(rpc): dispatch durable handler completion policies`.
 
 ### Task 4: Wire original peer coordination and carry authenticated transit metadata
 
-**Dependency:** Tasks 2/3's canonical completion, dispatcher and context contracts. Task 5 remains independent after Task 1.
-This task completes shared peer wiring before Task 6. Tasks 4/6 must execute sequentially.
+**Dependency:** Tasks 2/3/5. Finish this wiring before Task 6.
 
 **Files:**
 
@@ -715,38 +506,74 @@ This task completes shared peer wiring before Task 6. Tasks 4/6 must execute seq
 
 **Interfaces:**
 
-- `AppLaneParams<TTx extends GroupTransaction = GroupTransaction>` requires `completion: HandlerCompletion<TTx>`. Its `openedHandler?: OpenedAppHandler<TTx>` is required when crypto.pending exists.
-- It accepts `batch?: AppBatchBinding`. `createAppLane<TTx extends GroupTransaction>(params: AppLaneParams<TTx>): AppLane` retains those identities.
-- Capture `input.completion` and `appBatch(input.crypto)` before wrapPeerHost.
-- Pass the original completion and captured batch directly to AppLane.
-- Validate each present binding's exact key against completion.key and the origin control key before installing sources.
-- For pending-backed delivery, create the live OpenedAppHandler with canonical completion, required shared openedDeliveryContext and openedScope.owner.
-- Replace the peer's split deliverOpened/completeOpenedRecord lane plumbing with this dispatcher. Successful delivery completes exactly once.
-- Use canonical completion for bindAppCompletionCoverage. Never register coverage against params.completion's host wrapper.
-- Classify completion's key/complete/transact in host-boundary.ts. Preserve existing boundary drainage and claim admission checks.
-- RegistryPeerOptions/RegistryPeerParams gain the same transaction generic as GroupPeerParams and the origin-key completion alongside recoveryCompletion.
-- The registry adapter calls handlerCompletionForEntry with registrySafety's entry/binding and requested key before createPeer, forwarding that canonical service unchanged.
-- Task 8 owns cold fallback/resolver integration, rather than these prerequisites for live peers.
-- Add optional `epoch?: number` to broadcast UnwrapResult/BroadcastMessage/BusEvent/request-handler transit context.
-- Group adapters populate transit epoch from GroupUnwrapResult.frameEpoch after successful open and require its presence.
-- OpenedInbound carries required `epoch: number` and `incarnation: number`, provided by the origin group adapter.
-- EpochRuntimeParams/InboxPathParams receive the origin GroupKey. Peer forwards its completion.key explicitly.
-- Directed acceptor stamps `kumiai/epoch` and `kumiai/incarnation` per invoking frame, overriding supplied headers.
-- GroupHandlerMetadata remains required in group host contexts, optional transit metadata remains generic broadcast-compatible.
-- Consumes `groupHandlerMetadata` and event/request projection from Task 3. This task does not edit handlers.ts.
-- The retained singleton/non-pending app-lane producer is assigned to Task 6, using this same authenticated transit contract.
+```ts
+type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void>
+}
+function createHandlerCompletion<TTx extends GroupTransaction>(params: {
+  persistence: GroupPersistence<TTx>; key: GroupKey
+}): HandlerCompletion<TTx>
+function handlerCompletionForEntry<TTx extends GroupTransaction>(params: {
+  capability: EntryCapability<TTx>; binding: object; key: GroupKey
+}): HandlerCompletion<TTx>
+type BatchBudget = { maxFrames: number; maxWorkMs: number; now(): number; begin(): void; take(): boolean }
+type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue' | 'accounting'
+type GroupBatchScheduler = {
+  schedule<T>(work: { source: string; kind: BatchKind; signal?: AbortSignal; run(budget: BatchBudget): Promise<T> }): Promise<T>
+  close(reason: Error): void
+}
+type StreamingOpenResult = { consumed: number; results: Array<OpenAppResult> }
+type AppBatchBinding = {
+  key: GroupKey
+  scheduler: GroupBatchScheduler
+  openReady(frames: Array<OpenAppInput>, budget: BatchBudget): Promise<StreamingOpenResult>
+}
+function bindAppBatch(crypto: GroupCrypto, binding: AppBatchBinding): void
+function appBatch(crypto: GroupCrypto): AppBatchBinding | undefined
+type OpenedAppHandler<TTx extends GroupTransaction> = {
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  deliver(record: PendingAppFrame): Promise<void>
+}
+function createOpenedAppHandler<
+  P extends Record<string, GroupProtocolDefinition>, TTx extends GroupTransaction,
+>(params: {
+  localDID: string; protocols: P
+  handlers: { [K in keyof P]: GroupProcedureHandlers<P[K], TTx> }
+  suppress?: SuppressConfig
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  owner?: object
+}): OpenedAppHandler<TTx>
+type GroupHandlerMetadata = {
+  epoch: number; incarnation: number; frame?: AppFrameRef; idempotencyKey?: string
+}
+function groupHandlerMetadata(transit: { epoch?: number }, key: GroupKey): GroupHandlerMetadata
+```
+
+- `AppLaneParams<TTx extends GroupTransaction = GroupTransaction>` requires completion, with openedHandler required when crypto.pending exists.
+  `createAppLane<TTx extends GroupTransaction>(params: AppLaneParams<TTx>): AppLane` accepts optional `batch?: AppBatchBinding`.
+- Capture input.completion/appBatch(input.crypto) before wrapPeerHost; pass originals to lane/dispatcher. Check each binding's key first.
+- RegistryPeerOptions/RegistryPeerParams thread TTx, canonical origin-key completion, and distinct recoveryCompletion.
+- Live dispatcher uses the shared openedDeliveryContext/openedScope.owner. Its successful deliver includes completion.
+- Host-boundary classifies key/complete/transact, preserving drainage/claims. Task 6 binds coverage to the original identity.
+- Broadcast UnwrapResult/BroadcastMessage/BusEvent/request transit gains optional epoch. Group adapters require authenticated frameEpoch.
+- OpenedInbound requires epoch/incarnation. EpochRuntimeParams/InboxPathParams receive origin GroupKey from completion.key.
+- Directed ingress overwrites `kumiai/epoch`/`kumiai/incarnation` per frame. handlers.ts projects event/request transit.
 
 - [ ] **Step 1: Write a metadata matrix.**
 
 | Test name | Assertions |
 | --- | --- |
-| `peer captures original coordination before host wrapping` | Construct the real rpc peer with bound test crypto and a registered canonical completion. Exercise actual wrapPeerHost. Spy on createOpenedAppHandler while forwarding to its real implementation; assert constructor completion `=== input.completion`. A saved record reaches that dispatcher with one completion. Wrong-key inputs reject before any source/handler registration. Task 6 supplies actual streaming/coverage witnesses after implementing those consumers. |
-| `registry peer forwards the canonical completion for its requested key` | Through actual createRegistryPeer, capture createPeer's RegistryPeerOptions. Assert options.completion `=== createHandlerCompletion({persistence: persistence.groups, key: requested})`. The recoveryCompletion callback remains separate. Repeat with another group/key and assert distinct canonical identities. |
-| `retained frame metadata survives runtime advance` | Open a frame at E after local handle advances; durable/live handler gets authenticated frame E, originating incarnation, stable frame/key where durable. No current-epoch fallback. |
-| `anycast metadata survives suppression delay` | Delay jitter while runtime advances. Handler receives invoking frame epoch/incarnation. Sender and abort signal remain unchanged. |
-| `directed invocation metadata is per frame across a surviving session` | Parameterise event/request/stream/channel. Start separate invocations before/after rotation on one surviving session. Each handler gets its invoking frame metadata, never session creation epoch. An existing stream/channel context keeps its original invocation metadata. |
-| `wire and header metadata cannot override authenticated transit facts` | Spoof epoch/incarnation/sender in broadcast bytes and directed headers. Authenticating transport overwrites them. Missing authenticated epoch refuses group delivery with no persistence work. |
-| `metadata-only ephemeral delivery persists nothing` | Warm lease/receive path, exercise all kinds and replies. Zero group transition/outbox/pending/cursor calls. Exact successful-open counts remain unchanged. |
+| `peer captures original coordination before host wrapping` | Actual createPeer/wrapPeerHost: real dispatcher receives `completion === input.completion`, saved delivery completes once. Wrong keys reject before source/handler registration. Spy forwards to real dispatcher. |
+| `registry peer forwards the canonical completion for its requested key` | Actual createRegistryPeer forwards the identity returned by createHandlerCompletion for requested key. recoveryCompletion stays separate. Another key yields another canonical identity. |
+| `retained frame metadata survives runtime advance` | Open retained frame E after handle advancement. Host receives frame E and origin incarnation; durable frame/key remain stable. |
+| `anycast metadata survives suppression delay` | Advance runtime during jitter. Callback retains invoking epoch/incarnation, sender and abort signal. |
+| `directed invocation metadata is per frame across a surviving session` | Cross event/request/stream/channel on one session across rotation. Each invocation gets its own frame metadata; an existing stream/channel keeps its invocation metadata. |
+| `wire and header metadata cannot override authenticated transit facts` | Spoof epoch/incarnation/sender in bytes/headers. Authenticated transit overwrites them. Missing authenticated epoch invokes nothing and persists nothing. |
+| `metadata-only ephemeral delivery persists nothing` | Warm leases/receive; exercise all kinds/replies. Group transition/outbox/pending/cursor calls 0. Successful-open counts unchanged. |
 
 - [ ] **Step 2: Run RED.**
 
@@ -756,22 +583,15 @@ The coordination witness must fail for missing original identities or split deli
 
 - [ ] **Step 3: Implement transport projection and per-frame stamping.**
 
-Capture original coordination before wrapping, then thread the explicit lane inputs and live dispatcher defined above.
-Obtain canonical completion in the registry peer adapter. Preserve its identity when forwarding options into the actual rpc peer.
-Keep optional singleton compatibility only when the original crypto has no batch binding.
-Do not look up batch coordination on wrapped crypto or create a replacement completion service during wrapping.
-Forward epoch alongside authenticated sender from unwrap into bus events and request contexts.
-Delete any decoded epoch when authenticated unwrap supplies none. Group adapters then refuse missing authenticated metadata.
-Preserve it through suppressible wrappers. Preserve incarnation from the bound completion/access key, not wire data.
-At the directed ingress, overwrite reserved headers on every accepted frame before server validation.
-Supply authenticated transit to Task 3's event/request projection and the directed invocation adapter.
-Preserve original invocation metadata for every kind. Do not invent durable frame/key/tx for ephemeral calls.
-Keep retained procedures on the durable dispatcher. Wrong-retention ephemeral inputs are dropped without creating a hold or completion row.
-Preserve one consuming open per topic, sender splice checks, stale reply retirement and tunnel survival across ordinary rotation.
+Capture original completion/batch before host wrapping and pass them directly into AppLane and its dispatcher.
+RegistryPeer obtains canonical completion for the requested key. Validate key/context before installing sources.
+Forward authenticated frameEpoch/sender through broadcast and suppression. Missing epoch removes decoded hints and refuses group delivery.
+Stamp directed epoch/incarnation headers for each frame, preserving invocation metadata across streams/channels and runtime rotation.
+Keep retained delivery on its durable dispatcher and preserve one consuming open, sender splice checks and tunnel survival.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run the metadata matrix GREEN and relevant package typechecks. Defer both-family and full build gates to Task 9.
+
 Replace frame epoch with runtime/session epoch: retained/per-frame tests must fail.
 Stop overwriting headers or drop metadata during suppression: spoof/jitter tests must fail.
 Pass wrapped completion to the live dispatcher: the original-coordination witness must fail its identity or completion assertion.
@@ -784,31 +604,64 @@ Commit with `feat(rpc): preserve authenticated metadata on every invocation path
 
 ### Task 5: Build the per-group adaptive fairness arbiter
 
-**Dependency:** Task 1's portable budget/scheduler contracts and existing GroupBatchOptions. May overlap Tasks 2-4.
+**Dependency:** Task 1 and existing GroupBatchOptions. Execute before Task 2; this task supplies its completion budgets.
 
 **Files:**
 
+- Create `packages/rpc/src/app-batch.ts` and export its coordination types/binding.
 - Create `packages/mls-rpc/src/{group-batch,group-batch-binding}.ts` and `test/group-batch.test.ts`.
-- Modify `registry/types.ts` and `registry/registry.ts` only for batch options and initialisation.
+- Modify `registry/types.ts` and `registry/registry.ts` for batch options and initialisation. Task 8 owns observation/accounting integration.
 
 **Interfaces:**
 
-- Produces GroupBatchScheduler, BatchBudget, createGroupBatchScheduler and groupBatchFor as defined above.
-- GroupHandleRegistryParams gains `batch?: GroupBatchOptions`.
-- The scheduler never enters provider storage, calls handlers, or changes owner-queue.ts.
+Produces the exact scheduler, budget and original-crypto coordination contracts consumed by subsequent tasks.
+
+```ts
+type BatchBudget = { maxFrames: number; maxWorkMs: number; now(): number; begin(): void; take(): boolean }
+type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue' | 'accounting'
+type GroupBatchScheduler = {
+  schedule<T>(work: { source: string; kind: BatchKind; signal?: AbortSignal; run(budget: BatchBudget): Promise<T> }): Promise<T>
+  close(reason: Error): void
+}
+type StreamingOpenResult = { consumed: number; results: Array<OpenAppResult> }
+type AppBatchBinding = {
+  key: GroupKey
+  scheduler: GroupBatchScheduler
+  openReady(frames: Array<OpenAppInput>, budget: BatchBudget): Promise<StreamingOpenResult>
+}
+function bindAppBatch(crypto: GroupCrypto, binding: AppBatchBinding): void
+function appBatch(crypto: GroupCrypto): AppBatchBinding | undefined
+type GroupBatchOptions = { maxBatchFrames?: number; maxBatchDelayMs?: number; maxBatchWorkMs?: number }
+function createGroupBatchScheduler(params: { options?: GroupBatchOptions; now?: () => number }): GroupBatchScheduler
+function groupBatchFor(binding: object, groupID: string): GroupBatchScheduler
+```
+
+- GroupHandleRegistryParams gains `batch?: GroupBatchOptions`. Bind registry options before application work starts.
+- groupBatchFor shares one arbiter per coordinator binding/groupID. Without registry options, it uses defaults 64/2/8.
+- Refuse conflicting options on an already-live binding. Do not create a second arbiter or reset live budgets.
+- One schedule run performs one bounded transaction. Sources own unconsumed inputs and re-advertise only after release.
+- begin starts owned staging, excluding queue waits. It never resets an active budget. take counts an operation before staging it.
+- At count/work equality, admit no next operation. The first non-preemptible operation may start after setup consumed its budget.
+- Defaults: 64 frames, 2 ms delay, 8 ms work. Count is an integer; valid work limits may be fractional.
+- Opens additionally obey their hard cap 64. Values above 64 never enlarge a registry open batch.
+- Default completions may coalesce. Distinct transact callbacks never coalesce, including equal origin/policy.
+- Runtime disposal withdraws its signal-bound sources. close applies only to whole-binding shutdown, preserving cold owed work.
+- The scheduler changes no owner-queue FIFO and calls no storage/handlers itself. Unresolved proof retains D8 ownership.
+- Accounting is an ordinary source. Within each round, ordinary sources keep readiness order after ready control receives priority.
 
 - [ ] **Step 1: Write deterministic scheduler tests.**
 
 | Test name | Assertions |
 | --- | --- |
-| `idle lone work starts without advancing batching timers` | First run begins immediately. No pending coalescing timer must fire first. |
-| `active arrivals coalesce without waiting beyond two milliseconds` | Deferred A lets arrivals collect. Release A, then flush ready work immediately or by remaining deadline; count cap flushes first. No active-transition duration is charged as avoidable delay. |
-| `count and staging work stop at the next operation boundary` | Exercise begin/take. Defaults 64/2/8. Begin after an arbitrary queued delay. Reach 8 during a stage; no next operation. Count 64 stops before 65. Repeated begin cannot reset the budget. Task 6 separately proves this inside actual decrypt staging. |
-| `active A then control then B fits three batches` | Hold first A. Mark control/B ready and replenish A continuously. Batch log equals A,control,B before next A. No timers advanced to hide starvation. |
-| `each ready source gets one turn per round` | Multiple ordinary sources, including enqueue/completion/settlement, receive a turn before A repeats. Replenished control cannot starve them. |
-| `group B progresses while A is suspended` | Separate group bindings; A's callback/proof stays unresolved, B completes. No global mutex. |
-| `invalid bounds refuse before ownership` | Reject NaN/infinity/nonpositive count/work, fractional count and negative delay. Accept zero delay and positive fractional work budget. |
-| `closing a source cannot reroute queued work to a new incarnation` | Queued work rejects exact source; no silent key substitution. Storage-only owed work can still run through the shared arbiter. |
+| `idle lone work starts without advancing batching timers` | First run starts immediately; no coalescing timer fires first. |
+| `active arrivals coalesce without waiting beyond two milliseconds` | Hold active A while ready work collects. After release flush immediately or within remaining 2 ms; count cap flushes first. Active time is excluded. |
+| `count and staging work stop at the next operation boundary` | Defaults 64/2/8. begin excludes queue delay; take rejects next operation at 8 ms or count 64. Repeated begin cannot reset budget. |
+| `active A then control then B fits three batches` | Hold A, ready control/B, continuously replenish A. Batch prefix exactly `[A,control,B]`, without advancing timers. |
+| `each ready source gets one turn per round` | Ordinary enqueue/completion/settlement/accounting sources each run before A repeats, in readiness order. Replenished control cannot starve them. |
+| `post-release accounting cannot overtake buffered control and B` | Hold A, ready B/control, then offer accounting when A releases. Owner-entry prefix `[A,control,B]`; accounting runs before A repeats. Read callbacks enter only when their turn starts. |
+| `group B progresses while A is suspended` | Different binding/group schedulers: B completes while A callback/proof remains unresolved. No global mutex. |
+| `invalid bounds refuse before ownership` | Reject NaN/infinity/nonpositive count/work, fractional count, negative delay. Accept delay 0 and positive fractional work. |
+| `closing a source cannot reroute queued work to a new incarnation` | Withdrawal rejects only that source. No key substitution. Shared storage-only obligations remain serviceable. |
 
 - [ ] **Step 2: Run RED.**
 
@@ -819,12 +672,13 @@ Expected absent scheduler. Keep tests free of real crypto and wall-clock thresho
 
 Take ownership of no more than one scheduled batch at a time. Resolve each scheduled promise from its own run result.
 Track round service before accepting a replenished source's next turn. Give ready control first service at each boundary.
+Keep ordinary readiness order within the round. Post-release accounting cannot overtake B already ready during A.
 Keep pending source collections outside admitted D8 entries. Do not change D8 FIFO or proof retention.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run scheduler tests GREEN and relevant typechecks within the allowed slot.
 Remove control priority, per-round service memory and independent binding separately: their named tests must fail.
+Let late accounting overtake B: the post-release accounting order assertion must fail.
 Delay idle work by 2 ms: the no-timer test must fail.
 
 - [ ] **Step 5: Commit.**
@@ -844,31 +698,85 @@ Commit with `feat(mls-rpc): arbitrate bounded group batches fairly`.
 
 **Interfaces:**
 
-- Consumes AppBatchBinding.openReady, full PendingAppFrame, AppCompletionCoverageBinding and Task 3's metadata projection contract.
-- Consumes Task 4's explicit canonical completion, dispatcher and batch inputs. No peer.ts or host-boundary.ts wiring remains deferred.
-- Registry streaming uses the internal owned preparation seam. Optional unwrapBatch remains an explicit atomic API, not the streaming budget seam.
-- Unbound singleton adapters get one turn per open. When pending exists, reload full saved records after singleton unwrap.
-- Produces immutable coverage snapshots at lane boundaries and source IDs containing exact key/topic/segment identity.
-- Produces independent topic readiness and one in-flight reservation per topic, while preserving order within each protocol lane.
-- Existing explicit openBatch remains atomic. Streaming returns a proven processed prefix and leaves its suffix with the producer.
+Consumes the following completion, streaming, coverage and dispatcher contracts. Q1=A preserves cursors when proof is unavailable.
+
+```ts
+type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void>
+}
+type BatchBudget = { maxFrames: number; maxWorkMs: number; now(): number; begin(): void; take(): boolean }
+type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue' | 'accounting'
+type GroupBatchScheduler = {
+  schedule<T>(work: { source: string; kind: BatchKind; signal?: AbortSignal; run(budget: BatchBudget): Promise<T> }): Promise<T>
+  close(reason: Error): void
+}
+type StreamingOpenResult = { consumed: number; results: Array<OpenAppResult> }
+type AppBatchBinding = {
+  key: GroupKey
+  scheduler: GroupBatchScheduler
+  openReady(frames: Array<OpenAppInput>, budget: BatchBudget): Promise<StreamingOpenResult>
+}
+function bindAppBatch(crypto: GroupCrypto, binding: AppBatchBinding): void
+function appBatch(crypto: GroupCrypto): AppBatchBinding | undefined
+type AppCompletionCoverage = {
+  key: GroupKey; topicID: string; generation: number
+  previous: string | null; through: string | null
+  prefix: Array<{ frame: PreOpenAppFrameRef; state: 'pending' | 'dead' | 'completed' }>
+}
+type AppCompletionCoverageSource = {
+  capture(ids: Array<string>): Array<AppCompletionCoverage>
+  current(coverage: AppCompletionCoverage): boolean
+  committed(ids: Array<string>, coverage: Array<AppCompletionCoverage>): void
+}
+type AppCompletionCoverageBinding = { advance(): Promise<void>; unbind(): void }
+function bindAppCompletionCoverage<TTx extends GroupTransaction>(
+  completion: HandlerCompletion<TTx>, source: AppCompletionCoverageSource,
+): AppCompletionCoverageBinding | undefined
+type OpenedAppHandler<TTx extends GroupTransaction> = {
+  completion: HandlerCompletion<TTx>; openedDeliveryContext: OpenedDeliveryContext
+  deliver(record: PendingAppFrame): Promise<void>
+}
+function groupHandlerMetadata(transit: { epoch?: number }, key: GroupKey): GroupHandlerMetadata
+type RegistryStreamingOpen = AppBatchBinding['openReady']
+function bindRegistryStreamingOpen(access: RegistryHandleAccess, binding: AppBatchBinding): void
+function registryStreamingOpen(access: RegistryHandleAccess): AppBatchBinding | undefined
+```
+
+- AppLane receives original completion, openedHandler and optional batch directly from peer construction.
+- Bind access to `{key: owner.key, scheduler: groupBatchFor(params.binding, owner.key.groupID), openReady}`.
+  Registry crypto transfers that binding to its original returned crypto object. Published RegistryHandleAccess stays unchanged.
+- Streaming counts each attempted input, including refusal/replay. For a consumed prefix k, results.length === consumed === k.
+- Caller retains frames.slice(k). Rejection exposes no results and consumes no caller inputs. Empty input returns 0/[] .
+- Nonempty successful streaming consumes at least one. Unknown COMMIT retains ownership and publishes nothing until proof.
+- One run returns one atomic prefix. Receive conflicts yield a fresh source turn. Explicit openBatch never splits and rejects >64 before reads.
+- Unbound singleton adapters get one open per turn. Pending-backed singleton replay reloads the full saved record.
+- bindAppCompletionCoverage returns undefined for an unregistered structural port. Peer construction and policy delivery remain valid.
+- In that fallback, await the supplied complete/transact promise, then update volatile completed/dead state.
+  Preserve durable cursors and retain no root-cursor repair path. Rowless dead prefixes remain volatile until a coverage-capable adapter exists.
+- Document restart/refetch cost. The portable adapter owns idempotent durable completion and may implement equivalent internal cursor proof.
+- Registered canonical services use bound advance for rowless dead prefixes. Never silently substitute wrapped identities.
 
 - [ ] **Step 1: Write real/double streaming witnesses.**
 
 | Test name | Assertions |
 | --- | --- |
-| `streaming burst uses bounded atomic open batches` | Offer 130 already-ready frames to the streaming seam, with a deferred first stage and fixed work clock. Default committed sizes are `[64, 64, 2]`. Host frame cap 32 gives `[32, 32, 32, 32, 2]`. Every returned record is the saved full record. |
-| `real peer keeps registry batching and completion through host wrapping` | Assemble actual registry crypto, canonical completion and rpc createPeer in real-MLS/double modes. Feed 130 buffered retained occurrences through hub ingress, with count-bound clock and withheld handler starts. Actual committed open sizes are `[64, 64, 2]`. Singleton unwrap calls are `0`. Release delivery and assert the canonical service receives coverage and completes each saved record once. No direct seam calls or test rebinding of wrapped crypto. |
-| `actual decrypt staging crosses eight milliseconds before the next batch` | Drive the registry streaming seam with three valid frames. Advance the injected clock from 0 to 8 inside the first actual decryptStaged call. First committed result consumes exactly 1, next consumes 2. Assert decrypt-starts belong to committed batch groups `[[1], [2, 3]]`. Decrypt runs outside the provider transaction. Caller suffix remains untouched before resubmission. Repeat at host work cap 3, advancing 0 to 3. Explicit openBatch still returns all three atomically. |
-| `streaming remainder belongs to its original source through rollback` | Stop a five-input offer at count 2. Assert two ordered results and three untouched inputs. Rollback exposes no prefix/results; retry starts from input 1. A new source generation cannot inherit the remainder. Mixed refusals also count toward consumed. |
-| `one peer discovers both ready protocols before awaiting a source` | Use actual retained-fetch app-lane ingress. Buffer A and B, suspend A's first owned batch, replenish A. B is registered before A finishes. Batch order starts A then B when no control is ready. Do not submit B directly to the scheduler. |
-| `retained singleton without pending projects authenticated metadata` | Use the non-pending compatibility branch with opened frameEpoch `7`, handle epoch `8`, origin incarnation `3`. The legacy event handler receives `{epoch: 7, incarnation: 3}` through Task 3's projection. No current-epoch substitution. |
-| `mixed refusal keeps valid siblings and holds incomplete prefix` | Valid/poison/wrong-AAD/future/duplicate inputs preserve input result order and independent valid records. Held member remains uncompleted. No handler before proof. |
-| `scheduled N open rollback exposes no plaintext` | Fail after first write/before COMMIT, then retry/reconstruct. All N key advances/pending/poison commit or none. No handler/ack/output leaks. |
-| `dead prefix prunes poison in the cursor transaction` | Scheduled malformed frame becomes dead. Covered poison removal and cursor advance roll back/commit together using Task 2. No accumulation behind a passed cursor. |
-| `rowless dead-only peer prefix commits its cursor and survives reopen` | Use real retained-fetch peer ingress and canonical completion in both fixture modes. Fetch only wrong-AAD, invalid-ciphertext, unsupported outer-version and expired-future occurrences at ordered positions `10`, `2`, `20`, `3`. No pending/poison exists. Handler calls stay zero. Fail the cursor transaction before COMMIT: durable cursor stays null, volatile coverage remains retryable. Retry commits cursor `3`; reconstruct persistence/peer and observe `3`, with the next fetch starting after `3`. No valid record or poison may trigger advancement for this test. |
-| `future expiry alone requests rowless completion` | Through the same peer path, catch up at locked epoch E. E+3 completes immediately. E+2 remains held at 29,999 ms and completes at 30,000 ms without new traffic. Each case commits cursor `2` with no pending/poison/handler. The age case attempts open again before expiring. |
-| `coverage capture cannot deadlock completion behind app mutex` | Suspend app delivery while completion prepares. Capture is synchronous, no mutex/gate cycle. Cursor/source reset invalidates captured proof before writes. |
-| `batching preserves controller knowledge and control progress` | Use current management/controller fixture, advance retained controller knowledge, then batch opens. Knowledge survives. Block handler A and confirm authenticated control still applies. |
+| `structural completion without private registration remains a portable adapter` | Rpc-only fixture implements key/complete/transact, atomic side rows and pending, with no mls-rpc imports/registration. Actual peer delivers both policies: saved metadata exact, original methods called once, pending gone, one transactional effect. Unknown/duplicates no-op. Reconstruct: no repeated handler/effect; durable cursor unchanged. Rowless dead input calls no cursor save/completion. No registration error. |
+| `streaming burst uses bounded atomic open batches` | 130 ready frames: sizes `[64,64,2]`; host cap 32: `[32,32,32,32,2]`. Fixed work clock and held first stage. Results equal full saved records. |
+| `real peer keeps registry batching and completion through host wrapping` | Actual registry crypto/canonical completion/createPeer in both modes. Feed 130 retained hub occurrences; hold handlers. Open sizes `[64,64,2]`, singleton unwrap calls 0. Release handlers: original canonical service gets coverage and completes each once. No direct seam/test rebinding. |
+| `later completion retains live coverage until the earlier prefix closes` | Actual registry-bound peer/retained fetch in both modes. Feed same-topic A=`10`, B=`2`, held future=`20`, cursor null. Hold A's default handler until both saved opens prove and production AppLane captures traversal. Complete B through canonical completion: only A pending, cursor null. Release A: its normal completion commits cursor `2`; held `20` stays uncrossed. Reopen: cursor `2`, no repeated effect/pending. Never install fixture-only coverage or rebind the lane. |
+| `actual decrypt staging crosses eight milliseconds before the next batch` | Three valid inputs; advance 0→8 inside first actual decryptStaged: committed groups `[[1],[2,3]]`, consumed 1 then 2. Repeat 0→3 at host cap 3. Decrypt outside tx; suffix untouched until resubmission. Explicit openBatch returns all three atomically. |
+| `streaming remainder belongs to its original source through rollback` | Five inputs/count 2: two ordered results, three untouched inputs. Rollback exposes no result/prefix; retry starts at input 1. New generation inherits no suffix. Refusals count as consumed. |
+| `one peer discovers both ready protocols before awaiting a source` | Actual retained-fetch ingress buffers A/B. Hold A owned batch, replenish A: B advertises before A finishes; order starts A,B. No direct B scheduler submission. |
+| `retained singleton without pending projects authenticated metadata` | Non-pending compatibility: frameEpoch 7/handle epoch 8/origin incarnation 3 yields legacy handler `{epoch:7,incarnation:3}`. |
+| `mixed refusal keeps valid siblings and holds incomplete prefix` | Valid/poison/wrong-AAD/future/duplicate preserve result order and valid siblings. Held occurrence remains incomplete; no handler before proof. |
+| `scheduled N open rollback exposes no plaintext` | Fail first write/before COMMIT, retry/reconstruct. N key advances/pending/poison co-commit or none. No handler/ack/output leak. |
+| `dead prefix prunes poison in the cursor transaction` | Scheduled malformed frame becomes dead. Poison pruning/cursor co-commit or roll back. No poison remains behind committed cursor. |
+| `rowless dead-only peer prefix commits its cursor and survives reopen` | Actual peer/retained fetch/canonical completion, both modes: wrong-AAD/invalid-ciphertext/unsupported outer/expired-future at `10,2,20,3`. No pending/poison/handler. Cursor rollback keeps null and volatile proof. Retry commits `3`; reconstruction fetches after `3`. No saved-ID completion triggers this. |
+| `future expiry alone requests rowless completion` | Actual peer at E: E+3 completes immediately; E+2 remains held at 29,999 ms, retries open then expires at 30,000 ms without new traffic. Cursor `2`, no rows/handler. |
+| `coverage capture cannot deadlock completion behind app mutex` | Hold app delivery while completion prepares. Capture acquires no mutex. Cursor/generation reset invalidates proof before writes. |
+| `batching preserves controller knowledge and control progress` | Save current controller knowledge, batch opens: knowledge retained. Block handler A; authenticated control still applies. |
 
 - [ ] **Step 2: Run RED.**
 
@@ -877,30 +785,20 @@ Expected singleton transaction counts, narrow record projection or split cursor/
 
 - [ ] **Step 3: Implement bounded collection and exact saved-record delivery.**
 
-Use Task 4's captured batch and canonical completion. Bind the lane's coverage source to that exact service.
-Discover every ready topic in a short runAppLane snapshot before awaiting pull(), any open, or any handler.
-Register one scheduled turn for each ready source before awaiting their completion. Do not exhaust A before discovering B.
-Reserve each topic's input snapshot under runAppLane, then release the mutex before owned crypto or storage work.
-After proof, merge only the consumed prefix under the mutex. Leave the suffix queued and advertise a fresh turn.
-Preserve protocol/anchor ordering and generation checks. Independent protocols can advertise readiness simultaneously.
-Pull merges advertise newly buffered sources immediately. An unresolved topic fetch cannot hide already-buffered work in another topic.
-Hub I/O runs outside lane reservations, owner scope and scheduler callbacks. Do not await one pull before serving buffered sources.
-Collect only validated fetched durable occurrences. Push log metadata remains a wakeup, never durable coverage authority.
-Pass the same BatchBudget into registry openReady's owned preparation loop, calling take before each actual input stage.
-Refactor reusable staging within app-open.ts rather than bypassing CAS, safety, lease projection or controller retention.
-Do not split a caller's explicit atomic batch. A slow stage may overrun work budget; start no additional stage afterward.
-Use each opened result's full saved record. Do not reconstruct it from plaintext and a pre-open ref.
-For the retained singleton/non-pending branch, emit authenticated frameEpoch and origin incarnation through the shared metadata projection.
-Register immutable coverage outside the owner/app mutex cycle. Advance volatile state only from proven completion.
-After marking rowless refusals or expiry dead, request binding.advance outside runAppLane, the current scheduler run and owner scope.
-Request advancement even when an open batch used its no-write path or no saved record was delivered.
-Future-expiry and fetched dead-only paths use this channel. Preserve coverage until its cursor commit is proven.
-Preserve caught-up future window 2, 30,000 ms age, retained epochs, departing topics and independent commit scheduling.
-Replace independent durable cursor saves, including drain/sync/expiry paths, with the binding before removing duplicate pending completion.
+Snapshot all ready topics under runAppLane before awaiting a pull, open or handler. Reserve each topic, then release the mutex.
+Advertise every ready source before awaiting results. Hub I/O runs outside reservations/ownership/scheduler callbacks.
+Pass one budget into owned preparation and take before each attempted input. Reuse app-open CAS/safety/lease/controller validation.
+After proof, merge only the consumed prefix under the mutex. Keep suffix ownership/generation and advertise a fresh source turn.
+Deliver full saved results; singleton/non-pending delivery projects authenticated frameEpoch and originating incarnation.
+Maintain immutable coverage outside the mutex/owner cycle. Only proof retires completed coverage.
+Use optional bound advance for dead/refused/expired prefixes outside mutex/scheduler/ownership. Never save durable cursors separately.
+Without registration, retain conservative volatile progress and the supplied completion identity. Keep future window 2 and age 30,000 ms.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run focused tests GREEN, relevant package typechecks and the existing registry crypto/open tests affected by preparation changes.
+Run existing registry crypto/open tests affected by preparation changes.
+Require private coverage registration at construction: the structural-adapter test must fail at peer construction.
+Add a fallback root cursor.save or silently replace its completion: the same test's cursor/method-identity assertions must fail.
 Revert to singleton consumption: transaction-count witness must fail.
 Charge only array collection time, or omit take inside decrypt preparation: the actual-stage boundary assertion must fail.
 Consume the whole offered array on a short result: the remainder ownership assertion must fail.
@@ -908,6 +806,7 @@ Restore whole-lane draining before advertising B: the real producer readiness as
 Remove original batch propagation in createPeer while leaving the registry streaming seam intact.
 The real-peer witness must fail `[64, 64, 2]` or zero singleton calls, even if direct streaming tests pass.
 Substitute wrapped completion at the lane input: canonical coverage/completion assertions and the rowless peer cursor witness must fail.
+Discard completed B from production AppLane coverage after row removal: the live later-prefix witness must fail cursor `2`.
 Drop metadata only in the non-pending branch: its handler-context assertion must fail.
 Expose one result before commit or remove a sibling from rollback: N-open witness must fail.
 Skip saved procedure/epoch/key projection, poison prune or held-prefix stop separately: corresponding witnesses must fail.
@@ -918,158 +817,397 @@ Remove expiry's advance request separately: the 30,000 ms cursor assertion must 
 
 Commit with `feat(rpc): consume retained frames through adaptive open batches`.
 
-### Task 7: Schedule control, completion, settlement and enqueue together
+### Task 7: Separate buffered control intake from persistence-driven walking
 
-**Dependency:** Tasks 2/4/5/6. Task 4's original peer coordination is complete before assembled single-peer witnesses run.
+**Dependency:** Tasks 4/5/6. This task exposes readiness; Task 8 implements selected owned control preparation.
 
 **Files:**
 
-- Modify `packages/mls-rpc/src/{handler-completion,memory-group-persistence,memory-group-ports,app-settlement,entry-capability}.ts` and `registry/{access,app-publication}.ts`.
-- Modify `packages/rpc/src/peer.ts` for buffered control intake, selected preparation and post-proof observation.
-- Modify mls-rpc `src/{mls,crypto,control-adoption}.ts` and create `src/registry/control-batch.ts` for entry-bound control preparation.
-- Extend `test/group-batch-integration.test.ts` and existing `test/app-publication-conformance.test.ts`.
+- Create `packages/rpc/src/{buffered-control,control-batch}.ts` and `test/buffered-control.test.ts`.
+- Modify rpc `src/{peer,index}.ts` for checked-page buffering and original-MLS binding capture.
+- Extend mls-rpc `test/group-batch-integration.test.ts` with intake checkpoints using a recording control binding.
 
 **Interfaces:**
 
-- Consumes groupBatchFor and the existing transaction-bound mutation routines.
-- Produces compatible default-completion and settlement collectors, each staging N operations in one D8 transaction.
-- Outbox enqueue becomes a ready scheduled source. Buffered control registers before ownership-dependent reads through ControlBatchBinding.run.
-- Capture `controlBatch(input.mls)` before wrapPeerHost and validate its exact key against the originating completion.
-- Produces ReadyControlScope and its one-entry control preparation contract above, including foreign and recognised-own paths.
-- Registry access supplies the internal bridge below. MLS builds its scope from attempt-bound access and pure adapter helpers.
-- Root facades assertRoot before any yield, collector insertion or schedule call, including complete/transact and coverage binding.advance.
-- Guard pending.complete, outbox.put/recordSettlement/remove, finaliseAppSettlements and finaliseCertifiedApp at their outermost scheduled entry.
-- Guard registry control/publication roots moved behind scheduling. Preserve existing preparePublication/publicationSnapshot checks before their waits.
-- Transaction-bound methods remain direct and never recursively schedule or acquire an owner.
+Produces the intake and internal original-MLS coordination types. Consumes the scheduler contract for pre-admission readiness.
+`CoveredFetchResult` and `checkedFetchResult` come from rpc `src/log-delivery.ts`.
 
 ```ts
-// Internal registry/control-batch.ts bridge. None of these views escapes prepare.
-export type RegistryControlBatchEntry = {
+type BatchBudget = { maxFrames: number; maxWorkMs: number; now(): number; begin(): void; take(): boolean }
+type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue' | 'accounting'
+type GroupBatchScheduler = {
+  schedule<T>(work: { source: string; kind: BatchKind; signal?: AbortSignal; run(budget: BatchBudget): Promise<T> }): Promise<T>
+  close(reason: Error): void
+}
+type ReadyControlScope = {
+  source: AdoptionExpected
+  control(): ControlSnapshot
+  anchor(): AnchorSlot | null
+  readEpoch: GroupMLS['readEpoch']
+  readCommitHeader: GroupMLS['readCommitHeader']
+  rosterEntries: GroupMLS['rosterEntries']
+  isLedgerComplete: GroupMLS['isLedgerComplete']
+  openEntries: GroupCrypto['openEntries']
+  exportSecret: GroupCrypto['exportSecret']
+  validation: ControlValidationPort
+  prepareCommit: GroupMLS['processCommit']
+  prepareOwn: ControlAdoptionPort['adopt']
+  stageControl(changes: ControlChanges, mutationID: string): void
+  stageAnchor(slot: AnchorSlot): void
+}
+type ControlBatchBinding = {
   key: GroupKey
   run<T>(input: {
     source: string
     signal?: AbortSignal
-    prepare(scope: {
-      access: ControlHandleAccess
-      control: ControlStore
-      anchor: AnchorStore
-    }): Promise<T>
+    prepare(scope: ReadyControlScope): Promise<T>
   }): Promise<{ value: T; epoch: number; control: ControlSnapshot; anchor: AnchorSlot | null }>
 }
-export function bindRegistryControlBatch(access: RegistryHandleAccess, entry: RegistryControlBatchEntry): void
-export function registryControlBatch(access: RegistryHandleAccess): RegistryControlBatchEntry | undefined
+function bindControlBatch(mls: GroupMLS, binding: ControlBatchBinding): void
+function controlBatch(mls: GroupMLS): ControlBatchBinding | undefined
+type BufferedControlPage = {
+  topicID: string; after: string | null; generation: number
+  result: CoveredFetchResult
+}
+type BufferedControlIntake = {
+  offer(page: BufferedControlPage): void
+  next(): { page: BufferedControlPage; index: number } | undefined
+  consumed(input: { generation: number; topicID: string; position: string }): void
+  reset(generation: number): void
+}
+function createBufferedControlIntake(params: { key: GroupKey; ready(): void }): BufferedControlIntake
 ```
 
-The internal control/anchor views read staged snapshots and stage writes without claiming durable success outside prepare.
-Attempt-bound access.read/readControl reuse EntryReads and the isolated handle. Mutate/replace stage through existing registry validation.
-The MLS adapter uses these views to build ReadyControlScope and registers ControlBatchBinding on its original returned GroupMLS.
-Its binding forwards one run to the registry bridge, adding no second scheduler submission or owner entry.
-The bridge assertsRoot before scheduling. Its selected callback runs one live.run prepare/work transition with existing proof semantics.
+- ControlBatchBinding is internal coordination, without new published GroupMLS/RegistryHandleAccess methods.
+- Capture controlBatch(input.mls) before wrapPeerHost. Validate its key against input.completion.key before source installation.
+- offer stores a checked page and invokes ready synchronously when its next occurrence becomes available.
+- next/consumed preserve page order, opaque positions, fetched head/gap facts and exact source generation.
+- reset invalidates old pages and acknowledgements. Push metadata only wakes a checked fetch.
+- Bound peers invoke run before root readEpoch/readCommitHeader/control.load/isLedgerComplete/roster/anchor prerequisites.
+- Missing startup replay/bootstrap/confirmed-recovery prerequisites remain external gates. Already-actionable buffered input cannot wait behind a fresh root read.
+- Unbound peers keep their existing walker. No test may bind only the wrapped MLS object.
 
-Certified finalisation has these internal contracts. `FinaliseBatchResult` uses Task 1's processed-prefix convention.
-
-```ts
-type CertifiedFinalisationResult = { seq: number; status: 'published' | 'already-complete' }
-type FinaliseBatchResult = { consumed: number; results: Array<CertifiedFinalisationResult> }
-// EntryCapability member, implemented in memory-group-persistence.ts:
-finaliseCertifiedAppBatch(
-  key: GroupKey, seqs: Array<number>, budget: BatchBudget,
-): Promise<FinaliseBatchResult>
-// Transaction-bound primitive in app-settlement.ts:
-function finaliseCertifiedAppInTransaction<TTx extends GroupTransaction>(params: {
-  stores: GroupStores<TTx>
-  key: GroupKey
-  seq: number
-  mutationID: string
-}): Promise<CertifiedFinalisationResult>
-```
-
-The primitive validates saved obligation/attempt/topic, writes the stable published event, then removes entry/obligation.
-Both entry and obligation absent yields `already-complete`, with no effect. Duplicate seqs preserve input order and publish once.
-A missing counterpart or conflicting obligation throws `GroupStateConflictError`. It rolls back the entire staged prefix, returning no partial outcomes.
-All-no-op batches preserve markers/hooks. Successful mixed batches mutate only valid seqs and publish outcomes after proof.
-The existing singleton finaliseCertifiedApp becomes a collector client. Cold finaliseAppSettlements queues ready seqs together rather than awaiting each.
-The batch entry freezes its processed prefix before outcome. Known backend rollback retries exactly that prefix under the same retained owner.
-Retries use fresh tx/store bindings and existing 100 ms doubling to 15 s backoff. Never add suffix inputs during a retained retry.
-Ambiguity retains that owner and both hook queues until proof. Invalid obligation errors do not enter backend-rollback retry.
-
-D6 `recordSettlement` certification remains a separate scheduled operation with its current retained retry and exact mismatch results.
-Do not merge certification with finalisation or convert its `recorded: false` into success.
-Identity/version/attempt mismatches still change no rows, hooks, markers or evidence. Certification rollback retains its original admission.
-
-- [ ] **Step 1: Write assembled fairness and atomicity witnesses.**
+- [ ] **Step 1: Write failing intake and peer checkpoints.**
 
 | Test name | Assertions |
 | --- | --- |
-| `one peer advertises buffered B before replenishing A` | Construct one peer with two log protocols and real retained-fetch ingress. Buffer A/B through the hub. Hold A's first owned preparation. Deliver a valid control occurrence through the peer's actual commit-topic wakeup/fetch while A still holds ownership. After fetch completion, before releasing A, assert one ready control source, B already ready, and zero prerequisite root-read admissions. Release A: selected mutation sources are exactly `[A, control, B]`, including active A, with no intervening prerequisite Read/anchor-save entries. Control's proven epoch is E+1 and its cursor names that occurrence. A keeps replenishing. No manual control/B scheduler submission or direct registry opens. |
-| `selected control performs all local prerequisites in its entry` | In both fixture modes, count root readEpoch/readCommitHeader/readControl, control.load, isLedgerComplete, rosterEntries, anchor load/save and crypto.openEntries calls for the buffered occurrence. Counts stay `0`; attempt-bound preparation uses one owner, with crypto before the mutation transaction opens. The named-entry resolver succeeds from the selected source handle. Work commits prepared state/control/anchor together. No nested scheduler submission, root reentry or output before proof. Retained scope access rejects after prepare. |
-| `ready control revalidates source and preserves authentication` | Let A change stateVersion without changing epoch: control uses that newly committed source and adopts. Change epoch/authenticator or retire the incarnation separately: reclassify/reprepare or refuse, never commit a stale candidate or change another key. Inject an expected-version conflict at work: no stale writes commit. Valid sender-data with a bad commit-content signature grants no adoption, obligation deletion or retry prohibition. Failed named-entry copies preserve live bytes/ID/candidate/deadline and `retryForbidden: false` unless already prohibited. Re-run recognised-own consumption and self-removal, preserving saved-candidate installation and drain-before-clear. |
-| `control prerequisites never hold a selected turn across network work` | With ledger/bootstrap or recovery genuinely unavailable, the selected local attempt returns its prerequisite outcome and releases owner/scheduler. External fetch/confirmation stays unresolved while already-ready B/enqueue proves. No held owner, staged adoption, destructive lifecycle transition or repeated control turn before B. A wakeup without fetched bytes does not advertise adoptable work. |
-| `enqueue progresses before burst exhaustion` | Extend that peer scenario with log dispatch while A remains replenished. Enqueue acceptance proves before a second further A batch and while A backlog remains. Handler completion gets a turn without backlog exhaustion. |
-| `compatible completions and settlements share bounded transactions` | Queue homogeneous same-key operations during an active batch. At least two ready operations co-commit; none exceed count/work bounds. Each batch's entry-bound helpers add zero nested scheduler submissions and succeed under ownership. Rollback leaves every entry/effect/event unchanged. |
-| `certified finalisation batch preserves per-item outcomes and retry ownership` | Queue seqs `[1, 2, 1, 3]`, with 1/2 certified and 3 absent. One batch returns statuses `['published', 'published', 'already-complete', 'already-complete']` and publishes each valid seq once. Inject before-COMMIT rollback: same owner retries the frozen prefix before queued retirement. Reconstruction preserves original topics/occurrences. Corrupt seq 2's obligation separately: all rows/events unchanged, no partial outcomes. |
-| `certification mismatch remains a no-write result beside batching` | Parameterise identity/version/attempt/missing-entry mismatches through production recordSettlement. Assert `{recorded: false, reason}` with reasons `identity-changed`, `state-version-changed`, `attempt-changed`, `entry-missing` respectively. Rows/markers/hooks remain byte-identical. A valid certification rollback still retries before later lifecycle work. |
-| `certification rollback keeps its existing owner precedence` | Existing 2.3c proof retries retain admission and block same-group retirement until settled. Scheduler cannot let later control/retirement invalidate that guarantee. |
-| `one failed batch leaves unrelated sources serviceable` | Default handler failure has no owner. Known rolled-back work backs off outside storage, other sources can run unless retained proof specifically requires otherwise. |
-| `withheld topic fetch cannot block already-ready peer sources` | Keep A's hub fetch unresolved. In the same peer, already-buffered B, authenticated control and enqueue prove before A's fetch resolves or its timeout fires. Repeat with damaged A bytes. Assert no durable hold, deleted obligation, replacement build or lifecycle transition. Existing r28i preservation witnesses remain required. |
-| `scheduled completion roots reject reentry before admission` | Enter a production transactional handler through the assembled scheduler. Parameterise complete, transact, pending.complete and bound coverage.advance, with valid same-key target work. Call synchronously with ownershipContext absent/present, then after await with it present. Each call rejects `ReentrantOwnershipError`. Scheduler submissions and collector insertions each increase by `0`; target rows/cursor remain unchanged and no nested callback runs. The outer lawful effect/completion can commit once after catching the refusal. |
-| `scheduled enqueue and settlement roots reject reentry before admission` | Repeat that handler/context matrix for outbox.put, recordSettlement, remove with a certified obligation, finaliseAppSettlements and capability.finaliseCertifiedApp. Use otherwise-valid inputs and real production facades. Assert `ReentrantOwnershipError`, zero collector/scheduler submissions and unchanged target entries/events/obligations. Include any registry control/publication root newly scheduled here. |
-
-Observe recursive results without awaiting an unresolved child while the outer batch is held. Flush microtasks before releasing that batch.
-Assert rejection and zero admission at that checkpoint. A missing result or an enqueued operation fails an assertion, not a timeout.
-Without ownershipContext, after-await root diagnosis remains limited by S:1006-1007. Do not invent a stronger guarantee or hanging witness.
+| `buffered control intake preserves checked page order and generation` | Offer positions `10`, `2`, then a second checked page. Observe original order and same fetched head/gap provenance. ready runs before offer returns. Stale consumed/reset cannot acknowledge a new-generation occurrence. Wakeup without fetched bytes produces no next occurrence. |
+| `peer advertises buffered control before prerequisite reads` | Use one actual peer, original MLS binding and real commit-topic wakeup/fetch. Hold application A's owner while B is buffered. A recording binding delegates readiness to the real arbiter. After fetch, before releasing A, ready control count is 1, B is ready, prerequisite root-read admissions are 0. No direct scheduler control submission substitutes for ingress. Task 8 supplies actual adoption assertions. |
+| `pending control fetch does not hide already-buffered work` | Withhold one fetch while buffered B advertises. No owner/scheduler callback waits on network. Dispose/reset withdraws only that generation; owed storage work remains serviceable. |
 
 - [ ] **Step 2: Run RED.**
 
-Run group-batch-integration and app-publication-conformance focused tests.
-Expected absent shared admission, per-item transaction counts or a missing reentry diagnostic, not an altered 2.3c certification result.
+Run `ktest @kumiai/rpc test/buffered-control.test.ts` and the named intake checkpoints in group-batch-integration.
+Expected failure: missing buffer or readiness hidden behind prerequisite root admission.
 
-- [ ] **Step 3: Integrate at pre-admission boundaries.**
+- [ ] **Step 3: Implement intake and original binding capture.**
 
-Extract transaction-bound settlement/completion operations only where necessary for compatible grouping.
-Split commit intake from persistence-driven walking. Fetch and buffer ordered occurrences without awaiting runSerial's root prerequisites.
-Advertise the next buffered occurrence before pullCommits/walkCommitLog prologue reads or per-occurrence classification reads.
-Preserve control replay ordering and locally known prerequisite gates. Revalidate those gates inside the selected entry.
-Install the registry bridge on access and the MLS binding on the original port before constructing a registry peer.
-Capture that binding before host wrapping. The buffered walker uses it directly, preserving the source's exact key and occurrence order.
-Refactor readEpoch/readCommitHeader/processCommit and pure exporter helpers to accept the attempt-bound access used by ReadyControlScope.
-Refactor ordinary own-candidate staging for prepareOwn. Never call the root control-adoption adapter from an owned callback.
-Perform advanceHandle's local preconditions and anchor staging inside the scope. Defer runtime mutation, events and rebuilding until proof.
-Return unmet prerequisites before any staged adoption. Request bootstrap/recovery outside both owner and scheduler, then re-advertise when actionable.
-Place capability.assertRoot at each scheduled root facade before reading targets, collecting work, calling schedule or yielding.
-Keep the check in the caller's synchronous context. A check deferred to the selected run callback is too late.
-Audit every new schedule/collector ingress, including rowless advance and aliases. Keep lawful transaction-bound helpers free of root checks.
-Move certified finalisation's existing body into the named primitive and implement the batch entry in memory-group-persistence.ts.
-Preserve the coordinator's administrative validation, effects/account restrictions and original-occurrence event construction.
-Keep network/crypto publication preparation outside storage and all external publication bytes behind proof.
-Select buffered actionable control before the next ordinary round. Complete its local preparation and adoption in the same selected entry.
-Do not prequeue burst source batches into EntryCapability.run. Never put independent groups behind one application mutex.
-Preserve frozen original-topic settlement, exact attempt/version checks, retained certification rollback retry and post-proof events.
+Fetch/check/buffer pages independently of runSerial's persistence work. Advertise the next actionable occurrence synchronously before walker prologue reads.
+Keep fetched coverage and traversal bookkeeping together. Do not classify acceptance from hub bytes or pre-admit queued source turns.
+Route bound occurrences through the captured run callback. Retain the existing unbound route.
+Unmet external prerequisites release the intake attempt; their continuations request fresh readiness after completion.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run Step 2 GREEN, focused publication/retirement regressions and relevant package typechecks. Defer broad gates to Task 9.
-Bypass shared arbitration for control or enqueue: corresponding batch-count witness must fail.
-Restore any control prologue/per-occurrence root read before run: readiness/zero-admission and `[A, control, B]` assertions must fail.
-Remove control binding capture before wrapping: the actual-peer readiness assertion must fail despite manually-ready scheduler tests passing.
-Call root crypto.openEntries or root advanceHandle inside prepare: the selected-prerequisites witness must fail its zero-root or reentry assertion.
-Skip source revalidation or commit-content signature verification separately: the source/authentication witness must fail its unchanged-state assertion.
-Await external bootstrap/confirmation inside the selected turn: the prerequisite witness must fail B's completion checkpoint before external release.
-Restore one transaction per compatible completion/settlement: grouping witness must fail.
-Release certification ownership on rollback: the retained-precedence witness must fail.
-Partially commit finalisation siblings, retry under a new owner, or return success on mismatch: corresponding batch/mismatch witnesses must fail.
-Await A's network fetch before discovering B: the withheld-fetch witness must fail on its completion-order assertion.
-For each scheduled root path, bypass its pre-admission guards separately, leaving the D8 queue check intact.
-Its named reentry witness must fail on missing ReentrantOwnershipError or a nonzero submission count while the outer batch remains held.
-Move the check after a yield: the synchronous absent-context witness must fail. Restore each guard and require GREEN.
+Move root control.load/readEpoch before advertising run: the zero-admission/readiness assertion must fail while A owns.
+Look up binding only after wrapping: the original-binding checkpoint must fail.
+Await the withheld fetch before advertising B or acknowledge the wrong generation: the respective checkpoint must fail without a timeout.
 
 - [ ] **Step 5: Commit.**
 
-Commit with `feat(mls-rpc): share fair admission across durable work sources`.
+Commit with `refactor(rpc): advertise buffered control before persistence prerequisites`.
 
-### Task 8: Integrate both handler policies into peer and cold lifecycle drains
+### Task 8: Prepare and adopt buffered control in one selected owned entry
 
-**Dependency:** Tasks 2/3/4/6/7. Q1=A applies to absent cold coverage.
+**Dependency:** Tasks 2/4/5/6/7. Buffered intake and original-MLS binding capture are complete.
+
+**Files:**
+
+- Create `packages/mls-rpc/src/registry/{control-batch,accounting}.ts`. Modify `registry/{access,live-send,registry}.ts`.
+- Modify `packages/mls-rpc/src/{mls,crypto,control-adoption,registry-group-mls,registry-handle-access}.ts`.
+- Modify rpc `src/peer.ts` for bound local walker preparation and post-proof observations.
+- Extend `packages/mls-rpc/test/{group-batch-integration,registry-live-send,registry-live-receive}.test.ts` and fixtures `{registry,storage-persistence}.ts`.
+- Extend `packages/mls-rpc/test/{registry-delivery-safety,delivered-entry-copy,control-validation}.test.ts` with explicitly registry-bound scenarios.
+
+**Interfaces:**
+
+Consumes the exact intake, budget and original-MLS contracts. Produces the registry bridge without altering published ports.
+
+```ts
+type BatchBudget = { maxFrames: number; maxWorkMs: number; now(): number; begin(): void; take(): boolean }
+type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue' | 'accounting'
+type GroupBatchScheduler = {
+  schedule<T>(work: { source: string; kind: BatchKind; signal?: AbortSignal; run(budget: BatchBudget): Promise<T> }): Promise<T>
+  close(reason: Error): void
+}
+type ReadyControlScope = {
+  source: AdoptionExpected
+  control(): ControlSnapshot
+  anchor(): AnchorSlot | null
+  readEpoch: GroupMLS['readEpoch']
+  readCommitHeader: GroupMLS['readCommitHeader']
+  rosterEntries: GroupMLS['rosterEntries']
+  isLedgerComplete: GroupMLS['isLedgerComplete']
+  openEntries: GroupCrypto['openEntries']
+  exportSecret: GroupCrypto['exportSecret']
+  validation: ControlValidationPort
+  prepareCommit: GroupMLS['processCommit']
+  prepareOwn: ControlAdoptionPort['adopt']
+  stageControl(changes: ControlChanges, mutationID: string): void
+  stageAnchor(slot: AnchorSlot): void
+}
+type ControlBatchBinding = {
+  key: GroupKey
+  run<T>(input: {
+    source: string
+    signal?: AbortSignal
+    prepare(scope: ReadyControlScope): Promise<T>
+  }): Promise<{ value: T; epoch: number; control: ControlSnapshot; anchor: AnchorSlot | null }>
+}
+function bindControlBatch(mls: GroupMLS, binding: ControlBatchBinding): void
+function controlBatch(mls: GroupMLS): ControlBatchBinding | undefined
+type BufferedControlPage = {
+  topicID: string; after: string | null; generation: number
+  result: CoveredFetchResult
+}
+type BufferedControlIntake = {
+  offer(page: BufferedControlPage): void
+  next(): { page: BufferedControlPage; index: number } | undefined
+  consumed(input: { generation: number; topicID: string; position: string }): void
+  reset(generation: number): void
+}
+function createBufferedControlIntake(params: { key: GroupKey; ready(): void }): BufferedControlIntake
+type RegistryControlBatchEntry = {
+  key: GroupKey
+  run<T>(input: {
+    source: string; signal?: AbortSignal
+    prepare(scope: { access: ControlHandleAccess; control: ControlStore; anchor: AnchorStore }): Promise<T>
+  }): Promise<{ value: T; epoch: number; control: ControlSnapshot; anchor: AnchorSlot | null }>
+}
+function bindRegistryControlBatch(access: RegistryHandleAccess | ControlHandleAccess, entry: RegistryControlBatchEntry): void
+function registryControlBatch(access: RegistryHandleAccess | ControlHandleAccess): RegistryControlBatchEntry | undefined
+function groupBatchFor(binding: object, groupID: string): GroupBatchScheduler
+function scheduleRegistryAccounting<TTx extends GroupTransaction>(params: {
+  capability: EntryCapability<TTx>; binding: object; key: GroupKey
+  source: 'live' | 'handoff' | 'trust'; signal?: AbortSignal
+  current(): boolean
+  read(reads: EntryReads): Promise<void>
+}): Promise<void>
+run<P, T>(
+  request: { groupID: string; mutationID: string | null },
+  prepare: (reads: EntryReads) => Promise<Prepared<P>>,
+  work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
+  effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
+): Promise<T>
+```
+
+- The registry bridge assertsRoot synchronously, schedules kind 'control', and performs one live.run prepare/work transition.
+- createLiveSend accepts `binding: object` from createRegistryAccess's existing params. Its observed(version, stillCurrent) signature remains unchanged.
+- scheduleRegistryAccounting assertsRoot when started outside ownership and schedules kind 'accounting' on groupBatchFor(binding, key.groupID).
+- Its stable source ID is `JSON.stringify(['registry-accounting', key.incarnation, source])`; each selected callback submits at most one capability.read.
+- Check current/signal before admission and again inside the read. Stale/cancelled requests perform no classification or handoff.
+- Route live-send.observed's read, registry's ownerless handoff read and diagnoseObservation's trust read through this helper.
+- onProof only prepares observation/start closures. afterRelease, the 0 ms fallback and live.run's finally start the same idempotent scheduled check.
+- Expected own versions still receive proof-gated classification. Never skip rechecks merely because owner.expected contains the version.
+- Preserve own-proof settlement, foreign classification, version/generation fences, admission, lease ceilings and cancellation/drain tracking.
+- live.run settles its own proof without awaiting queued accounting. No scheduled callback waits for accounting queued behind itself.
+- When accounting is a prerequisite, await it outside owner/scheduler callbacks, then advertise a fresh source turn.
+- The MLS binding forwards once to that bridge. No second scheduler submission or nested owner entry occurs.
+- Forward bridge identity through createRegistryHandleAccess and registry-group-mls's lazy access before constructing a readable-source peer.
+  Capture readable-source access during factory setup, never on first buffered intake. Preserve the lost-state recovery-only path without manufacturing a handle.
+- Attempt-bound access/control/anchor views reuse EntryReads and an isolated handle. Writes only stage prepared changes.
+- scope.source/control/anchor reflect that attempt and staged snapshots. All scope capabilities expire when prepare ends.
+- One occurrence consumes one budget operation. Local preparation runs under its selected owner, outside the provider transaction.
+- readEpoch/readCommitHeader/roster/ledger/exporter/openEntries use the isolated source, never root methods.
+- prepareCommit includes processCommit eligibility and signature validation. Named-entry resolution uses scope.openEntries.
+- prepareOwn preserves journal/occurrence/compatibility/saved-candidate checks and stages ordinary adoption without root adopt/replace.
+- Local advanceHandle roster/anchor work stages pending/landed/captured/kept AnchorSlot changes, including departing anchors.
+- Work revalidates source key/identity/version/lifetime/safety. State/control/anchor/checkpoint changes commit atomically.
+- Missing ledger/bootstrap/recovery prerequisites return without staging adoption. Fetch/confirmation continues only after owner/scheduler release.
+- Crypto/provenance/receive handoff/controller retention/finalise/account/proof keep their existing validation.
+- Only proven results update peer epoch/control/anchor, runtime, events or rebuild scheduling. Exceptions discard all prepared results.
+- Hub faults grant no hold/halt, retry ban, deletion, rebuild or permanent stranding. Failed copies preserve independent saved work.
+
+- [ ] **Step 1: Write actual registry-bound control witnesses.**
+
+Every row runs in real-MLS/double modes. Control-route rows obtain access from the actual registry in both modes.
+Build MLS through the registry adapter in both modes, using a restored double handle beneath that adapter.
+Accounting-only rows exercise their named registry callbacks, including an absent owner.
+For actionable, unheld control sources, assert controlBatch(originalMLS) exists and at least one registry bridge run.
+Pre-existing safety holds and unmet recovery gates are separate preservation subcases: assert no admission and unchanged saved work.
+Existing sealed-control and memory-proxy routes alone cannot satisfy these assertions.
+
+| Test name | Assertions |
+| --- | --- |
+| `one peer advertises buffered B before replenishing A` | One actual peer/hub ingress buffers A/B. Hold A prepare; fetch valid commit while A owns. Before release: control ready=1, B ready, prerequisite root-read admissions=0. After release: exactly `[A,control,B]`, no intervening Read/anchor-save entry; control epoch E+1/cursor occurrence proven. No manual control/B submission. |
+| `own accounting cannot bypass buffered control and B` | Use the preceding actual-peer setup with a committed A-open that registers its own expected version. Assert observation/start coverage, not a mocked live.run. Spy forwards real capability.read and owner-entry admissions. B/control are ready before A releases; the first three actual entries are exactly `[A,control,B]`, Reads included. After service, live.accounting settles and classified version/control match the latest proven state; ready accounting runs before replenished A. |
+| `accounting fallback retains arbitration and cancellation` | Repeat with afterRelease withheld in both ownership-context modes. Hold A's post-proof scheduler return; fire the 0 ms fallback: no accounting Read admitted. Release A and drain runnable work with the accounting read backend held: B committed, entry prefix `[A,control,B]`. finally/late afterRelease start no duplicate check. Cancellation settles inflight accounting, prevents stale classification and lets dispose/drain finish. Foreign observations still invalidate incompatible headroom. |
+| `ownerless and trust observation reads wait for selection` | Hold a scheduler turn without holding an owner. Trigger actual registry seed/account observation without a live owner, and a persisted unreadable-trust observation separately. Each offers its handoff/trust source; capability.read admissions stay 0 before selection. After release, one selected read revalidates the key/generation. Foreign ownerless state clears incompatible pending handoff. Only typed trust diagnosis may install its existing hold. |
+| `selected control performs all local prerequisites in its entry` | Root readEpoch/readCommitHeader/readControl/control.load/isLedgerComplete/roster/anchor/openEntries counts 0. One owner; isolated crypto precedes tx. Named-entry resolution succeeds; state/control/anchor co-commit. No nested schedule/reentry/pre-proof output. Scope access expires. |
+| `ready control revalidates source and preserves authentication` | A changes version without epoch: control adopts current source. Epoch/authenticator/retirement or injected version conflict reclassifies/refuses with no stale/cross-key write. Bad content signature grants no adoption/deletion/retry ban. Failed copies preserve saved bytes/ID/candidate/deadline and explicit false unless already prohibited. Valid own consumption/self-removal preserves saved candidate/drain-before-clear. |
+| `control prerequisites never hold a selected turn across network work` | Unavailable ledger/bootstrap/recovery: local outcome releases owner/scheduler. While external work stays unresolved, B proves; no staged adoption/destructive transition or repeated control before B. Wakeup alone advertises no occurrence. |
+| `withheld topic fetch cannot block already-ready peer sources` | Hold A fetch. Actual peer buffered B/control prove before A resolves or timeout fires; repeat with damaged A bytes. No hold/deletion/rebuild/lifecycle change. Task 9 extends service to enqueue. |
+| `registry bound delivery faults preserve saved work and future progress` | Cross unsupported handshake/commit/sealed outer/sealed inner versions, bad commit-content signature, tampered named-entry copy, signed past divergence, retention gap and ahead claim. Cross valid live-build and pending-rejoin fixtures, each with intent/outcome and independent owed Welcome rows. Snapshot bytes/ID/candidate/deadline/retryForbidden, safety/hold/strand, owed rows and incarnation. For actionable cases, assert selected bridge route entered; no new hold/halt/strand, deletion, rebuild, replacement, retry ban or lifecycle switch. Saved bytes/ID/candidate/deadline remain exact. Coverage-only skips persist explicit retryForbidden:false unless already prohibited; legacy defaults remain. Pre-existing authenticated holds remain unchanged and prevent admission; do not clear them to force route coverage. Reopen and assert preserved rows again. For actionable fixtures, a later valid applicable occurrence advances epoch/cursor; independent owed Welcome remains deliverable. No manual recovery authority is granted by the bad page. |
+| `registry bound failed own copies cannot strand saved retry or Welcome` | Deliver own-copy version/tamper/unrecognised variants through that same bound route. Expected r28i skip/cursor bookkeeping may change; live payload, candidate, opID and deadline do not. Coverage-only skips preserve explicit false unless already prohibited. No implicit acceptance/absence. A lawful local saved retry and independent Welcome obligation remain available after reconstruction. Recognised valid own consumption installs saved candidate exactly once without rebuilding and preserves independent Welcome work. |
+
+For the fault matrix, carry existing scenario inputs from control-validation, delivered-entry-copy and registry-delivery-safety tests.
+Assert preservation at the explicit post-attempt checkpoint, before supplying valid bytes or resolving external prerequisites.
+Gap/ahead observations may emit diagnostics and incomplete coverage. They cannot acquire durable safety/lifecycle authority.
+
+- [ ] **Step 2: Run RED.**
+
+Run the named group-batch-integration and registry-bound delivery-fault rows in the listed files.
+Baseline fails at absent binding/bridge or prerequisite root admission. Unbound existing regressions are insufficient.
+
+- [ ] **Step 3: Implement selected local preparation and atomic adoption.**
+
+Install registry bridge on access and control binding on the original MLS before peer construction.
+Refactor local crypto/eligibility helpers to accept attempt-bound access. Stage foreign/own adoption and local anchors in one prepare.
+Revalidate the prepared write set under storage. Apply peer observations only after proof.
+Replace all three observation-triggered root-read submissions with scheduleRegistryAccounting, including timer/finally starts.
+Keep observation checks in their existing inflight/drain sets until completion or cancellation.
+Preserve the accounting wait outside selected work. Never disable observers to obtain the ordering witness.
+Never call root crypto.openEntries, advanceHandle, the whole walker, bootstrap or confirmation from that scope.
+Preserve recognised-own/self-removal rules, saved-candidate installation and drain-before-clear.
+
+- [ ] **Step 4: Verify and mutate.**
+
+Run focused control/retirement and live-send/live-receive regressions, including skipped-afterRelease and foreign handoff cases.
+Restore only live-send.observed's direct capability.read: the actual-entry `[A,control,B]` assertion must fail.
+Bypass accounting arbitration only in fallback/finally starts: the fallback no-admission/order assertion must fail.
+Restore direct ownerless/trust reads separately: their before-selection admission assertions must fail.
+Await live.accounting inside its active scheduler callback: the pre-release B progress checkpoint must fail without a timeout.
+Drop accounting cancellation or version fences: its drain/stale-classification assertion must fail.
+Bypass arbitration or reintroduce a prerequisite root read: actual-peer readiness/order `[A, control, B]` must fail.
+Call root openEntries/advanceHandle: zero-root or reentry assertions must fail. Drop source/signature checks: unchanged-state assertions must fail.
+Await bootstrap/confirmation inside run: B's committed checkpoint must fail before external release.
+Only in the new bound-route unsupported-version catch, stage controlHold with reason 'unsupported-version'.
+The named fault-matrix assertion `expect(after.controlHold).toEqual(before.controlHold)` must fail in both fixture modes.
+Separately delete saved commitOnce/Welcome or set retryForbidden from a gap/ahead claim: exact saved-work assertions must fail.
+Remove only the bound registration in the double fixture: the route-entry assertion must fail, even if unbound regressions stay green.
+
+- [ ] **Step 5: Commit.**
+
+Commit with `feat(mls-rpc): prepare buffered control under selected ownership`.
+
+### Task 9: Collect settlements and enqueue work through shared fair admission
+
+**Dependency:** Tasks 2/5/6/7/8. Bounded completion and owned control paths already work independently.
+
+**Files:**
+
+- Modify mls-rpc `src/{memory-group-persistence,memory-group-ports,app-settlement,entry-capability}.ts`, `registry/app-publication.ts`.
+- Extend `packages/mls-rpc/test/{group-batch-integration,app-publication-conformance,handler-completion}.test.ts`.
+
+**Interfaces:**
+
+Consumes the exact scheduler/completion contracts and coordinator effects seam. Produces the certified processed-prefix entry and primitive.
+
+```ts
+type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void>
+}
+type BatchBudget = { maxFrames: number; maxWorkMs: number; now(): number; begin(): void; take(): boolean }
+type BatchKind = 'control' | 'open' | 'completion' | 'settlement' | 'enqueue' | 'accounting'
+type GroupBatchScheduler = {
+  schedule<T>(work: { source: string; kind: BatchKind; signal?: AbortSignal; run(budget: BatchBudget): Promise<T> }): Promise<T>
+  close(reason: Error): void
+}
+function groupBatchFor(binding: object, groupID: string): GroupBatchScheduler
+run<P, T>(
+  request: { groupID: string; mutationID: string | null },
+  prepare: (reads: EntryReads) => Promise<Prepared<P>>,
+  work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
+  effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
+): Promise<T>
+type CertifiedFinalisationResult = { seq: number; status: 'published' | 'already-complete' }
+type FinaliseBatchResult = { consumed: number; results: Array<CertifiedFinalisationResult> }
+// EntryCapability member, implemented in memory-group-persistence.ts:
+finaliseCertifiedAppBatch(key: GroupKey, seqs: Array<number>, budget: BatchBudget): Promise<FinaliseBatchResult>
+// app-settlement.ts transaction-bound primitive:
+function finaliseCertifiedAppInTransaction<TTx extends GroupTransaction>(params: {
+  stores: GroupStores<TTx>; key: GroupKey; seq: number; mutationID: string
+}): Promise<CertifiedFinalisationResult>
+function finaliseAppSettlements<TTx extends GroupTransaction>(params: {
+  persistence: GroupPersistence<TTx>; key: GroupKey
+}): Promise<void>
+```
+
+- Group ports retain `put: AppOutbox['put']`, `recordSettlement: AppOutbox['recordSettlement']`, and `remove: AppOutbox['remove']`.
+- Root complete/transact/pending.complete/coverage.advance, outbox roots and finalisers assertRoot before reads, collection, scheduling or yielding.
+- Existing scheduled registry control/publication roots retain the same synchronous admission rule. Transaction-bound helpers remain direct.
+- Await registry publication's live.accounting prerequisite outside scheduled callbacks. Only the ensuing prepared work enters a selected turn.
+- Default completions collect homogeneously. Distinct transact calls remain separate transactions, including independent protocols A/B.
+- Settlement batches freeze a bounded prefix. consumed/results match that prefix in input order. The producer owns the untouched suffix.
+- Each seq validates saved obligation/attempt/original topic, writes its stable event, then removes entry/obligation.
+- Both absent means already-complete with no event. Duplicates publish once and preserve input order.
+- Missing counterpart/conflict throws GroupStateConflictError and rolls back the staged prefix, returning no partial results.
+- All-no-op batches preserve markers/hooks. Proven mixed batches publish only valid outcomes.
+- Singleton finaliseCertifiedApp becomes a collector client. Cold finaliseAppSettlements offers ready seqs together instead of awaiting singletons.
+- Certified finalisation's known backend rollback retries the frozen prefix under its retained owner with fresh tx/store bindings.
+  Backoff starts at 100 ms, doubles to 15 s. Never add suffix inputs during retained retry.
+- During this backoff, all later same-group work queues, including control, other lanes, accounting, enqueue and lifecycle transitions.
+- Ordinary open, completion/transact and enqueue failures release after known rollback/hooks. Their caller retries outside ownership through a fresh turn.
+- Default handler failure owns no slot. Retained D6 certification/finalisation retry and unresolved proof are explicit serviceability exceptions.
+- A validation conflict releases without backend retry. Independent groups remain serviceable during every retained same-group wait.
+- Unknown outcomes retain owner and hook queues until proof. Invalid obligations do not enter backend-rollback retry.
+- D6 certification stays separate from finalisation, preserving recorded:false mismatch results and retained rollback admission.
+
+- [ ] **Step 1: Write assembled settlement and service witnesses.**
+
+Run storage rows in real-MLS/double modes, with/without ownershipContext where relevant.
+Re-run Task 2's oversized-call matrix using the actual peer/registry host options; retain its exact assertions.
+
+| Test name | Assertions |
+| --- | --- |
+| `enqueue progresses before burst exhaustion` | Actual peer with replenished A: dispatch log enqueue proves before second further A batch, backlog still nonempty. Completion also gets service. |
+| `compatible completions and settlements share bounded transactions` | Queue homogeneous same-key work behind active batch. At least two operations co-commit, respecting count/work. Helpers add 0 nested schedules. Rollback preserves all rows/effects/events. |
+| `certified finalisation batch preserves per-item outcomes and retry ownership` | Seqs `[1,2,1,3]`, 1/2 certified, 3 absent: statuses `[published,published,already-complete,already-complete]`, one event per valid seq. Before-COMMIT rollback retries frozen prefix/same owner before retirement. Reconstruct retains original topics/occurrences. Corrupt seq 2 obligation: all unchanged, no partial outcomes. |
+| `certification mismatch remains a no-write result beside batching` | Production recordSettlement mismatches identity/version/attempt/missing-entry: `{recorded:false,reason}` respectively identity-changed/state-version-changed/attempt-changed/entry-missing. Rows/markers/hooks byte-identical. Valid rollback retries before lifecycle. |
+| `certification rollback keeps its existing owner precedence` | 2.3c retained admission blocks same-group retirement until proof/retry settles. Scheduler cannot release it on rollback. |
+| `ordinary failed batches release before caller retry` | Cross open/completion/transact/enqueue known rollback. Staged rows/effects unchanged; owner released after hooks. Queue B before caller retry: B proves before retry is advertised. Default handler rejecting before effects owns no slot. Ordinary work retains no backoff slot. Exclude unresolved proof and retained D6 certification/certified finalisation. |
+| `certified finalisation backoff retains same-group ownership` | Force before-COMMIT rollback of frozen seqs 1/2. Queue same-group control/B/enqueue/retirement and other-group work. At 99 ms: later same-group admissions 0, other group committed. At 100 ms retry uses the same owner/mutationID, fresh tx/store bindings and only seqs 1/2. Force another rollback: no later admission through the next 199 ms; retry at +200 ms. Subsequent delays cap at 15,000 ms. No published events/results before proof. Successful retry releases, then queued work progresses. |
+| `scheduled completion roots reject reentry before admission` | Inside production transactional handler call complete/transact/pending.complete/bound advance on valid targets: sync both context modes, after-await with context. ReentrantOwnershipError; collector/scheduler admissions 0 before outer release; target rows/cursor unchanged. Catch refusal, outer effect completes once. |
+| `scheduled enqueue and settlement roots reject reentry before admission` | Same handler/context matrix for outbox.put/recordSettlement/remove(certified), finaliseAppSettlements/finaliseCertifiedApp and newly scheduled control/publication roots. ReentrantOwnershipError, admissions 0, targets/events/obligations unchanged before outer release. |
+| `queued transactional A failures cannot roll back transactional B` | Assemble one actual peer/registry with two transactional log protocols. Hold active A-open, then queue separate A/B dispatches. A's callback always rejects. B's effect/removal proves once before A's next retry, while A remains pending through two retries. Tx callback logs never mix A/B. Default-handler isolation alone cannot satisfy this row. |
+
+For reentry tests, inspect results and admission counts before outer release. Flush microtasks without awaiting an unresolved nested batch.
+The absent-context after-await limitation remains S:1006-1007. Missing rejection fails an assertion, never a hanging test.
+
+- [ ] **Step 2: Run RED.**
+
+Run focused group-batch-integration and app-publication-conformance rows.
+Expected per-item transaction counts or missing pre-admission diagnostics, without changing certification mismatch behaviour.
+
+- [ ] **Step 3: Implement collectors using direct transaction-bound primitives.**
+
+Move finalisation's body into the named primitive. Use its processed-prefix entry for compatible seqs, with retained proof/retry semantics.
+Schedule enqueue and certification at outer root boundaries. Preserve original occurrence/version/attempt and post-proof event construction.
+Audit every new schedule/collector ingress. Check root authority synchronously in the caller's context.
+Never invoke a scheduled root from a collector callback. Do not pre-admit burst backlog into the D8 FIFO.
+
+- [ ] **Step 4: Verify and mutate.**
+
+Run affected publication/retirement regressions.
+Bypass enqueue arbitration or restore singleton completion/settlement transactions: service/grouping assertions must fail.
+Partially commit finalisation siblings, retry under a new owner or return success on mismatch: their named assertions must fail.
+Release/requeue certified finalisation during known-rollback backoff: its zero-admission/same-owner assertions must fail.
+Retain an ordinary failed completion/open/enqueue across caller backoff: its B-before-retry checkpoint must fail.
+Release certification ownership on rollback: retained-precedence assertion must fail.
+Fuse transactional A/B callbacks: the transactional B committed-effect assertion must fail, even if default-handler tests remain green.
+Remove per-call prefix splitting or atomic refusal: Task 2's oversized-call matrix must fail under assembled host options.
+For every scheduled root, bypass pre-admission guards while retaining D8's queue check: reentry assertions must fail before outer release.
+Move a check after yielding: synchronous absent-context reentry must fail. Restore each mutation and require GREEN.
+
+- [ ] **Step 5: Commit.**
+
+Commit with `feat(mls-rpc): collect settlements through fair group admission`.
+
+### Task 10: Integrate both handler policies into peer and cold lifecycle drains
+
+**Dependency:** Tasks 2/3/4/6/7/8/9. Q1=A applies to absent cold coverage.
 
 **Files:**
 
@@ -1078,6 +1216,38 @@ Commit with `feat(mls-rpc): share fair admission across durable work sources`.
 - Test mls-rpc `test/{opened-delivery,registry-opened-lifecycle}.test.ts`, rpc `test/{peer-drained,opened-delivery}.test.ts`, integration `test/terminal-drain.test.ts`.
 
 **Interfaces:**
+
+```ts
+type HandlerCompletion<TTx extends GroupTransaction> = {
+  key: GroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>): Promise<void>
+}
+function createHandlerCompletion<TTx extends GroupTransaction>(params: {
+  persistence: GroupPersistence<TTx>; key: GroupKey
+}): HandlerCompletion<TTx>
+type OpenedAppHandler<TTx extends GroupTransaction> = {
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  deliver(record: PendingAppFrame): Promise<void>
+}
+function createOpenedAppHandler<
+  P extends Record<string, GroupProtocolDefinition>, TTx extends GroupTransaction,
+>(params: {
+  localDID: string; protocols: P
+  handlers: { [K in keyof P]: GroupProcedureHandlers<P[K], TTx> }
+  suppress?: SuppressConfig
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  owner?: object
+}): OpenedAppHandler<TTx>
+function normaliseOpenedAppHandler<TTx extends GroupTransaction>(params: {
+  deliver: OpenedAppHandler<TTx> | ((record: PendingAppFrame) => Promise<void>)
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  owner?: object
+}): OpenedAppHandler<TTx>
+```
 
 - Consumes Task 4's completed live peer wiring and origin-key HandlerCompletion, alongside separately named recoveryCompletion.
 - Live and cold opened sources call the same completion-owning dispatcher from Task 3.
@@ -1098,7 +1268,7 @@ type RegistryOpenedHandlerOptions<TTx extends GroupTransaction> =
 ```
 
 Intersect these options with GroupHandleRegistryParams. Require shared openedDeliveryContext whenever either alternative is configured.
-Resolve once per exact-key drain, after obtaining that key's canonical createHandlerCompletion service and coverage binding.
+Resolve once per exact-key drain, after obtaining its canonical createHandlerCompletion service. Coverage is optional under Q1=A.
 Validate the dispatcher's completion identity/key and context against the resolver arguments before invoking it.
 Cache only by coordinator binding plus `(groupID, incarnation)`. Never reuse a dispatcher by groupID alone.
 An explicit resolver/raw callback overrides attached fallback. Otherwise use the still-admissible attached exact-key dispatcher.
@@ -1112,15 +1282,15 @@ Cross real-MLS/double, default/transactional policy and supplied/absent ownershi
 
 | Test name | Assertions |
 | --- | --- |
-| `default effect before completion crash preserves complete handler metadata` | Effect occurs, completion rolls back, process reconstructed. Handler receives byte-identical key/sender/frame epoch/incarnation/procedure again. |
-| `transactional handoff commits once before retirement clears` | Suspend a live transactional callback or proof, request resync/delete/successor. No overlapping cold callback, cursor loss or clear before proof. Restart leaves exactly one durable effect. |
-| `terminal restart drains both policies without crypto or network` | Open batch, commit self-removal, reconstruct before handlers. Drain persisted records/completion, then clear. Decrypt/fetch/publish spies stay zero. Handler failure preserves pending indefinitely. |
-| `disposed fallback refuses unadmitted records but keeps admitted completion` | Preserve 46c1d2c3 behaviour under new policy dispatch. Disposal cannot release a drain waiter early or invoke new live handlers. |
-| `old completion cannot write the new incarnation cursor` | Old saved-key callback finishes while lifecycle runs. Exact origin receives eligible completion; new cursor/state/history remain untouched. |
-| `handler lifecycle reentry refuses instead of self-waiting` | After await, same-group dispose/recover/delete from an opened callback rejects with the existing delivery diagnostic. Unrelated caller/group remains independent. Transactional root diagnosis follows Task 2's D8 contract and Task 7's scheduler admission witnesses. |
-| `attached fallback and registry override retain context after await` | Cross both policies with attached fallback and explicit resolver. Test legacy raw override as default policy. After await, same-group lifecycle call rejects `OpenedDeliveryReentryError`. Verify no self-wait and no independent caller contamination. Standalone helper is pinned in Task 3. |
-| `registry resolves cold dispatchers independently for two groups` | One registry drains two distinct group keys through openedHandler. Each resolver gets its own completion/key and shared context. Each transactional side row commits once and its own pending rows disappear. Wrong-key/context resolver output rejects TypeError before any handler or completion call. |
-| `cold dispatcher after incarnation switch uses the requested key` | Drain old incarnation, perform an authorised switch, then persist/drain new-incarnation records. Assert separate resolver keys/completion identities. New pending clears, old effect remains single, and neither cursor is written under the other key. Reconstruct before the new cold drain. |
+| `default effect before completion crash preserves complete handler metadata` | Default effect succeeds/completion rolls back. Reconstruct: byte-identical key/sender/frame epoch/incarnation/procedure on replay. |
+| `transactional handoff commits once before retirement clears` | Hold live callback/proof; request resync/delete/successor. No cold overlap/cursor loss/clear before proof. Reconstruct: one durable effect. |
+| `terminal restart drains both policies without crypto or network` | Open batch, commit self-removal, reconstruct before handlers. Drain saved plaintext/completion then clear; decrypt/fetch/publish calls 0. Handler failure preserves pending indefinitely. |
+| `disposed fallback refuses unadmitted records but keeps admitted completion` | Disposal admits no new live callback and releases no drain waiter before admitted completion proof. |
+| `old completion cannot write the new incarnation cursor` | Complete saved old-key callback during lifecycle. Only original cursor receives proof; successor cursor/state/history unchanged. |
+| `handler lifecycle reentry refuses instead of self-waiting` | After-await dispose/recover/delete rejects delivery diagnostic for same group. Unrelated caller/group unaffected. D8 scheduler reentry uses its separate diagnostics. |
+| `attached fallback and registry override retain context after await` | Both policies × attached fallback/explicit resolver, plus raw default override: after-await lifecycle rejects OpenedDeliveryReentryError. No independent-caller context contamination. |
+| `registry resolves cold dispatchers independently for two groups` | One registry/two keys: resolver gets each canonical completion/key and shared context. Each effect once, own pending gone. Wrong key/context rejects TypeError before invocation/completion. |
+| `cold dispatcher after incarnation switch uses the requested key` | Drain old key, switch lawfully, persist new records, reconstruct and cold-drain. Separate resolver/completion identities; new pending gone, old effect once; neither cursor crosses keys. |
 
 - [ ] **Step 2: Run RED.**
 
@@ -1129,20 +1299,14 @@ Expected missing transactional completion or metadata. Do not mask a deadlock wi
 
 - [ ] **Step 3: Replace split completion with the common boundary.**
 
-Reuse Task 4's original completion/batch capture and live dispatcher. No shared host-boundary wiring is deferred to this task.
-Propagate the required context through fallback and registry resolver.
-Dispatch one policy-aware delivery per claim. Stop the cold worker from completing again after successful dispatch.
-Migrate remaining cold createOpenedAppHandler call sites to its explicit deliver method and required context/owner inputs.
-Resolve registry dispatchers for each requested key. Preserve legacy raw callback behaviour through exact-key normalisation.
-Remove outer runOpenedDelivery scopes around the dispatcher; the dispatcher binds only the actual host callback.
-Await persisted completion proof and volatile notification before releasing ownership of the delivery claim.
-Retain the attached live handler fallback, explicit registry override precedence and synchronous withdrawal at disposal start.
-Retirement/drain wait outside the owner. Do not open/fetch more records or grant automatic recovery authority.
-Preserve visible switch-blocked reporting and no-timeout erasure, including terminal reconstruction.
+Resolve the exact-key dispatcher with canonical completion/shared context, preserving raw override precedence and admissible attached fallback.
+Dispatch once per claim. Successful deliver includes completion; remove cold worker's appended complete and outer callback context scope.
+Await completion proof/volatile notification before releasing the claim. Withdraw disposed live fallback synchronously.
+Lifecycle waits outside ownership and drains saved plaintext before clearing, with visible blocked status and no timeout erasure.
 
 - [ ] **Step 4: Verify and mutate.**
 
-Run Step 2 GREEN, affected integration tests and relevant package typechecks.
+Run affected integration tests.
 Allow cold/live overlap, detach coverage, release a waiter early or append a duplicate completion separately: respective witnesses must fail.
 Restore a new-open call during terminal drain: the zero-crypto/network witness must fail.
 Reuse a registry-wide dispatcher across keys or cache by groupID alone: two-group/post-switch cold-drain assertions must fail.
@@ -1152,9 +1316,9 @@ Drop context in fallback or override normalisation: its after-await reentry asse
 
 Commit with `feat(mls-rpc): use handler policies throughout opened lifecycle drains`.
 
-### Task 9: Publish shared conformance and assembled reconstruction evidence
+### Task 11: Publish shared conformance and assembled reconstruction evidence
 
-**Dependency:** Tasks 1-8. Implement the settled Q1=A/Q2=A contracts.
+**Dependency:** Tasks 1-10. Implement the settled Q1=A/Q2=A contracts.
 
 **Files:**
 
@@ -1165,35 +1329,65 @@ Commit with `feat(mls-rpc): use handler policies throughout opened lifecycle dra
 
 **Interfaces:**
 
-- Extend the persistence test aggregate with `completion(key): HandlerCompletion<TTx>` and existing crypto(key) binding used by these suites.
-- Export `testHandlerCompletionConformance` and `testHandlerBatchingConformance` with independent mirrored contracts and supplied fixture constructors.
-- Reuse side-row/fault hooks. Tests must enter through public production handlers and completion, not handwritten storage transactions.
+Consumes independent conformance mirrors, never production imports. Their completion shape remains structurally identical:
+
+```ts
+type ConformanceHandlerCompletion<TTx extends ConformanceGroupTransaction> = {
+  key: ConformanceGroupKey
+  complete(ids: Array<string>): Promise<void>
+  transact(ids: Array<string>, handle: (tx: TTx, records: Array<ConformanceStoragePendingAppFrame>) => Promise<void>): Promise<void>
+}
+type HandlerConformancePorts<TTx extends ConformanceGroupTransaction> = StorageTestPorts<TTx> & {
+  completion(key: ConformanceGroupKey): ConformanceHandlerCompletion<TTx>
+  crypto(key: ConformanceGroupKey): ConformanceGroupCrypto
+}
+type HandlerConformanceParams<TTx extends ConformanceGroupTransaction> =
+  Omit<StorageConformanceParams<TTx>, 'createFixture'> & {
+    createFixture(id: string, options?: FixtureOptions<TTx>): Promise<
+      ConformancePersistenceFixture<HandlerConformancePorts<TTx>>
+    >
+  }
+function testHandlerCompletionConformance<TTx extends ConformanceGroupTransaction>(params: HandlerConformanceParams<TTx>): void
+function testHandlerBatchingConformance<TTx extends ConformanceGroupTransaction>(params: HandlerConformanceParams<TTx>): void
+```
+
+Add completion(key) to the area-specific persistence test aggregate. Retain existing side-row/fault/crypto fixture bindings.
+Implementation-specific peer/scheduler/control-route assertions stay in their owning integration tests.
+These shared ports provide no traversal ingress or ordered-prefix proof. Never fabricate live coverage in their fixture.
+Task 2 owns the local completion/ordered-proof assertion. Task 6 owns its production-AppLane witness and coverage-retention mutation.
+Task 11 records both as implementation evidence, separately from the portable shared completion mutation.
+Q1=A preserves cursors without proof. Q2=A retains the mapped handler type and homogeneous helper/emitter guard.
 
 - [ ] **Step 1: Add shared behavioural assertions and wire real/double adapters.**
 
-Cover current S:2801-2809 and S:2840-2842, preserving S:2800 ordering scope and S:2819 reentrancy limits.
-Each row maps to an earlier named witness. Assert identical required behaviour on real MLS and every relevant double.
-Include default effect-before-completion, N-frame open rollback, transactional effect around COMMIT and terminal restart seams.
-Include the effects-phase refusal, actual decrypt-work cutoff, real peer readiness, per-key cold dispatch and later-prefix closure witnesses.
-Include original binding propagation through actual host wrapping and control readiness before prerequisite root reads.
-Require selected control's entry-bound authentication/preparation and unmet-prerequisite release witnesses on both fixture modes.
-Include dead-only rowless cursor rollback/reopen and scheduled-root reentry with zero admission, through the production adapters.
-Keep the base crypto mirror's required frameEpoch assertion independent from saved-record replay.
+Map every task-owned behavioural/mutation row into shared assertions where portable, and implementation assertions where entry bindings are internal.
+Cover S:2801-2809, S:2840-2842 and the S:2819 reentry limits. Preserve S:2800 ordering scope.
+Include the independent structural completion adapter, individual oversized calls, transactional A/B failure isolation and registry-bound control fault matrix.
+Record both fixture modes and actual route-entry evidence. Raw manual transactions or unbound control regressions cannot close these rows.
 Keep semantic chat dedup/read marks, provider faults and SIGKILL explicitly unclaimed.
+Add shared `completion removes only saved IDs without prefix proof` in handler-completion.ts.
+Arrange full saved A/B records at positions `10`/`2`, same key/topic, with cursor null through fixture.entry().run.
+Retain unrelated fixture rows. Capture their exact pre-state. Install no coverage source and drive no lane.
+Call ports.completion(key).complete(['B','B','missing']): only B disappears; A and unrelated rows remain exact, cursor stays null.
+Complete A: its row disappears and cursor remains null under Q1=A. Reopen: neither row returns and cursor remains null.
+Repeat both IDs/missing: no effect, hook, marker or durable-row change. Invoke the production completion adapter throughout.
 
 - [ ] **Step 2: Run RED.**
 
-Temporarily discard completed B's live coverage after its pending row disappears.
-Run `ktest @kumiai/mls-rpc test/handler-batching-conformance.test.ts -t 'later completion retains live coverage until the earlier prefix closes'`.
-Expected behavioural RED: completing A leaves the cursor at `10`, instead of the required `2`, in both fixture modes.
-Restore coverage retention. The same named assertion must pass before proceeding.
+Temporarily omit saved-row removal in the production handler-completion service, leaving the supplied port and fixture unchanged.
+Run `ktest @kumiai/mls-rpc test/handler-batching-conformance.test.ts -t 'completion removes only saved IDs without prefix proof'`.
+Expected behavioural RED: B remains pending after complete, in both fixture modes. No live prefix proof is required.
+Restore removal. The same named assertion must pass before proceeding.
+Separately record Task 6's production-AppLane coverage mutation: A's completion must reach cursor `2`, not stop at `10`.
+Do not run that live assertion through HandlerConformancePorts or count a fixture-only coverage source as production evidence.
 
 - [ ] **Step 3: Document host migration against the wired fixtures.**
 
 Use exact group keys, actual supplied tx side rows and current controller-aware fixtures.
 Document completion versus recoveryCompletion, options-based adaptBusHandlers, policy fan-out and required authenticated metadata.
 Document GroupUnwrapResult's locked epoch versus frameEpoch, required openedDeliveryContext and optional ownershipContext's async limitation.
-Describe Q1=A's conservative cold cursor guarantee, poison lifetime and current-move coverage invalidation.
+Describe Q1=A, poison lifetime, generation invalidation and the optional coverage binding for independent adapters.
+Document complete's partial-prefix failure/retry semantics, atomic transact refusal and separate callback transactions.
 Document the key-neutral registry openedHandler resolver and explicit shared delivery context through every dispatcher path.
 Add release text to `.changeset/spec-p-storage-foundation.md`. Do not release or raise the band.
 
@@ -1202,60 +1396,25 @@ Add release text to `.changeset/spec-p-storage-foundation.md`. Do not release or
 Run kbuild, the new conformance wrapper, kports and repo-wide ktypes in a coordinated slot.
 Treat these commands as the final gate. The checklist below records that evidence without rerunning the same commands.
 Run affected full rpc/mls-rpc/broadcast unit suites and affected integration files with bounded workers.
-Record every guard mutation from Tasks 1-8, including RED cause and restored GREEN.
+Record every guard mutation from Tasks 1-10, including RED cause and restored GREEN.
 Inspect the final diff for permissive double fallbacks, generated files, stale recovery field names and hidden format/dependency changes.
 
 - [ ] **Step 5: Commit.**
 
 Commit with `test(rpc): enforce handler completion and batching contracts`.
 
-## Parallel lanes
+## Execution order and final handoff
 
-These are future implementation lanes, not permission to run tests concurrently.
+Execute `1 → 5 → 2 → 3 → 4 → 6 → 7 → 8 → 9 → 10 → 11`.
+Tasks 7/8/9 replace the former composite Task 7 and run sequentially.
+Task 4 finishes shared peer wiring before Task 6 takes app-lane.ts. Tasks 7/8 take peer.ts only after Task 6.
+Task 10 owns lifecycle integration. Task 11 records the single assembled build/contracts/full-suite/typecheck gate.
 
-- **Initial:** Task 1, portable contracts, callers and app-batch coordination types.
-- **After Task 1, lane A:** Tasks 2 → 3, completion and policy/context projection.
-- **After Task 1, lane B:** Task 5, scheduler implementation and registry batch options.
-- **After Task 3:** Task 4 supplies live peer coordination and transit metadata. Task 5 may continue independently.
-- **After Tasks 4/5:** Task 6 consumes completed peer wiring, then implements streaming and coverage. No Task 4/6 overlap.
-- **Assembled join:** Task 7 follows Task 6, supplying buffered control intake/preparation through the actual peer producer.
-- **Final sequential joins:** Task 8, then Task 9 and recorded completion evidence.
+- [ ] Map all 28 inventory candidates to implementation evidence without promoting unexecuted witnesses to passing results.
+- [ ] Record task-owned mutations with named RED causes and restored GREEN.
+- [ ] Run `rtk proxy pnpm run lint` in implementation scope; inspect its changes before committing.
+- [ ] Record skipped/unavailable backend evidence as incomplete, with 2.3e/2.4 and provider/SIGKILL handoffs.
+- [ ] Preserve the version band. Do not merge, push, release or edit generated files during this sub-plan.
 
-Reserve handlers.test.ts edits for Task 3; Task 4 owns handler-metadata.test.ts and its transport/directed files.
-Task 3 owns handlers.ts projection. Task 6 owns app-lane.ts, including the singleton/non-pending metadata producer.
-Task 4 first owns AppLane's completion/dispatcher/batch input migration. Task 6 takes that file only after Task 4 finishes.
-Task 2 finishes coordinator and handler-completion tests before Task 3 extends its production-handler witness.
-Task 1 finishes generic peer/host-boundary migrations before Task 4. Task 4 finishes common peer wiring before Task 7's control integration.
-Task 8 changes only lifecycle integration after those joins. It owns no prerequisite binding propagation for earlier task gates.
-Use file-disjoint implementation workspaces under the session's allowed roots. Do not create them during drafting.
-
-## Completion gates and handoff
-
-- [ ] Confirm implemented contracts retain settled Q1=A/Q2=A. Record any spec-dependent departure as a new question.
-- [ ] Map inventory candidates and current conformance rows to actual implementation/test evidence.
-- [ ] Run repo-wide `rtk proxy pnpm exec turbo run test:types` after final public-type changes, with uncached evidence.
-- [ ] Run both contract families on real implementations and doubles, including registry crypto, completion, hub memory/SQL/log/view wrappers.
-- [ ] Run affected full package suites and assembled memory reconstruction tests in the coordinated heavy-run slot.
-- [ ] Confirm each guard mutation fails for its intended assertion and restored code passes.
-- [ ] Confirm idle-immediate, count/work bounds and A/control/B batch counts without wall-clock flake thresholds.
-- [ ] Confirm actual decrypt staging enforces 8 ms and the same peer advertises B before awaiting A or its fetch.
-- [ ] Confirm actual wrapped-peer ingress commits open sizes `[64, 64, 2]`, with original completion identity and zero singleton calls.
-- [ ] Confirm buffered control advertises while A owns, before any prerequisite root-read admission, then proves `[A, control, B]`.
-- [ ] Confirm control's local reads/crypto/anchor staging use one selected entry and missing network prerequisites release its turn.
-- [ ] Confirm completion effects/pending/poison/cursors share proof, including rejected/unknown COMMIT and cold handoff.
-- [ ] Confirm transactional handlers run in effects and every domain-store view refuses writes with PersistencePhaseError.
-- [ ] Confirm B-first/A-later completion closes surviving live coverage through position `2` and preserves that cursor after reopen.
-- [ ] Confirm rowless dead-only peer prefixes advance via binding.advance, including rollback/reopen and expiry without new traffic.
-- [ ] Confirm scheduled roots reject detectable reentry before any collector/scheduler admission, preserving lawful entry-bound operations.
-- [ ] Confirm cold dispatch resolves two groups and successive incarnations with distinct exact-key completion services.
-- [ ] Confirm all metadata paths use authenticated original frame epoch/incarnation, overriding spoofed headers and wire values.
-- [ ] Confirm ephemeral metadata paths perform zero persistence and keep exact receive counts.
-- [ ] Confirm completion-only work does not rewrite MLS/controller state and batched MLS writes retain controller/management knowledge.
-- [ ] Run `rtk proxy pnpm run lint` in implementation scope and inspect formatting changes before commit.
-- [ ] Record skipped/unavailable backend evidence as incomplete. Never count it as a pass.
-- [ ] Record host API migration, Q1/Q2 decisions and remaining 2.3e/2.4 obligations in the implementation carry-forward.
-- [ ] Preserve provider-fault and SIGKILL handoffs to phases 3/6. Memory reconstruction cannot close those rows.
-- [ ] Do not merge, push, release or edit generated files as part of completing this sub-plan.
-
-Draft verification: source/spec/history inspection only. No tests, builds, typechecks or mutations ran during drafting.
-The existing machine-wide slot mechanism and all runtime verification remain unverified until implementation.
+Draft verification: read-only source/spec/history and document consistency checks. No build, test, typecheck or implementation mutation ran.
+The machine-wide heavy-run slot and all runtime evidence remain unverified until implementation.
