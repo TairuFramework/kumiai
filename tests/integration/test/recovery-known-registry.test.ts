@@ -7,11 +7,13 @@ import {
   createKeyPackageBundle,
   type GroupHandle,
   processWelcome,
+  revokeWithProof,
 } from '@kumiai/mls'
 import { createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { createDurableHandleAccess, groupMLSDependencies } from './app-lane-e2e.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -129,6 +131,25 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
     })
   ).group
   expect(malloryGroup.findMemberLeafIndex(mallory.id)).toBeDefined()
+  s.install(added.newGroup)
+  await s.responderGroup.processMessage(added.commitMessage)
+  const { controllerSeed, inception } = await import(
+    new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
+  )
+  const revocation = revokeChain({
+    seed: controllerSeed,
+    profile: 0,
+    did: fixture.controllerID,
+    chain: [inception],
+    subject: mallory.id,
+  })
+  const removed = await revokeWithProof(s.group(), {
+    deny: [mallory.id],
+    log: { chain: [inception, revocation], events: [] },
+  })
+  if (removed.status !== 'built') throw new Error('Expected revocation')
+  s.install(removed.result.newGroup)
+  expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')
   const requestID = 'known-revoked-verdict'
   const { request, requestKey } = await s.mls.createRecoveryRequest(requestID)
   const pending = await s.mls.applyRecovery(
@@ -137,4 +158,7 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
     requestKey,
   )
   expect(pending).toBeNull()
+  expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')
+  expect(s.group().findMemberLeafIndex(mallory.id)).toBeUndefined()
+  expect(s.responderGroup.findMemberLeafIndex(mallory.id)).toBeDefined()
 })

@@ -6,7 +6,6 @@ import { decodeStoredValue, encodeStoredValue } from '../persistence-codec.js'
 import { GroupStateConflictError } from '../persistence-errors.js'
 import { assertTrustTransition } from '../persistence-guards.js'
 import type { GroupKey, GroupRecoveryTrust } from '../persistence-types.js'
-import { knownRecoveryRegistry } from '../recovery.js'
 
 export function recoveryTrustInputs(trust: GroupRecoveryTrust): RecoveryTrustInputs {
   return {
@@ -103,10 +102,7 @@ export function recoveryTrustFor(
       authenticator: handle.state.keySchedule.epochAuthenticator,
     },
     signerTree,
-    registry:
-      retained === null
-        ? handle.registry
-        : knownRecoveryRegistry(retained.registry, handle.registry),
+    registry: handle.registry,
     credential: handle.credential,
     binding,
     ledger: handle.ledgerTokens,

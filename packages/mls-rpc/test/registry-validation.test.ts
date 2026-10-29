@@ -7,6 +7,7 @@ import {
   GroupHandle,
   type GroupOptions,
   readGroupAnchorExtension,
+  RecoveryKnowledgeError,
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
@@ -274,6 +275,9 @@ test('trust builder keeps public history and defensively copies revocations, flo
       },
     ],
   ])
+  expect(() => recoveryTrustFor(s.handle, s.key, s.trust)).toThrow(RecoveryKnowledgeError)
+  candidate.devices = new Map([['revoked-device', { ...revoked }]])
+  candidate.controllers = new Map([['controller', { ...projection, timeFloor: 12 }]])
   const trust = recoveryTrustFor(s.handle, s.key, s.trust)
   expect(trust.ledger).toEqual([s.token, s.token])
   expect(trust.signerTree[0]).not.toHaveProperty('privateKey')

@@ -296,6 +296,18 @@ for (const mode of ['real-mls', 'double'] as const) {
           registry: { ...trust.registry, devices: new Map([['device', 42]]) },
         }),
       },
+      ...['privateKey', 'unknown'].map((field) => ({
+        name: `extra device record ${field} field`,
+        damage: (trust: GroupRecoveryTrust) => ({
+          ...trust,
+          registry: {
+            ...trust.registry,
+            devices: new Map([
+              ['device', { controller: 'controller', status: 'active', [field]: 'secret' }],
+            ]),
+          },
+        }),
+      })),
       {
         name: 'malformed controller record',
         damage: (trust) => ({

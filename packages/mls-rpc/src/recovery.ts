@@ -236,38 +236,9 @@ export function knownRecoveryRegistry(
   const controllers = new Map(reply.controllers)
   for (const [id, projection] of known.controllers) {
     const offered = controllers.get(id)
-    controllers.set(
-      id,
-      offered == null
-        ? projection
-        : {
-            ...offered,
-            ...(offered.genFloor > projection.genFloor
-              ? {}
-              : {
-                  removedMembers: new Map([
-                    ...projection.removedMembers,
-                    ...offered.removedMembers,
-                  ]),
-                  survivorGrants: new Map([
-                    ...projection.survivorGrants,
-                    ...offered.survivorGrants,
-                  ]),
-                  attestations: new Map(
-                    [...projection.attestations, ...offered.attestations].map(([key, time]) => [
-                      key,
-                      Math.max(
-                        time,
-                        projection.attestations.get(key) ?? 0,
-                        offered.attestations.get(key) ?? 0,
-                      ),
-                    ]),
-                  ),
-                }),
-            genFloor: Math.max(projection.genFloor, offered.genFloor),
-            timeFloor: Math.max(projection.timeFloor, offered.timeFloor),
-          },
-    )
+    // Unlogged offer metadata cannot displace retained controller evidence.
+    if (offered?.recordedLog == null) controllers.set(id, projection)
+    else assertRetainsKnownEffects(id, known, reply)
   }
   return { devices, controllers }
 }

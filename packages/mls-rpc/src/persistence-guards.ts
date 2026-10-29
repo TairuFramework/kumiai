@@ -1,4 +1,9 @@
-import { type ClientState, decodeClientState, encodeClientState } from '@kumiai/mls'
+import {
+  assertRetainsKnownEffects,
+  type ClientState,
+  decodeClientState,
+  encodeClientState,
+} from '@kumiai/mls'
 import type { EpochReceiverData } from 'ts-mls'
 
 import type { StateMetadata } from './entry-capability.js'
@@ -303,4 +308,10 @@ export function assertTrustTransition(
     ),
     'Spent authenticator set shrank',
   )
+  const controllers = new Set([
+    ...previous.registry.controllers.keys(),
+    ...Array.from(previous.registry.devices.values(), (record) => record.controller),
+  ])
+  for (const controller of controllers)
+    assertRetainsKnownEffects(controller, previous.registry, next.registry)
 }

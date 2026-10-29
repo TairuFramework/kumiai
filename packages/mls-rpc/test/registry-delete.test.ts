@@ -29,6 +29,7 @@ import {
 import { registryRetirement } from '../src/registry/retirement.js'
 import type { GroupHandleRegistry } from '../src/registry/types.js'
 import { deferred } from '../src/runtime.js'
+import { drainRegistryMaintenance } from '../src/testing.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
@@ -994,8 +995,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         const proof = fixture.holdProof('disposal-switch')
         try {
           const owner = registry(fixture)
-          const mutate = await mutationCall(fixture, owner, 'switch')
           const access = await owner.access(groupID)
+          await drainRegistryMaintenance(access)
+          const mutate = await mutationCall(fixture, owner, 'switch')
           issued = mutate().catch((error: unknown) => error)
           await fault.rejected
           await proof.started

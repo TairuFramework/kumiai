@@ -88,6 +88,37 @@ describe('device registry codec', () => {
     expect(decoded.controllers).toBeInstanceOf(Map)
   })
 
+  test.each(['privateKey', 'unknown'])(
+    'refuses decoding a device record with an extra %s field',
+    (field) => {
+      const body = new TextEncoder().encode(
+        JSON.stringify({
+          devices: [
+            ['device', { controller: controllerID, status: 'active', [field]: 'secret' }],
+          ],
+          controllers: [],
+        }),
+      )
+      const bytes = new Uint8Array(body.length + 1)
+      bytes[0] = 1
+      bytes.set(body, 1)
+      expect(() => decodeDeviceRegistry(bytes)).toThrow(DeviceRegistryCodecError)
+    },
+  )
+
+  test.each(['privateKey', 'unknown'])(
+    'refuses encoding a device record with an extra %s field',
+    (field) => {
+      const registry: DeviceRegistry = {
+        ...registrySeed(),
+        devices: new Map([
+          ['device', { controller: controllerID, status: 'active', [field]: 'secret' }],
+        ]),
+      }
+      expect(() => encodeDeviceRegistry(registry)).toThrow(DeviceRegistryCodecError)
+    },
+  )
+
   test('encodes deterministically and re-encodes decoded bytes exactly', () => {
     const registry = populatedRegistry()
     const bytes = encodeDeviceRegistry(registry)

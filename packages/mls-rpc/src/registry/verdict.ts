@@ -318,10 +318,15 @@ export async function verifyRegistryResync(params: {
       tuple != null && tuple.position === proof.position && tuple.commitDigest === record.digest,
       'tuple',
     )
+    // The judge reads the mutable cached anchor, not the authenticated extension bytes.
+    requireMatch(sameValue(candidate.anchor, decodeGroupAnchor(anchor)), 'candidate')
+    reason = 'ineligible'
+    const known = knownRecoveryRegistry(source.trust.registry, snapshot.knownRegistry)
+    reason = 'tuple'
     const judge = createVerdictJudge({
       group: candidate,
       sourceTree: snapshot.sourceTree,
-      known: knownRecoveryRegistry(source.trust.registry, snapshot.knownRegistry),
+      known,
       requestID: record.requestID,
       boundCommit: tuple,
     })
@@ -345,8 +350,6 @@ export async function verifyRegistryResync(params: {
             options: {},
           })
     requireMatch(opened.verdict.verdict === 'confirmed', 'unaccepted')
-    // The judge reads the mutable cached anchor, not the authenticated extension bytes.
-    requireMatch(sameValue(candidate.anchor, decodeGroupAnchor(anchor)), 'candidate')
     // Captured signer eligibility and floors were authenticated against origin trust above.
     if (captured !== null)
       requireMatch(

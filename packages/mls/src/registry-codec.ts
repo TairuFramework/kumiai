@@ -13,6 +13,10 @@ export function encodeDeviceRegistry(registry: DeviceRegistry): Uint8Array {
   const sortedEntries = <Value>(map: ReadonlyMap<string, Value>) => {
     return [...map].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
   }
+  for (const record of registry.devices.values()) {
+    if (!isDeviceRecord(record))
+      throw new DeviceRegistryCodecError({ message: 'encodeDeviceRegistry: invalid device record' })
+  }
   const body = fromUTF(
     canonicalStringify({
       devices: sortedEntries(registry.devices),
@@ -76,8 +80,10 @@ function isNumber(value: unknown): value is number {
 function isDeviceRecord(value: unknown): value is DeviceRecord {
   return (
     isObject(value) &&
+    Reflect.ownKeys(value).every((key) =>
+      ['controller', 'status', 'label', 'proofRef', 'reason', 'cascadedFrom'].includes(key as string),
+    ) &&
     typeof value.controller === 'string' &&
-    !Object.hasOwn(value, 'logPosition') &&
     (value.status === 'active' || value.status === 'revoked') &&
     (value.label === undefined || typeof value.label === 'string') &&
     (value.proofRef === undefined || isProofRef(value.proofRef)) &&

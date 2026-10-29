@@ -50,6 +50,7 @@ import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import * as verdictAPI from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
+import { drainRegistryMaintenance } from '../src/testing.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
@@ -1323,10 +1324,12 @@ describe('registry peer recovery coordination', () => {
           putOutcomes: [{ id: 'prior', opID: null, at: 1, kind: 'unknown' }],
         },
       })
+      const access = await s.f.registry.access(groupID)
+      await drainRegistryMaintenance(access)
       const stored = await s.f.device.groups.loadState(source)
       if (stored === null || stored.deleted) throw new Error('Missing source')
       const trust = await s.f.device.groups.loadTrust(groupID)
-      const handle = await (await s.f.registry.access(groupID)).read((value) => value)
+      const handle = await access.read((value) => value)
       const moved = await s.f.advance(handle)
       await s.f.installRows({
         key: source,
