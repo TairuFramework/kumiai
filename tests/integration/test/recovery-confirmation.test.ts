@@ -78,14 +78,14 @@ function controlRecoveryClock() {
   })
 }
 
-async function completeRecovery(peer: GroupPeer<Protocols>) {
+async function completeRecovery(recovery: ReturnType<GroupPeer<Protocols>['recover']>) {
   let settled = false
-  const recovery = peer.recover().finally(() => {
+  const completion = recovery.finally(() => {
     settled = true
   })
-  void recovery.catch(() => {})
+  void completion.catch(() => {})
   await drainUntil(() => settled, 'recovery settlement')
-  return recovery
+  return completion
 }
 
 async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
@@ -266,6 +266,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
 }
 
 test('publication keeps the old handle until a survivor confirms, then delivers at the confirmed epoch', async () => {
+  controlRecoveryClock()
   const s = await setup({ deadlineMs: 10_000 })
   const pause = gate()
   cleanup.push(async () => pause.release())
@@ -278,20 +279,35 @@ test('publication keeps the old handle until a survivor confirms, then delivers 
     })
   const recovery = s.bob.recover()
   void recovery.catch(() => {})
-  await vi.waitFor(() => expect(s.published).toContain(HANDSHAKE_KIND.commit))
+  await drainUntil(() => sealing.mock.calls.length > 0, 'survivor confirmation')
+  expect(s.published).toContain(HANDSHAKE_KIND.commit)
   expect(s.bobGroup()).toBe(s.initial)
   expect(s.bob.anchorEpoch()).toBe(Number(s.initial.epoch))
-  await vi.waitFor(() => expect(sealing).toHaveBeenCalled())
+  let pulledWakeup = false
+  const topicID = commitTopic(await s.bobMLS.exportRecoverySecret())
+  const fetch = s.bobConnection.fetchTopic.bind(s.bobConnection)
+  s.bobConnection.fetchTopic = async (params) => {
+    const result = await fetch(params)
+    if (
+      params.topicID === topicID &&
+      result.messages.some((message) => message.payload.length === 1 && message.payload[0] === 0)
+    )
+      pulledWakeup = true
+    return result
+  }
   await s.aliceConnection.publish({
     senderDID: s.aliceID.id,
-    topicID: commitTopic(await s.bobMLS.exportRecoverySecret()),
+    topicID,
     payload: new Uint8Array([0]),
+    // Retention lets the pull prove this wakeup arrived without an elapsed-time assumption.
+    retain: 'log',
   })
-  await new Promise((resolve) => setTimeout(resolve, 60))
+  await drainUntil(() => pulledWakeup, 'pending recovery commit pull')
+  await s.bob.resync()
   expect(s.strands).toHaveLength(0)
   expect(s.bobGroup()).toBe(s.initial)
   pause.release()
-  expect(await recovery).toEqual({ advanced: true, reenact: [] })
+  expect(await completeRecovery(recovery)).toEqual({ advanced: true, reenact: [] })
   expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.recoveryRequest)).toHaveLength(1)
   expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(1)
   expect(
@@ -301,7 +317,7 @@ test('publication keeps the old handle until a survivor confirms, then delivers 
       .filter((member) => member.id === s.bobID.id),
   ).toHaveLength(1)
   await s.bob.protocol('chat').dispatch('chat/posted', { data: { text: 'confirmed delivery' } })
-  await vi.waitFor(() => expect(s.received).toContain('confirmed delivery'))
+  await drainUntil(() => s.received.includes('confirmed delivery'), 'confirmed delivery')
 })
 
 test('lost confirmations through the deadline leave an orphan which the next rejoin collects', async () => {
@@ -349,6 +365,7 @@ test('lost confirmations through the deadline leave an orphan which the next rej
 })
 
 test('simultaneous recovery releases both lanes while a third member confirms', async () => {
+  controlRecoveryClock()
   const s = await setup({ third: true, deadlineMs: 10_000 })
   const pause = gate()
   cleanup.push(async () => pause.release())
@@ -366,10 +383,10 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
   }
   const recoveringBob = s.bob.recover()
   void recoveringBob.catch(() => {})
-  await vi.waitFor(() => expect(waiting).toBe(true))
-  const alice = await s.alice.recover()
+  await drainUntil(() => waiting, 'Bob recovery head read')
+  const alice = await completeRecovery(s.alice.recover())
   pause.release()
-  const bob = await recoveringBob
+  const bob = await completeRecovery(recoveringBob)
   expect(alice.advanced).toBe(true)
   expect(bob.advanced).toBe(true)
   await s.alice.resync()
@@ -382,7 +399,7 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
       .filter((member) => member.id === s.bobID.id),
   ).toHaveLength(1)
   await s.alice.protocol('chat').dispatch('chat/posted', { data: { text: 'both confirmed' } })
-  await vi.waitFor(() => expect(s.received).toContain('both confirmed'))
+  await drainUntil(() => s.received.includes('both confirmed'), 'both confirmed delivery')
 })
 
 test('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
@@ -575,7 +592,7 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
   expect(s.bobGroup()).toBe(s.initial)
   vi.mocked(s.aliceMLS.sealRecoveryVerdict).mockRestore()
   vi.mocked(s.bobMLS.openRecoveryVerdict).mockRestore()
-  expect((await completeRecovery(s.bob)).advanced).toBe(true)
+  expect((await completeRecovery(s.bob.recover())).advanced).toBe(true)
 })
 
 test('a ratchet of the old handle while pending invalidates adoption on revalidation', async () => {
@@ -626,6 +643,7 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
 })
 
 test('confirmation requests received during another recovery preflight pull after the lane releases', async () => {
+  controlRecoveryClock()
   const s = await setup({ third: true, deadlineMs: 10_000 })
   const pause = gate()
   cleanup.push(async () => pause.release())
@@ -636,11 +654,11 @@ test('confirmation requests received during another recovery preflight pull afte
   })
   const bob = s.bob.recover()
   void bob.catch(() => {})
-  await vi.waitFor(() => expect(preparing).toHaveBeenCalled())
-  expect((await s.alice.recover()).advanced).toBe(true)
+  await drainUntil(() => preparing.mock.calls.length > 0, 'Bob recovery preflight')
+  expect((await completeRecovery(s.alice.recover())).advanced).toBe(true)
   pause.release()
-  await bob
-  expect((await s.bob.recover()).advanced).toBe(true)
+  await completeRecovery(bob)
+  expect((await completeRecovery(s.bob.recover())).advanced).toBe(true)
   await s.alice.resync()
   expect(s.aliceGroup().epoch).toBe(s.bobGroup().epoch)
 })
