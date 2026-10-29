@@ -21,6 +21,7 @@ import {
   decodeControlFixtureState,
 } from '../../../packages/rpc-conformance/src/control-store.js'
 import { encodeJournal, type Member, makeMember } from './app-lane-e2e.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
@@ -41,18 +42,6 @@ const controller = (await import(
   controllerSeed: Uint8Array
   controllerID: string
 }
-const events = (await import(
-  new URL('../../../node_modules/@kokuin/controller/lib/index.js', import.meta.url).href
-)) as {
-  createRevoke(params: {
-    seed: Uint8Array
-    profile: number
-    did: string
-    prior: ControllerBinding['prefix'][number]['event']
-    target: string
-    keyPosition: { gen: number; seq: number }
-  }): ControllerBinding['prefix'][number]
-}
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -64,6 +53,7 @@ async function setup() {
   const entrySlot = createLedgerEntrySlot()
   let group = (
     await createGroup(identity, 'proven-revoke', {
+      controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }),
       resolveLedgerEntries: entrySlot.resolve,
     })
@@ -89,13 +79,12 @@ async function setup() {
     ratchetTree: group.state.ratchetTree,
     options: { resolveLedgerEntries: carolSlot.resolve },
   })
-  const revoke = events.createRevoke({
+  const revoke = revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
-    prior: fixture.inception.event,
-    target: subject,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [fixture.inception],
+    subject: subject,
   })
   const hub = createWireHub()
   const member = makeMember({ hub, identity, group, entrySlot })
@@ -111,16 +100,20 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
     const result = await adapter.publishRevokeProof({
       peer: s.member.peer,
       mls: s.mls,
-      input: { subject: s.subject, log: s.log },
+      input: { deny: [s.subject], log: { chain: s.log, events: [] } },
     })
-    expect(result).toEqual({ status: 'committed', epoch: epoch + 1 })
+    expect(result).toEqual({
+      status: 'committed',
+      epoch: epoch + 1,
+      effects: [{ kind: 'deny', did: s.subject, ref: { chainIndex: 1 } }],
+    })
     expect(s.member.handle().registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(s.member.handle().findMemberLeafIndex(s.subject)).toBeUndefined()
     expect(
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       }),
     ).toEqual({ status: 'already-revoked' })
     expect(Number(s.member.handle().epoch)).toBe(epoch + 1)
@@ -151,7 +144,7 @@ test('restart restores co-committed revoke proof state before volatile adoption 
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       }),
     ).rejects.toBeInstanceOf(PeerDisposedError)
     await s.member.peer.dispose()
@@ -215,13 +208,12 @@ test('a fresh request after a lost epoch race serialises proof against the winni
   const target = fixture.agent(71).id
   const prior = s.log[1]
   if (prior == null) throw new Error('Missing revoke event')
-  const nextRev = events.createRevoke({
+  const nextRev = revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
-    prior: prior.event,
-    target,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: s.log,
+    subject: target,
   })
   const derived: Array<GroupHandle> = []
   try {
@@ -232,13 +224,13 @@ test('a fresh request after a lost epoch race serialises proof against the winni
         await adapter.publishRevokeProof({
           peer: s.other.peer,
           mls: s.other.mls,
-          input: { subject: s.subject, log: s.log },
+          input: { deny: [s.subject], log: { chain: s.log, events: [] } },
         })
       }
       return encodeJournal(candidate)
     }
 
-    const input = { subject: target, log: [...s.log, nextRev] }
+    const input = { deny: [target], log: { chain: [...s.log, nextRev], events: [] } }
     await expect(
       adapter.publishRevokeProof({
         peer: s.member.peer,
@@ -253,9 +245,13 @@ test('a fresh request after a lost epoch race serialises proof against the winni
       mls: s.mls,
       input,
     })
-    expect(result).toEqual({ status: 'committed', epoch: epoch + 2 })
+    expect(result).toEqual({
+      status: 'committed',
+      epoch: epoch + 2,
+      effects: [{ kind: 'deny', did: target, ref: { chainIndex: 2 } }],
+    })
     expect(derived).toHaveLength(2)
-    expect(derived[0]?.registry.devices.get(s.subject)?.status).not.toBe('revoked')
+    expect(derived[0]?.registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(derived[1]?.registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(derived[1]?.registry.devices.get(target)?.status).toBe('revoked')
     const topic = commitTopic(await s.mls.exportRecoverySecret())
@@ -281,7 +277,7 @@ test('a fresh request after a winning duplicate proof returns already revoked', 
       await adapter.publishRevokeProof({
         peer: s.other.peer,
         mls: s.other.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       })
       return encodeJournal(candidate)
     }
@@ -290,14 +286,14 @@ test('a fresh request after a winning duplicate proof returns already revoked', 
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       }),
     ).rejects.toMatchObject({ outcome: { kind: 'lost' } })
     expect(
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       }),
     ).toEqual({ status: 'already-revoked' })
     expect(builds).toBe(1)
@@ -366,22 +362,24 @@ test('non-building outcomes do not serialize or advance', async () => {
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: [fixture.inception] },
+        input: { deny: [s.subject], log: { chain: [fixture.inception], events: [] } },
       }),
     ).toMatchObject({ status: 'not-provable', reason: 'no-rev' })
-    const selfRev = events.createRevoke({
+    const selfRev = revokeChain({
       seed: controller.controllerSeed,
       profile: 0,
       did: controller.controllerID,
-      prior: fixture.inception.event,
-      target: s.member.identity.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [fixture.inception],
+      subject: s.member.identity.id,
     })
     expect(
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.member.identity.id, log: [fixture.inception, selfRev] },
+        input: {
+          deny: [s.member.identity.id],
+          log: { chain: [fixture.inception, selfRev], events: [] },
+        },
       }),
     ).toEqual({ status: 'self-affected', subject: s.member.identity.id })
     expect(serializations).toBe(0)
@@ -391,7 +389,7 @@ test('non-building outcomes do not serialize or advance', async () => {
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: { ...s.mls },
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       }),
     ).rejects.toThrow('adapter-created GroupMLS')
   } finally {
@@ -417,7 +415,7 @@ test('a serializer failure keeps the caller waiting until the same operation ret
       .publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
-        input: { subject: s.subject, log: s.log },
+        input: { deny: [s.subject], log: { chain: s.log, events: [] } },
       })
       .finally(() => {
         settled = true

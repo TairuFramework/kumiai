@@ -13,6 +13,8 @@ export type LeafBinding = {
   prefix?: Array<SignedEvent>
   capability?: string
   holderGrant?: string
+  member?: { add: string; g: number }
+  iat?: number
   /** The leaf's MLS signature public key. */
   leafKey: Uint8Array
 }

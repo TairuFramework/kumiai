@@ -45,7 +45,7 @@ export const rotationIntent: Operation & { stage: 'intent' } = {
 export async function authoringAccessFixture(
   kind: AccessKind,
   owner: 'member' | 'committer' = 'member',
-  backgroundMaintenance?: 'gated',
+  backgroundMaintenance: 'gated' = 'gated',
 ) {
   const groupID = `authoring-${kind}`
   const real = await createRealGroup(2, groupID)

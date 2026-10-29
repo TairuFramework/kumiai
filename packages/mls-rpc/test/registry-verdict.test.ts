@@ -39,7 +39,11 @@ async function setup(mode: 'real-mls' | 'double', bound = true) {
   const identity = randomIdentity()
   const signer = randomIdentity()
   const controller = bound ? await lifecycle.bindingFor(identity) : undefined
-  const options = registryOptions({ ...(controller == null ? {} : { controller }) })
+  const options = registryOptions({
+    ...(controller == null
+      ? {}
+      : { controller, controllerLog: { chain: controller.prefix, events: [] } }),
+  })
   let source = (await createGroup(identity, 'registry-verdict', options)).group
   let responder: { identity: OwnIdentity; group: GroupHandle } | undefined
   if (bound) {
@@ -155,7 +159,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           s.source.trust.registry.controllers = new Map(s.source.trust.registry.controllers).set(
             normalizeDID(controller),
             {
-              recordedLog: [],
+              attestations: new Map(),
+              removedMembers: new Map(),
+              survivorGrants: new Map(),
               genFloor: policy === 'generation floor' ? 1 : 0,
               timeFloor: policy === 'lapsed grant' ? Date.now() / 1000 + 100_000 : 0,
             },

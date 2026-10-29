@@ -1,8 +1,9 @@
-import { createInception, createRevoke, didFromInception } from '@kokuin/controller'
+import { createInception, didFromInception } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
 import type { GroupAnchor } from '../src/anchor.js'
+import { asControllerLog } from '../src/controller-log.js'
 import type { FoldInput } from '../src/fold.js'
 import {
   authority,
@@ -18,6 +19,7 @@ import {
   registrySeed,
 } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE, type RoleValue } from '../src/roster.js'
+import { denyEffects, revokeChain } from './fixtures/controller-chain.js'
 
 const GROUP = 'group-1'
 const CREATOR = 'did:key:zCreator'
@@ -416,13 +418,12 @@ describe('authenticated lifecycle projections', () => {
   const seed = new Uint8Array(32).fill(31)
   const inception = createInception(seed, 0)
   const controller = didFromInception(inception.event)
-  const rev = createRevoke({
-    seed,
+  const rev = revokeChain({
+    seed: seed,
     profile: 0,
     did: controller,
-    prior: inception.event,
-    target: DEV_A,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [inception],
+    subject: DEV_A,
   })
   const anchor: GroupAnchor = { creatorDID: CREATOR, version: 1, controller }
 
@@ -430,21 +431,30 @@ describe('authenticated lifecycle projections', () => {
     const entries = [
       deviceInput(
         DEV_B,
-        DEV_A,
+        controller,
         {
+          effects: denyEffects([inception, rev], DEV_A),
+          removed: [],
           op: 'revoke',
-          proof: [inception, rev],
+          proof: asControllerLog([inception, rev]),
           revoked: [{ did: DEV_A }],
         },
         'revoke',
       ),
     ]
     const { registry } = foldControl(entries, anchor, GROUP)
-    expect(registry.devices.get(DEV_A)).toEqual({ controller, status: 'revoked', logPosition: 1 })
+    expect(registry.devices.get(DEV_A)).toEqual({
+      controller,
+      status: 'revoked',
+      proofRef: { chainIndex: 1 },
+    })
     expect(registry.controllers.get(controller)).toEqual({
-      recordedLog: [inception, rev],
+      recordedLog: { chain: [inception, rev], events: [] },
       genFloor: 0,
       timeFloor: 0,
+      attestations: new Map(),
+      removedMembers: new Map(),
+      survivorGrants: new Map(),
     })
     expect(denySetOf(registry)).toEqual(new Set([DEV_A]))
   })
@@ -453,8 +463,14 @@ describe('authenticated lifecycle projections', () => {
     const entries = [
       deviceInput(
         DEV_B,
-        DEV_A,
-        { op: 'revoke', proof: [inception, rev], revoked: [{ did: DEV_A }] },
+        controller,
+        {
+          effects: denyEffects([inception, rev], DEV_A),
+          removed: [],
+          op: 'revoke',
+          proof: asControllerLog([inception, rev]),
+          revoked: [{ did: DEV_A }],
+        },
         'r',
       ),
       deviceInput(DEV_B, controller, { op: 'clock', time: 100 }, 'c'),
@@ -462,7 +478,7 @@ describe('authenticated lifecycle projections', () => {
     ]
     const { registry } = foldControl(entries, anchor, GROUP)
     expect(registry.controllers.get(controller)).toMatchObject({
-      recordedLog: [inception, rev],
+      recordedLog: { chain: [inception, rev], events: [] },
       genFloor: 0,
       timeFloor: 100,
     })
@@ -500,7 +516,23 @@ describe('device proof field placement', () => {
   })
 
   test('proof-bearing revokes and resets still carry proof and declared effects', () => {
-    expect(isDeviceValue({ op: 'revoke', proof: [], revoked: [] })).toBe(true)
-    expect(isDeviceValue({ op: 'reset', proof: [], revoked: [] })).toBe(true)
+    expect(
+      isDeviceValue({
+        op: 'revoke',
+        proof: asControllerLog([]),
+        effects: [],
+        revoked: [],
+        removed: [],
+      }),
+    ).toBe(true)
+    expect(
+      isDeviceValue({
+        effects: [],
+        removed: [],
+        op: 'reset',
+        proof: asControllerLog([]),
+        revoked: [],
+      }),
+    ).toBe(true)
   })
 })

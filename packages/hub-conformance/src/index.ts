@@ -1448,6 +1448,11 @@ export {
   testMailboxHubConformance,
 } from './log-hub.js'
 export {
+  type HubStorePurgeRaceParams,
+  type PurgeRaceHarness,
+  testHubStorePurgeRaceConformance,
+} from './purge-race.js'
+export {
   type TopicAuthorizationConformanceParams,
   testTopicAuthorizationConformance,
 } from './topic-authorization.js'

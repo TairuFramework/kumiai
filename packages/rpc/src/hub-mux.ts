@@ -253,7 +253,7 @@ type TopicDemand = { options: HubSubscribeOptions | undefined }
  */
 type TopicSubscription =
   | { kind: 'deferred'; options: HubSubscribeOptions | undefined }
-  | { kind: 'asking' }
+  | { kind: 'asking'; ready: Promise<void> }
   | { kind: 'held' }
   /**
    * `permanent` and the request `options` together decide what a later retain may do. A refusal is
@@ -410,7 +410,6 @@ export function createHubMux(params: HubMuxParams): HubMux {
       subscriptions.set(topicID, { kind: 'deferred', options })
       return
     }
-    subscriptions.set(topicID, { kind: 'asking' })
     try {
       // Inside the try, and awaited: `subscribe` may reject OR throw synchronously (the type
       // allows `void`), and the old code's `Promise.resolve(...).catch()` caught only the first.
@@ -446,6 +445,16 @@ export function createHubMux(params: HubMuxParams): HubMux {
     }
   }
 
+  const startSubscribe = (topicID: string, options: HubSubscribeOptions | undefined): void => {
+    // Not `Promise.withResolvers`: this runs on Hermes too. `attemptSubscribe` never rejects.
+    let settle: () => void = () => {}
+    const ready = new Promise<void>((resolve) => {
+      settle = resolve
+    })
+    subscriptions.set(topicID, { kind: 'asking', ready })
+    void attemptSubscribe(topicID, options, 0).finally(settle)
+  }
+
   const retain = (topicID: string, options?: HubSubscribeOptions): void => {
     if (disposed) return
     if ((refcount.get(topicID) ?? 0) === 0) demands.set(topicID, { options })
@@ -455,7 +464,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     // hold it, and the data structure must not pretend otherwise.
     const state = subscriptions.get(topicID)
     if (state == null) {
-      void attemptSubscribe(topicID, options, 0)
+      startSubscribe(topicID, options)
       return
     }
     if (state.kind !== 'refused') return
@@ -472,7 +481,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     ) {
       return
     }
-    void attemptSubscribe(topicID, options, 0)
+    startSubscribe(topicID, options)
   }
 
   /**
@@ -498,7 +507,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     const { options } = state
     subscriptions.delete(topicID)
     if ((refcount.get(topicID) ?? 0) > 0) {
-      void attemptSubscribe(topicID, options, 0)
+      startSubscribe(topicID, options)
     }
   }
 
@@ -762,7 +771,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     for (const [topicID, state] of [...subscriptions]) {
       if (state.kind !== 'deferred') continue
       subscriptions.delete(topicID)
-      if ((refcount.get(topicID) ?? 0) > 0) void attemptSubscribe(topicID, state.options, 0)
+      if ((refcount.get(topicID) ?? 0) > 0) startSubscribe(topicID, state.options)
     }
     for (const wake of resumeWaiters) wake()
     resumeWaiters.clear()
@@ -891,6 +900,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
     // A fetch of a refused topic would die of `NotSubscribedError` — the SYMPTOM, naming the mux's
     // own failure to subscribe as if it were the caller's mistake. The latched refusal is raised
     // instead, so what reaches the host is the reason.
+    const state = subscriptions.get(params.topicID)
+    if (state?.kind === 'asking') await state.ready
     assertSubscribable(params.topicID)
     const { signal } = params
     if (signal?.aborted) throw signal.reason

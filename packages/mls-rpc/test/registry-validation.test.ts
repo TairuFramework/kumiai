@@ -251,12 +251,29 @@ test('trust builder keeps public history and defensively copies revocations, flo
   Object.assign(leaf.leaf, { signaturePrivateKey: new Uint8Array([92]) })
   const registry = s.trust.registry
   const revoked = { controller: s.environment.identity.id, status: 'revoked' as const }
-  const projection = { recordedLog: [], genFloor: 7, timeFloor: 9 }
+  const projection = {
+    attestations: new Map(),
+    removedMembers: new Map(),
+    survivorGrants: new Map(),
+    genFloor: 7,
+    timeFloor: 9,
+  }
   registry.devices = new Map([['revoked-device', revoked]])
   registry.controllers = new Map([['controller', projection]])
   const candidate = s.handle.registry
   candidate.devices = new Map([['revoked-device', { ...revoked, status: 'active' }]])
-  candidate.controllers = new Map([['controller', { recordedLog: [], genFloor: 3, timeFloor: 12 }]])
+  candidate.controllers = new Map([
+    [
+      'controller',
+      {
+        attestations: new Map(),
+        removedMembers: new Map(),
+        survivorGrants: new Map(),
+        genFloor: 3,
+        timeFloor: 12,
+      },
+    ],
+  ])
   const trust = recoveryTrustFor(s.handle, s.key, s.trust)
   expect(trust.ledger).toEqual([s.token, s.token])
   expect(trust.signerTree[0]).not.toHaveProperty('privateKey')
@@ -366,7 +383,10 @@ test('trust copies installed controller binding and its signed prefix', async ()
   }
   const identity = fixture.agent(91)
   const binding = await fixture.bindingFor(identity)
-  const { group } = await createGroup(identity, 'registry-binding', { controller: binding })
+  const { group } = await createGroup(identity, 'registry-binding', {
+    controllerLog: { chain: binding.prefix, events: [] },
+    controller: binding,
+  })
   const trust = recoveryTrustFor(group, { groupID: group.groupID, incarnation: 1 }, null)
   expect(trust.binding).toEqual(binding)
   if (trust.binding == null) throw new Error('Missing installed binding')

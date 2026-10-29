@@ -34,22 +34,62 @@ const authorityEvent: Record<string, Shape> = {
   kt: 'number',
   nt: 'number',
 }
+const memberEntry: Shape = {
+  object: { did: 'string', key: 'string', add: 'string', lease: 'number' },
+}
 const event: Shape = {
   tag: 't',
   variants: {
     icp: { object: { ...authorityEvent, r: 'string' }, optional: ['i', 'p'] },
     rot: {
-      object: { ...authorityEvent, a: 'string', d: { array: 'string' } },
-      optional: ['i', 'p', 'a', 'd'],
+      object: {
+        ...authorityEvent,
+        a: 'string',
+        m: { array: memberEntry },
+        u: { array: memberEntry },
+        d: { array: 'string' },
+      },
+      optional: ['i', 'p', 'a', 'm', 'u', 'd'],
     },
-    rev: { object: { ...commonEvent, x: 'string', cap: 'string' }, optional: ['i', 'p', 'cap'] },
   },
-  // Future event payloads stay public JSON; the lifecycle fold decides their authority.
   fallback: { object: commonEvent, optional: ['i', 'p'], open: true },
+}
+const epochCommon: Record<string, Shape> = {
+  v: 'number',
+  t: 'string',
+  i: 'string',
+  g: 'number',
+  e: 'string',
+  p: { array: 'string' },
+  crit: 'boolean',
+  by: 'string',
+}
+const epochEvent: Shape = {
+  tag: 't',
+  variants: {
+    add: {
+      object: { ...epochCommon, did: 'string', key: 'string', lease: 'number' },
+      optional: ['by'],
+    },
+    ren: { object: { ...epochCommon, add: 'string', lease: 'number' }, optional: ['by'] },
+    rmv: { object: { ...epochCommon, add: 'string' }, optional: ['by'] },
+    rev: { object: { ...epochCommon, x: 'string' }, optional: ['by'] },
+  },
 }
 const signedEvent: Shape = {
   object: { event, sigs: { array: 'string' }, recoveryKey: 'string' },
   optional: ['recoveryKey'],
+}
+const signedEpochEvent: Shape = {
+  object: { event: epochEvent, sigs: { array: 'string' }, recoveryKey: 'string' },
+  optional: ['recoveryKey'],
+}
+const controllerLog: Shape = {
+  object: { chain: { array: signedEvent }, events: { array: signedEpochEvent } },
+}
+const proofRef: Shape = {
+  object: { chainIndex: 'number', snapshot: 'number', event: 'string', epoch: 'string' },
+  optional: ['chainIndex', 'snapshot', 'event', 'epoch'],
 }
 const credential: Shape = {
   tag: 'credentialType',
@@ -93,22 +133,25 @@ const registry: Shape = {
           controller: 'string',
           status: 'string',
           label: 'string',
-          logPosition: 'number',
+          proofRef,
           reason: 'string',
           cascadedFrom: 'string',
         },
-        optional: ['label', 'logPosition', 'reason', 'cascadedFrom'],
+        optional: ['label', 'proofRef', 'reason', 'cascadedFrom'],
       },
     },
     controllers: {
       map: {
         object: {
-          recordedLog: { array: signedEvent },
+          recordedLog: controllerLog,
+          attestations: { map: 'number' },
+          removedMembers: { map: { object: { did: 'string', gen: 'number', proofRef } } },
+          survivorGrants: { map: 'string' },
           genFloor: 'number',
           timeFloor: 'number',
           beacon: { object: { logLength: 'number', headDigest: 'string' } },
         },
-        optional: ['beacon'],
+        optional: ['recordedLog', 'beacon'],
       },
     },
   },
@@ -150,8 +193,10 @@ const trustShape: Shape = {
           prefix: { array: signedEvent },
           capability: 'string',
           holderGrant: 'string',
+          member: { object: { add: 'string', g: 'number' } },
+          iat: 'number',
         },
-        optional: ['holderGrant'],
+        optional: ['capability', 'holderGrant', 'member', 'iat'],
       },
     },
     ledger: { array: 'string' },

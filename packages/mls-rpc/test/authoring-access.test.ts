@@ -11,7 +11,14 @@ import {
   encodeClientState,
   type GroupHandle,
 } from '@kumiai/mls'
-import { digestAppliedCommit, type Operation } from '@kumiai/rpc'
+import {
+  asLogPosition,
+  digestAppliedCommit,
+  type GroupPeer,
+  type HostBuilt,
+  type Operation,
+  type OperationRequest,
+} from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import type { authorPrivateCommit } from '../../mls/lib/authoring.js'
@@ -21,7 +28,7 @@ import { InvalidCandidateError } from '../src/index.js'
 import { createGroupMLS } from '../src/mls.js'
 import { encodeStoredValue } from '../src/persistence-codec.js'
 import { createRegistryHandleAccess } from '../src/registry-handle-access.js'
-import { buildRevokeProofOperation } from '../src/revoke.js'
+import { buildRevokeProofOperation, publishRevokeProof } from '../src/revoke.js'
 import { accessKinds, authoringAccessFixture, rotationIntent } from './fixtures/authoring-access.js'
 import { testGroupMLSDependencies } from './fixtures/real-group.js'
 import { createRegistryFixture, restoreHost } from './fixtures/registry.js'
@@ -483,7 +490,10 @@ test('buildRevokeProofOperation builds on the supplied handle', async () => {
     const op = {
       ...rotationIntent,
       body: new TextEncoder().encode(
-        JSON.stringify({ type: 'revoke-proof', input: { subject: f.member.identity.id, log: [] } }),
+        JSON.stringify({
+          type: 'revoke-proof',
+          input: { deny: [f.member.identity.id], log: { chain: [], events: [] } },
+        }),
       ),
     }
     await expect(
@@ -677,3 +687,59 @@ test.each(['commit', 'welcome', 'candidate'] as const)(
     }
   },
 )
+
+test('a durable proof facade returns the accepted build effects and epoch', async () => {
+  const f = await authoringAccessFixture('simple')
+  const target = randomIdentity().id
+  const effects = [{ kind: 'deny' as const, did: target, ref: { chainIndex: 1 } }]
+  let accept: () => void = () => {}
+  const accepted = new Promise<void>((resolve) => {
+    accept = resolve
+  })
+  let built: HostBuilt | undefined
+  let proof: ReturnType<typeof vi.spyOn> | undefined
+  try {
+    const group = await f.restoreStored((await f.stored()).state)
+    const rotation = await commitKeyRotation(group)
+    proof = vi
+      .spyOn(publicMLS, 'revokeWithProof')
+      .mockResolvedValue({ status: 'built', effects, result: rotation })
+    const mls = createGroupMLS({
+      ...testGroupMLSDependencies(f.access, f.control()),
+      identity: f.member.identity,
+      entrySlot: f.member.slot,
+    })
+    const commit = async (request: OperationRequest) => {
+      built = await buildRevokeProofOperation({
+        mls,
+        group,
+        op: { ...request, seq: 1, enqueuedAt: 0, deadline: 30_000, stage: 'intent' },
+        options: { serializeJournal: (next) => encodeClientState(next.state) },
+      })
+      await accepted
+      return { position: asLogPosition('accepted-proof') }
+    }
+    const peer = { commit } as GroupPeer<Record<string, never>>
+    let settled = false
+    const publishing = publishRevokeProof({
+      peer,
+      mls,
+      input: { deny: [target], log: { chain: [], events: [] } },
+    }).then((result) => {
+      settled = true
+      return result
+    })
+    await vi.waitFor(() => expect(built).toBeDefined())
+    expect(settled).toBe(false)
+    accept()
+    expect(await publishing).toEqual({
+      status: 'committed',
+      epoch: Number(rotation.epoch),
+      effects,
+    })
+  } finally {
+    accept()
+    proof?.mockRestore()
+    await f.close()
+  }
+})

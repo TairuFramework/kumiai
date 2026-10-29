@@ -80,6 +80,7 @@ function signedEvent(value: unknown): boolean {
   return (
     event.v === 1 &&
     typeof event.t === 'string' &&
+    event.t !== 'rev' &&
     typeof event.g === 'number' &&
     Number.isFinite(event.g) &&
     typeof event.s === 'number' &&
@@ -97,7 +98,13 @@ function binding(value: unknown): boolean {
     value === null ||
     (object(value) &&
       typeof value.id === 'string' &&
-      typeof value.capability === 'string' &&
+      (value.member == null
+        ? typeof value.capability === 'string'
+        : object(value.member) &&
+          typeof value.member.add === 'string' &&
+          unsigned(value.member.g, 0xffffffff) &&
+          typeof value.iat === 'number' &&
+          Number.isFinite(value.iat)) &&
       vector(value.prefix, signedEvent) &&
       (value.holderGrant === undefined || typeof value.holderGrant === 'string'))
   )

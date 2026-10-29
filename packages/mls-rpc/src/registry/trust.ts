@@ -84,12 +84,14 @@ export function recoveryTrustFor(
   })
   const held = handle.bindingOfDID(handle.credential.id)
   const binding =
-    held?.controller == null || held.prefix == null || held.capability == null
+    held?.controller == null || held.prefix == null
       ? null
       : {
           id: held.controller,
           prefix: held.prefix,
-          capability: held.capability,
+          ...(held.member == null
+            ? { capability: held.capability }
+            : { member: held.member, iat: held.iat }),
           ...(held.holderGrant == null ? {} : { holderGrant: held.holderGrant }),
         }
   const value = {

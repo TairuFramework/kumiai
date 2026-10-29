@@ -61,6 +61,13 @@ describe('parseMLSCredentialIdentity', () => {
     const bytes = new TextEncoder().encode(JSON.stringify({ v: 2, id: 'did:key:z6MkABC' }))
     expect(() => parseMLSCredentialIdentity(bytes)).toThrow(/v(ersion)?/i)
   })
+
+  it('rejects an object version with an invalid credential error when coercion would throw', () => {
+    const bytes = new TextEncoder().encode(
+      '{"id":"did:key:zDevice","v":{"toString":null,"valueOf":null}}',
+    )
+    expect(() => parseMLSCredentialIdentity(bytes)).toThrow(/^Invalid MLS credential/)
+  })
 })
 
 describe('makeMLSCredential', () => {
@@ -164,6 +171,13 @@ describe('didFromCredential', () => {
   it('returns null instead of throwing on an unsupported identity version', () => {
     const bytes = new TextEncoder().encode(JSON.stringify({ v: 2, id: 'did:key:z6MkABC' }))
     expect(() => didFromCredential(basicCredential(bytes))).not.toThrow()
+    expect(didFromCredential(basicCredential(bytes))).toBeNull()
+  })
+
+  it('returns null for an object version when coercion would throw', () => {
+    const bytes = new TextEncoder().encode(
+      '{"id":"did:key:zDevice","v":{"toString":null,"valueOf":null}}',
+    )
     expect(didFromCredential(basicCredential(bytes))).toBeNull()
   })
 

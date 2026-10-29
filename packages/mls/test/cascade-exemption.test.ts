@@ -2,9 +2,7 @@ import { audienceConfirmation } from '@kokuin/capability'
 import {
   createControllerIdentity,
   createInception,
-  createRevoke,
   didFromInception,
-  foldLog,
   type SignedEvent,
 } from '@kokuin/controller'
 import { type OwnIdentity, stringifyToken } from '@kokuin/token'
@@ -12,6 +10,7 @@ import { defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { mintTrustedGrant, readCapability } from '../src/capability.js'
+import { asControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import { LeafBindingError, RevokeProofError } from '../src/errors.js'
 import { commitLedgerEntries, commitWithEntries } from '../src/group-commit.js'
@@ -22,6 +21,7 @@ import { leafAt } from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
+import { denyEffects, revokeChain } from './fixtures/controller-chain.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -42,24 +42,17 @@ import {
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
 function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
-  const folded = foldLog(controllerID, log)
-  const head = folded.ok ? folded.states.at(-1) : undefined
-  const prior = log.at(-1)
-  if (head == null || prior == null) throw new Error('Missing head')
-  return createRevoke({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    prior: prior.event,
-    target: subject,
-    keyPosition: { gen: head.keyGen, seq: head.keySeq },
-  })
+  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
 }
 
 async function parentGrant(identity: OwnIdentity, iat: number): Promise<string> {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const grant = await mintTrustedGrant({
-    signer: createControllerIdentity({ seed: controllerSeed, profile: 0, log: [inception] }),
+    signer: createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog([inception]),
+    }),
     controllerID,
     audience: identity.id,
     leafKey: identity.publicKey,
@@ -156,8 +149,8 @@ async function ownAgents(options: SetupOptions = {}) {
 async function afterIssuerProof(options: SetupOptions = {}) {
   const setup = await ownAgents(options)
   const built = await revokeWithProof(setup.publisher, {
-    subject: setup.issuer.id,
-    log: setup.log,
+    deny: [setup.issuer.id],
+    log: asControllerLog(setup.log),
   })
   if (built.status !== 'built') throw new Error(`Proof not built: ${JSON.stringify(built)}`)
   await publishLedger(setup.tokens, built.result.newGroup)
@@ -184,8 +177,8 @@ describe('revocation cascade', () => {
     const childIndex = setup.publisher.findMemberLeafIndex(setup.child.id)
     expect(childIndex).toBeDefined()
     const built = await revokeWithProof(setup.publisher, {
-      subject: setup.issuer.id,
-      log: setup.log,
+      deny: [setup.issuer.id],
+      log: asControllerLog(setup.log),
     })
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
@@ -211,8 +204,8 @@ describe('revocation cascade', () => {
   test('evidencedChildSurvivesProofAndWelcome', async () => {
     const setup = await ownAgents()
     const built = await revokeWithProof(setup.publisher, {
-      subject: setup.issuer.id,
-      log: setup.log,
+      deny: [setup.issuer.id],
+      log: asControllerLog(setup.log),
     })
     expect(built.status).toBe('built')
     if (built.status !== 'built') throw new Error('Missing proof')
@@ -276,8 +269,14 @@ describe('revocation cascade', () => {
     const token = await signLedgerEntry(setup.identity, {
       type: DEVICE_ENTRY_TYPE,
       groupID: setup.publisher.groupID,
-      subject: setup.issuer.id,
-      value: { op: 'revoke', proof: setup.log, revoked: [{ did: setup.issuer.id }] },
+      subject: controllerID,
+      value: {
+        effects: denyEffects(setup.log.slice(1), setup.issuer.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog(setup.log.slice(1)),
+        revoked: [{ did: setup.issuer.id }],
+      },
     })
     const forged = await rawCommit({
       group: setup.publisher,
@@ -307,10 +306,14 @@ describe('revocation cascade', () => {
     expect(built.status).toBe('built')
     expect(publisher.findMemberLeafIndex(child.id)).toBeDefined()
     expect(childHandle.findMemberLeafIndex(child.id)).toBeDefined()
-    expect(await revokeWithProof(publisher, { subject: issuer.id, log })).toEqual({
+    expect(
+      await revokeWithProof(publisher, { deny: [issuer.id], log: asControllerLog(log) }),
+    ).toEqual({
       status: 'already-revoked',
     })
-    expect(await revokeWithProof(childHandle, { subject: issuer.id, log })).toEqual({
+    expect(
+      await revokeWithProof(childHandle, { deny: [issuer.id], log: asControllerLog(log) }),
+    ).toEqual({
       status: 'already-revoked',
     })
   })
@@ -336,8 +339,8 @@ describe('commit authentication of evidenced children', () => {
   test('survivorPublishesSecondRevocationBeforeRenewal', async () => {
     const { publisher, childHandle, bystander, log, tokens } = await afterIssuerProof()
     const second = await revokeWithProof(childHandle, {
-      subject: bystander.id,
-      log: [...log, revoke(log, bystander.id)],
+      deny: [bystander.id],
+      log: asControllerLog([...log, revoke(log, bystander.id)]),
     })
     expect(second.status).toBe('built')
     if (second.status !== 'built') throw new Error('Missing second proof')
@@ -368,8 +371,8 @@ describe('commit authentication of evidenced children', () => {
     // The same fresh leaf on the path of an otherwise valid proof commit is refused when its
     // credential is authenticated, before any later check sees it.
     const proof = await revokeWithProof(childHandle, {
-      subject: bystander.id,
-      log: [...log, revoke(log, bystander.id)],
+      deny: [bystander.id],
+      log: asControllerLog([...log, revoke(log, bystander.id)]),
     })
     if (proof.status !== 'built') throw new Error('Missing second proof')
     const bystanderIndex = childHandle.findMemberLeafIndex(bystander.id)
@@ -592,7 +595,7 @@ describe('renewal order', () => {
     const controller = createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
-      log: [inception],
+      log: asControllerLog([inception]),
     })
     const wrongKey: ControllerBinding = {
       id: controllerID,
@@ -616,7 +619,11 @@ describe('renewal order', () => {
     const otherSeed = new Uint8Array(32).fill(32)
     const otherInception = createInception(otherSeed, 0)
     const otherID = didFromInception(otherInception.event)
-    const other = createControllerIdentity({ seed: otherSeed, profile: 0, log: [otherInception] })
+    const other = createControllerIdentity({
+      seed: otherSeed,
+      profile: 0,
+      log: asControllerLog([otherInception]),
+    })
     const otherController: ControllerBinding = {
       id: otherID,
       prefix: [otherInception],

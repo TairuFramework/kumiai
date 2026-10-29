@@ -9,9 +9,47 @@ import {
   createInvite,
   createKeyPackageBundle,
   processWelcome,
+  restoreGroup,
 } from '../src/group.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { MissingLedgerEntriesError } from '../src/policy.js'
+import { DEVICE_ENTRY_TYPE } from '../src/registry.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
+import { belowGateWelcome, pipelineGroup } from './fixtures/lifecycle-pipeline.js'
+
+test('restored handle takes its own admission from the replayed ledger', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150000)
+  try {
+    const epoch = await buildEpoch({ members: 1 })
+    const member = epoch.members[0]
+    if (member == null) throw new Error('Missing member')
+    const { group, identity } = await pipelineGroup({ controllerLog: epoch.log })
+    const { joined } = await belowGateWelcome(group, member.identity, {
+      id: epoch.did,
+      prefix: epoch.log.chain,
+      member: { add: member.add, g: epoch.head.gen },
+      iat: 100,
+    })
+    const params = { state: joined.state, credential: joined.credential }
+    const unknown = await restoreGroup(params)
+    expect(unknown.sendAdmission()).toMatchObject({ admissible: true })
+    const floor = await signLedgerEntry(identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: epoch.did,
+      value: { op: 'clock', time: 1001 },
+    })
+    const ledgerEntries = [...joined.ledgerTokens, floor]
+    const restored = await restoreGroup({ ...params, ledgerEntries })
+    expect(restored.sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
+    await expect(restored.encrypt(new Uint8Array([1]))).rejects.toMatchObject({
+      reason: 'lapsed',
+    })
+    expect(ledgerEntries).toEqual([...joined.ledgerTokens, floor])
+  } finally {
+    clock.mockRestore()
+  }
+})
 
 describe('received commit persistence boundary', () => {
   test('rolls back a failed persist, then applies once; persistence sees the new state before notification', async () => {

@@ -15,7 +15,7 @@
 '@kumiai/rpc-conformance': minor
 ---
 
-The group moves from the 0.10 band to the 0.11 band for crash-safe control. Every publishable
+The group moves from the 0.12 band to the 0.13 band for crash-safe control. Every publishable
 package shares one meaningful version — the minor while pre-1.0, the major after — so a matched
 band is a coherent set. Trailing segments still diverge freely: a package taking a patch release
 on its own does not move anyone else.

@@ -1,4 +1,3 @@
-import { createRevoke } from '@kokuin/controller'
 import { randomIdentity } from '@kokuin/token'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
@@ -36,6 +35,7 @@ import {
 } from '../src/index.js'
 import * as lifecycle from '../src/lifecycle.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { buildBoundKeyPackageBundle, twoDeviceProfileGroup } from './fixtures/device-harness.js'
 import { controllerID, controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
@@ -260,16 +260,19 @@ const builders: Array<{ name: string; prepare: () => Promise<BuilderFixture> }> 
       const { author: group, peer } = await lifecyclePair()
       const log = [
         inception,
-        createRevoke({
+        revokeChain({
           seed: controllerSeed,
           profile: 0,
           did: controllerID,
-          prior: inception.event,
-          target: peer.id,
-          keyPosition: { gen: 0, seq: 0 },
+          chain: [inception],
+          subject: peer.id,
         }),
       ]
-      return { group, build: (group) => revokeWithProof(group, { subject: peer.id, log }) }
+      return {
+        group,
+        build: (group) =>
+          revokeWithProof(group, { deny: [peer.id], log: { chain: log, events: [] } }),
+      }
     },
   },
 ]

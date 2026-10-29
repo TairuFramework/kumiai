@@ -2,6 +2,7 @@ import { audienceConfirmation, createCapability, now } from '@kokuin/capability'
 import { createControllerIdentity, createInception, didFromInception } from '@kokuin/controller'
 import { createIdentity, createSigningIdentity, stringifyToken } from '@kokuin/token'
 
+import { asControllerLog } from '../../src/controller-log.js'
 import type { ControllerBinding, MLSCredentialIdentity } from '../../src/credential.js'
 
 export type BoundLeaf = {
@@ -56,7 +57,11 @@ export async function buildBoundLeaf(options: BuildBoundLeafOptions = {}): Promi
 
   const inception = createInception(controllerSeed, profile)
   const controllerID = didFromInception(inception.event)
-  const controller = createControllerIdentity({ seed: controllerSeed, profile, log: [inception] })
+  const controller = createControllerIdentity({
+    seed: controllerSeed,
+    profile,
+    log: asControllerLog([inception]),
+  })
   const device = await buildDevice(deviceSeed, options.deviceMethod ?? 'key')
 
   const capabilityToken = await createCapability(controller, {

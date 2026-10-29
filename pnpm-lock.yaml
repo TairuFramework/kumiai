@@ -165,47 +165,50 @@ settings:
 catalogs:
   default:
     '@enkaku/client':
-      specifier: ^0.21.6
-      version: 0.21.6
+      specifier: ^0.22.3
+      version: 0.22.3
     '@enkaku/http-fetch':
-      specifier: ^0.21.6
-      version: 0.21.6
+      specifier: ^0.22.3
+      version: 0.22.3
     '@enkaku/http-serve':
-      specifier: ^0.21.6
-      version: 0.21.6
+      specifier: ^0.22.3
+      version: 0.22.3
     '@enkaku/protocol':
-      specifier: ^0.21.6
-      version: 0.21.6
+      specifier: ^0.22.3
+      version: 0.22.3
     '@enkaku/server':
-      specifier: ^0.21.6
-      version: 0.21.6
+      specifier: ^0.22.3
+      version: 0.22.3
     '@enkaku/transport':
-      specifier: ^0.21.6
-      version: 0.21.6
+      specifier: ^0.22.3
+      version: 0.22.3
     '@hozon/adapter':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.1
+      version: 0.2.1
     '@hozon/db':
-      specifier: ^0.2.3
-      version: 0.2.3
+      specifier: ^0.5.0
+      version: 0.5.0
     '@hozon/node-sqlite':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.0
+      version: 0.2.0
     '@hozon/postgres':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.0
+      version: 0.2.0
+    '@hozon/provider':
+      specifier: ^0.3.0
+      version: 0.3.0
     '@kokuin/capability':
+      specifier: ^0.5.2
+      version: 0.5.2
+    '@kokuin/controller':
+      specifier: ^0.2.5
+      version: 0.2.5
+    '@kokuin/expo':
       specifier: ^0.4.2
       version: 0.4.2
-    '@kokuin/controller':
-      specifier: ^0.1.0
-      version: 0.1.0
-    '@kokuin/expo':
-      specifier: ^0.4.0
-      version: 0.4.0
     '@kokuin/token':
-      specifier: ^0.5.1
-      version: 0.5.1
+      specifier: ^0.6.4
+      version: 0.6.4
     '@noble/ciphers':
       specifier: ^2.4.0
       version: 2.4.0
@@ -216,8 +219,8 @@ catalogs:
       specifier: ^2.4.0
       version: 2.4.0
     '@sozai/async':
-      specifier: ^0.4.1
-      version: 0.4.1
+      specifier: ^0.4.3
+      version: 0.4.3
     '@sozai/codec':
       specifier: ^0.4.3
       version: 0.4.3
@@ -225,8 +228,8 @@ catalogs:
       specifier: ^0.1.6
       version: 0.1.6
     '@sozai/http-server':
-      specifier: ^0.1.1
-      version: 0.1.1
+      specifier: ^0.2.1
+      version: 0.2.1
     '@sozai/log':
       specifier: ^0.4.0
       version: 0.4.0
@@ -243,17 +246,17 @@ catalogs:
       specifier: ^0.1.6
       version: 0.1.6
     '@teikyo/access':
-      specifier: ^0.1.1
-      version: 0.1.1
+      specifier: ^0.4.0
+      version: 0.4.0
     '@teikyo/enkaku':
-      specifier: ^0.1.1
-      version: 0.1.1
+      specifier: ^0.4.0
+      version: 0.4.0
     '@teikyo/hozon':
-      specifier: ^0.1.1
-      version: 0.1.1
+      specifier: ^0.4.0
+      version: 0.4.0
     '@teikyo/rate-limit':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.2.0
+      version: 0.2.0
     '@testcontainers/postgresql':
       specifier: ^12.2.1
       version: 12.2.1
@@ -273,9 +276,6 @@ catalogs:
       specifier: ^5.0.5
       version: 5.0.5
 
-overrides:
-  '@hozon/provider': 0.1.1
-
 importers:
 
   .:
@@ -288,16 +288,16 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@noble/hashes':
         specifier: 'catalog:'
         version: 2.4.0
       '@sozai/async':
         specifier: 'catalog:'
-        version: 0.4.1
+        version: 0.4.3
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.3
@@ -316,7 +316,7 @@ importers:
     dependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -335,13 +335,13 @@ importers:
     devDependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-server':
         specifier: workspace:^
         version: link:../hub-server
@@ -366,13 +366,13 @@ importers:
     dependencies:
       '@enkaku/http-serve':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@hozon/provider':
-        specifier: 0.1.1
-        version: 0.1.1(@logtape/logtape@2.4.2)
+        specifier: 'catalog:'
+        version: 0.3.0(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -384,38 +384,38 @@ importers:
         version: link:../hub-store
       '@sozai/http-server':
         specifier: 'catalog:'
-        version: 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/access':
         specifier: 'catalog:'
-        version: 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/enkaku':
         specifier: 'catalog:'
-        version: 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/hozon':
         specifier: 'catalog:'
-        version: 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@teikyo/rate-limit':
         specifier: 'catalog:'
-        version: 0.1.0(@logtape/logtape@2.4.2)(hono@4.13.13)
+        version: 0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/http-fetch':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/capability':
         specifier: 'catalog:'
-        version: 0.4.2(@logtape/logtape@2.4.2)
+        version: 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
 
   packages/hub-protocol:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@noble/ciphers':
         specifier: 'catalog:'
         version: 2.4.0
@@ -440,16 +440,16 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/capability':
         specifier: 'catalog:'
-        version: 0.4.2(@logtape/logtape@2.4.2)
+        version: 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -465,10 +465,10 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -480,10 +480,10 @@ importers:
     dependencies:
       '@hozon/adapter':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.1
       '@hozon/db':
         specifier: 'catalog:'
-        version: 0.2.3(@logtape/logtape@2.4.2)
+        version: 0.5.0(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -493,22 +493,22 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@hozon/node-sqlite':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@hozon/postgres':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -523,13 +523,13 @@ importers:
     dependencies:
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
       '@sozai/async':
         specifier: 'catalog:'
-        version: 0.4.1
+        version: 0.4.3
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.3
@@ -542,16 +542,16 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -582,13 +582,13 @@ importers:
     dependencies:
       '@kokuin/capability':
         specifier: 'catalog:'
-        version: 0.4.2(@logtape/logtape@2.4.2)
+        version: 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/controller':
         specifier: 'catalog:'
-        version: 0.1.0(@logtape/logtape@2.4.2)
+        version: 0.2.5(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@noble/ciphers':
         specifier: 'catalog:'
         version: 2.4.0
@@ -598,6 +598,9 @@ importers:
       '@noble/hashes':
         specifier: 'catalog:'
         version: 2.4.0
+      '@sozai/async':
+        specifier: 'catalog:'
+        version: 0.4.3
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.3
@@ -615,10 +618,10 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-client':
         specifier: workspace:^
         version: link:../hub-client
@@ -634,16 +637,16 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/capability':
         specifier: 'catalog:'
-        version: 0.4.2(@logtape/logtape@2.4.2)
+        version: 0.5.2(@logtape/logtape@2.4.2)
       '@kokuin/controller':
         specifier: 'catalog:'
-        version: 0.1.0(@logtape/logtape@2.4.2)
+        version: 0.2.5(@logtape/logtape@2.4.2)
       '@kumiai/hub-server':
         specifier: workspace:^
         version: link:../hub-server
@@ -661,7 +664,7 @@ importers:
     dependencies:
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-tunnel':
         specifier: workspace:^
         version: link:../hub-tunnel
@@ -701,19 +704,19 @@ importers:
     dependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/broadcast':
         specifier: workspace:^
         version: link:../broadcast
@@ -769,22 +772,22 @@ importers:
     dependencies:
       '@kokuin/expo':
         specifier: 'catalog:'
-        version: 0.4.0(@logtape/logtape@2.4.2)(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
+        version: 0.4.2(@logtape/logtape@2.4.2)(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../../packages/mls
       '@sozai/runtime-expo':
         specifier: 'catalog:'
-        version: 0.3.0(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
+        version: 0.3.0(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
       expo:
-        specifier: ~58.0.17
-        version: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+        specifier: ~58.0.19
+        version: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       expo-status-bar:
         specifier: ~58.0.4
-        version: 58.0.4(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+        version: 58.0.4(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
       react:
         specifier: 19.3.0
         version: 19.3.0
@@ -803,31 +806,34 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/http-fetch':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.6(@logtape/logtape@2.4.2)
+        version: 0.22.3(@logtape/logtape@2.4.2)
       '@hozon/db':
         specifier: 'catalog:'
-        version: 0.2.3(@logtape/logtape@2.4.2)
+        version: 0.5.0(@logtape/logtape@2.4.2)
       '@hozon/node-sqlite':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
       '@hozon/postgres':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.2.0
+      '@kokuin/controller':
+        specifier: 'catalog:'
+        version: 0.2.5(@logtape/logtape@2.4.2)
       '@kokuin/token':
         specifier: 'catalog:'
-        version: 0.5.1(@logtape/logtape@2.4.2)
+        version: 0.6.4(@logtape/logtape@2.4.2)
       '@kumiai/hub-client':
         specifier: workspace:^
         version: link:../../packages/hub-client
@@ -1300,26 +1306,26 @@ packages:
   '@borewit/text-codec@0.2.2':
     resolution: {integrity: sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ==}
 
-  '@enkaku/client@0.21.6':
-    resolution: {integrity: sha512-cvG7y9hQNRLm8moOdBZRWgMGfBG9nhT03Xo/EfqKUarK7Ktf1fWQYOGiPHioTYDhQk7NsW/W8xRDFCAeIJqVvw==}
+  '@enkaku/client@0.22.3':
+    resolution: {integrity: sha512-fwBBvaGG3tQRsZq+qygbUt6THod9gXId5kF01j+3YqFQ7KqR8QUR7OZAqynj/b0LIkaXMPo7+Q7CP5tjLCPUdw==}
 
-  '@enkaku/http-fetch@0.21.6':
-    resolution: {integrity: sha512-BpqJ3EfeXL7O4TnZr0zV4gXCdtEml8xv9cZtiwr8EFbDN8v+h4aRJROCuedAncwuXBesruQpUKztydRL4uzmDQ==}
+  '@enkaku/http-fetch@0.22.3':
+    resolution: {integrity: sha512-ERDjrCOz/pINWt0++nyHaGaW9tNYcGeDiMTK6ZzprXAvod28l8gx7FnCOI6r128iirfG767GmqpB3GmPOE7WNg==}
 
-  '@enkaku/http-serve@0.21.6':
-    resolution: {integrity: sha512-6S+GzzffrBj4o49JWcPr4NB5275d7PC2v/D987Zk4VlgBcpocN97sJVr0BWBVtU0S4A7sxCEnebohe5X038LdQ==}
+  '@enkaku/http-serve@0.22.3':
+    resolution: {integrity: sha512-GgcNvaMeEbd306CzFpV9qfPXowyQVeAl8v+SMhu8h1t/JkIwyYN7C7Toy0fS2vZR8rAJxHqPOPjrRdlMV6KdRg==}
 
-  '@enkaku/otel@0.21.6':
-    resolution: {integrity: sha512-F0Sbzl3+OwvdyIeeUfrrsTlspRN1lTfuNjZlWJuAlaM6TJAq1Dp7bgVLeu4Jlotv4Y6C0jIfnk5LgqtcJ6ON2g==}
+  '@enkaku/otel@0.22.3':
+    resolution: {integrity: sha512-M5QXlA11UEYhU9rPiyesSyK99Agq5MfFb2G1mz3mUHJVox7X3j9lvkmHpSn3EltMHv0eHUjkCT7BvnZpyt+I+Q==}
 
-  '@enkaku/protocol@0.21.6':
-    resolution: {integrity: sha512-c0DdKsqBZvt9JLL3MzToQnNoF3OP6GLy3FqZVrmhzRNoyvboILzww1TjSbw1qFkHz+KgGV2lqWgTUo2kjp89Qw==}
+  '@enkaku/protocol@0.22.3':
+    resolution: {integrity: sha512-8OR/L3IeskoN4zFgLpen86CGWbos8zvLArbTi+XRdNT8DkbTO/c8sLHKRxOfNr4OmO4w/0x6h4Rq3byiDLT1VA==}
 
-  '@enkaku/server@0.21.6':
-    resolution: {integrity: sha512-DbdCw8HPfBkrKSQ7EexTK86SqWEvqm+S6I1qhRjL/Yt1hbIgy0UeWuGAy8OZKuPSYAGzkbtX8arT8bJ8bfbsaw==}
+  '@enkaku/server@0.22.3':
+    resolution: {integrity: sha512-jTvyEwlgsibj3uAmfk6p6dlRe99cERoOeQco8nIOVrthy6N5koXsSz/PmTtbaNt+i2bhSumWszhCgU3HQaeUVQ==}
 
-  '@enkaku/transport@0.21.6':
-    resolution: {integrity: sha512-vQegeuAqcox01k48iLTaV12jXL3ieqoAA18omfqIq/jCuwoO2zKWP7cJ+uoJYHQiBgaDXVe7s9HBwLOMPBqTiA==}
+  '@enkaku/transport@0.22.3':
+    resolution: {integrity: sha512-GaeK7bQxG1jZcQ3WZraazHRG/mvYedeKAl6t+YC4NWYKEklJIDRQauhQn0mz5wagO9ld2/J/IUGGkuqvvRecGg==}
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -1477,8 +1483,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@expo/cli@58.1.14':
-    resolution: {integrity: sha512-Qrpkhb9XrQn+wuxaOVR0hh0dLzeFZjGZHC9Jz86hPsexPzP+/mnMigRoWVaeEP8q7b3Hsr98gozL5d94DzFOBw==}
+  '@expo/cli@58.1.15':
+    resolution: {integrity: sha512-+gBvfvmttvNqs8ceJe1SdiWBa6reocb/ZC8jMxsF8qFlCijAUQNqFMGCPkT/6zasFkQLUL8ZOFhf/9DKj2XaLg==}
     hasBin: true
     peerDependencies:
       expo: '*'
@@ -1500,8 +1506,8 @@ packages:
   '@expo/config-types@58.0.3':
     resolution: {integrity: sha512-wyfrwkTT/hQHzwyqkXkngKxoOa8L6ovsTP4h/UukS1mTmssee5et6HOPoN5RtawdJPnm5JO28f//C/wXlpka8Q==}
 
-  '@expo/config@58.0.7':
-    resolution: {integrity: sha512-FzpIEDVLNHNeztnWxvg1Oh6WJQwd5nXBgZILrrE9rG7GPjWBf3KbFr4qpqLe/QUeyuzPhHyfIbxMMUjiRBBgCQ==}
+  '@expo/config@58.0.8':
+    resolution: {integrity: sha512-jbel1j208xyWFzy2XUUEo/sSnu+7hMunbw//rNyGrjM73rBQouWl3IRKo/p6p4BhRUgoUDJTqmm+AY9LSzfp2A==}
 
   '@expo/devcert@1.2.2':
     resolution: {integrity: sha512-wz1YedXwdNbYqk/PRr34vixnuw1+l6uSwmPXUj649cot5iYNccb2zIOnK7Nonb1Pfd/dxAY6CvU6KM3uSdxC7A==}
@@ -1544,8 +1550,8 @@ packages:
   '@expo/json-file@11.2.1':
     resolution: {integrity: sha512-UPhKoFCj8BcwgLB1rKQ1CuR/REITnZLiqxHEHOeH1tPsdXcHGtUDh0P5bLbr7oU0nKVdtJ5rzyKx8jniMQdESQ==}
 
-  '@expo/local-build-cache-provider@58.0.7':
-    resolution: {integrity: sha512-RlpFBiduGKpcltNMDVMCEx+YfxsmMVORh5dOuJ1ntdq8igiJv1Qg9nIpRWqFuHL8iY70woRIqG8Ov/txJuHONA==}
+  '@expo/local-build-cache-provider@58.0.8':
+    resolution: {integrity: sha512-vM2YZgQ7XSWuVZmPQgK764lj2PiP9+Y3m/tOpVTI0mHHpCoImBu7R+4KQNPqW87r44rhevduggi8kZ0kaoNNxQ==}
 
   '@expo/log-box-utils@58.0.2':
     resolution: {integrity: sha512-My8Lwe9FU/yDwwzqwi5LN2rzzDcJqIAZKrD9f0XHZEKz/FQnWJYdt1rsV7+RwqMGeGq2XsxTCVT1ggTCOvumxw==}
@@ -1561,8 +1567,8 @@ packages:
       expo:
         optional: true
 
-  '@expo/metro-config@58.0.16':
-    resolution: {integrity: sha512-njvkkNGe2joPmIwoquGTmlmt24q4zYfQs0AIEh5XAyK7o6oVIB/t5EjS4j3f+P6v+ib9U7vxmo62T5+/Dy2pcg==}
+  '@expo/metro-config@58.0.17':
+    resolution: {integrity: sha512-T2i8chQ5PsF6zgS10AixIteBlPu8oMAcqoD9MPk6CBQvcAdM4bE/x9VuDxuqKcAvFg+bRZMq1JfGAjJcRSmKkQ==}
     peerDependencies:
       expo: '*'
     peerDependenciesMeta:
@@ -1610,8 +1616,8 @@ packages:
   '@expo/plist@0.10.1':
     resolution: {integrity: sha512-nuNOqj+r/hGJbZ1Ax3jUpZaOB8UAMHUrISALJEUKaCieTflYj7224EqFWmMpriCGk9wXS1gH+9GGVnSj0tWzuQ==}
 
-  '@expo/prebuild-config@58.0.15':
-    resolution: {integrity: sha512-1qvYdhCRO3iu2iPtTNhVTetk5U3Cmby/MMDQmunFQ94jyrbtpLyb9PvU6bvvRdzoaC7PZbHp3Xvlwtx+Webx9A==}
+  '@expo/prebuild-config@58.0.16':
+    resolution: {integrity: sha512-Yhr+1wy4YzLZjbi+F4ss+kUdPN5WnnJ8lwVwOC2wQOsnjnfnyrDImGoEhbnTvzLHRCN8+gEtqKhW9ZSosYYUxQ==}
 
   '@expo/require-utils@58.0.4':
     resolution: {integrity: sha512-DvjS5NCitXYcad2Woe1EMHJKcbhTbE77HX0BgOQGL2LFHE3q2H0n8kCWDPBOCVJ63Drap3c35nwoJwF5TQL7Tw==}
@@ -1621,15 +1627,15 @@ packages:
       typescript:
         optional: true
 
-  '@expo/router-server@58.0.16':
-    resolution: {integrity: sha512-pBts7H/ntTcmJnn/2T2Wfpm2XNu+yp7FVJbB9iKG+pqEDqH7PEFpts1Ju80OXQHL1sDQKhUVMe0TCNp+tclp1w==}
+  '@expo/router-server@58.0.17':
+    resolution: {integrity: sha512-9xZqpWIvb9/2ZH038WrWAtXQJsVep1ZG9FYh7cpoz6RGRo9SkmG97kMkQW7slKzL85Ppx8iW+68EHK9SQf/Zog==}
     peerDependencies:
       '@expo/metro-runtime': ^58.0.15
       expo: '*'
       expo-constants: ^58.0.13
-      expo-font: ^58.0.9
+      expo-font: ^58.0.10
       expo-router: '*'
-      expo-server: ^58.0.5
+      expo-server: ^58.0.6
       react: '*'
       react-dom: '*'
       react-server-dom-webpack: ~19.0.1 || ~19.1.2 || ~19.2.1 || ~19.3.0
@@ -1690,24 +1696,24 @@ packages:
     peerDependencies:
       hono: '>=4.0.0'
 
-  '@hozon/adapter@0.1.0':
-    resolution: {integrity: sha512-OfwOdQneFmsCpxtbeQxI11VLWR1+hSHH8klq4QxYLqMTtK/SJpVyGqyTDqRPhRzpTeVtYaY8xw31K9m1drjciA==}
+  '@hozon/adapter@0.2.1':
+    resolution: {integrity: sha512-OGeMABBQnI52dLIPRq2vCHJB7PEssoIUMuyHjDcMItpwnQJwYER5wXx7vlVawozUhud8nLVyg3v4Lp3ULPn0Og==}
     engines: {node: '>=24'}
 
-  '@hozon/db@0.2.3':
-    resolution: {integrity: sha512-M64coSybdKUok8Ky8brldJ/VYmFSXxa2U1sLJvHHE9ROlpE1Pi6kTMH5Ajk7wJPGnOflvfcNG0HUc+AXh70IAg==}
+  '@hozon/db@0.5.0':
+    resolution: {integrity: sha512-5Iu2k6N96htRPXw8L8Dn4B7pI/VitupOsNGA4lMdmWXPuw27Zgne70wnKNLrsf6UhXx2x/RxE+oOP3JjpD+nlQ==}
     engines: {node: '>=24'}
 
-  '@hozon/node-sqlite@0.1.0':
-    resolution: {integrity: sha512-yUOEHgxSXI6QlpjJNOYa3R+Ytp3dS7VB50oISVnUHvX0rWqVEBa1XNfN90cYjrAyeGLTKO3zFLQhqdhv7Qz5Xw==}
+  '@hozon/node-sqlite@0.2.0':
+    resolution: {integrity: sha512-D6qlhV6B0+2UnSMKAAEcop7XoAjO9j10i4Uob5LAZ0po24ou34doXTCxbNsZHhKlLk6bPsAAu2OBJbPdbEd1GA==}
     engines: {node: '>=24'}
 
-  '@hozon/postgres@0.1.0':
-    resolution: {integrity: sha512-q5uBO8E8taQNFODltPM0AJb4X4cRdyXPQrw2pjKuR0vfupdfa+Q6ViLN/54Cb7WfR73Rt7RaSMxbwSPTuA9Gbw==}
+  '@hozon/postgres@0.2.0':
+    resolution: {integrity: sha512-u7RrTXTvRbyh2fgI0VF+Lu7SSFOIbtDIv7q+UXiGyQqS3hScNc2hc9PgzsC/aCntEF+qNmBpUVtsqhtVskLZ8A==}
     engines: {node: '>=24'}
 
-  '@hozon/provider@0.1.1':
-    resolution: {integrity: sha512-mbKYqRKIkP7O8oh99be//bLT0e1UV7He+Tk2/R8vqvnM3NeG6GbE1EZqyk5/lsh0jBj1G0mrCzfyJA7yEdujAA==}
+  '@hozon/provider@0.3.0':
+    resolution: {integrity: sha512-0fjTibKSNym1NuTbOo930sZnoHpSbMi+hwLFun98uJ6EM6AhEz/38gZBpzSpSOUqYd2bWBFMwmC7ZX0fWn1V3w==}
     engines: {node: '>=24'}
 
   '@hpke/common@1.10.1':
@@ -1763,20 +1769,20 @@ packages:
     resolution: {integrity: sha512-Ti+Ob/Ct0amJDnefhOpOxWJWzYPN2AKb5w0eF78DXYG2Oqg96iJ1VeGRb4HmLJGBi+NNwikIpFOBz8r6qDrzVQ==}
     hasBin: true
 
-  '@kokuin/capability@0.4.2':
-    resolution: {integrity: sha512-v2iVtToe+Lp3tjPjRrKfDWFOtfQeQ6FTlWlkiO3JNZpfx82in0m1/9ztm/t/O9K+Y/M4xllSUvxj9QXG8QJlJw==}
+  '@kokuin/capability@0.5.2':
+    resolution: {integrity: sha512-TSHpklIIpHv6jjv4cZ0gPy/Id4noEIy4wuSCkrNLSNJSCWsHXh4g9Qbprp79OgNOWfFODAGqTvYpWsNFh/8jdw==}
 
-  '@kokuin/controller@0.1.0':
-    resolution: {integrity: sha512-AgC97EW1F2oJYrdjXf4Ei4afM9NUP4em0Orr1Hr3W6QZRCJjGDZ6pctF5d4gA01uA9xbuzYw3UomhzaWlKy/EQ==}
+  '@kokuin/controller@0.2.5':
+    resolution: {integrity: sha512-ApWN7AIuhupK2hBmNlqsswdMPu2m+lPpNZTZ26wkwXaUGJx/L3M4/3bNFVcjhEIU+9JVY+A77u+837pRjA5Z6g==}
 
-  '@kokuin/expo@0.4.0':
-    resolution: {integrity: sha512-EboJ1uel4lJJ/Ojorm+DKVQ3PKuqIkqkWMQgaEbIn2Al/Ko3q546wdP6ArBYommzbtDEXJuHEz1UnEkUdkyVbw==}
+  '@kokuin/expo@0.4.2':
+    resolution: {integrity: sha512-vxtJltdEGTAnBy/q2ZYqNOwh++al8jLbRZrZySi+EaEY7EkF7iO1bi/pu+gGUViQLJJ6+ewntCpNqEQhSC0t2w==}
 
-  '@kokuin/otel@0.3.0':
-    resolution: {integrity: sha512-XwnBYkrglkV0aVcPx/ajDL6DNAZgFeZ7cNyzAHMW6ex4/RyY9xJ7htNYzl/sCFlYMNQ8M/lPayrzYf3hdN4dUQ==}
+  '@kokuin/otel@0.3.1':
+    resolution: {integrity: sha512-dXv3mA8NG/EnCfJFGkfnxlofWuJxkXO7+w91UdQbl4gd4KlMWHnOhSwH1B9zenW72aVX9oM2YK6J95jZqmoz2w==}
 
-  '@kokuin/token@0.5.1':
-    resolution: {integrity: sha512-VI1Mo4ky45/9c3rSq77gWyIyxdv2nPjsC1piImMDwgV+/Q93L+fcCxuYbrii7qUY/SClTccCK3qaKmDJTBHhFA==}
+  '@kokuin/token@0.6.4':
+    resolution: {integrity: sha512-kfJekuEV9cVA9ccOmQb86k7+mWlKqqyYn7EyjFO/aZ+XOSTc9eHorqHrnQKvCS/7egW0SHXPYu2wyX3RjP2Khw==}
 
   '@kwsites/file-exists@1.1.1':
     resolution: {integrity: sha512-m9/5YGR18lIwxSFDwfE3oA7bWuq9kdau6ugN4H2rJeyhFQZcG9AgSHkQtSD15a8WvTgfz9aikZMrKPHvbpqFiw==}
@@ -2202,8 +2208,8 @@ packages:
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
 
-  '@sozai/async@0.4.1':
-    resolution: {integrity: sha512-B026uyunAkdGARhXsIA0KgHjE7rZyndAN8W/LCG01rEHJilFFC1NX4MISs1hTmXqHMMzxIkLLkoNzNVAe7pwdQ==}
+  '@sozai/async@0.4.3':
+    resolution: {integrity: sha512-8Yc+4zLoQgOb/9OZcJq+OCouy8s0SuFX71VRwJznvXGKwu9YMRuFZbaPSDuwoefJX3hDzwtJ2Mnypd+BuCmEqw==}
 
   '@sozai/codec@0.4.3':
     resolution: {integrity: sha512-C2WtBwspVIRtCS4AS4qXTQUxgTN2RjzKH/eK6nInh0/MeCZUBtkxrp40GwKy6VCA3lim2Ta8bFNXet9l8QbxCg==}
@@ -2214,14 +2220,11 @@ packages:
   '@sozai/execution@0.2.3':
     resolution: {integrity: sha512-sknU9ABs/gIklF7mmDBzS47n89qaviKMGxnfZPMN/lZqgcF0wJgBJUcW4RKS5KzcCeBL7f88yIia08ZxkeRoqA==}
 
-  '@sozai/http-server@0.1.1':
-    resolution: {integrity: sha512-yvlKtf/f2/NRxhl5FSLTygbTflZETnS1xxQ8XRAoiLAZ32wS2R8qguNz4ZTBaaQpG7IAzDzk4iN2PqgUvlqtOg==}
+  '@sozai/http-server@0.2.1':
+    resolution: {integrity: sha512-RllI34Se+9mg6NfN29QAsZPI7AVr04v3LxhS9DKqD4NZkrwnY3zkjOT9rZfdh9WXullZAGopNg4dARo+58YXCQ==}
     engines: {node: '>=24'}
     peerDependencies:
       hono: ^4.13.13
-
-  '@sozai/json@0.1.1':
-    resolution: {integrity: sha512-5ftTPdDYVeFj14VZWBKi4jV5Xu0XC2yioNEWXgSfrdw9QkCY+R6nNwkukHaVwyFAnz8qLnKHYNjg+42gxAOo4Q==}
 
   '@sozai/json@0.3.0':
     resolution: {integrity: sha512-ArThPadz4kZjDqVnHI+UROwervbL9riIEYQ4b0g9e9mtA22EZ54lvNgsNvEUHL+oK53tlhgmHsgO2w5FwCTrhg==}
@@ -2231,8 +2234,8 @@ packages:
     peerDependencies:
       '@logtape/logtape': ^2.3.11
 
-  '@sozai/otel@0.3.4':
-    resolution: {integrity: sha512-qnX2hMqHYRIKMADURHNXxfAuSzyNoyMbtz9/zNDhULsPTr2neuEOgx8BH8svRem2pJHEUb0qIISd6EOmBTOUYw==}
+  '@sozai/otel@0.4.0':
+    resolution: {integrity: sha512-IJJQDJO6QwlvkfOJa5f0OGde68qMzZg9RpxzV71NSh6CTa3qqH05NlSg4nHcDbDBNFbrJti4k+BwIKrOcOUQIw==}
 
   '@sozai/result@0.2.2':
     resolution: {integrity: sha512-lz6gZMWmKekgFqWQGFw4T901ufJAjbySoOvZ57UJeAb0drm+jUJlaVNqs1Fn5Yeeylkxym2nNcwS3CDHOTObPA==}
@@ -2356,24 +2359,24 @@ packages:
   '@swc/types@0.1.28':
     resolution: {integrity: sha512-V6Mnml8v09QALx6K0elJ7o9K/MkVDtW3t6L+7Ou/JcWtb3xwId2AH4FeOceySd2JaO87IMw4+6vSZxLm34LPbw==}
 
-  '@teikyo/access@0.1.1':
-    resolution: {integrity: sha512-U886dtqyxEBKVjr6ABq9tKJmGLZxi8isoQrLDAALQvIC/NlKTOgXpjGZpskajWdF7MJyHiNkJdf4zMWrSAwz1w==}
+  '@teikyo/access@0.4.0':
+    resolution: {integrity: sha512-VY4Vaa5MgIS7YYMTR3TqOgk9tD8gCilRUot9y8Wsl8NycPqXw7EHy78QR9ynZExMYg6dfQiugxI4WyRGofsLIg==}
     engines: {node: '>=24'}
 
-  '@teikyo/enkaku@0.1.1':
-    resolution: {integrity: sha512-gtmHNkY5M08DPhmYO7Klr6znjKK9FV5mlT30lkmlSOlI2v/G3q2owTQnBmDuCNqfWPDvM9e7/+U2N0maEPPM9w==}
-    engines: {node: '>=24'}
-    peerDependencies:
-      hono: ^4.13.13
-
-  '@teikyo/hozon@0.1.1':
-    resolution: {integrity: sha512-oyD/c2b9aHrIxpRmF0eKl2lGC4wHS7F2cltJs9N0o8fgPja/bYRfOu/crwkx/QdOi3DYszqtAyywtNcSi+DX1Q==}
+  '@teikyo/enkaku@0.4.0':
+    resolution: {integrity: sha512-udSil3p03QtX6r6UUJ0EKQNvBdEmbql5fDNI6dI0HByjPTD6n4x+NVtlYK1BBALNL2obn5GogzVeVTy3tdcW0A==}
     engines: {node: '>=24'}
     peerDependencies:
       hono: ^4.13.13
 
-  '@teikyo/rate-limit@0.1.0':
-    resolution: {integrity: sha512-fLYruYZfig8u7tFCoVuuHCLuSVhC7v91InmJVeufaZI3KZL68x/fwapVffnDckyootQu2J01YAlZQ/uLfQg+Mg==}
+  '@teikyo/hozon@0.4.0':
+    resolution: {integrity: sha512-WHdyIr6ZEH02MhY2Sz6HJKuWX1VrQTYjE1P4gaE2puJdBnG+AfDC46WpAZUZ7M8n3tJz5+r/uIAFQ3OO8araMA==}
+    engines: {node: '>=24'}
+    peerDependencies:
+      hono: ^4.13.13
+
+  '@teikyo/rate-limit@0.2.0':
+    resolution: {integrity: sha512-DqLgT0alYQmH0fkwnECuatfmVyHg1RqV6ED3HRaWTlBNs5fIinwMG4jM2uIQPTqjRQyW6k4FMobAxTrE/gY+9Q==}
     engines: {node: '>=24'}
     peerDependencies:
       hono: ^4.13.13
@@ -2682,12 +2685,12 @@ packages:
   babel-plugin-transform-flow-enums@0.0.2:
     resolution: {integrity: sha512-g4aaCrDDOsWjbm0PUUeVnkcVd6AKJsVc/MbnPhEotEpkeJQP6b8nzewohQi7+QS8UyPehOhGWn0nOwjvWpmMvQ==}
 
-  babel-preset-expo@58.0.19:
-    resolution: {integrity: sha512-vla5Ga5RCH+L+DhrVZCNf1V481iYNxJtlIq/O0OIj9PcZORv0oLu1SIrUO7ZkzCA1fR5wMEtjhqAQUpvRbpWWw==}
+  babel-preset-expo@58.0.20:
+    resolution: {integrity: sha512-pdOe2B3pR41uYvfMIWUxwz8YMqXuszMEBKTCCLnf2nvypybMEZ30z38J0IcwUCQ2H+hrWAXpueQzWQsdooXWOA==}
     peerDependencies:
       '@babel/runtime': ^7.20.0
       expo: '*'
-      expo-widgets: ^58.0.22
+      expo-widgets: ^58.0.23
       react-refresh: '>=0.14.0 <1.0.0'
     peerDependenciesMeta:
       '@babel/runtime':
@@ -3142,14 +3145,14 @@ packages:
     peerDependencies:
       expo: '*'
 
-  expo-file-system@58.0.10:
-    resolution: {integrity: sha512-n0M7amp/Bv9TAqVfTWq1zGykmQJWiPzDePZIKp8YYKkVvY7N65bo96sMBQlHkhAyW4I1B6MZABnybliy5DXQig==}
+  expo-file-system@58.0.11:
+    resolution: {integrity: sha512-accVZyXeA8RYUNk52ydkcHPnQaYMVJWlWvdF8pU0xLvt7ZPbaOgGzbgbeyTswjlsKSTmrAsKos4prx0PVM4ERA==}
     peerDependencies:
       expo: '*'
       react-native: '*'
 
-  expo-font@58.0.9:
-    resolution: {integrity: sha512-C8sIeVA2NBb76xqqnQ6eVzfXezAfKJC4qVGU9ukKM4KXdLtkhH5bRCvRSc6qUFUmrcNoM3RjI78SEH3lhigRSg==}
+  expo-font@58.0.10:
+    resolution: {integrity: sha512-13orvRCiXg3EuirjMznWTKwFzhKHvtHRkUdgbvolbkyA1+EAbYDpp7LJMnvDnbTFU/m8Kb5awvOiaGzPYQ/ojg==}
     peerDependencies:
       expo: '*'
       react: '*'
@@ -3161,17 +3164,17 @@ packages:
       expo: '*'
       react: '*'
 
-  expo-modules-autolinking@58.0.14:
-    resolution: {integrity: sha512-KlSVwfggAUM7Y+c4msfLr9r73nkrnkKi7iJ3D9fz7ayaqhAiHR7vd7I2hHj+R6hSTyLyJQuCttmjEfs1N2Mp2w==}
+  expo-modules-autolinking@58.0.15:
+    resolution: {integrity: sha512-eTeWBS2RWdp2V/LlhjI5JI/5ACMfrdOax9iBpOshDOAZHsncbAKN2fkpmvyAtvVbj1DUJ04ejINUTyDDLgo2yg==}
     hasBin: true
 
-  expo-modules-cli@0.3.1:
-    resolution: {integrity: sha512-dRLz4GMRi6lETbE729xFVforu9VI2hQ+YLMtVXfukHMjm6KposDOlJGCdYoZpB6oLVMK/NShc1q9v/u4yr1dkA==}
+  expo-modules-cli@0.3.2:
+    resolution: {integrity: sha512-iSIZeNaqi5ku0H3pk2fAyIlM25TWveRr9Xcc+bIZSokhZ0ERLtT5Xc1qVZwszSo0GbXXEoA8zwiGnvaw1DydCQ==}
     engines: {node: ^22.13.0 || ^24.3.0 || ^26.0.0 || >=27.0.0}
     hasBin: true
 
-  expo-modules-core@58.0.24:
-    resolution: {integrity: sha512-RrE6FEWHJWpyazngFj2ZtpGrgf0sDWsl0Pa6TxHP9VD+Ns0Fju6E831d9nDary0PnGlGLHY31nJqfurOd2uEbg==}
+  expo-modules-core@58.0.26:
+    resolution: {integrity: sha512-HOuHt0nCBVv3E8+yMGeR6N6xa4WH+81CLqU/pWjDykt2NUBYGfXVMaWPsjwuBfeYOB/DcJTJR40yq+y9Ku/YcQ==}
     peerDependencies:
       react: '*'
       react-native: '*'
@@ -3180,8 +3183,8 @@ packages:
       react-native-worklets:
         optional: true
 
-  expo-modules-jsi@58.0.17:
-    resolution: {integrity: sha512-pGIj40nf3roqUvCkRbeEJ40ROouyOAdlP3tLWRTci6julMd+FlmCL8UIb6p7TQMODxb8fV2O5VM+QdUd+MPI9A==}
+  expo-modules-jsi@58.0.19:
+    resolution: {integrity: sha512-dmYjRQnkSUdul6jZN3+yq6ZPKwiatUzLJW/pcXYx16q7QJW3i3+4RZ+MnxNeLNgg1rLrCR9F+dIgeh01+FxaFQ==}
     peerDependencies:
       react-native: '*'
 
@@ -3193,8 +3196,8 @@ packages:
     peerDependencies:
       expo: '*'
 
-  expo-server@58.0.5:
-    resolution: {integrity: sha512-FHYecxfGOuAhacHcanR6qCN8Cln9S+FFulcYetLu3ddDg55ohuCsMZ9U4Egzwdm+A2o6N+MdSoJKquBC5F9NIg==}
+  expo-server@58.0.6:
+    resolution: {integrity: sha512-6DBlSZwxk3J0y1j2s4XebAWNiwGaMp32NcWX7b2kJC2+EFf1g+pCcVmx8ylawt2tyLmbDHswm4MHOfrd4bqfvA==}
     engines: {node: ^22.13.0 || ^24.3.0 || ^26.0.0 || >=27.0.0}
 
   expo-status-bar@58.0.4:
@@ -3204,8 +3207,8 @@ packages:
       react: '*'
       react-native: '*'
 
-  expo@58.0.17:
-    resolution: {integrity: sha512-IFH8ExamRC2m7La8q/RiBaZ3dcHga2fuMPQzRXsagS7w2sLDwwExEpZWT9Mr+30A13xEuXAHxZD3zmtgetzvHw==}
+  expo@58.0.19:
+    resolution: {integrity: sha512-+MHH9Bu7OFWsAl8Ox44KgqbVIe72xbxzAi3vLPtVf14o5zHE39iCD//uw/4nyBlqZii6cFUZsvtJDbeRo5OhMA==}
     engines: {node: ^22.13.0 || ^24.3.0 || ^26.0.0 || >=27.0.0}
     hasBin: true
     peerDependencies:
@@ -5375,77 +5378,77 @@ snapshots:
 
   '@borewit/text-codec@0.2.2': {}
 
-  '@enkaku/client@0.21.6(@logtape/logtape@2.4.2)':
+  '@enkaku/client@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
-      '@enkaku/otel': 0.21.6(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.5.1(@logtape/logtape@2.4.2)
-      '@sozai/async': 0.4.1
+      '@enkaku/otel': 0.22.3(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
+      '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/execution': 0.2.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/runtime': 0.1.0
       '@sozai/stream': 0.2.2
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/http-fetch@0.21.6(@logtape/logtape@2.4.2)':
+  '@enkaku/http-fetch@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
-      '@enkaku/otel': 0.21.6(@logtape/logtape@2.4.2)
-      '@enkaku/protocol': 0.21.6(@logtape/logtape@2.4.2)
-      '@enkaku/transport': 0.21.6(@logtape/logtape@2.4.2)
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@enkaku/otel': 0.22.3(@logtape/logtape@2.4.2)
+      '@enkaku/protocol': 0.22.3(@logtape/logtape@2.4.2)
+      '@enkaku/transport': 0.22.3(@logtape/logtape@2.4.2)
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/runtime': 0.1.0
       '@sozai/stream': 0.2.2
       eventsource-parser: 4.1.2
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/http-serve@0.21.6(@logtape/logtape@2.4.2)':
+  '@enkaku/http-serve@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
-      '@enkaku/otel': 0.21.6(@logtape/logtape@2.4.2)
-      '@enkaku/protocol': 0.21.6(@logtape/logtape@2.4.2)
-      '@enkaku/transport': 0.21.6(@logtape/logtape@2.4.2)
-      '@sozai/async': 0.4.1
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@enkaku/otel': 0.22.3(@logtape/logtape@2.4.2)
+      '@enkaku/protocol': 0.22.3(@logtape/logtape@2.4.2)
+      '@enkaku/transport': 0.22.3(@logtape/logtape@2.4.2)
+      '@sozai/async': 0.4.3
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/runtime': 0.1.0
       '@sozai/stream': 0.2.2
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/otel@0.21.6(@logtape/logtape@2.4.2)':
+  '@enkaku/otel@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
       '@opentelemetry/api': 1.10.0
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/protocol@0.21.6(@logtape/logtape@2.4.2)':
+  '@enkaku/protocol@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
-      '@kokuin/token': 0.5.1(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/schema': 0.1.6
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/server@0.21.6(@logtape/logtape@2.4.2)':
+  '@enkaku/server@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
-      '@enkaku/otel': 0.21.6(@logtape/logtape@2.4.2)
-      '@enkaku/protocol': 0.21.6(@logtape/logtape@2.4.2)
-      '@kokuin/capability': 0.4.2(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.5.1(@logtape/logtape@2.4.2)
-      '@sozai/async': 0.4.1
+      '@enkaku/otel': 0.22.3(@logtape/logtape@2.4.2)
+      '@enkaku/protocol': 0.22.3(@logtape/logtape@2.4.2)
+      '@kokuin/capability': 0.5.2(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
+      '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/runtime': 0.1.0
       '@sozai/schema': 0.1.6
       '@sozai/stream': 0.2.2
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/transport@0.21.6(@logtape/logtape@2.4.2)':
+  '@enkaku/transport@0.22.3(@logtape/logtape@2.4.2)':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/event': 0.1.6(@logtape/logtape@2.4.2)
       '@sozai/stream': 0.2.2
     transitivePeerDependencies:
@@ -5529,29 +5532,29 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
-  '@expo/cli@58.1.14(72a97471c6c8e090e3851c28b67c389b)':
+  '@expo/cli@58.1.15(0d295ccc9b8bb2f2909ed4209cebd13d)':
     dependencies:
       2g: 1.0.1(typescript@6.0.3)
       '@expo/code-signing-certificates': 0.0.7
-      '@expo/config': 58.0.7(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/config': 58.0.8(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/config-plugins': 58.0.10(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/devcert': 1.2.2(supports-color@8.1.1)
       '@expo/env': 2.5.3(supports-color@8.1.1)
       '@expo/image-utils': 0.12.5(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/inline-modules': 0.2.7(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/json-file': 11.2.1
-      '@expo/log-box': 58.0.13(@expo/dom-webview@58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0))(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      '@expo/log-box': 58.0.13(@expo/dom-webview@58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0))(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
       '@expo/log-box-utils': 58.0.2
       '@expo/metro': 58.0.0(supports-color@8.1.1)
-      '@expo/metro-config': 58.0.16(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/metro-config': 58.0.17(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/metro-file-map': 58.0.5(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/osascript': 2.8.1
       '@expo/package-manager': 1.14.2
       '@expo/platforms': 58.0.1
       '@expo/plist': 0.10.1
-      '@expo/prebuild-config': 58.0.15(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/prebuild-config': 58.0.16(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/require-utils': 58.0.4(supports-color@8.1.1)(typescript@6.0.3)
-      '@expo/router-server': 58.0.16(79d4a08111551c02c2bcf9f5d1e5c4cd)
+      '@expo/router-server': 58.0.17(4fce29a22bd136957c19ea5ea775815d)
       '@expo/schema-utils': 58.0.2
       '@expo/spawn-async': 1.8.0
       '@expo/ws-tunnel': 2.0.1(ws@8.22.0)
@@ -5569,8 +5572,8 @@ snapshots:
       compression: 1.8.2(supports-color@8.1.1)
       connect: 3.7.0(supports-color@8.1.1)
       dnssd-advertise: 1.1.6
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
-      expo-server: 58.0.5
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo-server: 58.0.6
       fetch-nodeshim: 0.4.10
       getenv: 2.0.0
       glob: 13.0.6
@@ -5635,7 +5638,7 @@ snapshots:
 
   '@expo/config-types@58.0.3': {}
 
-  '@expo/config@58.0.7(supports-color@8.1.1)(typescript@6.0.3)':
+  '@expo/config@58.0.8(supports-color@8.1.1)(typescript@6.0.3)':
     dependencies:
       '@expo/config-plugins': 58.0.10(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/config-types': 58.0.3
@@ -5659,17 +5662,17 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@expo/devtools@58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)':
+  '@expo/devtools@58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)':
     dependencies:
       chalk: 4.1.2
     optionalDependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
 
-  '@expo/dom-webview@58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)':
+  '@expo/dom-webview@58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)':
     dependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
 
@@ -5722,9 +5725,9 @@ snapshots:
       '@babel/code-frame': 7.29.7
       json5: 2.2.3
 
-  '@expo/local-build-cache-provider@58.0.7(supports-color@8.1.1)(typescript@6.0.3)':
+  '@expo/local-build-cache-provider@58.0.8(supports-color@8.1.1)(typescript@6.0.3)':
     dependencies:
-      '@expo/config': 58.0.7(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/config': 58.0.8(supports-color@8.1.1)(typescript@6.0.3)
       chalk: 4.1.2
     transitivePeerDependencies:
       - supports-color
@@ -5732,24 +5735,24 @@ snapshots:
 
   '@expo/log-box-utils@58.0.2': {}
 
-  '@expo/log-box@58.0.13(@expo/dom-webview@58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0))(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)':
+  '@expo/log-box@58.0.13(@expo/dom-webview@58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0))(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)':
     dependencies:
-      '@expo/dom-webview': 58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      '@expo/dom-webview': 58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
       '@expo/log-box-utils': 58.0.2
       anser: 1.4.10
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
       stacktrace-parser: 0.1.11
     optionalDependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
 
-  '@expo/metro-config@58.0.16(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(supports-color@8.1.1)(typescript@6.0.3)':
+  '@expo/metro-config@58.0.17(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(supports-color@8.1.1)(typescript@6.0.3)':
     dependencies:
       2g: 1.0.1(typescript@6.0.3)
       '@babel/code-frame': 7.29.7
       '@babel/core': 7.29.7(supports-color@8.1.1)
       '@babel/generator': 7.29.8
-      '@expo/config': 58.0.7(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/config': 58.0.8(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/env': 2.5.3(supports-color@8.1.1)
       '@expo/json-file': 11.2.1
       '@expo/metro': 58.0.0(supports-color@8.1.1)
@@ -5774,7 +5777,7 @@ snapshots:
       postcss: 8.5.31
       resolve-from: 5.0.0
     optionalDependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -5847,16 +5850,16 @@ snapshots:
       base64-js: 1.5.1
       xmlbuilder: 15.1.1
 
-  '@expo/prebuild-config@58.0.15(supports-color@8.1.1)(typescript@6.0.3)':
+  '@expo/prebuild-config@58.0.16(supports-color@8.1.1)(typescript@6.0.3)':
     dependencies:
-      '@expo/config': 58.0.7(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/config': 58.0.8(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/config-plugins': 58.0.10(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/config-types': 58.0.3
       '@expo/image-utils': 0.12.5(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/json-file': 11.2.1
       '@react-native/normalize-colors': 0.88.0
       debug: 4.4.3(supports-color@8.1.1)
-      expo-modules-autolinking: 58.0.14(supports-color@8.1.1)(typescript@6.0.3)
+      expo-modules-autolinking: 58.0.15(supports-color@8.1.1)(typescript@6.0.3)
       resolve-from: 5.0.0
       semver: 7.8.5
     transitivePeerDependencies:
@@ -5873,13 +5876,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@expo/router-server@58.0.16(79d4a08111551c02c2bcf9f5d1e5c4cd)':
+  '@expo/router-server@58.0.17(4fce29a22bd136957c19ea5ea775815d)':
     dependencies:
       debug: 4.4.3(supports-color@8.1.1)
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
-      expo-constants: 58.0.13(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3)
-      expo-font: 58.0.9(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
-      expo-server: 58.0.5
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo-constants: 58.0.13(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3)
+      expo-font: 58.0.10(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      expo-server: 58.0.6
       react: 19.3.0
     transitivePeerDependencies:
       - supports-color
@@ -5933,36 +5936,37 @@ snapshots:
       '@opentelemetry/semantic-conventions': 1.43.0
       hono: 4.13.13
 
-  '@hozon/adapter@0.1.0':
+  '@hozon/adapter@0.2.1':
     dependencies:
       kysely: 0.29.7
 
-  '@hozon/db@0.2.3(@logtape/logtape@2.4.2)':
+  '@hozon/db@0.5.0(@logtape/logtape@2.4.2)':
     dependencies:
-      '@hozon/adapter': 0.1.0
+      '@hozon/adapter': 0.2.1
+      '@sozai/async': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
       kysely: 0.29.7
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@hozon/node-sqlite@0.1.0':
+  '@hozon/node-sqlite@0.2.0':
     dependencies:
-      '@hozon/adapter': 0.1.0
+      '@hozon/adapter': 0.2.1
       kysely: 0.29.7
 
-  '@hozon/postgres@0.1.0':
+  '@hozon/postgres@0.2.0':
     dependencies:
-      '@hozon/adapter': 0.1.0
+      '@hozon/adapter': 0.2.1
       kysely: 0.29.7
       kysely-postgres-js: 5.0.1(kysely@0.29.7)(postgres@3.4.9)
       postgres: 3.4.9
 
-  '@hozon/provider@0.1.1(@logtape/logtape@2.4.2)':
+  '@hozon/provider@0.3.0(@logtape/logtape@2.4.2)':
     dependencies:
-      '@hozon/adapter': 0.1.0
-      '@hozon/db': 0.2.3(@logtape/logtape@2.4.2)
-      '@hozon/node-sqlite': 0.1.0
-      '@hozon/postgres': 0.1.0
+      '@hozon/adapter': 0.2.1
+      '@hozon/db': 0.5.0(@logtape/logtape@2.4.2)
+      '@hozon/node-sqlite': 0.2.0
+      '@hozon/postgres': 0.2.0
     transitivePeerDependencies:
       - '@logtape/logtape'
 
@@ -6054,51 +6058,52 @@ snapshots:
       - supports-color
       - vite
 
-  '@kokuin/capability@0.4.2(@logtape/logtape@2.4.2)':
+  '@kokuin/capability@0.5.2(@logtape/logtape@2.4.2)':
     dependencies:
-      '@kokuin/token': 0.5.1(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@kokuin/controller@0.1.0(@logtape/logtape@2.4.2)':
+  '@kokuin/controller@0.2.5(@logtape/logtape@2.4.2)':
     dependencies:
-      '@kokuin/token': 0.5.1(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
-      '@sozai/json': 0.1.1
+      '@sozai/json': 0.3.0
       micro-key-producer: 0.10.2
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@kokuin/expo@0.4.0(@logtape/logtape@2.4.2)(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))':
+  '@kokuin/expo@0.4.2(@logtape/logtape@2.4.2)(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))':
     dependencies:
-      '@kokuin/otel': 0.3.0(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.5.1(@logtape/logtape@2.4.2)
+      '@kokuin/otel': 0.3.1(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/codec': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
-      expo-crypto: 58.0.7(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
-      expo-secure-store: 58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
+      expo-crypto: 58.0.7(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
+      expo-secure-store: 58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
     transitivePeerDependencies:
       - '@logtape/logtape'
       - expo
 
-  '@kokuin/otel@0.3.0(@logtape/logtape@2.4.2)':
+  '@kokuin/otel@0.3.1(@logtape/logtape@2.4.2)':
     dependencies:
       '@opentelemetry/api': 1.10.0
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@kokuin/token@0.5.1(@logtape/logtape@2.4.2)':
+  '@kokuin/token@0.6.4(@logtape/logtape@2.4.2)':
     dependencies:
-      '@kokuin/otel': 0.3.0(@logtape/logtape@2.4.2)
+      '@kokuin/otel': 0.3.1(@logtape/logtape@2.4.2)
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
+      '@sozai/async': 0.4.3
       '@sozai/codec': 0.4.3
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       '@sozai/schema': 0.1.6
     transitivePeerDependencies:
       - '@logtape/logtape'
@@ -6397,7 +6402,7 @@ snapshots:
 
   '@sindresorhus/merge-streams@4.0.0': {}
 
-  '@sozai/async@0.4.1': {}
+  '@sozai/async@0.4.3': {}
 
   '@sozai/codec@0.4.3':
     dependencies:
@@ -6405,29 +6410,27 @@ snapshots:
 
   '@sozai/event@0.1.6(@logtape/logtape@2.4.2)':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
   '@sozai/execution@0.2.3':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/result': 0.2.2
 
-  '@sozai/http-server@0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@sozai/http-server@0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
       '@hono/node-server': 2.1.5(hono@4.13.13)
       '@hono/otel': 1.2.0(hono@4.13.13)
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-      '@sozai/otel': 0.3.4(@logtape/logtape@2.4.2)
+      '@sozai/otel': 0.4.0(@logtape/logtape@2.4.2)
       get-port: 7.2.0
       hono: 4.13.13
     transitivePeerDependencies:
       - '@logtape/logtape'
-
-  '@sozai/json@0.1.1': {}
 
   '@sozai/json@0.3.0': {}
 
@@ -6435,7 +6438,7 @@ snapshots:
     dependencies:
       '@logtape/logtape': 2.4.2
 
-  '@sozai/otel@0.3.4(@logtape/logtape@2.4.2)':
+  '@sozai/otel@0.4.0(@logtape/logtape@2.4.2)':
     dependencies:
       '@opentelemetry/api': 1.10.0
       '@opentelemetry/api-logs': 0.223.0
@@ -6445,12 +6448,12 @@ snapshots:
 
   '@sozai/result@0.2.2':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
 
-  '@sozai/runtime-expo@0.3.0(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))':
+  '@sozai/runtime-expo@0.3.0(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))':
     dependencies:
       '@sozai/runtime': 0.1.0
-      expo-crypto: 58.0.7(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
+      expo-crypto: 58.0.7(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))
     transitivePeerDependencies:
       - expo
 
@@ -6466,7 +6469,7 @@ snapshots:
 
   '@sozai/stream@0.2.2':
     dependencies:
-      '@sozai/async': 0.4.1
+      '@sozai/async': 0.4.3
 
   '@standard-schema/spec@1.1.0': {}
 
@@ -6547,44 +6550,44 @@ snapshots:
     dependencies:
       '@swc/counter': 0.1.3
 
-  '@teikyo/access@0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/access@0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
-      '@enkaku/server': 0.21.6(@logtape/logtape@2.4.2)
-      '@hozon/db': 0.2.3(@logtape/logtape@2.4.2)
-      '@kokuin/capability': 0.4.2(@logtape/logtape@2.4.2)
-      '@kokuin/token': 0.5.1(@logtape/logtape@2.4.2)
+      '@enkaku/server': 0.22.3(@logtape/logtape@2.4.2)
+      '@hozon/db': 0.5.0(@logtape/logtape@2.4.2)
+      '@kokuin/capability': 0.5.2(@logtape/logtape@2.4.2)
+      '@kokuin/token': 0.6.4(@logtape/logtape@2.4.2)
       '@sozai/codec': 0.4.3
-      '@sozai/http-server': 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@sozai/http-server': 0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)
       '@sozai/log': 0.4.0(@logtape/logtape@2.4.2)
-      '@teikyo/hozon': 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@teikyo/hozon': 0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)
     transitivePeerDependencies:
       - '@logtape/logtape'
       - hono
 
-  '@teikyo/enkaku@0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/enkaku@0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
-      '@enkaku/http-serve': 0.21.6(@logtape/logtape@2.4.2)
-      '@enkaku/protocol': 0.21.6(@logtape/logtape@2.4.2)
-      '@enkaku/server': 0.21.6(@logtape/logtape@2.4.2)
-      '@kokuin/capability': 0.4.2(@logtape/logtape@2.4.2)
-      '@sozai/http-server': 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
-      '@teikyo/access': 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@enkaku/http-serve': 0.22.3(@logtape/logtape@2.4.2)
+      '@enkaku/protocol': 0.22.3(@logtape/logtape@2.4.2)
+      '@enkaku/server': 0.22.3(@logtape/logtape@2.4.2)
+      '@kokuin/capability': 0.5.2(@logtape/logtape@2.4.2)
+      '@sozai/http-server': 0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@teikyo/access': 0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)
       hono: 4.13.13
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@teikyo/hozon@0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/hozon@0.4.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
-      '@hozon/db': 0.2.3(@logtape/logtape@2.4.2)
-      '@hozon/provider': 0.1.1(@logtape/logtape@2.4.2)
-      '@sozai/http-server': 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@hozon/db': 0.5.0(@logtape/logtape@2.4.2)
+      '@hozon/provider': 0.3.0(@logtape/logtape@2.4.2)
+      '@sozai/http-server': 0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)
       hono: 4.13.13
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@teikyo/rate-limit@0.1.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
+  '@teikyo/rate-limit@0.2.0(@logtape/logtape@2.4.2)(hono@4.13.13)':
     dependencies:
-      '@sozai/http-server': 0.1.1(@logtape/logtape@2.4.2)(hono@4.13.13)
+      '@sozai/http-server': 0.2.1(@logtape/logtape@2.4.2)(hono@4.13.13)
       hono: 4.13.13
       hono-rate-limiter: 0.5.4(hono@4.13.13)
     transitivePeerDependencies:
@@ -6957,7 +6960,7 @@ snapshots:
     transitivePeerDependencies:
       - '@babel/core'
 
-  babel-preset-expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(@babel/runtime@7.29.10)(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-refresh@0.14.2)(supports-color@8.1.1):
+  babel-preset-expo@58.0.20(@babel/core@7.29.7(supports-color@8.1.1))(@babel/runtime@7.29.10)(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-refresh@0.14.2)(supports-color@8.1.1):
     dependencies:
       '@babel/generator': 7.29.8
       '@babel/helper-module-imports': 7.29.7(supports-color@8.1.1)
@@ -7004,7 +7007,7 @@ snapshots:
       react-refresh: 0.14.2
     optionalDependencies:
       '@babel/runtime': 7.29.10
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
     transitivePeerDependencies:
       - '@babel/core'
       - supports-color
@@ -7437,48 +7440,48 @@ snapshots:
 
   expect-type@1.4.0: {}
 
-  expo-asset@58.0.18(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3):
+  expo-asset@58.0.18(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3):
     dependencies:
       '@expo/image-utils': 0.12.5(supports-color@8.1.1)(typescript@6.0.3)
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
-      expo-constants: 58.0.13(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo-constants: 58.0.13(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3)
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
     transitivePeerDependencies:
       - supports-color
       - typescript
 
-  expo-constants@58.0.13(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3):
+  expo-constants@58.0.13(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3):
     dependencies:
       '@expo/env': 2.5.3(supports-color@8.1.1)
       '@expo/require-utils': 58.0.4(supports-color@8.1.1)(typescript@6.0.3)
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
     transitivePeerDependencies:
       - supports-color
       - typescript
 
-  expo-crypto@58.0.7(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)):
+  expo-crypto@58.0.7(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)):
     dependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
 
-  expo-file-system@58.0.10(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)):
+  expo-file-system@58.0.11(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)):
     dependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
 
-  expo-font@58.0.9(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0):
+  expo-font@58.0.10(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0):
     dependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
 
-  expo-keep-awake@58.0.3(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react@19.3.0):
+  expo-keep-awake@58.0.3(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react@19.3.0):
     dependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       react: 19.3.0
 
-  expo-modules-autolinking@58.0.14(supports-color@8.1.1)(typescript@6.0.3):
+  expo-modules-autolinking@58.0.15(supports-color@8.1.1)(typescript@6.0.3):
     dependencies:
       '@expo/platforms': 58.0.1
       '@expo/require-utils': 58.0.4(supports-color@8.1.1)(typescript@6.0.3)
@@ -7489,19 +7492,20 @@ snapshots:
       - supports-color
       - typescript
 
-  expo-modules-cli@0.3.1:
+  expo-modules-cli@0.3.2:
     dependencies:
+      '@babel/parser': 7.29.9
       arg: 5.0.2
 
-  expo-modules-core@58.0.24(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0):
+  expo-modules-core@58.0.26(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0):
     dependencies:
-      expo-modules-jsi: 58.0.17(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))
+      expo-modules-jsi: 58.0.19(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))
       expo-modules-macros: 0.22.0
       invariant: 2.2.4
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
 
-  expo-modules-jsi@58.0.17(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)):
+  expo-modules-jsi@58.0.19(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)):
     dependencies:
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
 
@@ -7512,42 +7516,42 @@ snapshots:
       '@expo/modules-macros-win32-arm64': 0.22.0
       '@expo/modules-macros-win32-x64': 0.22.0
 
-  expo-secure-store@58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)):
+  expo-secure-store@58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)):
     dependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
 
-  expo-server@58.0.5: {}
+  expo-server@58.0.6: {}
 
-  expo-status-bar@58.0.4(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0):
+  expo-status-bar@58.0.4(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0):
     dependencies:
-      expo: 58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
 
-  expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3):
+  expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3):
     dependencies:
       '@babel/runtime': 7.29.10
-      '@expo/cli': 58.1.14(72a97471c6c8e090e3851c28b67c389b)
-      '@expo/config': 58.0.7(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/cli': 58.1.15(0d295ccc9b8bb2f2909ed4209cebd13d)
+      '@expo/config': 58.0.8(supports-color@8.1.1)(typescript@6.0.3)
       '@expo/config-plugins': 58.0.10(supports-color@8.1.1)(typescript@6.0.3)
-      '@expo/devtools': 58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
-      '@expo/dom-webview': 58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      '@expo/devtools': 58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      '@expo/dom-webview': 58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
       '@expo/fingerprint': 0.21.6(supports-color@8.1.1)
-      '@expo/local-build-cache-provider': 58.0.7(supports-color@8.1.1)(typescript@6.0.3)
-      '@expo/log-box': 58.0.13(@expo/dom-webview@58.0.2(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0))(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      '@expo/local-build-cache-provider': 58.0.8(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/log-box': 58.0.13(@expo/dom-webview@58.0.2(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0))(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
       '@expo/log-box-utils': 58.0.2
       '@expo/metro': 58.0.0(supports-color@8.1.1)
-      '@expo/metro-config': 58.0.16(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(supports-color@8.1.1)(typescript@6.0.3)
+      '@expo/metro-config': 58.0.17(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(supports-color@8.1.1)(typescript@6.0.3)
       '@ungap/structured-clone': 1.4.0
-      babel-preset-expo: 58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(@babel/runtime@7.29.10)(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-refresh@0.14.2)(supports-color@8.1.1)
-      expo-asset: 58.0.18(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
-      expo-constants: 58.0.13(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3)
-      expo-file-system: 58.0.10(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))
-      expo-font: 58.0.9(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
-      expo-keep-awake: 58.0.3(expo@58.0.17(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react@19.3.0)
-      expo-modules-autolinking: 58.0.14(supports-color@8.1.1)(typescript@6.0.3)
-      expo-modules-cli: 0.3.1
-      expo-modules-core: 58.0.24(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      babel-preset-expo: 58.0.20(@babel/core@7.29.7(supports-color@8.1.1))(@babel/runtime@7.29.10)(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-refresh@0.14.2)(supports-color@8.1.1)
+      expo-asset: 58.0.18(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3)
+      expo-constants: 58.0.13(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@6.0.3)
+      expo-file-system: 58.0.11(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))
+      expo-font: 58.0.10(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
+      expo-keep-awake: 58.0.3(expo@58.0.19(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)(supports-color@8.1.1)(typescript@6.0.3))(react@19.3.0)
+      expo-modules-autolinking: 58.0.15(supports-color@8.1.1)(typescript@6.0.3)
+      expo-modules-cli: 0.3.2
+      expo-modules-core: 58.0.26(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
       pretty-format: 29.7.0
       react: 19.3.0
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)

@@ -70,6 +70,7 @@ export async function externalGroupInfoInputs(params: InspectRecoveryGroupInfoPa
       )
         return false
       await verifyLeafCredential(credential, signaturePublicKey, {
+        judging: () => ({ stage: 'structural', mode: 'rejudge' }),
         leafLifetime: () =>
           anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400),
         trustedGrantLifetime: () =>

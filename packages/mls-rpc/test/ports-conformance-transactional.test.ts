@@ -192,12 +192,16 @@ testPendingGroupCryptoConformance({
 
 testGroupMLSConformance({
   createCapturedRecovery: () => createCapturedRealRecovery(true),
-  createBoundRecovery: () =>
-    createRealBoundRecovery(async (member) => {
-      const store = createTransactionalStore(member.handle)
-      const host = await createTransactionalAccess(member, store)
-      return { access: host.access, control: store.control }
-    }),
+  createBoundRecovery: (binding) =>
+    createRealBoundRecovery(
+      async (member) => {
+        const store = createTransactionalStore(member.handle)
+        const host = await createTransactionalAccess(member, store)
+        return { access: host.access, control: store.control }
+      },
+      {},
+      binding,
+    ),
   label: 'createGroupMLS over a transactional HandleAccess',
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `tx-mls-conformance-${id}`)

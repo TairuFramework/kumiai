@@ -14,6 +14,7 @@ import {
   renewLeaf,
   restoreGroup,
   revokeWithProof,
+  verifyLedgerEntry,
 } from '@kumiai/mls'
 import {
   createGroupCrypto,
@@ -32,6 +33,7 @@ import {
   groupMLSDependencies,
   type Protocols,
 } from './app-lane-e2e.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import { drainUntil } from './fixtures/drain.js'
 import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { createWireHub, type WireHub } from './log-hub-over-wire.js'
@@ -39,6 +41,7 @@ import { createWireHub, type WireHub } from './log-hub-over-wire.js'
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
+  inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
   resetPrefix: () => ControllerBinding['prefix']
@@ -69,6 +72,7 @@ async function setup(
   const bob = fixture.agent(61)
   let aliceGroup = (
     await createGroup(alice, 'lifecycle-recovery', {
+      controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({
         identity: alice,
         iat: 100,
@@ -174,19 +178,17 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   const ledger = await import(
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
-  const { createRevoke } = await import('@kokuin/controller')
   const revoked = fixture.agent(81)
-  const rev = createRevoke({
+  const rev = revokeChain({
     seed: ledger.controllerSeed,
     profile: 0,
     did: fixture.controllerID,
-    prior: ledger.inception.event,
-    target: revoked.id,
-    keyPosition: { gen: 0, seq: 0 },
+    chain: [ledger.inception],
+    subject: revoked.id,
   })
   const revoke = await revokeWithProof(s.aliceGroup(), {
-    subject: revoked.id,
-    log: [ledger.inception, rev],
+    deny: [revoked.id],
+    log: { chain: [ledger.inception, rev], events: [] },
   })
   if (revoke.status !== 'built') throw new Error('Expected revoke')
   s.installAlice(revoke.result.newGroup)
@@ -208,7 +210,10 @@ test('peer recovery and restore retain authenticated revocations, reset history 
       )
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), { reset: true, log: prefix })
+  const reset = await revokeWithProof(s.aliceGroup(), {
+    reset: true,
+    log: { chain: prefix, events: [] },
+  })
   if (reset.status !== 'built') throw new Error('Expected reset')
   s.installAlice(reset.result.newGroup)
   vi.spyOn(Date, 'now').mockReturnValue(180_000)
@@ -239,7 +244,13 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   )
   fresh = await fixture.timedBinding({ identity: s.bob, iat: 180, exp: 280, prefix })
   const expected = s.aliceGroup().ledgerTokens
-  expect(expected).toHaveLength(3)
+  expect(await Promise.all(expected.map((token) => verifyLedgerEntry(token)))).toMatchObject([
+    { entry: { value: { op: 'seed' } } },
+    { entry: { value: { op: 'revoke' } } },
+    { entry: { value: { op: 'reset' } } },
+    { entry: { value: { op: 'clock', time: 180 } } },
+  ])
+  expect(expected).toHaveLength(4)
   const hub = createWireHub()
   const alice = recoveryPeer({
     hub,
@@ -270,7 +281,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
       expect(handle.registry.controllers.get(fixture.controllerID)).toMatchObject({
         genFloor: 1,
         timeFloor: 180,
-        recordedLog: prefix,
+        recordedLog: { chain: prefix, events: [] },
       })
       expect(handle.registry.devices.get(revoked.id)?.status).toBe('revoked')
       expect(await handle.isLedgerComplete()).toBe(true)

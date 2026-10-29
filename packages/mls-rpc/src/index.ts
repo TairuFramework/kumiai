@@ -45,8 +45,10 @@ export {
   type ControlHandleAccess,
   type ControlRead,
   type ControlReadScope,
+  guardedReplace,
   type HandleAccess,
   type PersistContext,
+  retainsKnownEffects,
   type SimpleHandleAccessParams,
   simpleHandleAccess,
 } from './access.js'

@@ -406,7 +406,7 @@ export async function reconstructMemoryPeer(
 function operation(
   member: TestPeer,
   kind: OperationRequest['kind'],
-  body: { tokens: Array<string>; target?: string },
+  body: { tokens: Array<string>; target?: string; replace?: boolean },
   options: LedgerCommitOptions,
 ): OperationRequest {
   const id = crypto.randomUUID()
@@ -441,12 +441,26 @@ export function buildInviteCommit(
   return operation(member, 'invite', { tokens: [], target: inviteeDID }, options)
 }
 
+export function buildReplaceCommit(
+  member: TestPeer,
+  inviteeDID: string,
+  options: LedgerCommitOptions = {},
+): OperationRequest {
+  return operation(member, 'invite', { tokens: [], target: inviteeDID, replace: true }, options)
+}
+
 export async function buildMemoryOperation(mls: MemoryGroupMLS, op: Operation): Promise<HostBuilt> {
   const body = JSON.parse(new TextDecoder().decode(op.body)) as {
     tokens: Array<string>
     target?: string
+    replace?: boolean
   }
-  if (op.kind === 'invite' && body.target != null && mls.leaves().includes(body.target))
+  if (
+    op.kind === 'invite' &&
+    body.target != null &&
+    !body.replace &&
+    mls.leaves().includes(body.target)
+  )
     throw new OperationRejectedError('Already a member')
   if (op.kind === 'remove' && body.target != null && !mls.leaves().includes(body.target))
     throw new OperationRejectedError('Already removed')
@@ -455,7 +469,9 @@ export async function buildMemoryOperation(mls: MemoryGroupMLS, op: Operation): 
   const authenticatorBefore = mls.authenticator()
   const commit = mls.buildCommit(body.tokens, {
     ...(op.kind === 'invite' && body.target != null ? { adds: [body.target] } : {}),
-    ...(op.kind === 'remove' && body.target != null ? { removes: [body.target] } : {}),
+    ...((op.kind === 'remove' || body.replace) && body.target != null
+      ? { removes: [body.target] }
+      : {}),
   })
   mls.adopt(commit)
   const journal = mls.serializeState()

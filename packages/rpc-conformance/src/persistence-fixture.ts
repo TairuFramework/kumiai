@@ -19,7 +19,7 @@ export type ConformanceMemberCredential = { id: string; groupID: string }
 export type ConformanceSignedEvent = {
   event: {
     v: 1
-    t: 'icp' | 'rot' | 'rev'
+    t: 'icp' | 'rot'
     i?: string
     g: number
     s: number
@@ -29,11 +29,33 @@ export type ConformanceSignedEvent = {
   sigs: Array<string>
   recoveryKey?: string
 }
+type ConformanceProofRef =
+  | { chainIndex: number }
+  | { snapshot: number }
+  | { event: string; epoch?: string }
+type ConformanceEpochCommon = {
+  v: 1
+  i: string
+  g: number
+  e: string
+  p: Array<string>
+  crit: boolean
+  by?: string
+}
+type ConformanceEpochEvent = ConformanceEpochCommon &
+  (
+    | { t: 'add'; did: string; key: string; lease: number }
+    | { t: 'ren'; add: string; lease: number }
+    | { t: 'rmv'; add: string }
+    | { t: 'rev'; x: string }
+  )
 export type ConformanceControllerBinding = {
   id: string
   prefix: Array<ConformanceSignedEvent>
-  capability: string
+  capability?: string
   holderGrant?: string
+  member?: { add: string; g: number }
+  iat?: number
 }
 export type ConformanceDeviceRegistry = {
   devices: ReadonlyMap<
@@ -42,7 +64,7 @@ export type ConformanceDeviceRegistry = {
       controller: string
       status: 'active' | 'revoked'
       label?: string
-      logPosition?: number
+      proofRef?: ConformanceProofRef
       reason?: 'reset'
       cascadedFrom?: string
     }
@@ -50,9 +72,18 @@ export type ConformanceDeviceRegistry = {
   controllers: ReadonlyMap<
     string,
     {
-      recordedLog: Array<ConformanceSignedEvent>
+      recordedLog?: {
+        chain: Array<ConformanceSignedEvent>
+        events: Array<{ event: ConformanceEpochEvent; sigs: Array<string>; recoveryKey?: string }>
+      }
       genFloor: number
       timeFloor: number
+      attestations: ReadonlyMap<string, number>
+      removedMembers: ReadonlyMap<
+        string,
+        { did: string; gen: number; proofRef: ConformanceProofRef }
+      >
+      survivorGrants: ReadonlyMap<string, string>
       beacon?: { logLength: number; headDigest: string }
     }
   >

@@ -1,4 +1,3 @@
-import { createRevoke } from '@kokuin/controller'
 import { createFullIdentity, normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   createCommit,
@@ -10,6 +9,7 @@ import {
 import { describe, expect, test } from 'vitest'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from '../src/anchor.js'
+import { asControllerLog } from '../src/controller-log.js'
 import type { MLSCredentialIdentity } from '../src/credential.js'
 import { encodeControlEnvelope } from '../src/envelope.js'
 import { CommitRejectedError } from '../src/group.js'
@@ -22,6 +22,7 @@ import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../src/hea
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { controllerOf, DEVICE_ENTRY_TYPE } from '../src/registry.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { revokeChain } from './fixtures/controller-chain.js'
 import {
   buildBoundKeyPackageBundle,
   joinBoundDevice,
@@ -58,16 +59,15 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
   })
   const log = [
     inception,
-    createRevoke({
+    revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
-      prior: inception.event,
-      target: issuer.id,
-      keyPosition: { gen: 0, seq: 0 },
+      chain: [inception],
+      subject: issuer.id,
     }),
   ]
-  const discarded = await revokeWithProof(group, { subject: issuer.id, log })
+  const discarded = await revokeWithProof(group, { deny: [issuer.id], log: asControllerLog(log) })
   if (discarded.status !== 'built') throw new Error('Missing revoke candidate')
   expect(await group.context.authService.validateCredential(credential, child.publicKey)).toBe(true)
   expect(seen).toHaveLength(0)
@@ -83,7 +83,10 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
       child.publicKey,
     ),
   ).toBe(false)
-  const winner = await revokeWithProof(fixture.joined, { subject: issuer.id, log })
+  const winner = await revokeWithProof(fixture.joined, {
+    deny: [issuer.id],
+    log: asControllerLog(log),
+  })
   if (winner.status !== 'built') throw new Error('Missing winning revoke')
   publishTokens(tokens, winner.result.newGroup)
   await group.processMessage(winner.result.commitMessage, { persist: async () => {} })

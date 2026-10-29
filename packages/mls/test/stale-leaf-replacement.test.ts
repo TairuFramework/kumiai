@@ -1,3 +1,4 @@
+import { createAdd, digestOf, encodeKey } from '@kokuin/controller'
 import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type DefaultProposal,
@@ -10,6 +11,7 @@ import {
 } from 'ts-mls'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
+import { foldControllerLog } from '../src/controller-log.js'
 import type { ControllerBinding } from '../src/credential.js'
 import {
   commitInvite,
@@ -21,8 +23,11 @@ import {
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
-import { ledgerEntryDigest } from '../src/ledger.js'
-import { leafAt } from '../src/lifecycle.js'
+import { bindingIssuedAt } from '../src/index.js'
+import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
+import { leafAt, validateEntry } from '../src/lifecycle.js'
+import { assertNewerBinding } from '../src/stale-leaf.js'
+import { controllerID, controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
   lowLevelWelcome,
@@ -37,12 +42,34 @@ afterEach(() => vi.restoreAllMocks())
 
 const utf8 = new TextEncoder()
 
+test('assertNewerBinding orders a membership binding against a capability binding by bindingIssuedAt', async () => {
+  const { group, identity } = await pipelineGroup()
+  const capability = await timedBinding({ identity, iat: 100, exp: 200 })
+  const membership: ControllerBinding = {
+    id: capability.id,
+    prefix: capability.prefix,
+    member: { add: 'member-add', g: 0 },
+    iat: 120,
+  }
+  const old = (await rawBundle(group, identity, capability)).publicPackage.leafNode
+  const next = { ...old, credential: makeMLSCredential(identity, membership) }
+  expect(bindingIssuedAt(capability)).toBe(100)
+  expect(bindingIssuedAt(membership)).toBe(120)
+  expect(() => assertNewerBinding(next, old)).not.toThrow()
+  expect(() => assertNewerBinding(old, next)).toThrow(
+    expect.objectContaining({ reason: 'renewal-order' }),
+  )
+  expect(() => assertNewerBinding(next, next)).toThrow(
+    expect.objectContaining({ reason: 'renewal-order' }),
+  )
+})
+
 /** An own-agents group of A, a stale leaf for B whose handle is lost, and a live C. */
-async function staleGroup() {
+async function staleGroup(bobIssuedAt = 100) {
   const setup = await pipelineGroup()
   const bob = agent(51)
   const carol = agent(52)
-  const bobBinding = await timedBinding({ identity: bob, iat: 100, exp: 200 })
+  const bobBinding = await timedBinding({ identity: bob, iat: bobIssuedAt, exp: 200 })
   const withBob = await lowLevelWelcome(setup.group, bob, bobBinding)
   const withCarol = await lowLevelWelcome(
     withBob.author,
@@ -140,6 +167,83 @@ test('admitting a fresh key package replaces the stale leaf of the same DID', as
   const opened = await bobGroup.decrypt(fromCarol)
   expect(new TextDecoder().decode(opened.payload)).toBe('welcome back')
   expect(opened.senderDID).toBe(carol.id)
+})
+
+test('the delivered input invite includes the stale replacement preservation clock', async () => {
+  const f = await staleGroup(140)
+  const parent = f.author.bindingOfDID(f.identity.id)?.capability
+  if (parent == null) throw new Error('Missing inviter capability')
+  const bundle = await rawBundle(
+    f.author,
+    f.bob,
+    await timedBinding({ identity: f.bob, iat: 145, exp: 200, parent, issuer: f.identity }),
+  )
+  const before = [...f.invite.ledgerEntries]
+  const result = await commitInvite(f.author, bundle.publicPackage, f.invite)
+  const clock = await signLedgerEntry(f.identity, {
+    type: 'kumiai.device',
+    groupID: f.author.groupID,
+    subject: controllerID,
+    value: { op: 'clock', time: 140 },
+  })
+  expect(result.newGroup.ledgerTokens).toEqual([...before, clock])
+  for (const token of f.invite.ledgerEntries) f.tokens.set(ledgerEntryDigest(token), token)
+  const { group: joined } = await processWelcome({
+    identity: f.bob,
+    invite: f.invite,
+    welcome: result.welcomeMessage,
+    keyPackageBundle: { ...bundle, ownerDID: f.bob.id },
+  })
+  expect(result.invite).toBe(f.invite)
+  expect(joined.ledgerTokens).toEqual([...before, clock])
+  expect(joined.registry.controllers.get(controllerID)?.timeFloor).toBe(140)
+  await f.carolGroup.processMessage(result.commitMessage)
+  expect(f.carolGroup.registry).toEqual(joined.registry)
+  const payload = utf8.encode('replacement with preserved time')
+  await expect(f.carolGroup.decrypt(await joined.encrypt(payload))).resolves.toMatchObject({
+    payload,
+    senderDID: f.bob.id,
+  })
+})
+
+function admissionsOf(group: GroupHandle): Array<string> {
+  return group.listMembers().flatMap(({ admission }) => (admission == null ? [] : [admission]))
+}
+
+test("a replacement brings a fresh admission; the re-added member's own path only drops it", async () => {
+  const { author, bob, carolGroup, invite } = await staleGroup()
+  const before = admissionsOf(carolGroup)
+  const bundle = await rawBundle(
+    author,
+    bob,
+    await timedBinding({ identity: bob, iat: 120, exp: 200 }),
+  )
+  const result = await commitInvite(author, bundle.publicPackage, invite)
+  await carolGroup.processMessage(result.commitMessage)
+
+  // The DID set did not move; the fresh KeyPackage leaf is what says a leaf was Added.
+  for (const group of [result.newGroup, carolGroup]) {
+    expect(new Set(group.listMembers().map(({ id }) => normalizeDID(id)))).toEqual(
+      new Set(carolGroup.listMembers().map(({ id }) => normalizeDID(id))),
+    )
+    const fresh = admissionsOf(group).filter((admission) => !before.includes(admission))
+    expect(fresh).toHaveLength(1)
+    expect(leavesOf(group, bob.id)[0]?.admission).toBe(fresh[0])
+  }
+
+  // Bob's first commit is a path, not an Add: his admission leaves the tree and none enters it.
+  const { group: bobGroup } = await processWelcome({
+    identity: bob,
+    invite,
+    welcome: result.welcomeMessage,
+    keyPackageBundle: { ...bundle, ownerDID: bob.id },
+  })
+  const replaced = admissionsOf(carolGroup)
+  const path = await commitWithEntries({ group: bobGroup, extraProposals: [], enacted: [] })
+  await carolGroup.processMessage(encode(mlsMessageEncoder, path.commit))
+  expect(carolGroup.epoch).toBe(result.newGroup.epoch + 1n)
+  expect(admissionsOf(carolGroup).filter((admission) => !replaced.includes(admission))).toEqual([])
+  expect(leavesOf(carolGroup, bob.id)[0]?.admission).toBeUndefined()
 })
 
 test('a Remove paired with an Add of a different DID stays unauthorised', async () => {
@@ -304,4 +408,64 @@ test('two leaves for the admitted DID are refused as ambiguous', async () => {
       enacted: [],
     }),
   ).rejects.toThrow('Unauthorised Remove')
+})
+
+async function staleMembership() {
+  const f = await staleGroup()
+  const folded = foldControllerLog(controllerID, { chain: [inception], events: [] })
+  if (!folded.ok) throw new Error(folded.reason)
+  const add = createAdd({
+    seed: controllerSeed,
+    profile: 0,
+    did: controllerID,
+    head: folded.head,
+    parents: [folded.head.epoch],
+    member: { did: f.bob.id, key: encodeKey(f.bob.publicKey, 'EdDSA'), lease: 1000 },
+  })
+  await f.author.applyLedgerEntries([
+    await signLedgerEntry(f.identity, {
+      type: 'kumiai.device',
+      groupID: f.author.groupID,
+      subject: controllerID,
+      value: { op: 'log', proof: { chain: [], events: [add] } },
+    }),
+  ])
+  const binding: ControllerBinding = {
+    id: controllerID,
+    prefix: [inception],
+    member: { add: digestOf(add.event), g: 0 },
+    iat: 100,
+  }
+  const old = leafAt(f.author.state.ratchetTree, f.staleIndex)
+  if (old == null) throw new Error('Missing stale leaf')
+  old.credential = makeMLSCredential(f.bob, binding)
+  const { invite } = await createInvite({
+    group: f.author,
+    identity: f.identity,
+    recipientDID: f.bob.id,
+  })
+  return { ...f, binding, old, invite }
+}
+
+test('membership key package replaces a stale leaf only when newer', async () => {
+  const f = await staleMembership()
+  for (const iat of [90, 100, 120]) {
+    const bundle = await rawBundle(f.author, f.bob, { ...f.binding, iat })
+    const result = commitInvite(f.author, bundle.publicPackage, f.invite)
+    if (iat <= 100)
+      await expect(result).rejects.toMatchObject({ cause: { reason: 'renewal-order' } })
+    else {
+      const { newGroup } = await result
+      expect(leavesOf(newGroup, f.bob.id)).toHaveLength(1)
+      expect(newGroup.bindingOfDID(f.bob.id)).toMatchObject({ member: f.binding.member, iat })
+    }
+  }
+})
+
+test('membership renewal with an older iat is refused', async () => {
+  const f = await staleMembership()
+  const leaf = (await rawBundle(f.author, f.bob, { ...f.binding, iat: 99 })).publicPackage.leafNode
+  await expect(validateEntry(f.author, leaf, f.old)).rejects.toMatchObject({
+    reason: 'renewal-order',
+  })
 })

@@ -977,6 +977,13 @@ test.each(['binding', 'lapse', 'floor'] as const)(
   async (reason) => {
     const hub = new FakeHub()
     const binding = { id: 'controller', prefix: [], capability: 'original' }
+    const controllerLog = {
+      chain: [],
+      events: [],
+      grants: ['alice', 'bob'].flatMap((did) =>
+        ['original', 'renewed'].map((capability) => ({ did, capability, key: 'binding-key' })),
+      ),
+    }
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const aliceMLS = createMemoryGroupMLS({
       recoverySecret: secret,
@@ -984,6 +991,8 @@ test.each(['binding', 'lapse', 'floor'] as const)(
       epoch: 1,
       members: ['alice', 'bob'],
       binding,
+      controllerLog,
+      signatureKey: 'binding-key',
       onAdvance: (epoch) => aliceCrypto.setEpoch(epoch),
     })
     const alice = member(hub, 'alice', { mls: aliceMLS, crypto: aliceCrypto })
@@ -994,6 +1003,8 @@ test.each(['binding', 'lapse', 'floor'] as const)(
       localDID: 'bob',
       members: ['alice', 'bob'],
       binding,
+      controllerLog,
+      signatureKey: 'binding-key',
       recoveryBinding: async () => {
         renewals += 1
         return { ...binding, capability: 'renewed' }

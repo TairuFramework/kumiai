@@ -9,6 +9,7 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
 import { loadValidatedGroup } from '../src/registry/cold.js'
+import { registryLeaseSnapshot } from '../src/testing.js'
 import { accessKinds, authoringAccessFixture, rotationIntent } from './fixtures/authoring-access.js'
 import {
   createCapturedRealRecovery,
@@ -321,6 +322,7 @@ test('a prepare refusal leaves speculative control notifications queued', async 
   })
   try {
     const registryAccess = await fixture.registry.access('refused-notifications')
+    await vi.waitFor(() => expect(registryLeaseSnapshot(registryAccess)).not.toBeNull())
     const raw = await registryAccess.read((handle) =>
       restoreGroup({
         state: structuredClone(handle.state),

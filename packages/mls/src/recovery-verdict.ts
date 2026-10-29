@@ -1,4 +1,3 @@
-import { foldLog } from '@kokuin/controller'
 import {
   encodeMultibase,
   isVerifiedToken,
@@ -13,8 +12,11 @@ import { type ClientState, type LeafNode, nodeTypes } from 'ts-mls'
 
 import type { GroupAnchor } from './anchor.js'
 import { readCapability } from './capability.js'
+import { foldChain } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import type { GroupHandle } from './group-handle.js'
+import { attestedTreeTime, leafExpiry } from './lifecycle.js'
+import { effectiveAuthorityOf, memberRootStatus } from './member-root.js'
 import {
   type OpenSealedReplyParams,
   openSealedReply,
@@ -184,41 +186,20 @@ export async function openRecoveryVerdict(
 
 export type RecoverySignerEligibleParams = {
   group: GroupHandle
-  known: DeviceRegistry
+  registry: DeviceRegistry
   signer: string
   /** Seconds since epoch; defaults to the current time. */
   now?: number
 }
 
 export function recoverySignerEligible(params: RecoverySignerEligibleParams): boolean {
-  const { group, known, signer, now = Date.now() / 1000 } = params
-  const controller = group.anchor.controller
-  if (controller == null) return false
-  try {
-    const binding = group.bindingOfDID(signer)
-    if (binding?.controller !== controller || binding.capability == null || binding.prefix == null)
-      return false
-    const payload = readCapability(binding.capability).payload
-    if (
-      known.devices.get(normalizeDID(signer))?.status === 'revoked' ||
-      (payload.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
-    )
-      return false
-    const folded = foldLog(controller, binding.prefix)
-    const projection = known.controllers.get(normalizeDID(controller))
-    if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
-    let time = projection?.timeFloor ?? 0
-    for (const member of group.listMembers()) {
-      const leaf = group.bindingOfDID(member.id)
-      if (leaf?.controller !== controller || leaf.capability == null) continue
-      const capability = readCapability(leaf.capability).payload
-      const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
-      time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
-    }
-    return payload.exp >= Math.max(time, now - 300)
-  } catch {
-    return false
-  }
+  return recoverySignerEligibleFromPublic({
+    tree: params.group.state.ratchetTree,
+    anchor: params.group.anchor,
+    known: params.registry,
+    signer: params.signer,
+    now: params.now,
+  })
 }
 
 /** @internal Origin authority does not depend on the offered tree's surviving leaves. */
@@ -229,44 +210,56 @@ export function recoverySignerEligibleFromPublic(params: {
   signer: string
   now?: number
 }): boolean {
-  const { tree, anchor, known, signer, now = Date.now() / 1000 } = params
+  const { tree, anchor, known: registry, signer, now = Date.now() / 1000 } = params
   const controller = anchor.controller
   if (controller == null) return false
   const leaf = recoveryLeafForDID(tree, signer)
   if (leaf == null) return false
   const binding = recoveryLeafIdentity(leaf)?.controller
   if (binding == null || binding.id !== controller) return false
-  let payload: ReturnType<typeof readCapability>['payload']
-  let folded: ReturnType<typeof foldLog>
+  for (const node of tree) {
+    if (node?.nodeType === nodeTypes.leaf && recoveryLeafIdentity(node.leaf) == null) return false
+  }
   try {
-    payload = readCapability(binding.capability).payload
-    folded = foldLog(controller, binding.prefix)
+    const time = attestedTreeTime(tree, registry, controller)
+    const payload =
+      binding.member != null || binding.capability == null
+        ? undefined
+        : readCapability(binding.capability).payload
+    if (
+      registry.devices.get(normalizeDID(signer))?.status === 'revoked' ||
+      (payload?.cap != null &&
+        registry.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
+    )
+      return false
+    const folded = foldChain(controller, binding.prefix)
+    const projection = registry.controllers.get(normalizeDID(controller))
+    if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
+    const authority = effectiveAuthorityOf(
+      { did: signer, binding, leafKey: leaf.signaturePublicKey },
+      registry,
+      controller,
+    )
+    if ('status' in authority) return false
+    if (binding.member != null && authority.slot === 'membership') {
+      const status = memberRootStatus(registry, controller, {
+        kind: 'member',
+        did: signer,
+        add: binding.member.add,
+        gen: binding.member.g,
+      })
+      if (
+        status.status !== 'effective' ||
+        status.key.length !== leaf.signaturePublicKey.length ||
+        status.key.some((byte, index) => byte !== leaf.signaturePublicKey[index])
+      )
+        return false
+    }
+    const expiry = leafExpiry(binding, registry, controller)
+    return expiry != null && expiry >= Math.max(time, now - 300)
   } catch {
     return false
   }
-  if (
-    known.devices.get(normalizeDID(signer))?.status === 'revoked' ||
-    (payload.cap != null && known.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
-  )
-    return false
-  const projection = known.controllers.get(normalizeDID(controller))
-  if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
-  let time = projection?.timeFloor ?? 0
-  for (const node of tree) {
-    if (node?.nodeType !== nodeTypes.leaf) continue
-    const parsed = recoveryLeafIdentity(node.leaf)
-    if (parsed == null) return false
-    const held = parsed.controller
-    if (held?.id !== controller) continue
-    try {
-      const capability = readCapability(held.capability).payload
-      const parent = Array.isArray(capability.cap) ? capability.cap[0] : capability.cap
-      time = Math.max(time, parent == null ? capability.iat : readCapability(parent).payload.iat)
-    } catch {
-      return false
-    }
-  }
-  return payload.exp >= Math.max(time, now - 300)
 }
 
 function recoveryLeafIdentity(

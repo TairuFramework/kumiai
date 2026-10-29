@@ -235,7 +235,7 @@ testPendingGroupCryptoConformance({
 testGroupMLSConformance({
   createCapturedRecovery: () => createCapturedRealRecovery(),
   label: 'createGroupMLS over a real GroupHandle',
-  createBoundRecovery: createRealBoundRecovery,
+  createBoundRecovery: (binding) => createRealBoundRecovery(undefined, {}, binding),
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `mls-conformance-${id}`)
     let hintOffset = 0
@@ -744,10 +744,12 @@ test.each(['built', 'adopted'] as const)(
       const snapshot = await f.snapshot()
       expect(snapshot.settledRejoins[0]).toMatchObject({ kind: 'superseded-branch', epoch: 10 })
       expect(new Set(snapshot.settledRejoins[0]?.ledgerBefore)).toEqual(
-        new Set(['earlier-owed', 'shared', 'owed-X']),
+        new Set([...record.ledgerBefore, 'earlier-owed']),
       )
       const y = await f.build(authority, capture)
-      expect(new Set(y?.record.ledgerBefore)).toEqual(new Set(['earlier-owed', 'shared', 'owed-X']))
+      expect(new Set(y?.record.ledgerBefore)).toEqual(
+        new Set([...record.ledgerBefore, 'earlier-owed']),
+      )
     } finally {
       await f.close()
     }

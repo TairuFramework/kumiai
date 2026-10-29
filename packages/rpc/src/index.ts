@@ -333,7 +333,7 @@ export {
   type StoredRejoinRecord,
   validateCaptureHead,
 } from './recovery-types.js'
-export { detectRosterChange } from './roster.js'
+export { detectLeafAdmission, detectRosterChange } from './roster.js'
 export {
   APP_TOPIC_LABEL,
   COMMIT_LABEL,

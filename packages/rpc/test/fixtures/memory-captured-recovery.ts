@@ -87,6 +87,16 @@ export async function createCapturedMemoryRecovery(
     groupID: trust.groupID,
     members: trust.members,
     binding: { id: 'controller', prefix: [], capability: 'captured-capability' },
+    signatureKey: 'captured-key',
+    controllerLog: {
+      chain: [],
+      events: [],
+      grants: trust.members.map((did) => ({
+        did,
+        key: 'captured-key',
+        capability: 'captured-capability',
+      })),
+    },
   }
   const requester = createMemoryGroupMLS({
     ...options,

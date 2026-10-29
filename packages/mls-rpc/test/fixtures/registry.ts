@@ -1564,8 +1564,12 @@ export async function createNotMemberFixture(
       ): Promise<ControllerBinding>
       trustedGrant(identity: OwnIdentity): Promise<string>
     }
+    const creatorBinding1 = await bindingFor(alternate)
     const fork = (
-      await createGroup(alternate, own.groupID, { controller: await bindingFor(alternate) })
+      await createGroup(alternate, own.groupID, {
+        controllerLog: { chain: creatorBinding1.prefix, events: [] },
+        controller: creatorBinding1,
+      })
     ).group
     const bundle = await createKeyPackageBundle(base.requester.identity, {
       controller: await bindingFor(base.requester.identity, undefined, {

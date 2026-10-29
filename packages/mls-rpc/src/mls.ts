@@ -67,7 +67,7 @@ import {
 } from '@kumiai/rpc'
 import { ciphersuites, decode, mlsMessageDecoder, wireformats } from 'ts-mls'
 
-import type { ControlHandleAccess } from './access.js'
+import { type ControlHandleAccess, guardedReplace } from './access.js'
 import { applyCommit } from './apply-commit.js'
 import { validateRecoveryCommit } from './control-validation.js'
 import { inboundCommitContext } from './inbound-commit.js'
@@ -82,7 +82,6 @@ import {
   createVerdictJudge,
   deriveRecoverySecretFromTrust,
   inspectRecoveryCapture,
-  knownRecoveryRegistry,
   openRecoveryVerdictFromTrust,
   RECOVERY_LABEL,
   type RecoveryBinding,
@@ -320,7 +319,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
                 )
               )
                 return
-              await access.replace(data.group, write)
+              await guardedReplace(access, data.group, write)
             })()
             accepting.set(id, adoption)
             void adoption.then(
@@ -638,6 +637,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           did: member.id,
           leafIndex: member.leafIndex,
           longForm: member.longForm,
+          ...(member.admission != null && { admission: member.admission }),
         })),
       )
     },
@@ -899,7 +899,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         if (rejoined == null || 'renewalRequired' in rejoined) return rejoined
         return {
           ...rejoined,
-          knownRegistry: knownRecoveryRegistry(group.registry, rejoined.sourceRegistry),
+          knownRegistry: rejoined.group.registry,
         }
       })
       if (candidate == null || 'renewalRequired' in candidate) return candidate
@@ -908,7 +908,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         rejoined.group.anchor.controller != null &&
         !recoverySignerEligible({
           group: rejoined.group,
-          known: rejoined.knownRegistry,
+          registry: rejoined.knownRegistry,
           signer: reply.signer,
         })
       )

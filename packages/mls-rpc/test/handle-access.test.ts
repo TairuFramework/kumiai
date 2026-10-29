@@ -3,6 +3,7 @@ import type { GroupHandle } from '@kumiai/mls'
 import { asLogPosition } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
+import { guardedReplace, type HandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import { authenticateRecoveryReply } from '../src/recovery.js'
@@ -367,4 +368,44 @@ test('replace saves before adoption and open passes through the staged writer', 
   }, writer)
   expect(writer).toHaveBeenCalledWith(new Uint8Array([1]), record)
   expect(persist).toHaveBeenCalledOnce()
+})
+
+test('a throwing guard aborts replacement before persistence', async () => {
+  const group = await createRealGroup(1, 'guard-aborts')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const before = member.handle
+  const persist = vi.fn()
+  const access = testHandleAccess({
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+    persist,
+  })
+  await buildRealCommit(group)
+  await expect(
+    access.replace(group.committer.handle, undefined, async () => {
+      throw new Error('stale')
+    }),
+  ).rejects.toThrow('stale')
+  expect(persist).not.toHaveBeenCalled()
+  expect(member.handle).toBe(before)
+})
+
+test('guardedReplace refuses an access implementation that skips the guard', async () => {
+  const group = await createRealGroup(1, 'guard-skipped')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const inner = testHandleAccess({
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+  })
+  const skipping: HandleAccess = { ...inner, replace: (next) => inner.replace(next) }
+  await buildRealCommit(group)
+  await expect(guardedReplace(skipping, group.committer.handle)).rejects.toThrow(
+    'HandleAccess.replace did not run its guard',
+  )
 })

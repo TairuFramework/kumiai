@@ -1639,7 +1639,11 @@ test.each(['malformed-capability', 'Token expired', 'Unsupported signature algor
     )
     const previousError = verifierFault.error
     if (kind !== 'malformed-capability') {
-      verifierFault.token = binding.capability
+      verifierFault.token =
+        binding.capability ??
+        (() => {
+          throw new Error('Missing fixture capability')
+        })()
       verifierFault.error = new Error(kind)
     }
     try {

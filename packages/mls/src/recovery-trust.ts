@@ -97,6 +97,7 @@ async function assertTrustedMember(
   const denied = denySetOf(trust.registry)
   await verifyLeafCredential(member.credential, member.signaturePublicKey, {
     deviceDenySet: () => denied,
+    judging: () => ({ registry: trust.registry, stage: 'full', mode: 'rejudge' }),
     leafLifetime: () => group.anchor.leafLifetime,
     trustedGrantLifetime: () => group.anchor.trustedGrantLifetime,
   })

@@ -35,6 +35,15 @@ export type HubPurgeOptions = {
    * store's, since the store is the thing that refuses the subscribe.
    */
   olderThan?: number
+  /**
+   * Subscription inactivity window in seconds. Default: 7776000 (90 days).
+   * Clamped to at least olderThan so subscriptions outlive the message retention window.
+   */
+  subscriptionOlderThan?: number
+}
+
+type SubscriptionReapingStore = HubStore & {
+  purgeSubscriptions?: (params: { olderThan: number }) => Promise<Array<unknown>>
 }
 
 /** Replay settings a host may tune. The hub always enables replay checks and rejects stale tokens. */
@@ -162,14 +171,24 @@ export function createHub(params: CreateHubParams): HubInstance {
   if (params.purge !== false) {
     const interval = params.purge?.interval ?? 3_600_000
     const olderThan = params.purge?.olderThan ?? 604_800
+    const subscriptionOlderThan = Math.max(
+      params.purge?.subscriptionOlderThan ?? 7_776_000,
+      olderThan,
+    )
+    const store: SubscriptionReapingStore = params.store
     purgeTimer = setInterval(() => {
-      const run = params.store
-        .purge({ olderThan })
-        .then(() => {})
-        .catch((error: unknown) => {
-          // Purge failures are non-fatal; retried on the next interval
+      const run = (async () => {
+        try {
+          await store.purge({ olderThan })
+        } catch (error) {
           storeErrorReporter({ method: 'purge', error })
-        })
+        }
+        try {
+          await store.purgeSubscriptions?.({ olderThan: subscriptionOlderThan })
+        } catch (error) {
+          storeErrorReporter({ method: 'purgeSubscriptions', error })
+        }
+      })()
       purgesInFlight.add(run)
       void run.finally(() => {
         purgesInFlight.delete(run)

@@ -1,4 +1,5 @@
 import {
+  type EffectClaim,
   type GroupHandle,
   type RevokeBuildResult,
   type RevokeWithProofParams,
@@ -17,13 +18,18 @@ import {
 
 import { groupHandleAccess } from './mls.js'
 
+const proofResults = new Map<
+  string,
+  (result: Extract<PublishRevokeResult, { status: 'committed' }>) => void
+>()
+
 export type RevokeJournalOptions = {
   /** Serialise the candidate together with its ledger. */
   serializeJournal: (derived: GroupHandle) => Promise<Uint8Array> | Uint8Array
 }
 
 export type PublishRevokeResult =
-  | { status: 'committed'; epoch: number }
+  | { status: 'committed'; epoch: number; effects: Array<EffectClaim> }
   | Exclude<RevokeBuildResult, { status: 'built' }>
 
 export type PublishRevokeProofParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
@@ -66,10 +72,16 @@ export async function buildRevokeProofOnHandle(params: {
   const result = await revokeWithProof(group, body.input)
   if (result.status !== 'built') throw new OperationRejectedError(JSON.stringify(result))
   const { newGroup, commitMessage } = result.result
+  const journal = await params.options.serializeJournal(newGroup)
+  proofResults.get(params.op.id)?.({
+    status: 'committed',
+    epoch: Number(result.result.epoch),
+    effects: result.effects,
+  })
   return {
     commit: commitMessage,
     bodies: newGroup.ledgerTokens.filter((token) => !priorTokens.has(token)),
-    journal: await params.options.serializeJournal(newGroup),
+    journal,
     welcome: null,
     epoch: Number(group.epoch),
     authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
@@ -84,9 +96,14 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
   if (!groupHandleAccess.has(params.mls)) {
     throw new Error('publishRevokeProof requires an adapter-created GroupMLS')
   }
+  const id = crypto.randomUUID()
+  let result: Extract<PublishRevokeResult, { status: 'committed' }> | undefined
+  proofResults.set(id, (built) => {
+    result = built
+  })
   try {
     await params.peer.commit({
-      id: crypto.randomUUID(),
+      id,
       kind: 'ledger',
       revokes: true,
       body: new TextEncoder().encode(JSON.stringify({ type: 'revoke-proof', input: params.input })),
@@ -99,6 +116,9 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
     >
     if (!['already-revoked', 'self-affected', 'not-provable'].includes(result.status)) throw error
     return result
+  } finally {
+    proofResults.delete(id)
   }
-  return { status: 'committed', epoch: await params.mls.readEpoch() }
+  if (result === undefined) throw new Error('Committed proof operation has no build result')
+  return result
 }

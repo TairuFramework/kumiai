@@ -1,4 +1,9 @@
-import { type GroupHandle, type HoldingToken, restrictCommitAuthoring } from '@kumiai/mls'
+import {
+  assertRetainsKnownEffects,
+  type GroupHandle,
+  type HoldingToken,
+  restrictCommitAuthoring,
+} from '@kumiai/mls'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
@@ -44,7 +49,7 @@ export type HandleAccess = {
     ) => Promise<TValue>,
     adoption?: AdoptionWriteFactory,
   ): Promise<TValue>
-  /** Check identity and carry progress under the replacement's persistence gate. */
+  /** Run prepare and retain known lifecycle effects under the persistence gate. */
   replace(
     next: GroupHandle,
     adoption?: AdoptionWriteFactory,
@@ -54,6 +59,30 @@ export type HandleAccess = {
     fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
     persistOpened: PersistOpened,
   ): Promise<TValue>
+}
+
+/** Refuses a replacement that drops lifecycle effects the live handle knows. */
+export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => void {
+  return (live) => {
+    const controller = live.anchor.controller
+    if (controller != null) assertRetainsKnownEffects(controller, live.registry, next.registry)
+  }
+}
+
+/** Run the effect guard inside the existing replacement gate. */
+export async function guardedReplace(
+  access: ControlHandleAccess,
+  next: GroupHandle,
+  adoption?: AdoptionWriteFactory,
+): Promise<void> {
+  const guard = retainsKnownEffects(next)
+  let ran = false
+  await access.replace(next, adoption, async (live) => {
+    guard(live)
+    ran = true
+    return true
+  })
+  if (!ran) throw new Error('HandleAccess.replace did not run its guard')
 }
 
 export type SimpleHandleAccessParams = {
@@ -170,6 +199,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         if (adoption != null && params.persist == null) {
           throw new ControlWriteNotCommittedError('adoption requires a persist callback')
         }
+        retainsKnownEffects(next)(current.handle)
         await save(next, adoption, current.handle)
         await params.adopt(next)
         publishedAdmission = next.sendAdmission()

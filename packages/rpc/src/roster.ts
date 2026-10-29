@@ -17,7 +17,9 @@
  *
  * Pure: no state, no order dependence (the inputs are compared as sets), duplicates ignored.
  * Because it compares DIDs and not leaves, a change that leaves the DID set intact is invisible
- * to it — an external-commit rejoin by a member the roster still holds is exactly that.
+ * to it — an external-commit rejoin by a member the roster still holds is exactly that, and so is
+ * a stale-leaf replacement (a Remove and an Add of the same DID in one Commit), which
+ * {@link detectLeafAdmission} sees.
  */
 export function detectRosterChange(before: Array<string>, after: Array<string>): boolean {
   const held = new Set(before)
@@ -25,6 +27,25 @@ export function detectRosterChange(before: Array<string>, after: Array<string>):
   if (held.size !== present.size) return true
   for (const did of held) {
     if (!present.has(did)) return true
+  }
+  return false
+}
+
+/**
+ * Detect an ADD by diffing the leaf admissions around a Commit's application (see the rpc
+ * `RosterEntry.admission`): `true` iff a value is present after that was absent before.
+ *
+ * Only an Add puts a KeyPackage leaf node into the tree, so a new admission is an Add, and every
+ * Add brings one. It sees the Add a DID diff cannot: a Remove and an Add of the same DID in one
+ * Commit, whose re-added member joins by Welcome at the post-commit epoch and can never export the
+ * anchor the group would otherwise keep. A value that disappears is a member's own path or Update
+ * replacing the leaf node it was Added with, or a Remove — neither is an Add, and the first must
+ * not rotate.
+ */
+export function detectLeafAdmission(before: Array<string>, after: Array<string>): boolean {
+  const held = new Set(before)
+  for (const admission of after) {
+    if (!held.has(admission)) return true
   }
   return false
 }

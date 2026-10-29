@@ -8,7 +8,11 @@ import { createCommit, defaultProposalTypes, generateKeyPackageWithKey, nodeType
 export async function holderlessWelcome() {
   const seed = new Uint8Array(32).fill(43)
   const inception = createInception(seed, 0)
-  const controller = createControllerIdentity({ seed, profile: 0, log: [inception] })
+  const controller = createControllerIdentity({
+    seed,
+    profile: 0,
+    log: { chain: [inception], events: [] },
+  })
   const inviter = randomIdentity()
   const trusted = randomIdentity()
   const identity = randomIdentity()
@@ -23,6 +27,7 @@ export async function holderlessWelcome() {
     exp: now + 3600,
   })
   const { group } = await createGroup(inviter, 'group:holder-evidence', {
+    controllerLog: { chain: [inception], events: [] },
     controller: {
       id: controller.id,
       prefix: [inception],

@@ -45,7 +45,9 @@ test('rotation refuses local pending proposals and otherwise preserves roster an
   expect(member.state).toEqual(source)
   expect(rotated.newGroup.epoch).toBe(member.epoch + 1n)
   expect(rotated.newGroup.ledgerTokens).toEqual(member.ledgerTokens)
-  expect(rotated.newGroup.listMembers()).toEqual(member.listMembers())
+  expect(
+    rotated.newGroup.listMembers().map(({ admission: _admission, ...entry }) => entry),
+  ).toEqual(member.listMembers().map(({ admission: _admission, ...entry }) => entry))
   expect(rotated.newGroup.state.unappliedProposals).toEqual({})
   await added.newGroup.processMessage(rotated.commitMessage)
   expect(added.newGroup.state.keySchedule.epochAuthenticator).toEqual(

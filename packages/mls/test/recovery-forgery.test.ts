@@ -42,6 +42,7 @@ import { buildLedgerHeadExtension, genesisHead } from '../src/head.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
 import {
   createRecoveryRequest,
+  encodeLedgerTokens,
   openSealedGroupInfo,
   RECOVERY_GROUPINFO_TYPE,
   SEALED_GROUP_INFO_VERSION,
@@ -227,9 +228,11 @@ async function sealForgedReply(opts: {
   requesterDID: string
   requestID: string
   groupInfo: Uint8Array
+  ledger?: Uint8Array
   capture?: { captureHead: string | null; groupInfoAuthenticator: string }
 }): Promise<Uint8Array> {
-  const ledger = opts.requesterGroup.anchor.controller == null ? undefined : new Uint8Array(4)
+  const ledger =
+    opts.requesterGroup.anchor.controller == null ? undefined : (opts.ledger ?? new Uint8Array(4))
   const signed = await opts.signer.signToken(
     {
       type: RECOVERY_GROUPINFO_TYPE,
@@ -506,8 +509,10 @@ test('captured attestation authority stays in the origin tree after the offered 
   const carol = randomIdentity()
   const now = Math.floor(Date.now() / 1000)
   const bindingOf = (identity: OwnIdentity) => timedBinding({ identity, iat: now, exp: now + 3600 })
+  const creatorBinding = await bindingOf(alice)
   const { group } = await createGroup(alice, 'origin-attestation-authority', {
-    controller: await bindingOf(alice),
+    controller: creatorBinding,
+    controllerLog: { chain: creatorBinding.prefix, events: [] },
   })
   const withBob = await lowLevelWelcome(group, bob, await bindingOf(bob))
   const withCarol = await lowLevelWelcome(withBob.author, carol, await bindingOf(carol))
@@ -554,6 +559,7 @@ test('captured attestation authority stays in the origin tree after the offered 
       requesterDID: bob.id,
       requestID: 'origin',
       groupInfo: bytes,
+      ledger: encodeLedgerTokens(advanced.ledgerTokens),
       capture,
     })
   const open = (sealed: Uint8Array) =>

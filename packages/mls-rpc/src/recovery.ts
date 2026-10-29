@@ -1,6 +1,7 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   assertRecoveryBinding,
+  assertRetainsKnownEffects,
   authenticateRecoveryReply as authenticateTrustedReply,
   type CapturedRecoveryGroupInfo,
   type ClientState,
@@ -241,6 +242,28 @@ export function knownRecoveryRegistry(
         ? projection
         : {
             ...offered,
+            ...(offered.genFloor > projection.genFloor
+              ? {}
+              : {
+                  removedMembers: new Map([
+                    ...projection.removedMembers,
+                    ...offered.removedMembers,
+                  ]),
+                  survivorGrants: new Map([
+                    ...projection.survivorGrants,
+                    ...offered.survivorGrants,
+                  ]),
+                  attestations: new Map(
+                    [...projection.attestations, ...offered.attestations].map(([key, time]) => [
+                      key,
+                      Math.max(
+                        time,
+                        projection.attestations.get(key) ?? 0,
+                        offered.attestations.get(key) ?? 0,
+                      ),
+                    ]),
+                  ),
+                }),
             genFloor: Math.max(projection.genFloor, offered.genFloor),
             timeFloor: Math.max(projection.timeFloor, offered.timeFloor),
           },
@@ -259,7 +282,14 @@ export function createRecoveryBindingState(
   let prepared = false
   const unusable = new Set<string>()
   const bindingID = (value: ControllerBinding): string =>
-    JSON.stringify([value.id, value.prefix, value.capability, value.holderGrant])
+    JSON.stringify([
+      value.id,
+      value.prefix,
+      value.capability,
+      value.holderGrant,
+      value.member,
+      value.iat,
+    ])
   function markBindingUnusable(id?: string): void {
     if (id == null) return
     unusable.delete(id)
@@ -281,12 +311,14 @@ export function createRecoveryBindingState(
   }
   function current(group: GroupHandle): ControllerBinding | undefined {
     const leaf = group.bindingOfDID(identity.id)
-    return leaf?.controller == null || leaf.prefix == null || leaf.capability == null
+    return leaf?.controller == null || leaf.prefix == null
       ? undefined
       : {
           id: leaf.controller,
           prefix: leaf.prefix,
-          capability: leaf.capability,
+          ...(leaf.member == null
+            ? { capability: leaf.capability }
+            : { member: leaf.member, iat: leaf.iat }),
           ...(leaf.holderGrant == null ? {} : { holderGrant: leaf.holderGrant }),
         }
   }
@@ -325,6 +357,7 @@ export function createRecoveryBindingState(
         binding = current(group)
       }
       let signerEligible = group.anchor.controller == null
+      let candidateSource: GroupHandle | undefined
       const build = (controller?: ControllerBinding) => {
         signerEligible = group.anchor.controller == null
         return joinGroupExternal({
@@ -335,16 +368,18 @@ export function createRecoveryBindingState(
           controller,
           beforeBinding: async (pending, source) => {
             if (group.anchor.controller == null) return
+            assertRetainsKnownEffects(group.anchor.controller, group.registry, source.registry)
             if (
               !recoverySignerEligible({
                 group: pending,
-                known: knownRecoveryRegistry(group.registry, source.registry),
+                registry: source.registry,
                 signer: reply.signer,
               })
             )
               throw new Error('Ineligible recovery attestation signer')
             signerEligible = true
-            if (controller == null || !(await usable(group, controller)))
+            candidateSource = source
+            if (controller == null || !(await usable(source, controller)))
               throw new LeafBindingError('floating-refused')
           },
           options: {
@@ -378,7 +413,7 @@ export function createRecoveryBindingState(
         )
           return null
         binding = await request(group)
-        if (binding == null || !(await usable(group, binding)))
+        if (binding == null || candidateSource == null || !(await usable(candidateSource, binding)))
           return { renewalRequired: true } as const
         try {
           return await candidate(binding)
@@ -416,7 +451,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
     )
       return 'tuple'
     if (group.anchor.controller != null)
-      return recoverySignerEligible({ group, known, signer }) ? null : 'ineligible'
+      return recoverySignerEligible({ group, registry: known, signer }) ? null : 'ineligible'
     if (verdict.verdict === 'confirmed') return null
     for (const node of sourceTree) {
       if (node == null || !('leaf' in node)) continue
@@ -670,6 +705,9 @@ export async function buildRecoveryCandidate(params: {
         : { ledgerEntries: reply.ledger }),
       options: { ...environment.options, ciphersuiteName: source.trust.ciphersuiteName },
       beforeBinding: async (_pending, before) => {
+        const controllerID = before.anchor.controller
+        if (controllerID != null)
+          assertRetainsKnownEffects(controllerID, source.trust.registry, before.registry)
         if (controller !== undefined) {
           if (capturedBindingState(environment).isBindingUnusable(controller))
             throw new LeafBindingError('floating-refused')
@@ -726,7 +764,7 @@ export async function buildRecoveryCandidate(params: {
       searchFrom: target.captureHead,
       state: result.group.state,
       sourceTree: offeredTree(result.group.state, reply.groupInfo),
-      knownRegistry: knownRecoveryRegistry(source.trust.registry, result.sourceRegistry),
+      knownRegistry: result.sourceRegistry,
       attestedReply: sealed,
       groupInfo: reply.groupInfo,
       replyLedger: reply.ledger,

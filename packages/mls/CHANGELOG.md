@@ -1,5 +1,54 @@
 # @kumiai/mls
 
+## 0.12.1
+
+### Patch Changes
+
+- `revokeWithProof` proves an incarnation removal from the settled chain when the settlement keeps the removed incarnation as a tombstone. This uses kokuin controller 0.2.4 snapshot `u`, the `snapshotOf` default. The proof keeps the existing `{ chainIndex }` reference. An epoch proof or a drop index is still preferred whenever one exists, so 0.12.0 receivers keep accepting every removal they could prove before. A 0.12.0 member refuses a tombstone-only proof, so a host may stop capturing `removalEvidence` only once every member of its lifecycle groups runs 0.12.1 or later. Evidence is still needed when a settlement drops the tombstone. As in 0.12.0, seeding a registry from a log learns no removal from tombstones alone.
+
+  Attest clocks are attributed only to an effective management member. A removed or denied incarnation sharing the issuer's DID no longer counts.
+
+  Note missing from 0.12.0: a `holderGrant` on a direct (non-chained) controller leaf is refused with `holder-evidence-mismatch`. 0.11 accepted one without verifying it. Attach holder grants only to chained leaves.
+
+## 0.12.0
+
+### Minor Changes
+
+- Introduce the breaking 0.12 management tier across all fourteen packages. Lifecycle groups require registry-seeding controller logs and support membership and member-rooted capability bindings. ControllerLog proofs carry exact denial, removal and reset effects, with survivor grants and retained removal evidence. Effective-member quorum time, admission-only epoch caps and recovery knowledge retention replace the previous lifecycle contracts. Wire shapes, persisted projections, adapters and conformance doubles follow the new surface.
+
+  Recheck lifecycle knowledge atomically when adopting recovery candidates, including adoption retries.
+
+  Reject log events authored by tombstoned member incarnations after stale root settlements.
+
+  Reject unauthenticated no-op log updates and bound replay and effect-claim verification work.
+
+  Verify lifecycle envelopes in order so renewal and attestation can share a commit.
+
+  Cascade chained leaves when their required holder grant loses member authority.
+
+  Use one effective-member clock predicate and skip attestations beyond the author’s lease.
+
+  `HandleAccess.replace(next, guard)` requires a guard that implementations run on the live handle under the replacement lock. New `retainsKnownEffects` and `guardedReplace`; recovery adoption and revoke replace through them, and hosts adopt authored commits through `guardedReplace`.
+
+## 0.11.0
+
+### Minor Changes
+
+- Adopt `@kokuin/controller` 0.2.1, `@kokuin/capability` 0.5.1 and `@kokuin/token` 0.6.1 for the 0.11 band.
+  Wire and persisted formats remain unchanged: `prefix`, `proof` and `recordedLog` still carry signed-event arrays.
+  Device revokes now use non-reset rotates whose state snapshots newly deny the device DID. Member-issued grants remain unsupported.
+
+  `@kumiai/mls-rpc` and `@kumiai/mls-hub` inherit the `@kumiai/mls` behaviour change.
+  `no-rev` means no revoking rotate for the subject.
+
+## 0.10.9
+
+### Patch Changes
+
+- `GroupMember` gains optional `admission`: the leaf's HPKE key while the leaf still holds the KeyPackage leaf node it was Added with (until its own path or Update replaces it). A value that appears across a commit means the commit Added a leaf, including a stale-leaf replacement of the same DID.
+
+  Upgrade `@kumiai/mls`, `@kumiai/mls-rpc` and `@kumiai/rpc` together. The rotation record is persisted before an advance and resolved after it, possibly after a restart: a record written while the port reported no admissions (rpc 0.10.9 over mls-rpc < 0.10.4 or mls < 0.10.9) holds `admissionsBefore: []`, and if it resolves after the port is upgraded, every leaf still holding its KeyPackage looks newly Added and the peer rotates on an ordinary commit while the rest of the group keeps the anchor.
+
 ## 0.10.8
 
 ### Patch Changes

@@ -111,7 +111,18 @@ test('rejects malformed UTF-8, JSON, and tagged nodes', () => {
 test('serializes trust registries through the canonical registry codec', async () => {
   const registry: DeviceRegistry = {
     devices: new Map([['did:key:device', { controller: 'did:key:controller', status: 'active' }]]),
-    controllers: new Map([['did:key:controller', { genFloor: 0, timeFloor: 0, recordedLog: [] }]]),
+    controllers: new Map([
+      [
+        'did:key:controller',
+        {
+          genFloor: 0,
+          timeFloor: 0,
+          attestations: new Map(),
+          removedMembers: new Map(),
+          survivorGrants: new Map(),
+        },
+      ],
+    ]),
   }
   const trustAddress = { ...address, incarnation: null, namespace: 'trust', recordID: 'current' }
   const value = {

@@ -86,6 +86,12 @@ export function accountedRuntime(params: {
       if (!('identity' in node.leaf.credential)) return null
       const parsed = parseMLSCredentialIdentity(node.leaf.credential.identity)
       if (parsed.controller == null) continue
+      if (parsed.controller.member != null) {
+        if (typeof parsed.controller.iat !== 'number' || !Number.isFinite(parsed.controller.iat))
+          return null
+        continue
+      }
+      if (parsed.controller.capability == null) return null
       const payload = decodeSignedToken(parsed.controller.capability).payload
       if (
         typeof payload.iat !== 'number' ||

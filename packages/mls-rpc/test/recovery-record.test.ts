@@ -1,4 +1,10 @@
-import { createRotate } from '@kokuin/controller'
+const { snapshotForChain } = (await import(
+  new URL('../../mls/test/fixtures/controller-chain.ts', import.meta.url).href
+)) as {
+  snapshotForChain(did: string, chain: ControllerBinding['prefix']): StateSnapshot
+}
+
+import { createRotate, type StateSnapshot } from '@kokuin/controller'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ControllerBinding,
@@ -65,8 +71,26 @@ test('reordered equivalent public trust hashes equally with bigint lifetimes and
     ['device-a', { controller: 'controller-a', status: 'revoked' }],
   ])
   first.registry.controllers = new Map([
-    ['controller-b', { recordedLog: [], genFloor: 2, timeFloor: 3 }],
-    ['controller-a', { recordedLog: [], genFloor: 4, timeFloor: 5 }],
+    [
+      'controller-b',
+      {
+        attestations: new Map(),
+        removedMembers: new Map(),
+        survivorGrants: new Map(),
+        genFloor: 2,
+        timeFloor: 3,
+      },
+    ],
+    [
+      'controller-a',
+      {
+        attestations: new Map(),
+        removedMembers: new Map(),
+        survivorGrants: new Map(),
+        genFloor: 4,
+        timeFloor: 5,
+      },
+    ],
   ])
   first.signerTree.push(undefined)
   const second = structuredClone(first)
@@ -126,7 +150,16 @@ test.each([
     'registry',
     (value: GroupRecoveryTrust) => {
       value.registry.controllers = new Map([
-        ['authority', { recordedLog: [], genFloor: 1, timeFloor: 2 }],
+        [
+          'authority',
+          {
+            attestations: new Map(),
+            removedMembers: new Map(),
+            survivorGrants: new Map(),
+            genFloor: 1,
+            timeFloor: 2,
+          },
+        ],
       ])
     },
   ],
@@ -286,13 +319,17 @@ describe('public trust JSON positions', () => {
         profile: 0,
         did: lifecycle.controllerID,
         prior: lifecycle.inception.event,
-        options: { keyPosition: { gen: 0, seq: 0 }, seal: '100' },
+        snapshot: snapshotForChain(lifecycle.controllerID, [lifecycle.inception]),
+        seal: '100',
       }),
     ]
     const identity = randomIdentity()
     const responder = randomIdentity()
     const controller = await lifecycle.bindingFor(identity, prefix)
-    const { group } = await createGroup(identity, 'captured-bound-record', { controller })
+    const { group } = await createGroup(identity, 'captured-bound-record', {
+      controller,
+      controllerLog: { chain: controller.prefix, events: [] },
+    })
     const { invite } = await createInvite({ group, identity, recipientDID: responder.id })
     const bundle = await createKeyPackageBundle(responder, {
       controller: await lifecycle.bindingFor(responder, prefix),
@@ -319,11 +356,12 @@ describe('public trust JSON positions', () => {
         profile: 0,
         did: lifecycle.controllerID,
         prior: lifecycle.inception.event,
-        options: { keyPosition: { gen: 0, seq: 0 } },
+        snapshot: snapshotForChain(lifecycle.controllerID, [lifecycle.inception]),
       }),
     ]
     const noSeal = await createGroup(noSealIdentity, 'trust-no-seal', {
       controller: await lifecycle.bindingFor(noSealIdentity, noSealPrefix),
+      controllerLog: { chain: noSealPrefix, events: [] },
     })
     producerTrusts = [
       structuredClone(held),
@@ -334,7 +372,17 @@ describe('public trust JSON positions', () => {
       [identity.id, { controller: controller.id, status: 'active' }],
     ])
     held.registry.controllers = new Map([
-      [controller.id, { recordedLog: controller.prefix, genFloor: 0, timeFloor: 0 }],
+      [
+        controller.id,
+        {
+          recordedLog: { chain: controller.prefix, events: [] },
+          attestations: new Map(),
+          removedMembers: new Map(),
+          survivorGrants: new Map(),
+          genFloor: 0,
+          timeFloor: 0,
+        },
+      ],
     ])
     const source = { ...fixture.snapshot.source, trustDigest: recoveryTrustDigest(held) }
     record = {

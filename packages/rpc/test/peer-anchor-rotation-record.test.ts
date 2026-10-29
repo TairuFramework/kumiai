@@ -20,6 +20,7 @@ import {
   buildInviteCommit,
   buildLedgerCommit,
   buildRemoveCommit,
+  buildReplaceCommit,
   makeMLSPeer,
 } from './fixtures/peer.js'
 
@@ -451,6 +452,144 @@ describe('recovery ordering', { concurrent: false }, () => {
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
     await restarted.peer.replay()
     expect(restarted.peer.anchorEpoch()).toBe(2)
+    expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
+    await restarted.peer.dispose()
+  })
+
+  test('a persisted leaf-replacement record rotates when restart resolves the durable handle', async () => {
+    const hub = new DurableFakeHub()
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
+    await bob.peer.replay()
+    await bob.peer.enqueue(
+      buildReplaceCommit(bob, 'carol', {
+        onAdopt: async () => {
+          throw new Error('durable replacement not adopted')
+        },
+      }),
+    )
+    await expect.poll(async () => (await bob.control.load()).commitOnce?.acceptedAs).toBeDefined()
+    expect(bob.mls.epoch()).toBe(1)
+    expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
+    await bob.peer.dispose()
+    const savedControl = await bob.control.load()
+    const slot = savedControl.commitOnce
+    if (slot === null) throw new Error('Missing slot')
+    const position = slot.acceptedAs
+    if (position === undefined) throw new Error('Missing acknowledged position')
+    const source = (await bob.mls.readEvidence()).source
+    await bob.database.saveState('bob', decodeMemoryControlJournal(slot.journal).candidate, {
+      expected: {
+        ...source,
+        journal: slot.journal,
+        occurrence: { source, position, payloadDigest: slot.payloadDigest, coverage: 'complete' },
+      },
+      mutationID: 'committed-replacement',
+      anchorLanded: slot.digest,
+      changes: {
+        ...closeControlBuild(
+          savedControl,
+          { kind: 'landed', position },
+          Date.now(),
+          crypto.randomUUID(),
+        ),
+        putApplied: [
+          {
+            epoch: slot.epoch,
+            digest: slot.digest,
+            payloadDigest: slot.payloadDigest,
+            sequenceID: position,
+            opID: slot.opID,
+            removed: false,
+          },
+        ],
+        cursor: { position, epoch: slot.epoch + 1 },
+      },
+    })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
+    await restarted.peer.replay()
+    expect(restarted.mls.leaves()).toEqual(members)
+    expect(restarted.peer.anchorEpoch()).toBe(2)
+    expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
+    await restarted.peer.dispose()
+  })
+
+  /**
+   * A record persisted by rpc 0.10.8 carries no `admissionsBefore`. It must resolve on `forced` and
+   * the DID diff alone, exactly as it did: not by reading a missing list as empty, which would make
+   * every leaf still holding its KeyPackage look newly Added.
+   */
+  test.each([
+    { name: 'a commit that moves no DID keeps the anchor', build: 'ledger', rotates: false },
+    {
+      name: 'a same-DID replacement keeps the anchor, as before',
+      build: 'replace',
+      rotates: false,
+    },
+    { name: 'an Add of a new DID rotates', build: 'invite', rotates: true },
+  ] as const)('a pending record without admissionsBefore: $name', async ({ build, rotates }) => {
+    const hub = new DurableFakeHub()
+    // Dave was Added and never committed, so his leaf still holds an admission the whole time.
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob', 'carol'] })
+    await bob.peer.replay()
+    await bob.peer.commit(buildInviteCommit(bob, 'dave'))
+    expect(bob.peer.anchorEpoch()).toBe(2)
+    const options = {
+      onAdopt: async (): Promise<'installed'> => {
+        throw new Error('not adopted')
+      },
+    }
+    const request =
+      build === 'ledger'
+        ? buildLedgerCommit(bob, [], options)
+        : build === 'replace'
+          ? buildReplaceCommit(bob, 'carol', options)
+          : buildInviteCommit(bob, 'erin', options)
+    await bob.peer.enqueue(request)
+    await expect.poll(async () => (await bob.control.load()).commitOnce?.acceptedAs).toBeDefined()
+    const anchorSlot = await bob.anchorStore.load()
+    if (anchorSlot?.pending == null) throw new Error('no pending record')
+    expect(anchorSlot.pending.admissionsBefore).toEqual(['dave#1'])
+    const { admissionsBefore: _dropped, ...legacy } = anchorSlot.pending
+    await bob.anchorStore.save({ anchor: anchorSlot.anchor, pending: legacy })
+    await bob.peer.dispose()
+    const savedControl = await bob.control.load()
+    const slot = savedControl.commitOnce
+    if (slot === null) throw new Error('Missing slot')
+    const position = slot.acceptedAs
+    if (position === undefined) throw new Error('Missing acknowledged position')
+    const source = (await bob.mls.readEvidence()).source
+    await bob.database.saveState('bob', decodeMemoryControlJournal(slot.journal).candidate, {
+      expected: {
+        ...source,
+        journal: slot.journal,
+        occurrence: { source, position, payloadDigest: slot.payloadDigest, coverage: 'complete' },
+      },
+      mutationID: 'committed-replacement',
+      anchorLanded: slot.digest,
+      changes: {
+        ...closeControlBuild(
+          savedControl,
+          { kind: 'landed', position },
+          Date.now(),
+          crypto.randomUUID(),
+        ),
+        putApplied: [
+          {
+            epoch: slot.epoch,
+            digest: slot.digest,
+            payloadDigest: slot.payloadDigest,
+            sequenceID: position,
+            opID: slot.opID,
+            removed: false,
+          },
+        ],
+        cursor: { position, epoch: slot.epoch + 1 },
+      },
+    })
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
+    await restarted.peer.replay()
+    expect(restarted.mls.epoch()).toBe(3)
+    expect(restarted.peer.anchorEpoch()).toBe(rotates ? 3 : 2)
     expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
     await restarted.peer.dispose()
   })

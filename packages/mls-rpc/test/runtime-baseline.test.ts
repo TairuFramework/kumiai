@@ -154,8 +154,10 @@ describe('runtime baseline capability smoke', () => {
     }
     const identity = randomIdentity()
     const now = Math.floor(Date.now() / 1000)
+    const creatorBinding1 = await timedBinding({ identity, iat: now - 20, exp: now + 1000 })
     const { group } = await createGroup(identity, 'baseline-bound-device', {
-      controller: await timedBinding({ identity, iat: now - 20, exp: now + 1000 }),
+      controllerLog: { chain: creatorBinding1.prefix, events: [] },
+      controller: creatorBinding1,
     })
     const index = group.state.privatePath.leafIndex * 2
     const original = group.state.ratchetTree[index]

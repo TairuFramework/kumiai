@@ -19,6 +19,9 @@ depend on both.
 
 - `simpleHandleAccess({ handle, adopt, stateVersion, key, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
+- `retainsKnownEffects(next)` — replacement guard refusing a handle that drops lifecycle effects the
+  live handle knows. `guardedReplace(access, next)` replaces through it, and throws afterwards if
+  `access` never invoked the guard (a broken adapter has then already adopted `next`).
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
   Registry access supplies `pending` and `unwrapBatch(frames)` automatically.
 - `createRegistryAppPublication(access)` — the peer's `appPublication` preparation/snapshot port.
@@ -133,6 +136,7 @@ A host with its own handle store implements the port instead:
   `processCommit(commit, context)` supplies it as `context.adoption`. Live and restored recovery candidates require
   `onAccepted(adoption)` and reject calls without a factory.
 - `replace` runs `prepare(current)` under the same gate as persistence. A false result skips saving and publishing.
+  It refuses candidates that drop known lifecycle effects under that gate. `guardedReplace` applies this guard through `prepare`.
 - `epoch()` is a synchronous hint. Publish it only after the outermost successful commit, and restore
   it on rollback. No port decision reads it: every one uses an epoch read under the lock.
 - `admission()` publishes synchronous send admission with the epoch after mutation, open or replacement resolves.

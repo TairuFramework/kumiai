@@ -610,7 +610,13 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (fault === 'trust')
           s.params.source.trust.registry.controllers = new Map(
             s.params.source.trust.registry.controllers,
-          ).set('unrelated-controller', { recordedLog: [], genFloor: 1, timeFloor: 0 })
+          ).set('unrelated-controller', {
+            attestations: new Map(),
+            removedMembers: new Map(),
+            survivorGrants: new Map(),
+            genFloor: 1,
+            timeFloor: 0,
+          })
         if (fault === 'unconfirmed' || fault === 'refused')
           await s.fixture.installRows({
             key,

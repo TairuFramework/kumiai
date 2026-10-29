@@ -160,7 +160,7 @@ test('public GroupInfo inspection checks replacement binding and authenticated l
     groupInfo,
     identity: fixture.identity,
     credential: fixture.group.credential,
-    ledgerEntries: [],
+    ledgerEntries: fixture.group.ledgerTokens,
   }
   await expect(mls.inspectRecoveryGroupInfo(params)).rejects.toMatchObject({
     reason: 'floating-refused',

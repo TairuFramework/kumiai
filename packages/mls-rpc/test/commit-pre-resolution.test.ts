@@ -2,6 +2,7 @@ import { MissingLedgerEntriesError, readCommitEntryIDs } from '@kumiai/mls'
 import { expect, test, vi } from 'vitest'
 
 import { createGroupCrypto } from '../src/crypto.js'
+import { guardedReplace } from '../src/index.js'
 import { createGroupMLS } from '../src/mls.js'
 import {
   buildRealCommit,
@@ -80,7 +81,7 @@ test('an epoch move during pre-resolution reports the new epoch without applying
   })
   const commit = await buildRealCommit(group)
   const resolver = async (ids: Array<string>) => {
-    await access.replace(group.committer.handle)
+    await guardedReplace(access, group.committer.handle)
     return await group.resolveLedgerEntries(ids)
   }
   const moved = Number(group.committer.handle.epoch)
@@ -110,7 +111,7 @@ test('wrong-epoch and non-Commit frames never open entry bodies', async () => {
   })
   const commit = await buildRealCommit(group)
   const opened = vi.fn(group.resolveLedgerEntries)
-  await access.replace(group.committer.handle)
+  await guardedReplace(access, group.committer.handle)
   await expect(
     mls.processCommit(commit, {
       senderDID: group.committer.identity.id,

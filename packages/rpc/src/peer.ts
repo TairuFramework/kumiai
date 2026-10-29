@@ -81,6 +81,7 @@ import {
   type ProcessCommitResult,
   type RecoveryCommitValidation,
   type RecoveryVerdict,
+  type RosterEntry,
 } from './crypto.js'
 import {
   asLogPosition,
@@ -176,7 +177,7 @@ import type {
   CapturedRejoinRecord,
   StoredRejoinRecord,
 } from './recovery-types.js'
-import { detectRosterChange } from './roster.js'
+import { detectLeafAdmission, detectRosterChange } from './roster.js'
 import {
   APP_TOPIC_LABEL,
   commitTopic,
@@ -235,6 +236,11 @@ type RendezvousOutcome =
   | { kind: 'publish-failed'; error: unknown }
 
 type PendingAnchorRotation = NonNullable<AnchorSlot['pending']>
+
+/** The leaf admissions a roster holds (see {@link RosterEntry.admission}). */
+function admissionsOf(entries: Array<RosterEntry>): Array<string> {
+  return entries.flatMap((entry) => (entry.admission == null ? [] : [entry.admission]))
+}
 
 type ResolveAnchorRotationParams = {
   port: GroupMLS
@@ -786,9 +792,13 @@ export function createGroupPeerWithControlWalk<
     }
     if (!(await port.isLedgerComplete())) return
     if (safetyHold() !== null) return
-    const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
+    const entries = await port.rosterEntries()
+    const roster = entries.map((entry) => normalizeDID(entry.did))
     if (safetyHold() !== null) return
-    if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
+    const admitted =
+      record.admissionsBefore != null &&
+      detectLeafAdmission(record.admissionsBefore, admissionsOf(entries))
+    if (record.forced || admitted || detectRosterChange(record.rosterBefore, roster)) {
       await captureAnchor(record.advance)
     } else {
       await keepAnchor()
@@ -1835,12 +1845,16 @@ export function createGroupPeerWithControlWalk<
     if (!confirmedRecovery) appLane.kick()
     assertLive()
     assertSafetyOpen()
+    const entriesBefore =
+      (retry && pending != null) || (!ledgerComplete && identity.forced)
+        ? []
+        : await port.rosterEntries()
     const rosterBefore =
       retry && pending != null
         ? pending.rosterBefore
         : !ledgerComplete && identity.forced
           ? []
-          : (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
+          : entriesBefore.map((entry) => normalizeDID(entry.did))
     assertSafetyOpen()
     const epochBefore = await port.readEpoch()
     assertLive()
@@ -1852,6 +1866,7 @@ export function createGroupPeerWithControlWalk<
             epochBefore,
             epochAfter: identity.epochAfter,
             rosterBefore,
+            admissionsBefore: admissionsOf(entriesBefore),
             forced: identity.forced,
             advance: identity.advance,
           }

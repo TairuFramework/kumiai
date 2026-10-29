@@ -1,13 +1,16 @@
 import { createIdentity, now } from '@kokuin/token'
+import { nodeTypes } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { createGroup } from '../src/group-create.js'
 import {
+  assertBindingAuthorTime,
   createKeyPackageBundle,
   createLastResortKeyPackageBundle,
   makeMLSCredential,
 } from '../src/group-credential.js'
+import { deriveGroup } from '../src/group-handle.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 
 const enc = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj))
@@ -17,6 +20,91 @@ const validController = {
   prefix: [{ event: { v: 1, t: 'icp' }, sigs: ['x'] }],
   capability: 'ey.token',
 }
+
+const membershipController = {
+  id: validController.id,
+  prefix: validController.prefix,
+  member: { add: 'member-add', g: 0 },
+  iat: 100,
+}
+
+test('parser accepts a membership binding', () => {
+  const parsed = parseMLSCredentialIdentity(
+    enc({ id: 'did:key:zDevice', controller: membershipController }),
+  )
+  expect(parsed.controller).toEqual(membershipController)
+  expect(parsed.controller?.capability).toBeUndefined()
+})
+
+test.each([
+  [
+    'parser refuses a binding with neither capability nor member',
+    { ...membershipController, member: undefined },
+  ],
+  ['parser refuses a binding with both', { ...membershipController, capability: 'ey.token' }],
+  ['parser refuses a membership binding without iat', { ...membershipController, iat: undefined }],
+])('%s', (_, controller) => {
+  expect(() => parseMLSCredentialIdentity(enc({ id: 'did:key:zDevice', controller }))).toThrow(
+    'Invalid MLS credential',
+  )
+})
+
+test.each([
+  null,
+  [],
+  { add: '', g: 0 },
+  { add: 'member-add', g: -1 },
+  { add: 'member-add', g: 0.5 },
+  { add: 'member-add', g: Number.MAX_SAFE_INTEGER + 1 },
+  { add: 'member-add', g: '0' },
+  { add: 'member-add', g: 0, extra: true },
+  { add: 'member-add' },
+])('parser refuses an invalid member claim %j', (member) => {
+  expect(() =>
+    parseMLSCredentialIdentity(
+      enc({ id: 'did:key:zDevice', controller: { ...membershipController, member } }),
+    ),
+  ).toThrow('Invalid MLS credential')
+})
+
+test.each([
+  { ...membershipController, holderGrant: 'ey.token' },
+  { ...membershipController, iat: '100' },
+  { ...membershipController, iat: null },
+])('parser refuses invalid membership evidence %j', (controller) => {
+  expect(() => parseMLSCredentialIdentity(enc({ id: 'did:key:zDevice', controller }))).toThrow(
+    'Invalid MLS credential',
+  )
+})
+
+test('bindingOfDID returns the membership form', async () => {
+  const identity = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(41) }],
+    didMethod: 'key',
+  })
+  const { group } = await createGroup(identity, 'membership-reader')
+  const controller = { ...membershipController, prefix: [] }
+  const ratchetTree = group.state.ratchetTree.map((node) =>
+    node?.nodeType === nodeTypes.leaf
+      ? { ...node, leaf: { ...node.leaf, credential: makeMLSCredential(identity, controller) } }
+      : node,
+  )
+  const bound = deriveGroup(group, { ...group.state, ratchetTree })
+  expect(bound.bindingOfDID(identity.id)).toEqual({
+    controller: controller.id,
+    prefix: [],
+    member: { add: 'member-add', g: 0 },
+    iat: 100,
+    leafKey: identity.publicKey,
+  })
+  expect(bound.bindingOfDID(identity.id)?.capability).toBeUndefined()
+})
+
+test('assertBindingAuthorTime checks membership issuance without a capability expiry', () => {
+  const controller = { ...membershipController, prefix: [], iat: now() }
+  expect(() => assertBindingAuthorTime(controller)).not.toThrow()
+  expect(() => assertBindingAuthorTime({ ...controller, iat: now() + 600 })).toThrow()
+})
 
 describe('parseMLSCredentialIdentity controller', () => {
   test('accepts a well-formed controller binding', () => {

@@ -4,7 +4,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { readGroupAnchorExtension } from '../../src/anchor.js'
 import { createGroup, exportGroupInfo } from '../../src/group.js'
 import * as mls from '../../src/index.js'
-import { type SealedReplyKind, sealToRequest } from '../../src/recovery.js'
+import { encodeLedgerTokens, type SealedReplyKind, sealToRequest } from '../../src/recovery.js'
 import { timedBinding } from './lifecycle-pipeline.js'
 
 export async function captureFixture(options: { standard?: boolean } = {}) {
@@ -16,7 +16,9 @@ export async function captureFixture(options: { standard?: boolean } = {}) {
   const { group } = await createGroup(
     identity,
     'captured-recovery',
-    binding == null ? {} : { controller: binding },
+    binding == null
+      ? {}
+      : { controller: binding, controllerLog: { chain: binding.prefix, events: [] } },
   )
   const extension = readGroupAnchorExtension(group)
   if (!(extension?.extensionData instanceof Uint8Array)) throw new Error('Missing anchor')
@@ -53,6 +55,7 @@ export async function signedCapture(params: {
 }) {
   const { fixture, fields = {}, omit = [] } = params
   const { groupInfo } = await exportGroupInfo({ group: fixture.group })
+  const ledger = encodeLedgerTokens(fixture.group.ledgerTokens)
   const payload: Record<string, unknown> = {
     type: 'kumiai.recovery-groupinfo',
     groupID: fixture.group.groupID,
@@ -62,7 +65,7 @@ export async function signedCapture(params: {
     groupInfoAuthenticator: Buffer.from(
       fixture.group.state.keySchedule.epochAuthenticator,
     ).toString('base64url'),
-    ledgerDigest: encodeMultibase(sha256(new Uint8Array(4))),
+    ledgerDigest: encodeMultibase(sha256(ledger)),
     ...fields,
   }
   for (const key of omit) delete payload[key]
@@ -77,12 +80,15 @@ export async function signedCapture(params: {
   token = params.transformToken?.(token) ?? token
   const bytes = new TextEncoder().encode(token)
   const lifecycle = fixture.group.anchor.controller != null
-  const plaintext = new Uint8Array(4 + bytes.length + groupInfo.length + (lifecycle ? 8 : 0))
+  const plaintext = new Uint8Array(
+    4 + bytes.length + groupInfo.length + (lifecycle ? 4 + ledger.length : 0),
+  )
   new DataView(plaintext.buffer).setUint32(0, bytes.length)
   plaintext.set(bytes, 4)
   if (lifecycle) {
     new DataView(plaintext.buffer).setUint32(4 + bytes.length, groupInfo.length)
     plaintext.set(groupInfo, 8 + bytes.length)
+    plaintext.set(ledger, 8 + bytes.length + groupInfo.length)
   } else plaintext.set(groupInfo, 4 + bytes.length)
   const kind: SealedReplyKind = {
     hpkeInfo: new TextEncoder().encode(params.info ?? 'kumiai/mls/recovery/v2'),

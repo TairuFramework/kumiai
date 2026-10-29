@@ -56,6 +56,48 @@ describe('verified ledger replay', () => {
     expect(verify).toHaveBeenCalledTimes(1)
   })
 
+  test('restoring newly deserialised token arrays reuses verified content', async () => {
+    const { restore, sign } = await fixture()
+    const tokens = await Promise.all(['one', 'two', 'three'].map(sign))
+    const verify = vi.spyOn(ledger, 'verifyLedgerEntry')
+
+    expect((await restore(tokens)).ledgerTokens).toEqual(tokens)
+    expect(
+      (await restore(JSON.parse(JSON.stringify(tokens)) as Array<string>)).ledgerTokens,
+    ).toEqual(tokens)
+    expect(verify).toHaveBeenCalledTimes(tokens.length)
+  })
+
+  test('does not cache failed token verification', async () => {
+    const { restore } = await fixture()
+    const verify = vi.spyOn(ledger, 'verifyLedgerEntry')
+
+    expect((await restore(['not-a-token'])).ledgerTokens).toEqual([])
+    expect((await restore(['not-a-token'])).ledgerTokens).toEqual([])
+    expect(verify).toHaveBeenCalledTimes(2)
+  })
+
+  test('rechecks expiry when content is reused by a new token array', async () => {
+    const { identity, group, restore } = await fixture()
+    const now = Math.floor(Date.now() / 1000)
+    const tokens = [
+      stringifyToken(
+        await identity.signToken({
+          type: 'app.value',
+          groupID: group.groupID,
+          subject: identity.id,
+          value: 'one',
+          exp: now + 60,
+        }),
+      ),
+    ]
+    expect((await restore(tokens)).ledgerTokens).toEqual(tokens)
+    vi.spyOn(Date, 'now').mockReturnValue((now + 61) * 1000)
+    expect(
+      (await restore(JSON.parse(JSON.stringify(tokens)) as Array<string>)).ledgerTokens,
+    ).toEqual([])
+  })
+
   test('a tampered token at a memoised position is dropped', async () => {
     const { restore, sign } = await fixture()
     const original = await sign('one')
@@ -127,7 +169,7 @@ describe('verified ledger replay', () => {
     const memoised = await bob.restore(tokens)
     expect(verify).not.toHaveBeenCalled()
     const uncached = await bob.restore([...tokens])
-    expect(verify).toHaveBeenCalledTimes(1)
+    expect(verify).not.toHaveBeenCalled()
     expect(uncached.ledger).toEqual([])
     expect(memoised.ledger).toEqual(uncached.ledger)
     expect(memoised.ledgerTokens).toEqual([])

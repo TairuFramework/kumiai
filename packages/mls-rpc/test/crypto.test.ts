@@ -14,6 +14,7 @@ import { UnsupportedLedgerEntriesVersionError } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
+import { guardedReplace } from '../src/index.js'
 import { bareTestHandle, testHandleAccess } from './fixtures/real-group.js'
 
 const utf8 = new TextEncoder()
@@ -100,7 +101,7 @@ function cryptoOver(initial: GroupHandle) {
   })
   return {
     crypto: createGroupCrypto({ access }),
-    adopt: (next: GroupHandle) => access.replace(next),
+    adopt: (next: GroupHandle) => guardedReplace(access, next),
     current: () => handle,
   }
 }

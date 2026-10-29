@@ -39,6 +39,7 @@ import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistrySwitchWrite } from '../src/registry/types.js'
 import { verifyRegistryResync } from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
+import { registryLeaseSnapshot } from '../src/testing.js'
 import {
   createRegistryFixture,
   registryFixtureRecoverySource,
@@ -83,13 +84,19 @@ async function setup(
 ) {
   const identity = randomIdentity()
   const signer = randomIdentity()
+  const creatorBinding = await lifecycle.bindingFor(identity)
   const fixture = await createRegistryFixture({
     mode,
     setup: 'empty',
     groupID,
     identity,
     options:
-      advanced === 'controller-less' ? {} : { controller: await lifecycle.bindingFor(identity) },
+      advanced === 'controller-less'
+        ? {}
+        : {
+            controller: creatorBinding,
+            controllerLog: { chain: creatorBinding.prefix, events: [] },
+          },
   })
   const options = fixture.environment.options
   const initial = (await createGroup(identity, groupID, options)).group
@@ -361,7 +368,9 @@ for (const mode of ['real-mls', 'double'] as const) {
             [
               normalizeDID(controller),
               {
-                recordedLog: [],
+                attestations: new Map(),
+                removedMembers: new Map(),
+                survivorGrants: new Map(),
                 genFloor: floor === 'generation' ? 1 : 0,
                 timeFloor: floor === 'time' ? Math.ceil(Date.now() / 1000) + 7200 : 0,
               },
@@ -736,6 +745,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       const released = deferred<void>()
       try {
         const access = await s.owner.access(groupID)
+        await vi.waitFor(() => expect(registryLeaseSnapshot(access)).not.toBeNull())
+        s.recovery.source = await s.owner.recoverySource(groupID)
         access.onRetire(async () => {
           entered.resolve()
           await released.promise
@@ -762,6 +773,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         const s = await setup(mode)
         try {
           const access = await s.owner.access(groupID)
+          await vi.waitFor(() => expect(registryLeaseSnapshot(access)).not.toBeNull())
+          s.recovery.source = await s.owner.recoverySource(groupID)
           const capability = entryCapability(s.fixture.device.groups)
           if (capability == null) throw new Error('Missing capability')
           const error =
@@ -786,6 +799,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         const s = await setup(mode)
         try {
           const access = await s.owner.access(groupID)
+          await vi.waitFor(() => expect(registryLeaseSnapshot(access)).not.toBeNull())
+          s.recovery.source = await s.owner.recoverySource(groupID)
           const before = await s.fixture.inspectRows()
           const fault = s.fixture.armWorkFault(s.write.mutationID, 'pending')
           const result = s.run().then(
@@ -805,6 +820,8 @@ for (const mode of ['real-mls', 'double'] as const) {
             expect(settled).toHaveProperty('error')
             expect(await s.fixture.inspectRows()).toEqual(before)
             await expect(access.read((handle) => handle.groupID)).resolves.toBe(groupID)
+            await vi.waitFor(() => expect(registryLeaseSnapshot(access)).not.toBeNull())
+            s.recovery.source = await s.owner.recoverySource(groupID)
             await expect(s.run()).resolves.toEqual(destination)
           }
         } finally {

@@ -19,6 +19,7 @@ import type { GroupKey } from '../src/persistence-types.js'
 import { RetainedTrustUnavailableError, registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
+import { registryLeaseSnapshot } from '../src/testing.js'
 import {
   createRegistryFixture,
   type RegistryFixture,
@@ -808,6 +809,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           const recovery = await fixture.confirmedRecovery(key, { confirm: true })
           const owner = fixture.registry
           const access = await owner.access(groupID)
+          await vi.waitFor(() => expect(registryLeaseSnapshot(access)).not.toBeNull())
+          recovery.source = await owner.recoverySource(groupID)
           const hook = vi.fn(async () => {})
           access.onRetire(hook)
           armed = true

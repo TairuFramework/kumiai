@@ -86,7 +86,9 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
       ...context,
       authService: {
         async validateCredential(credential: Credential, signaturePublicKey: Uint8Array) {
-          await verifyLeafCredential(credential, signaturePublicKey)
+          await verifyLeafCredential(credential, signaturePublicKey, {
+            judging: () => ({ stage: 'structural', mode: 'rejudge' }),
+          })
           return true
         },
       },
@@ -228,6 +230,10 @@ export type JoinGroupExternalResult = {
   sourceRegistry: DeviceRegistry
 }
 
+/**
+ * Core callers holding known state must call assertRetainsKnownEffects in beforeBinding.
+ * mls-rpc installs this check before binding and rechecks at adoption.
+ */
 export async function joinGroupExternal(
   params: JoinGroupExternalParams,
 ): Promise<JoinGroupExternalResult> {

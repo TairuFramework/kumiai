@@ -331,6 +331,7 @@ test('a binding enriches an app-bearing supplied anchor with explicit lifecycle 
   const supplied = buildCurrentGroupAnchorExtension(identity.id, app)
   const { group } = await createGroup(identity, 'supplied-lifecycle', {
     controller,
+    controllerLog: { chain: controller.prefix, events: [] },
     extensions: [supplied],
   })
   expect(readGroupAnchor(group)).toEqual({
@@ -349,6 +350,7 @@ test('enrichment preserves a supplied version and app while materialising missin
   const app = { recoverySecret: 'future-seed' }
   const { group } = await createGroup(identity, 'supplied-partial-lifecycle', {
     controller,
+    controllerLog: { chain: controller.prefix, events: [] },
     leafLifetime: 7200,
     trustedGrantLifetime: 86_400,
     extensions: [
@@ -381,6 +383,7 @@ test.each([
   await expect(
     createGroup(identity, 'supplied-default-conflict', {
       controller,
+      controllerLog: { chain: controller.prefix, events: [] },
       extensions: [buildGroupAnchorExtension({ creatorDID: identity.id, version: 1, ...fields })],
     }),
   ).rejects.toThrow()
@@ -393,6 +396,7 @@ test.each([{ leafLifetime: 86_400 }, { trustedGrantLifetime: 2_592_000 }])(
     await expect(
       createGroup(identity, 'supplied-option-conflict', {
         controller,
+        controllerLog: { chain: controller.prefix, events: [] },
         leafLifetime: 7200,
         trustedGrantLifetime: 86_400,
         extensions: [

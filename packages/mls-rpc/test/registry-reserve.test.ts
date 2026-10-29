@@ -289,7 +289,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       vi.spyOn(Date, 'now').mockReturnValue(150_000)
       const fixture = await setup(mode)
       const binding = await timedBinding({ identity: fixture.identity, iat: 100, exp: 200 })
-      const { group } = await createGroup(fixture.identity, 'reservation', { controller: binding })
+      const { group } = await createGroup(fixture.identity, 'reservation', {
+        controllerLog: { chain: binding.prefix, events: [] },
+        controller: binding,
+      })
       const token = await signLedgerEntry(fixture.identity, {
         type: DEVICE_ENTRY_TYPE,
         groupID: group.groupID,

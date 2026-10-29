@@ -1,4 +1,5 @@
 import {
+  assertRetainsKnownEffects,
   decodeClientState,
   denyApplicationSend,
   type GroupHandle,
@@ -526,6 +527,12 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
             prepare === undefined ? undefined : () => prepare(current, source),
           )
           if (destination === null) throw new Noop()
+          if (current.anchor.controller != null)
+            assertRetainsKnownEffects(
+              current.anchor.controller,
+              current.registry,
+              destination.registry,
+            )
           assertSafety()
           // The decoded handle is isolated from the caller and only now may carry source progress.
           await current.carryReceiveProgress(destination)

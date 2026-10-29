@@ -1,21 +1,18 @@
 import { audienceConfirmation, now } from '@kokuin/capability'
-import {
-  createReset,
-  createRevoke,
-  createRevokeWithKey,
-  createRotate,
-  type SignedEvent,
-} from '@kokuin/controller'
+import { canonicalBytes, createReset, createRotate, type SignedEvent } from '@kokuin/controller'
 import {
   createSigningIdentity,
   createUnsignedToken,
   normalizeDID,
   stringifyToken,
 } from '@kokuin/token'
+import { ed25519 } from '@noble/curves/ed25519.js'
+import { toB64U } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { MLS_DEVICES_ACT, MLS_DEVICES_RES } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
+import { asControllerLog } from '../src/controller-log.js'
 import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { RevokeProofError, type RevokeProofReason } from '../src/errors.js'
 import { commitLedgerEntries, commitWithEntries } from '../src/group-commit.js'
@@ -30,6 +27,7 @@ import { signLedgerEntry } from '../src/ledger.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue } from '../src/registry.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { denyEffects, revokeChain, snapshotForChain } from './fixtures/controller-chain.js'
 import {
   buildBoundKeyPackageBundle,
   joinBoundDevice,
@@ -268,7 +266,8 @@ describe('attack: history hidden in advisory or clock entries', () => {
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { seal: 'a'.repeat(393216) },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: 'a'.repeat(393216),
   })
   const fields = [
     { proof: [inception, oversized] },
@@ -278,6 +277,10 @@ describe('attack: history hidden in advisory or clock entries', () => {
 
   test.each(['clock', 'beacon'] as const)('author rejects hidden history on %s', async (op) => {
     const { group, identity } = await lifecycleGroup()
+    const [seed] = structuredClone(group.ledger)
+    if (seed == null) throw new Error('Missing seed')
+    expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+    expect(group.ledgerTokens).toEqual([seed.token])
     const binding = group.bindingOfDID(identity.id)
     if (binding?.capability == null) throw new Error('Missing leaf capability')
     const base: DeviceValue =
@@ -297,8 +300,9 @@ describe('attack: history hidden in advisory or clock entries', () => {
       await expect(
         commitWithEntries({ group, extraProposals: [], enacted: [token], requireAdmin: false }),
       ).rejects.toThrow()
-      expect(group.ledgerTokens).toEqual([])
-      expect(group.registry.controllers.size).toBe(0)
+      expect(group.ledgerTokens).toEqual([seed.token])
+      expect(group.ledger).toEqual([seed])
+      expect(group.registry.controllers.size).toBe(1)
     }
   })
 
@@ -309,6 +313,10 @@ describe('attack: history hidden in advisory or clock entries', () => {
         const { group, identity, tokens } = await lifecycleGroup()
         const recipient = agent(51)
         const members = await addMember(group, recipient, await bindingFor(recipient))
+        const [seed] = structuredClone(members.joined.ledger)
+        if (seed == null) throw new Error('Missing seed')
+        expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+        expect(members.joined.ledgerTokens).toEqual([seed.token])
         const binding = members.group.bindingOfDID(identity.id)
         if (binding?.capability == null) throw new Error('Missing leaf capability')
         const base: DeviceValue =
@@ -331,25 +339,15 @@ describe('attack: history hidden in advisory or clock entries', () => {
         await expect(members.joined.processMessage(message)).rejects.toThrow()
         expect(members.joined.epoch).toBe(epoch)
         expect(members.joined.registry).toBe(registry)
-        expect(members.joined.ledgerTokens).toEqual([])
+        expect(members.joined.ledgerTokens).toEqual([seed.token])
+        expect(members.joined.ledger).toEqual([seed])
       }
     },
   )
 })
 
-function authorityRevoke(
-  subject: string,
-  prior: SignedEvent['event'] = inception.event,
-  keyPosition = { gen: 0, seq: 0 },
-) {
-  return createRevoke({
-    seed: controllerSeed,
-    profile: 0,
-    did: controllerID,
-    prior,
-    target: subject,
-    keyPosition,
-  })
+function authorityRevoke(subject: string, chain: Array<SignedEvent> = [inception]) {
+  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject })
 }
 
 describe('attack: invalid lifecycle proofs keep their classifications', () => {
@@ -361,7 +359,8 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    options: { seal: 'a'.repeat(393216) },
+    snapshot: snapshotForChain(controllerID, [inception]),
+    seal: 'a'.repeat(393216),
   })
   const rev = authorityRevoke(target)
   const skipped = {
@@ -369,19 +368,11 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     event: { ...rev.event, t: 'future', crit: false },
     sigs: [],
   } as unknown as SignedEvent
-  const foreign = createRevokeWithKey({
-    privateKey: new Uint8Array(32).fill(61),
-    did: controllerID,
-    prior: inception.event,
-    target,
-  })
-  const delegated = createRevokeWithKey({
-    privateKey: new Uint8Array(32).fill(61),
-    did: controllerID,
-    prior: inception.event,
-    target,
-    cap: 'forged-grant',
-  })
+  const foreign = {
+    ...rev,
+    sigs: [toB64U(ed25519.sign(canonicalBytes(rev.event), new Uint8Array(32).fill(61)))],
+  }
+  const delegated = { ...rev, event: { ...rev.event, cap: 'forged-grant' } }
   const cases: Array<{
     attack: string
     reason: RevokeProofReason
@@ -391,8 +382,8 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     controller?: string
     revoked?: DeviceValue['revoked']
   }> = [
-    { attack: 'missing revocation', reason: 'no-rev', proof: [inception] },
-    { attack: 'empty proof', reason: 'no-rev', proof: [] },
+    { attack: 'missing revocation', reason: 'effects-mismatch', proof: [inception] },
+    { attack: 'empty proof', reason: 'effects-mismatch', proof: [] },
     {
       attack: 'wrong controller',
       reason: 'wrong-controller',
@@ -428,7 +419,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     {
       attack: 'over-horizon proof',
       reason: 'too-large',
-      proof: [inception, oversized, authorityRevoke(target, oversized.event, { gen: 0, seq: 1 })],
+      proof: [inception, oversized, authorityRevoke(target, [inception, oversized])],
     },
     {
       attack: 'forged effects',
@@ -448,7 +439,13 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
           subject: controllerID,
-          value: { op: 'reset', proof: [inception, reset], revoked: [] },
+          value: {
+            effects: [],
+            removed: [],
+            op: 'reset',
+            proof: asControllerLog([inception, reset]),
+            revoked: [],
+          },
         })
         group = (await enact(group, [token])).group
       }
@@ -456,10 +453,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
         const first = await signLedgerEntry(setup.identity, {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
-          subject: firstSubject,
+          subject: controllerID,
           value: {
+            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
+            removed: [],
             op: 'revoke',
-            proof: [inception, authorityRevoke(firstSubject)],
+            proof: asControllerLog([authorityRevoke(firstSubject)]),
             revoked: [{ did: firstSubject }],
           },
         })
@@ -468,10 +467,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       const token = await signLedgerEntry(setup.identity, {
         type: DEVICE_ENTRY_TYPE,
         groupID: group.groupID,
-        subject: target,
+        subject: controllerID,
         value: {
+          effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
+          removed: [],
           op: 'revoke',
-          proof,
+          proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
           revoked: revoked ?? [{ did: target }],
           ...(controller == null ? {} : { controller }),
         },
@@ -503,7 +504,13 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
           subject: controllerID,
-          value: { op: 'reset', proof: [inception, reset], revoked: [] },
+          value: {
+            effects: [],
+            removed: [],
+            op: 'reset',
+            proof: asControllerLog([inception, reset]),
+            revoked: [],
+          },
         })
         const accepted = await enact(group, [token])
         group = accepted.group
@@ -514,10 +521,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
         const first = await signLedgerEntry(setup.identity, {
           type: DEVICE_ENTRY_TYPE,
           groupID: group.groupID,
-          subject: firstSubject,
+          subject: controllerID,
           value: {
+            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
+            removed: [],
             op: 'revoke',
-            proof: [inception, authorityRevoke(firstSubject)],
+            proof: asControllerLog([authorityRevoke(firstSubject)]),
             revoked: [{ did: firstSubject }],
           },
         })
@@ -529,10 +538,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       const token = await signLedgerEntry(setup.identity, {
         type: DEVICE_ENTRY_TYPE,
         groupID: group.groupID,
-        subject: target,
+        subject: controllerID,
         value: {
+          effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
+          removed: [],
           op: 'revoke',
-          proof,
+          proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
           revoked: revoked ?? [{ did: target }],
           ...(controller == null ? {} : { controller }),
         },
@@ -559,6 +570,10 @@ describe('attack: reserved lifecycle entries', () => {
       const { group, identity, tokens } = await lifecycleGroup()
       const recipient = agent(51)
       const members = await addMember(group, recipient, await bindingFor(recipient))
+      const [seed] = structuredClone(members.joined.ledger)
+      if (seed == null) throw new Error('Missing seed')
+      expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
+      expect(members.joined.ledgerTokens).toEqual([seed.token])
       const token = await signLedgerEntry(identity, {
         type,
         groupID: group.groupID,
@@ -579,7 +594,8 @@ describe('attack: reserved lifecycle entries', () => {
       await expect(members.joined.processMessage(message)).rejects.toThrow()
       expect(members.joined.epoch).toBe(epoch)
       expect(members.joined.roster.roles).toEqual(new Map([[controllerID, 'admin']]))
-      expect(members.joined.ledgerTokens).toEqual([])
+      expect(members.joined.ledgerTokens).toEqual([seed.token])
+      expect(members.joined.ledger).toEqual([seed])
     },
   )
 })

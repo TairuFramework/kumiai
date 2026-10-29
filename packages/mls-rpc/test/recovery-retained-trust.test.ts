@@ -94,8 +94,10 @@ const lifecycle = (await import(
 
 async function fixture() {
   const identity = lifecycle.agent(43)
+  const creatorBinding1 = await lifecycle.bindingFor(identity)
   const { group } = await createGroup(identity, 'retained-recovery', {
-    controller: await lifecycle.bindingFor(identity),
+    controllerLog: { chain: creatorBinding1.prefix, events: [] },
+    controller: creatorBinding1,
   })
   const trust = recoveryTrustFor(group, { groupID: group.groupID, incarnation: 1 }, null)
   return { identity, group, trust }
@@ -211,7 +213,18 @@ test('retained authentication refuses wrong group, anchor, binding, signer and f
       ...trust,
       registry: {
         ...trust.registry,
-        controllers: new Map([[binding.id, { recordedLog: [], genFloor: 100, timeFloor: 0 }]]),
+        controllers: new Map([
+          [
+            binding.id,
+            {
+              attestations: new Map(),
+              removedMembers: new Map(),
+              survivorGrants: new Map(),
+              genFloor: 100,
+              timeFloor: 0,
+            },
+          ],
+        ]),
       },
     },
   ]) {

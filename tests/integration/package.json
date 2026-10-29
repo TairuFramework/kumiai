@@ -17,6 +17,7 @@
     "@hozon/db": "catalog:",
     "@hozon/node-sqlite": "catalog:",
     "@hozon/postgres": "catalog:",
+    "@kokuin/controller": "catalog:",
     "@kokuin/token": "catalog:",
     "@kumiai/hub-client": "workspace:^",
     "@kumiai/hub-http": "workspace:^",

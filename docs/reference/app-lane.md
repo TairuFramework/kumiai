@@ -25,8 +25,14 @@ seeding at its own add epoch included. Nothing is exchanged.
 A **rejoin** (external commit) moves it for the Add reason, from a member the roster diff cannot
 see: the rejoiner keeps its DID _and_ its leaf index (ts-mls's resync blanks the leaf and the new
 one takes the leftmost blank — the one it just blanked). No diff over any state reads true, so the
-commit says so itself: the header carries `external`, and the lane rotates on
-`rosterChanged || external`.
+commit says so itself: the header carries `external`.
+
+A **stale-leaf replacement** (a Remove and an Add of the same DID in one commit) moves it for the
+Add reason too, and the DID diff cannot see it either: the re-added member joins by Welcome at the
+post-commit epoch. Only an Add puts a KeyPackage leaf node into the tree, and a leaf keeps it until
+its own path or Update replaces it, so the roster reports it as `RosterEntry.admission`. The rotation
+record holds the admissions from before the advance; one that appears is an Add. An ordinary path
+commit only drops admissions. The lane rotates on `rosterChanged || admitted || external`.
 
 **The anchor is persisted, not derived.** A rebooted handle has ratcheted past the anchor epoch and
 can never re-export its secret. A peer that re-seeded from its live handle would be right at genesis

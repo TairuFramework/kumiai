@@ -4,6 +4,7 @@ import { createSigningIdentity } from '@kokuin/token'
 import { describe, expect, test, vi } from 'vitest'
 
 import { verifyManagementCapability } from '../src/authentication.js'
+import { asControllerLog } from '../src/controller-log.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
 const manager = createSigningIdentity(new Uint8Array(32).fill(51))
@@ -100,7 +101,7 @@ test('rejects a management grant naming another subject', async () => {
   const controller = createControllerIdentity({
     seed: new Uint8Array(32).fill(31),
     profile: 0,
-    log: f.prefix,
+    log: asControllerLog(f.prefix),
   })
   const token = await controller.signToken({
     sub: manager.id,
@@ -149,4 +150,29 @@ test('management verdicts use issuance time rather than receiver clocks', async 
   } finally {
     clock.mockRestore()
   }
+})
+
+test('management capabilities remain root-only with a well-formed member claim', async () => {
+  const cap = await buildManagementCapability({
+    managerDID: manager.id,
+    managerKey: manager.publicKey,
+  })
+  const capability = await manager.signToken({
+    sub: cap.controllerID,
+    aud: manager.id,
+    act: 'manage',
+    res: 'kumiai/devices',
+    iat: 100,
+    exp: 200,
+    mbr: { add: 'member-add', g: 0 },
+    cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: manager.publicKey }),
+  })
+  expect(
+    await verifyManagementCapability({
+      ...cap,
+      capability: `${capability.data}.${capability.signature}`,
+      audience: manager.id,
+      leafKey: manager.publicKey,
+    }),
+  ).toBe(false)
 })

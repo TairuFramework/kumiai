@@ -53,7 +53,7 @@ export async function registerDevice(
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries([token])
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -86,7 +86,7 @@ export async function labelDevice(
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries([token])
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -146,7 +146,7 @@ export async function addDevice(
       throw new Error('addDevice: expected a Welcome message for the add proposal')
     }
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries([token])
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       welcomeMessage: encode(mlsMessageEncoder, result.welcome),
@@ -189,7 +189,7 @@ export async function revokeDevice(
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries([token])
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -224,7 +224,7 @@ export async function announceControllerBeacon(
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries([token])
+    await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,

@@ -3,6 +3,14 @@
   intents:
     - durable-app-delivery
     - gather-stream
+"@kumiai/broadcast@0.11.0":
+  dir: packages/broadcast
+  intents:
+    - band-align-0-11
+"@kumiai/broadcast@0.12.0":
+  dir: packages/broadcast
+  intents:
+    - management-tier-0-12
 "@kumiai/broadcast@0.5.0":
   dir: packages/broadcast
   intents:
@@ -33,6 +41,14 @@
   dir: packages/hub-client
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/hub-client@0.11.0":
+  dir: packages/hub-client
+  intents:
+    - band-align-0-11
+"@kumiai/hub-client@0.12.0":
+  dir: packages/hub-client
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-client@0.5.0":
   dir: packages/hub-client
   intents:
@@ -62,6 +78,15 @@
   dir: packages/hub-conformance
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/hub-conformance@0.11.0":
+  dir: packages/hub-conformance
+  intents:
+    - band-align-0-11
+"@kumiai/hub-conformance@0.12.0":
+  dir: packages/hub-conformance
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-conformance@0.5.0":
   dir: packages/hub-conformance
   intents:
@@ -88,6 +113,15 @@
   dir: packages/hub-http
   intents:
     - quiet-hubs-host
+"@kumiai/hub-http@0.11.0":
+  dir: packages/hub-http
+  intents:
+    - band-align-0-11
+"@kumiai/hub-http@0.12.0":
+  dir: packages/hub-http
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-protocol@0.10.0":
   dir: packages/hub-protocol
   intents:
@@ -100,6 +134,14 @@
   dir: packages/hub-protocol
   intents:
     - hub-rate-limited-error
+"@kumiai/hub-protocol@0.11.0":
+  dir: packages/hub-protocol
+  intents:
+    - band-align-0-11
+"@kumiai/hub-protocol@0.12.0":
+  dir: packages/hub-protocol
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -142,6 +184,15 @@
   dir: packages/hub-server
   intents:
     - hub-rate-limited-error
+"@kumiai/hub-server@0.11.0":
+  dir: packages/hub-server
+  intents:
+    - band-align-0-11
+"@kumiai/hub-server@0.12.0":
+  dir: packages/hub-server
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -168,6 +219,15 @@
   dir: packages/hub-store
   intents:
     - bright-hubs-persist
+"@kumiai/hub-store@0.11.0":
+  dir: packages/hub-store
+  intents:
+    - band-align-0-11
+"@kumiai/hub-store@0.12.0":
+  dir: packages/hub-store
+  intents:
+    - hub-adoption-host-seams
+    - management-tier-0-12
 "@kumiai/hub-tunnel@0.10.0":
   dir: packages/hub-tunnel
   intents:
@@ -184,6 +244,14 @@
   dir: packages/hub-tunnel
   intents:
     - hub-tunnel-stale-session-end
+"@kumiai/hub-tunnel@0.11.0":
+  dir: packages/hub-tunnel
+  intents:
+    - band-align-0-11
+"@kumiai/hub-tunnel@0.12.0":
+  dir: packages/hub-tunnel
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -209,6 +277,14 @@
   dir: packages/hub-wake
   intents:
     - durable-app-delivery
+"@kumiai/hub-wake@0.11.0":
+  dir: packages/hub-wake
+  intents:
+    - band-align-0-11
+"@kumiai/hub-wake@0.12.0":
+  dir: packages/hub-wake
+  intents:
+    - management-tier-0-12
 "@kumiai/hub-wake@0.6.0":
   dir: packages/hub-wake
   intents:
@@ -229,6 +305,14 @@
   dir: packages/mls-hub
   intents:
     - hub-rate-limited-error
+"@kumiai/mls-hub@0.11.0":
+  dir: packages/mls-hub
+  intents:
+    - band-align-0-11
+"@kumiai/mls-hub@0.12.0":
+  dir: packages/mls-hub
+  intents:
+    - management-tier-0-12
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
@@ -266,6 +350,14 @@
   dir: packages/mls-rpc
   intents:
     - recovery-holder-evidence
+"@kumiai/mls-rpc@0.11.0":
+  dir: packages/mls-rpc
+  intents:
+    - band-align-0-11
+"@kumiai/mls-rpc@0.12.0":
+  dir: packages/mls-rpc
+  intents:
+    - management-tier-0-12
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -313,6 +405,18 @@
   dir: packages/mls
   intents:
     - bright-mugs-shout
+"@kumiai/mls@0.11.0":
+  dir: packages/mls
+  intents:
+    - kokuin-0-2
+"@kumiai/mls@0.12.0":
+  dir: packages/mls
+  intents:
+    - management-tier-0-12
+"@kumiai/mls@0.12.1":
+  dir: packages/mls
+  intents:
+    - settled-removal-tombstones
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -345,6 +449,14 @@
   dir: packages/rpc-conformance
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/rpc-conformance@0.11.0":
+  dir: packages/rpc-conformance
+  intents:
+    - band-align-0-11
+"@kumiai/rpc-conformance@0.12.0":
+  dir: packages/rpc-conformance
+  intents:
+    - management-tier-0-12
 "@kumiai/rpc-conformance@0.5.0":
   dir: packages/rpc-conformance
   intents:
@@ -397,6 +509,14 @@
   dir: packages/rpc
   intents:
     - clean-rpc-catalog
+"@kumiai/rpc@0.11.0":
+  dir: packages/rpc
+  intents:
+    - band-align-0-11
+"@kumiai/rpc@0.12.0":
+  dir: packages/rpc
+  intents:
+    - management-tier-0-12
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

@@ -1,5 +1,6 @@
 import { now } from '@kokuin/capability'
 import {
+  type ControllerLog,
   createControllerIdentity,
   createInception,
   didFromInception,
@@ -9,6 +10,7 @@ import { createFullIdentity, type OwnIdentity } from '@kokuin/token'
 import { createCommit, defaultProposalTypes, encode, joinGroup, mlsMessageEncoder } from 'ts-mls'
 
 import { mintLeafCapability, mintTrustedGrant } from '../../src/capability.js'
+import { asControllerLog } from '../../src/controller-log.js'
 import type { ControllerBinding } from '../../src/credential.js'
 import { encodeControlEnvelope } from '../../src/envelope.js'
 import { commitWithEntries } from '../../src/group-commit.js'
@@ -37,7 +39,8 @@ export async function bindingFor(
   issuer?: BindingIssuer,
 ): Promise<ControllerBinding> {
   const signer =
-    issuer?.identity ?? createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix })
+    issuer?.identity ??
+    createControllerIdentity({ seed: controllerSeed, profile: 0, log: asControllerLog(prefix) })
   const holderGrant = issuer == null ? undefined : await trustedGrant(identity, prefix)
   const capability = await mintLeafCapability({
     signer,
@@ -60,7 +63,11 @@ export async function trustedGrant(
   prefix: Array<SignedEvent> = [inception],
 ) {
   return mintTrustedGrant({
-    signer: createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix }),
+    signer: createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    }),
     controllerID,
     audience: identity.id,
     leafKey: identity.publicKey,
@@ -68,11 +75,15 @@ export async function trustedGrant(
   })
 }
 
-export async function lifecycleGroup(prefix: Array<SignedEvent> = [inception]) {
+export async function lifecycleGroup(
+  prefix: Array<SignedEvent> = [inception],
+  controllerLog: ControllerLog = asControllerLog([inception]),
+) {
   const identity = agent(41)
   const tokens = new Map<string, string>()
   const { group } = await createGroup(identity, 'lifecycle-ledger', {
     controller: await bindingFor(identity, prefix),
+    controllerLog,
     // Isolate ledger checks from the proposal rules supplied by the later consensus gate.
     commitPolicy: () => 'accept',
     resolveLedgerEntries: async (ids) =>
@@ -127,7 +138,7 @@ export async function enact(group: GroupHandle, tokens: Array<string>) {
     requireAdmin: false,
   })
   const derived = deriveGroup(group, result.newState)
-  await derived.applyLedgerEntries(tokens)
+  await derived.applyLedgerEntries(result.enacted)
   return { group: derived, message: encode(mlsMessageEncoder, result.commit) }
 }
 

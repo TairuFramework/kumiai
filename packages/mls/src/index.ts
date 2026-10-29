@@ -23,6 +23,8 @@ export {
 } from './anchor.js'
 export {
   createDIDAuthenticationService,
+  type DIDAuthenticationDependencies,
+  type JudgingContext,
   MLS_DEVICES_ACT,
   MLS_DEVICES_RES,
   MLS_LEAF_ACT,
@@ -65,6 +67,8 @@ export {
   encodeClientState,
   sanitizeRatchetTree,
 } from './codec.js'
+export { effectDelta, type FoldOk, ingestControllerLog } from './controller-ingest.js'
+export { memberDropIndices } from './controller-log.js'
 export {
   type ControllerBinding,
   didFromCredential,
@@ -79,6 +83,7 @@ export {
   nobleCryptoProvider,
 } from './crypto.js'
 export type { LeafBinding } from './device-proof.js'
+export { createRegistryControllerResolver, prefixRelation } from './embedded-resolver.js'
 export {
   CONTROL_ENVELOPE_VERSION,
   type ControlEnvelope,
@@ -107,6 +112,8 @@ export {
   type LeafBindingReason,
   LeafLapsedError,
   type LeafLapsedReason,
+  RecoveryKnowledgeError,
+  type RecoveryKnowledgeReason,
   RevokeProofError,
   type RevokeProofReason,
   type TransientVerificationError,
@@ -169,20 +176,28 @@ export {
   revokeDevice,
   type SendAdmission,
 } from './group.js'
+export { registryAt } from './group-handle.js'
 export {
   type InspectRecoveryGroupInfoParams,
   inspectRecoveryGroupInfo,
 } from './group-info-inspection.js'
 export {
+  attestTreeTime,
   type CommitResult,
   commitSelfRemovals,
+  controllerLogDelta,
+  preservationClock,
   proposeSelfRemoval,
+  publishControllerLog,
+  type RemovalEvidence,
   type RemoveLapsedLeavesResult,
   type RevokeBuildResult,
   type RevokeWithProofParams,
+  removalEvidence,
   removeLapsedLeaves,
   renewLeaf,
   revokeWithProof,
+  survivorTargets,
 } from './group-lifecycle.js'
 export { type CommitKeyRotationResult, commitKeyRotation } from './group-rotation.js'
 export {
@@ -200,7 +215,15 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
-export { HISTORY_HORIZON, historySize } from './history.js'
+export {
+  epochEventCount,
+  HISTORY_HORIZON,
+  historySize,
+  MAX_EPOCH_EVENTS_FOR_LEAVES,
+  proofSize,
+  SETTLE_PROMPT_EPOCH_EVENTS,
+  settleAdvisory,
+} from './history.js'
 export {
   decodeKeyPackage,
   decodePrivateKeyPackage,
@@ -218,9 +241,27 @@ export {
 export {
   type AssertRecoveryBindingParams,
   assertRecoveryBinding,
+  attestedTreeTime,
+  leafExpiry,
   type PublicRuntimeFacts,
   publicMembershipFacts,
 } from './lifecycle.js'
+export {
+  cascadeOf,
+  claimsFor,
+  type EffectClaim,
+  type EvidenceSlot,
+  effectiveAuthorityOf,
+  effectOf,
+  type LeafRef,
+  type MemberRoot,
+  type MemberRootStatus,
+  memberRootStatus,
+  memberRootsOf,
+  type ProofRef,
+  type RemovedEffect,
+  type RemovedMember,
+} from './member-root.js'
 export { ownCommitDigest } from './own-commit-digest.js'
 export {
   type CommitPolicyContext,
@@ -288,6 +329,7 @@ export {
   sealRecoveryVerdict,
 } from './recovery-verdict.js'
 export {
+  assertRetainsKnownEffects,
   authority,
   beaconOf,
   type ControllerBeacon,
@@ -302,6 +344,8 @@ export {
   foldControl,
   type Revocation,
   type RevokedEffect,
+  recordedLogOf,
+  registryForLog,
   registrySeed,
   revocationOf,
 } from './registry.js'
@@ -327,6 +371,6 @@ export {
   relinquishSend,
   reserveApplicationRange,
 } from './send-policy.js'
-export { DuplicateMemberLeafError } from './stale-leaf.js'
+export { bindingIssuedAt, DuplicateMemberLeafError } from './stale-leaf.js'
 export type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 export { welcomeKeyPackageRefs } from './welcome-refs.js'

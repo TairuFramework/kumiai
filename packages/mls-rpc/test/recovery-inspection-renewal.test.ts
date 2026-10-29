@@ -48,7 +48,10 @@ test.each([
     const now = Math.floor(Date.now() / 1000)
     const cached = await lifecycle.timedBinding({ identity, iat: now - 20, exp: now + 1000 })
     const renewed = await lifecycle.timedBinding({ identity, iat: now - 10, exp: now + 1000 })
-    let { group } = await createGroup(identity, 'inspection-renewal', { controller: cached })
+    let { group } = await createGroup(identity, 'inspection-renewal', {
+      controllerLog: { chain: cached.prefix, events: [] },
+      controller: cached,
+    })
     const companion = lifecycle.agent(83)
     const bundle = await createKeyPackageBundle(companion, {
       controller: await lifecycle.timedBinding({

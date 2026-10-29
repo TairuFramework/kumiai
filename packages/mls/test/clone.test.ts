@@ -79,8 +79,6 @@ describe('cloneData', () => {
   })
 
   test.each([
-    ['Map', new Map()],
-    ['Set', new Set()],
     ['Date', new Date()],
     ['class instance', new (class X {})()],
     ['function', () => undefined],
@@ -188,4 +186,25 @@ test('renews a leaf without structuredClone or mutating the original tree node',
   }
   expect(renewed).not.toBe(original)
   expect(parseMLSCredentialIdentity(renewed.leaf.credential.identity).controller).toEqual(binding)
+})
+
+test('controller cache copies isolate Maps, Sets and key bytes', () => {
+  const key = new Uint8Array([1, 2])
+  const member = { key, grants: new Set(['first']) }
+  const source = { members: new Map([['member', member]]), denied: new Set(['revoked']) }
+  const copy = cloneData(source)
+  expect(copy).toEqual(source)
+  expect(copy.members).not.toBe(source.members)
+  expect(copy.denied).not.toBe(source.denied)
+  const copiedMember = copy.members.get('member')
+  if (copiedMember === undefined) throw new Error('Missing cloned member')
+  copiedMember.key[0] = 9
+  copiedMember.grants.add('second')
+  copy.denied.clear()
+  copy.members.delete('member')
+  expect(source.members.get('member')).toBe(member)
+  expect(key).toEqual(new Uint8Array([1, 2]))
+  expect(member.grants).toEqual(new Set(['first']))
+  expect(source.denied).toEqual(new Set(['revoked']))
+  expect(() => cloneData(new Date())).toThrow('unsupported value')
 })

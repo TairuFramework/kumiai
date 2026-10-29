@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { encodeMultibase, normalizeDID, type OwnIdentity } from '@kokuin/token'
 import { ed25519, x25519 } from '@noble/curves/ed25519.js'
 import { hmac } from '@noble/hashes/hmac.js'
@@ -184,10 +185,85 @@ export function decodeMemoryControlJournal(blob: Uint8Array): MemoryControlJourn
 export type MemoryRecoveryBinding = {
   id: string
   prefix: Array<unknown>
-  capability: string
+  capability?: string
   holderGrant?: string
+  member?: { add: string; g: number }
+  iat?: number
 }
+export type MemoryControllerEvent = {
+  id: string
+  op: 'add' | 'deny' | 'remove'
+  target: string
+  member?: { did: string; key: string }
+  /** Explicitly verified grants supported by this model. Unknown grants fail closed. */
+  grants?: Array<{ capability: string; did: string; key: string }>
+}
+export type MemoryControllerLog = {
+  chain: Array<string>
+  events: Array<MemoryControllerEvent>
+  grants?: Array<{ capability: string; did: string; key: string }>
+}
+
+function memberOf(binding: MemoryRecoveryBinding) {
+  if (binding.member != null) return binding.member
+  if (binding.capability?.startsWith('{')) {
+    try {
+      return (JSON.parse(binding.capability) as { mbr?: { add: string; g: number } }).mbr
+    } catch {
+      return null
+    }
+  }
+}
+
+function effectiveMember(log: MemoryControllerLog | undefined, member: { add: string; g: number }) {
+  return (
+    log != null &&
+    member.g === 0 &&
+    log.events.some((event) => event.op === 'add' && event.target === member.add) &&
+    !log.events.some((event) => event.op === 'remove' && event.target === member.add)
+  )
+}
+
+function projectControllerLog(log: MemoryControllerLog | undefined, tokens: Array<string>) {
+  const candidate = log == null ? undefined : structuredClone(log)
+  for (const token of tokens) {
+    if (!token.startsWith('management:')) continue
+    const value = JSON.parse(token.slice('management:'.length)) as {
+      op: string
+      proof: MemoryControllerLog
+      effects: Array<MemoryControllerEvent>
+    }
+    if (
+      candidate == null ||
+      !Array.isArray(value.proof?.chain) ||
+      value.proof.chain.length !== 0 ||
+      !Array.isArray(value.proof.events)
+    )
+      throw new Error('Unavailable controller log')
+    const effects: Array<MemoryControllerEvent> = []
+    for (const event of value.proof.events) {
+      if (
+        typeof event.id !== 'string' ||
+        typeof event.target !== 'string' ||
+        !['add', 'deny', 'remove'].includes(event.op) ||
+        candidate.events.some((known) => known.id === event.id)
+      )
+        throw new Error('Invalid controller event')
+      if (event.op !== 'add') effects.push(event)
+      candidate.events.push(event)
+    }
+    if (
+      !['log', 'revoke'].includes(value.op) ||
+      (value.op === 'log' && effects.length > 0) ||
+      JSON.stringify(effects) !== JSON.stringify(value.effects)
+    )
+      throw new Error('Controller effects mismatch')
+  }
+  return candidate
+}
+
 export type MemoryGroupMLSOptions = {
+  controllerLog?: MemoryControllerLog
   deliveredCopyError?: new (message?: string, options?: ErrorOptions) => Error
   onSafetyHold?: GroupMLS['onSafetyHold']
   onSafetyChanged?: GroupMLS['onSafetyChanged']
@@ -226,6 +302,7 @@ export type MemoryGroupMLSOptions = {
   /** This member's DID — the committer stamped into the Commits it builds, and the modelled
    *  recipient of GroupInfo sealed to its leaf. */
   localDID?: string
+  signatureKey?: string
   /** Signed tokens whose BODIES this member holds — a joiner's Welcome carries them, and a
    *  member that resolved them from a commit frame keeps them. Holding a body is not the
    *  same as having enacted it: the ledger is what a commit enacted, and it starts empty. */
@@ -347,6 +424,8 @@ type MemoryCommit = {
    * roster it found is the roster it leaves.
    */
   adds?: Array<string>
+  bindings?: Record<string, MemoryRecoveryBinding>
+  signatureKeys?: Record<string, string>
   removes?: Array<string>
 }
 
@@ -367,6 +446,8 @@ export function encodeMemoryCommit(
     head?: string
     external?: boolean
     adds?: Array<string>
+    bindings?: Record<string, MemoryRecoveryBinding>
+    signatureKeys?: Record<string, string>
     removes?: Array<string>
     /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
     signerDID?: string
@@ -389,6 +470,8 @@ export function encodeMemoryCommit(
     // A genuine commit is signed by the member it names. Only a forger passes these apart.
     signerDID: options.signerDID ?? committerDID,
     ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
+    ...(options.bindings == null ? {} : { bindings: options.bindings }),
+    ...(options.signatureKeys == null ? {} : { signatureKeys: options.signatureKeys }),
     ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
   return tagMemoryCommit(fromUTF(JSON.stringify(commit)), options.authenticator ?? FAKE_BASE_SECRET)
@@ -458,6 +541,7 @@ export type MemoryGroupInfo = {
   epoch: number
   head: string
   members: Array<string>
+  controllerLog?: MemoryControllerLog
   captureHead?: string | null
   signer?: string
   signerController?: string
@@ -647,6 +731,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const entryDigest = options.entryDigest ?? memoryEntryID
   const computeLedgerHead = options.computeLedgerHead ?? memoryLedgerHead
   const recoverySecret = options.recoverySecret ?? new Uint8Array(32).fill(0x33)
+  let controllerLog =
+    options.controllerLog == null ? undefined : structuredClone(options.controllerLog)
   const localDID = options.localDID
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
   const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
@@ -692,12 +778,23 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     while (target.has(i)) i++
     return i
   }
-  const slotAdd = (did: string, target = slots): void => {
+  let admissions = new Map<number, string>()
+  const slotAdd = (did: string, target = slots, admission?: string, held = admissions): void => {
     // The double never adds a DID it already holds (matches how buildCommit models adds).
-    if (![...target.values()].includes(did)) target.set(lowestFreeSlot(target), did)
+    if ([...target.values()].includes(did)) return
+    const slot = lowestFreeSlot(target)
+    target.set(slot, did)
+    if (admission != null) held.set(slot, admission)
   }
-  const slotRemoveDID = (did: string, target = slots): void => {
-    for (const [i, d] of target) if (d === did) target.delete(i)
+  const slotRemoveDID = (did: string, target = slots, held = admissions): void => {
+    for (const [i, d] of target)
+      if (d === did) {
+        target.delete(i)
+        held.delete(i)
+      }
+  }
+  const clearAdmission = (did: string, target = slots, held = admissions): void => {
+    for (const [i, d] of target) if (d === did) held.delete(i)
   }
   const slotHas = (did: string): boolean => [...slots.values()].includes(did)
   const occupiedDIDs = (): Array<string> =>
@@ -707,7 +804,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       .sort((a, b) => a - b)
       .map((i) => {
         const did = slots.get(i) as string
-        return { did, leafIndex: i, longForm: did } // longForm = id fallback; fixture ids carry no long form
+        const admission = admissions.get(i)
+        // longForm = id fallback; fixture ids carry no long form
+        return { did, leafIndex: i, longForm: did, ...(admission != null ? { admission } : {}) }
       })
   /**
    * Ephemeral PRIVATE keys, keyed by requestID: minted with the request, retained by the port
@@ -750,22 +849,84 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   let asked = false
   const unusable = new Set<string>()
   const bindingID = (value: MemoryRecoveryBinding): string =>
-    JSON.stringify([value.id, value.prefix, value.capability, value.holderGrant])
-  const usable = (value?: MemoryRecoveryBinding): boolean =>
-    value != null && !unusable.has(bindingID(value))
+    JSON.stringify([
+      value.id,
+      value.prefix,
+      value.capability,
+      value.holderGrant,
+      value.member,
+      value.iat,
+    ])
+  const bindingRefusal = (
+    value: MemoryRecoveryBinding | undefined,
+    did: string | undefined,
+    key: string | undefined,
+    log: MemoryControllerLog | undefined,
+  ): 'invalid' | 'binding' | undefined => {
+    if (did == null) return 'binding'
+    if (
+      log?.events.some(
+        (event) => event.op === 'deny' && normalizeDID(event.target) === normalizeDID(did),
+      )
+    )
+      return 'invalid'
+    if (
+      value == null ||
+      normalizeDID(value.id) !== normalizeDID(options.binding?.id ?? '') ||
+      JSON.stringify(value.prefix) !== JSON.stringify(log?.chain) ||
+      (log?.events.length ?? 0) > 32
+    )
+      return 'binding'
+    const member = memberOf(value)
+    if (member === undefined) {
+      return log?.grants?.some(
+        (grant) =>
+          grant.capability === value.capability &&
+          normalizeDID(grant.did) === normalizeDID(did) &&
+          grant.key === key,
+      )
+        ? undefined
+        : 'binding'
+    }
+    if (member == null || !effectiveMember(log, member) || key == null) return 'binding'
+    const admission = log?.events.find((event) => event.op === 'add' && event.target === member.add)
+    if (admission?.member == null) return 'binding'
+    if (value.member != null) {
+      return normalizeDID(admission.member.did) === normalizeDID(did) &&
+        admission.member.key === key
+        ? undefined
+        : 'binding'
+    }
+    // A grant's signature is outside this model. Only explicitly recorded verified grants qualify.
+    return admission.grants?.some(
+      (grant) =>
+        grant.capability === value.capability &&
+        normalizeDID(grant.did) === normalizeDID(did) &&
+        grant.key === key,
+    )
+      ? undefined
+      : 'binding'
+  }
+  const usable = (
+    value: MemoryRecoveryBinding | undefined,
+    log: MemoryControllerLog | undefined,
+  ): boolean => {
+    if (value == null || unusable.has(bindingID(value))) return false
+    return bindingRefusal(value, localDID, options.signatureKey, log) == null
+  }
   const askBinding = async (): Promise<MemoryRecoveryBinding | undefined> => {
     if (asked) return
     asked = true
     const offered = await options.recoveryBinding?.()
-    return offered != null && usable(offered) ? offered : undefined
+    return offered != null && usable(offered, controllerLog) ? offered : undefined
   }
   const prepare = async (): Promise<'ready' | 'renewal-required'> => {
     prepared = true
     asked = false
     preparedBinding = binding
-    if (binding == null || usable(preparedBinding)) return 'ready'
+    if (binding == null || usable(preparedBinding, controllerLog)) return 'ready'
     preparedBinding = await askBinding()
-    return usable(preparedBinding) ? 'ready' : 'renewal-required'
+    return usable(preparedBinding, controllerLog) ? 'ready' : 'renewal-required'
   }
 
   const advance = (to: number): void => {
@@ -877,6 +1038,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   const enact = (parsed: MemoryCommit, commit: Uint8Array): void => {
+    controllerLog = projectControllerLog(
+      controllerLog,
+      parsed.entryIDs.map((id) => bodies.get(id) ?? ''),
+    )
     const nextIdentity = toB64U(sha256(concatBytes(authenticator(), commit)))
     advance(epoch + 1)
     ledger.push(...parsed.entryIDs)
@@ -891,8 +1056,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     if (parsed.removes != null) {
       for (const did of parsed.removes) slotRemoveDID(did)
     }
+    // The committer's path replaces its own leaf node, so a KeyPackage it was Added from is gone.
+    if (!parsed.external) clearAdmission(parsed.committerDID)
     if (parsed.adds != null) {
-      for (const did of parsed.adds) slotAdd(did)
+      // Unique per Add: the same DID re-Added after a Remove (a stale-leaf replacement) arrives
+      // with a KeyPackage of its own.
+      for (const did of parsed.adds) slotAdd(did, slots, `${did}#${parsed.epoch}`)
     }
     if (parsed.external) {
       // `resync: true`: the rejoining member's prior leaf is atomically removed, so a peer
@@ -908,7 +1077,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   const durableState = (value: { epoch: number } & Record<string, unknown>): Uint8Array => {
-    const { freshLeaves: nextFreshLeaves, ...fields } = value
+    const {
+      freshLeaves: nextFreshLeaves,
+      admissions: _admissions,
+      controllerLog: _controllerLog,
+      ...fields
+    } = value
     const history = new Map(receiveHistory)
     if (value.epoch === epoch + 1 && receiveState !== undefined) {
       history.set(epoch, { identity: toB64U(authenticator()), state: receiveState })
@@ -945,6 +1119,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         receiveState: value.epoch === epoch ? receiveState : undefined,
         receiveHistory: [...history],
         binding: value.binding ?? binding,
+        controllerLog: value.controllerLog ?? controllerLog,
+        admissions: value.admissions ?? [...admissions],
         freshLeaves: nextFreshLeaves ?? [...freshLeaves],
         ...(value.receiveHistory === undefined ? {} : { receiveHistory: value.receiveHistory }),
       }),
@@ -977,6 +1153,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       recoveryAuthenticator?: string
       epochIdentity?: string
       freshLeaves?: Array<[string, string]>
+      controllerLog?: MemoryControllerLog
+      admissions?: Array<[number, string]>
     }
     if (value.groupID !== undefined && value.groupID !== groupID)
       throw new Error('Memory state group mismatch')
@@ -997,6 +1175,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     receiveState = value.receiveState
     receiveHistory = new Map(value.receiveHistory ?? [])
     binding = value.binding
+    controllerLog = value.controllerLog
+    admissions = new Map(value.admissions ?? [])
     freshLeaves = new Map(value.freshLeaves ?? [])
   }
   const authenticator = (): Uint8Array => {
@@ -1041,6 +1221,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       external: true,
       // Model a fresh MLS leaf per attempt, preserving bytes on candidate restore.
       branch: freshLeaf,
+      ...(candidateBinding == null || localDID == null
+        ? {}
+        : {
+            bindings: { [localDID]: candidateBinding },
+            signatureKeys:
+              options.signatureKey == null ? undefined : { [localDID]: options.signatureKey },
+          }),
     })
     return {
       serialize: () =>
@@ -1120,6 +1307,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               receiveHistory.clear()
               receiveState = undefined
               binding = candidateBinding
+              controllerLog = structuredClone(info.controllerLog)
+              admissions.clear()
+              controllerLog = structuredClone(info.controllerLog)
+              admissions.clear()
               freshLeaves = new Map(value.freshLeaves ?? [])
               return
             }
@@ -1131,8 +1322,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           const nextSlots = new Map(info.members.map((did, index) => [index, did]))
           const nextFreshLeaves = new Map(info.leafTokens ?? [])
           if (localDID != null) {
-            slotRemoveDID(localDID, nextSlots)
-            slotAdd(localDID, nextSlots)
+            slotRemoveDID(localDID, nextSlots, new Map())
+            slotAdd(localDID, nextSlots, undefined, new Map())
             nextFreshLeaves.set(localDID, freshLeaf)
           }
           const write = factory({
@@ -1145,6 +1336,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             epoch: info.epoch + 1,
             receiveHistory: [],
             binding: candidateBinding,
+            controllerLog: info.controllerLog,
+            admissions: [],
             slots: [...nextSlots],
             ledger: [],
             ledgerHead: info.head,
@@ -1171,6 +1364,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           receiveHistory.clear()
           receiveState = undefined
           binding = candidateBinding
+          controllerLog = structuredClone(info.controllerLog)
+          admissions.clear()
           freshLeaves = nextFreshLeaves
         }).catch((error: unknown) => {
           accepted = undefined
@@ -1553,7 +1748,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             )
               return null
             if (!prepared) await prepare()
-            if (binding !== undefined && !usable(preparedBinding)) return { renewalRequired: true }
+            if (binding !== undefined && !usable(preparedBinding, controllerLog))
+              return { renewalRequired: true }
             const target = {
               ...capturedDependencies.target,
               groupInfoEpoch: info.epoch,
@@ -1593,6 +1789,15 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
                 head: held.info.head,
                 external: true,
                 branch: held.freshLeaf,
+                ...(held.candidateBinding == null || localDID == null
+                  ? {}
+                  : {
+                      bindings: { [localDID]: held.candidateBinding },
+                      signatureKeys:
+                        options.signatureKey == null
+                          ? undefined
+                          : { [localDID]: options.signatureKey },
+                    }),
               })
               const payload = encodeHandshakeFrame(
                 HANDSHAKE_KIND.commit,
@@ -1848,6 +2053,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         groupID,
         epoch,
         members: occupiedDIDs(),
+        controllerLog,
         head: ledgerHead,
         signer: localDID,
         signerController: binding?.id,
@@ -2379,13 +2585,42 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           }
         }
         await validateEnactment(parsed, nextBodies)
+        const incomingDIDs = [
+          ...(parsed.adds ?? []),
+          ...(parsed.external ? [parsed.committerDID] : []),
+        ]
+        if (controllerLog != null || binding != null || parsed.bindings != null) {
+          for (const did of incomingDIDs) {
+            const refusal = bindingRefusal(
+              parsed.bindings?.[did],
+              did,
+              parsed.signatureKeys?.[did],
+              controllerLog,
+            )
+            if (refusal != null)
+              return {
+                applied: false,
+                advanced: false,
+                epochBefore: epoch,
+                epochAfter: epoch,
+                refusal,
+              }
+          }
+        }
+        const nextControllerLog = projectControllerLog(
+          controllerLog,
+          parsed.entryIDs.map((id) => nextBodies.get(id) ?? ''),
+        )
         const epochBefore = epoch
         const nextSlots = new Map(slots)
-        for (const did of parsed.removes ?? []) slotRemoveDID(did, nextSlots)
-        for (const did of parsed.adds ?? []) slotAdd(did, nextSlots)
+        const nextAdmissions = new Map(admissions)
+        for (const did of parsed.removes ?? []) slotRemoveDID(did, nextSlots, nextAdmissions)
+        if (!parsed.external) clearAdmission(parsed.committerDID, nextSlots, nextAdmissions)
+        for (const did of parsed.adds ?? [])
+          slotAdd(did, nextSlots, `${did}#${parsed.epoch}`, nextAdmissions)
         if (parsed.external) {
-          slotRemoveDID(parsed.committerDID, nextSlots)
-          slotAdd(parsed.committerDID, nextSlots)
+          slotRemoveDID(parsed.committerDID, nextSlots, nextAdmissions)
+          slotAdd(parsed.committerDID, nextSlots, undefined, nextAdmissions)
         }
         const removed = localDID != null && ![...nextSlots.values()].includes(localDID)
         // Self-removal adopts the tree and ledger but supplies no successor epoch secrets.
@@ -2403,6 +2638,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         const state = durableState({
           epoch: epochAfter,
           slots: [...nextSlots],
+          controllerLog: nextControllerLog,
+          admissions: [...nextAdmissions],
           ledger: nextLedger,
           ledgerHead: nextHead,
           bodies: [...nextBodies],
@@ -2439,6 +2676,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         }
         if (!removed) advance(epochAfter)
         bodies = nextBodies
+        admissions = nextAdmissions
+        controllerLog = nextControllerLog
         slots = nextSlots
         ledger = nextLedger
         ledgerHead = nextHead
@@ -2578,10 +2817,27 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     ): Promise<PendingRecovery | { renewalRequired: true } | null> {
       const info = open(sealed, requestID, requestKey)
       if (info == null) return null
+      if (controllerLog != null) {
+        if (info.controllerLog == null) return null
+        const { events: knownEvents, ...knownState } = controllerLog
+        const { events: offeredEvents, ...offeredState } = info.controllerLog
+        // This model cannot verify settlement or resets. Retain full events and other state exactly.
+        if (
+          !isDeepStrictEqual(knownState, offeredState) ||
+          !Array.isArray(offeredEvents) ||
+          !knownEvents.every((known) => {
+            return offeredEvents.some((event) => isDeepStrictEqual(known, event))
+          })
+        )
+          return null
+      }
       if (!prepared) await prepare()
-      if (binding != null && !usable(preparedBinding)) {
+      if (
+        (binding != null || info.controllerLog != null) &&
+        !usable(preparedBinding, info.controllerLog)
+      ) {
         preparedBinding = await askBinding()
-        if (!usable(preparedBinding)) return { renewalRequired: true }
+        if (!usable(preparedBinding, info.controllerLog)) return { renewalRequired: true }
       }
       return makePending(
         info,

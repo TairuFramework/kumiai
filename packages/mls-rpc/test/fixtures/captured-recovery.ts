@@ -45,6 +45,7 @@ import { prepareCheckpointInstallation } from '../../src/checkpoint-capture.js'
 import { provenCheckpointFacts } from '../../src/checkpoint-store.js'
 import { entryCapability } from '../../src/entry-capability.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../../src/mls.js'
+import type { GroupRecoveryTrust } from '../../src/persistence-types.js'
 import { recoveryTrustDigest } from '../../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
 import type { RegistryRecoverySource } from '../../src/registry/types.js'
@@ -96,7 +97,7 @@ export function capturedRecord(
     requestKey,
     candidate: pending.serialize(),
     epochAfter: pending.epoch,
-    ledgerBefore: [],
+    ledgerBefore: [...(pending.source.trust as GroupRecoveryTrust).ledger],
   }
 }
 
@@ -245,7 +246,10 @@ async function boundCapturedGroup(identity = randomIdentity()) {
   const responder = randomIdentity()
   const controller = await lifecycle.bindingFor(identity)
   const source = (
-    await createGroup(identity, `captured-contract-${crypto.randomUUID()}`, { controller })
+    await createGroup(identity, `captured-contract-${crypto.randomUUID()}`, {
+      controllerLog: { chain: controller.prefix, events: [] },
+      controller,
+    })
   ).group
   const binding = await lifecycle.bindingFor(responder, undefined, {
     identity,
@@ -992,8 +996,9 @@ export async function createForkRecoveryRealFixture(
       })
       if (pending === null || 'renewalRequired' in pending)
         throw new Error('Missing hostile saved capture')
+      const built = capturedRecord(pending, capture.request, capture.requestKey, capture.requestID)
       const record = {
-        ...capturedRecord(pending, capture.request, capture.requestKey, capture.requestID),
+        ...built,
         id: authority.attemptID,
         forkRecovery: authority,
         stage,
@@ -1068,7 +1073,7 @@ export async function createForkRecoveryRealFixture(
       )
       if (pending == null || 'renewalRequired' in pending) throw new Error('Missing saved X')
       const record = capturedRecord(pending, capture.request, capture.requestKey, capture.requestID)
-      record.ledgerBefore = ['owed-X', 'shared']
+      record.ledgerBefore = [...record.ledgerBefore, 'owed-X', 'shared']
       if (stage !== 'built') {
         record.stage = stage === 'adopted' ? 'confirmed' : stage
         record.position = '001' as typeof record.position
@@ -1183,13 +1188,17 @@ export async function createForkRecoveryRealFixture(
       )
       if (pending == null || 'renewalRequired' in pending) return null
       builds++
+      const built = capturedRecord(pending, capture.request, capture.requestKey, capture.requestID)
       const record = {
-        ...capturedRecord(pending, capture.request, capture.requestKey, capture.requestID),
+        ...built,
         id: authorisation.attemptID,
         forkRecovery: authorisation,
-        ledgerBefore: (await local.device.groups.ports(key).control.load()).settledRejoins.flatMap(
-          (row) => row.ledgerBefore,
-        ),
+        ledgerBefore: [
+          ...built.ledgerBefore,
+          ...(await local.device.groups.ports(key).control.load()).settledRejoins.flatMap(
+            (row) => row.ledgerBefore,
+          ),
+        ],
       }
       await local.installRows({ key, control: { putRejoin: record } })
       return { record, pending }

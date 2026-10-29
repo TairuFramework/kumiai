@@ -156,6 +156,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
         const binding = await bindingFor(fixture.identity)
         fixture.environment.options.controller = binding
+        fixture.environment.options.controllerLog = { chain: binding.prefix, events: [] }
         const options = fixture.environment.options
         const original = (await createGroup(fixture.identity, groupID, options)).group
         const clock = await signLedgerEntry(fixture.identity, {
@@ -164,7 +165,15 @@ for (const mode of ['real-mls', 'double'] as const) {
           subject: binding.id,
           value: {
             op: 'clock',
-            time: Number(decodeSignedToken(binding.capability).payload.exp) + 1,
+            time:
+              Number(
+                decodeSignedToken(
+                  binding.capability ??
+                    (() => {
+                      throw new Error('Missing fixture capability')
+                    })(),
+                ).payload.exp,
+              ) + 1,
           },
         })
         await original.applyLedgerEntries([clock])

@@ -1249,7 +1249,10 @@ test.each(['real-mls', 'double'] as const)(
     try {
       vi.spyOn(Date, 'now').mockReturnValue(150_000)
       const controller = await timedBinding({ identity: base.identity, iat: 100, exp: 200 })
-      const { group } = await createGroup(base.identity, 'lapsed-rotation', { controller })
+      const { group } = await createGroup(base.identity, 'lapsed-rotation', {
+        controllerLog: { chain: controller.prefix, events: [] },
+        controller,
+      })
       const token = await signLedgerEntry(base.identity, {
         type: DEVICE_ENTRY_TYPE,
         groupID: group.groupID,

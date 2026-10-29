@@ -40,6 +40,20 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 | [Bound-leaf lifecycle](../reference/mls-lifecycle.md)        | Genesis, membership, proofs, renewal, recovery and security residuals.                                                |
 | [Wake notifications](../reference/wake-notifications.md)     | The push doorbell: the sealed hint, leading-edge debouncing, sender verdicts, and the iOS limits.                     |
 
+## MLS management tier
+
+Lifecycle groups use capability bindings or membership bindings (`member: { add, g }`, ordering-only `iat`).
+Capabilities can name a member root through `mbr`. Standard groups remain root-only.
+The registry holds the authoritative `ControllerLog`, member-removal tombstones, floors and pinned-key time attestations.
+Creation requires a controller log and installs it through a first-position `seed` entry.
+Effect-free `log` entries carry updates or settlement. `revoke` and `reset` carry exact effects and `ControllerLog` proofs.
+Proof references identify chain indices, epoch events or reset snapshots.
+Incarnation removal cascades through rooted leaves. Verified holder or survivor grants can preserve them with bounded expiry.
+Tree time combines the floor, root token times and a quorum over distinct effective pinned keys.
+Member-rooted admission caps applied epoch events at 32, with settlement advice from 24.
+Recovery adopts only authenticated candidate registries retaining known lifecycle effects and MLS time.
+The [lifecycle reference](../reference/mls-lifecycle.md) defines the public surface.
+
 ## What a host wires
 
 `createGroupPeer` takes two ports and four durable stores, plus `appOutboxLimit`.

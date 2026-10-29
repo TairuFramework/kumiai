@@ -8,6 +8,7 @@ import { nobleCryptoProvider } from '../src/crypto.js'
 import { deriveGroup } from '../src/group-handle.js'
 import * as mls from '../src/index.js'
 import { recoverySignerEligibleFromPublic } from '../src/recovery-verdict.js'
+import { controllerProjection } from '../src/registry.js'
 import {
   agent,
   controllerID,
@@ -146,11 +147,15 @@ test('retained authority checks a distinct signer and refuses malformed tree bin
       },
       {
         ...trust.registry,
-        controllers: new Map([[controllerID, { recordedLog: [], genFloor: 1, timeFloor: 0 }]]),
+        controllers: new Map([
+          [controllerID, { ...controllerProjection(), genFloor: 1, timeFloor: 0 }],
+        ]),
       },
       {
         ...trust.registry,
-        controllers: new Map([[controllerID, { recordedLog: [], genFloor: 0, timeFloor: 190 }]]),
+        controllers: new Map([
+          [controllerID, { ...controllerProjection(), genFloor: 0, timeFloor: 190 }],
+        ]),
       },
     ]) {
       expect(
@@ -162,7 +167,7 @@ test('retained authority checks a distinct signer and refuses malformed tree bin
           sealed: verdict,
           trust: { ...trust, registry },
         }),
-      ).rejects.toThrow(/denied-id|Ineligible retained recovery signer/)
+      ).rejects.toThrow(/denied-id|generation-floor|Ineligible retained recovery signer/)
     }
     for (const identity of [
       new TextEncoder().encode('{'),
@@ -372,13 +377,17 @@ test('lifecycle trust enforces retained signer binding, floors and denials', asy
       {
         registry: {
           ...trust.registry,
-          controllers: new Map([[binding.id, { recordedLog: [], genFloor: 1, timeFloor: 0 }]]),
+          controllers: new Map([
+            [binding.id, { ...controllerProjection(), genFloor: 1, timeFloor: 0 }],
+          ]),
         },
       },
       {
         registry: {
           ...trust.registry,
-          controllers: new Map([[binding.id, { recordedLog: [], genFloor: 0, timeFloor: 201 }]]),
+          controllers: new Map([
+            [binding.id, { ...controllerProjection(), genFloor: 0, timeFloor: 201 }],
+          ]),
         },
       },
     ]) {

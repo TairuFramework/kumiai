@@ -22,6 +22,7 @@ import {
 } from '@kumiai/rpc'
 
 import type { ControlRead, HandleAccess, PersistContext } from '../../src/access.js'
+import { retainsKnownEffects } from '../../src/access.js'
 import type { SaveControlBuild } from '../../src/control-build.js'
 import { controlCompatible } from '../../src/control-compat.js'
 import { decodeControlJournal } from '../../src/control-journal.js'
@@ -547,6 +548,7 @@ export async function createTransactionalAccess(
           },
         }
         if (prepare != null && !(await prepare(current, source))) return
+        retainsKnownEffects(next)(current)
         const write = adoption?.({
           incarnation: 1,
           epochAfter: Number(next.epoch),

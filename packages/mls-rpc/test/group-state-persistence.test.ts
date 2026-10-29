@@ -524,11 +524,20 @@ for (const mode of ['real-mls', 'double'] as const) {
         devices: new Map([
           [
             trust.credential.id,
-            { controller: trust.credential.id, status: 'revoked', logPosition: 2 },
+            { controller: trust.credential.id, status: 'revoked', proofRef: { chainIndex: 2 } },
           ],
         ]),
         controllers: new Map([
-          [trust.credential.id, { recordedLog: [], genFloor: 2, timeFloor: 1000 }],
+          [
+            trust.credential.id,
+            {
+              attestations: new Map(),
+              removedMembers: new Map(),
+              survivorGrants: new Map(),
+              genFloor: 2,
+              timeFloor: 1000,
+            },
+          ],
         ]),
       }
       const low = new Uint8Array([0])

@@ -41,6 +41,9 @@ export type LeafBindingReason =
   | 'controller-mismatch'
   | 'floating-refused'
   | 'history-horizon'
+  | 'member-removed'
+  | 'member-unavailable'
+  | 'epoch-cap'
 
 export class LeafBindingError extends Error {
   #reason: LeafBindingReason
@@ -57,6 +60,28 @@ export class LeafBindingError extends Error {
 }
 
 export type LeafLapsedReason = 'lapsed'
+
+export type RecoveryKnowledgeReason =
+  | 'revocation'
+  | 'removal'
+  | 'epoch-event'
+  | 'attestation'
+  | 'floor'
+  | 'forked'
+
+export class RecoveryKnowledgeError extends Error {
+  #reason: RecoveryKnowledgeReason
+
+  constructor(reason: RecoveryKnowledgeReason) {
+    super(`Recovery drops known lifecycle knowledge: ${reason}`)
+    this.name = 'RecoveryKnowledgeError'
+    this.#reason = reason
+  }
+
+  get reason(): RecoveryKnowledgeReason {
+    return this.#reason
+  }
+}
 
 export class LeafLapsedError extends Error {
   #reason: LeafLapsedReason
@@ -76,6 +101,7 @@ export type RevokeProofReason =
   | 'no-rev'
   | 'wrong-controller'
   | 'not-authority-signed'
+  | 'not-endorsed'
   | 'generation-floor'
   | 'too-large'
   | 'detached'

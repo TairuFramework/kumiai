@@ -128,7 +128,9 @@ describe('independent registry handle', () => {
       const { group } = await createGroup(
         identity,
         'signed-model-ledger',
-        mode === 'bound' ? { controller: binding } : {},
+        mode === 'bound'
+          ? { controller: binding, controllerLog: { chain: binding.prefix, events: [] } }
+          : {},
       )
       const handle = await restoreMemoryControlHandle({
         state: seedMemoryControlState(group.state, group.credential),
@@ -516,15 +518,18 @@ describe('independent registry handle', () => {
     }
     const identity = randomIdentity()
     const binding = await bindingFor(identity)
-    const { group } = await createGroup(identity, 'bound-double', { controller: binding })
+    const { group } = await createGroup(identity, 'bound-double', {
+      controllerLog: { chain: binding.prefix, events: [] },
+      controller: binding,
+    })
     const state = decodeClientState(
-      encodeClientState(seedMemoryControlState(group.state, group.credential)),
+      encodeClientState(seedMemoryControlState(group.state, group.credential, group.ledgerTokens)),
     )
     if (state === undefined) throw new Error('Missing bound state')
     const restored = await restoreMemoryControlHandle({
       state,
       credential: group.credential,
-      ledgerEntries: [],
+      ledgerEntries: group.ledgerTokens,
     })
     expect(restored.bindingOfDID(identity.id)).toEqual({
       leafKey: identity.publicKey,

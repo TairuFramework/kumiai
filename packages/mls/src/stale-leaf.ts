@@ -11,7 +11,7 @@ import {
 } from 'ts-mls'
 
 import { readCapability } from './capability.js'
-import { parseMLSCredentialIdentity } from './credential.js'
+import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { LeafBindingError } from './errors.js'
 
 /** More than one leaf of a lifecycle group names the DID an admission would replace. */
@@ -43,14 +43,20 @@ function leafDID(leaf: LeafNode): string | undefined {
   }
 }
 
-function bindingTime(leaf: LeafNode): number | undefined {
+export function bindingIssuedAt(binding: ControllerBinding): number {
+  if (binding.member != null && binding.iat != null) return binding.iat
+  if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
+  return readCapability(binding.capability).payload.iat
+}
+
+function leafBindingIssuedAt(leaf: LeafNode): number | undefined {
   if (
     !isDefaultCredential(leaf.credential) ||
     leaf.credential.credentialType !== defaultCredentialTypes.basic
   )
     return undefined
   const binding = parseMLSCredentialIdentity(leaf.credential.identity).controller
-  return binding == null ? undefined : readCapability(binding.capability).payload.iat
+  return binding == null ? undefined : bindingIssuedAt(binding)
 }
 
 /**
@@ -58,8 +64,8 @@ function bindingTime(leaf: LeafNode): number | undefined {
  * package published under the leaf's current grant cannot evict that leaf.
  */
 export function assertNewerBinding(leaf: LeafNode, replaced: LeafNode): void {
-  const next = bindingTime(leaf)
-  const previous = bindingTime(replaced)
+  const next = leafBindingIssuedAt(leaf)
+  const previous = leafBindingIssuedAt(replaced)
   if (next == null || previous == null || next <= previous)
     throw new LeafBindingError('renewal-order')
 }

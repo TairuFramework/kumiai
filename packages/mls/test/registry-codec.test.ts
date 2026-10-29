@@ -12,6 +12,7 @@ import {
   parseMLSCredentialIdentity,
   registrySeed,
 } from '../src/index.js'
+import { controllerProjection } from '../src/registry.js'
 import {
   agent,
   bindingFor,
@@ -35,7 +36,7 @@ function populatedRegistry(): DeviceRegistry {
           controller: controllerID,
           status: 'revoked',
           label: '',
-          logPosition: 0,
+          proofRef: { snapshot: 0 },
           reason: 'reset',
           cascadedFrom: agent(42).id,
         },
@@ -45,13 +46,26 @@ function populatedRegistry(): DeviceRegistry {
       [
         controllerID,
         {
-          recordedLog: [inception, reset],
+          ...controllerProjection(),
+          recordedLog: { chain: [inception, reset], events: [] },
+          attestations: new Map([['member-key', 150]]),
+          removedMembers: new Map([
+            [
+              'add-digest',
+              {
+                did: agent(45).id,
+                gen: 0,
+                proofRef: { event: 'remove-digest', epoch: 'epoch-digest' },
+              },
+            ],
+          ]),
+          survivorGrants: new Map([[agent(43).id, 'signed-grant']]),
           genFloor: 1,
           timeFloor: 1750000000,
           beacon: { logLength: 2, headDigest: digestOf(reset.event) },
         },
       ],
-      [didFromInception(other.event), { recordedLog: [], genFloor: 0, timeFloor: 0 }],
+      [didFromInception(other.event), { ...controllerProjection(), genFloor: 0, timeFloor: 0 }],
     ]),
   }
 }
@@ -96,7 +110,10 @@ describe('device registry codec', () => {
       parent: await trustedGrant(holder),
     })
     expect(controller.holderGrant).toBeDefined()
-    const { group } = await createGroup(device, 'registry-holder-evidence', { controller })
+    const { group } = await createGroup(device, 'registry-holder-evidence', {
+      controller,
+      controllerLog: { chain: controller.prefix, events: [] },
+    })
     const registry = populatedRegistry()
     const decoded = decodeClientState(encodeClientState(group.state))
     const leaf = decoded?.ratchetTree.find((node) => node != null && 'leaf' in node)
@@ -150,7 +167,7 @@ describe('device registry codec', () => {
     { devices: [['device', { controller: controllerID, status: 'unknown' }]], controllers: [] },
     {
       devices: [],
-      controllers: [[controllerID, { recordedLog: [], genFloor: 0 }]],
+      controllers: [[controllerID, { ...controllerProjection(), genFloor: 0 }]],
     },
     {
       devices: [],

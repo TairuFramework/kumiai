@@ -442,7 +442,11 @@ for (const mode of ['real-mls', 'double'] as const) {
       const { createGroup } = await import('@kumiai/mls')
       const { registryHandle } = await import('./fixtures/registry-welcome.js')
       const source = (
-        await createGroup(base.identity, id, { ...base.environment.options, controller: binding })
+        await createGroup(base.identity, id, {
+          controllerLog: { chain: binding.prefix, events: [] },
+          ...base.environment.options,
+          controller: binding,
+        })
       ).group
       const input = await registryHandle({
         mode,
@@ -456,7 +460,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(restored.ownLeafLapsed()).toBe(false)
       const registry = restored.registry
       registry.controllers = new Map(registry.controllers).set(binding.id, {
-        recordedLog: binding.prefix,
+        recordedLog: { chain: binding.prefix, events: [] },
+        attestations: new Map(),
+        removedMembers: new Map(),
+        survivorGrants: new Map(),
         genFloor: 0,
         timeFloor: 201,
       })
@@ -1163,7 +1170,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         '@kumiai/mls'
       )
       const { registryHandle } = await import('./fixtures/registry-welcome.js')
-      const { group } = await createGroup(base.identity, id, { controller: binding })
+      const { group } = await createGroup(base.identity, id, {
+        controllerLog: { chain: binding.prefix, events: [] },
+        controller: binding,
+      })
       const token = await signLedgerEntry(base.identity, {
         type: DEVICE_ENTRY_TYPE,
         groupID: id,

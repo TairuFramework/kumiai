@@ -564,3 +564,26 @@ describe('foldEnvelope beacon', () => {
       expect(beaconOf(next.registry, profile)).toEqual({ logLength: 2, headDigest: 'zOld' })
   })
 })
+
+test('lifecycle envelope folds an effect-free log into the candidate registry', async () => {
+  const { buildEpoch } = await import('./fixtures/controller-epoch.js')
+  const { recordedLogOf, registryForLog } = await import('../src/registry.js')
+  const f = await buildEpoch({ members: 1 })
+  const entry = input({
+    issuer: CREATOR_DID,
+    type: DEVICE_ENTRY_TYPE,
+    subject: f.did,
+    value: { op: 'log', proof: { chain: [], events: f.log.events } },
+    entryID: 'log',
+  })
+  const result = foldEnvelope({
+    baseRoster: roster([]),
+    baseRegistry: registryForLog(f.did, { chain: f.log.chain, events: [] }),
+    entries: [entry],
+    groupID: GROUP_ID,
+    context: { controllerID: f.did, memberController: () => f.did },
+  })
+  expect(result.ok).toBe(true)
+  if (!result.ok) throw new Error(result.reason)
+  expect(recordedLogOf(result.registry, f.did)?.events).toEqual(f.log.events)
+})

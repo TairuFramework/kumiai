@@ -3,6 +3,9 @@ export function cloneData<T>(value: T): T {
   if (value === null || typeof value !== 'object') return value
   if (value instanceof Uint8Array) return new Uint8Array(value) as T
   if (Array.isArray(value)) return value.map((item: unknown) => cloneData(item)) as T
+  if (value instanceof Map)
+    return new Map([...value].map(([key, entry]) => [cloneData(key), cloneData(entry)])) as T
+  if (value instanceof Set) return new Set([...value].map((entry) => cloneData(entry))) as T
 
   const prototype = Object.getPrototypeOf(value)
   if (prototype !== Object.prototype && prototype !== null) {

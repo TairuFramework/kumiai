@@ -5,7 +5,12 @@ import { entryCapability } from '../src/entry-capability.js'
 import { registryReceiveSlots, setReceiveBase } from '../src/registry/live-receive.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { deferred } from '../src/runtime.js'
-import { dropRegistryOwner, receiveRebuilds, setReceiveCapacity } from '../src/testing.js'
+import {
+  dropRegistryOwner,
+  receiveRebuilds,
+  registryLeaseSnapshot,
+  setReceiveCapacity,
+} from '../src/testing.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 
 type Fixture = Awaited<ReturnType<typeof createRegistryLeaseFixture>>
@@ -632,6 +637,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await fixture.reopen()
+      await vi.waitFor(() => expect(registryLeaseSnapshot(fixture.access())).not.toBeNull())
       await foreignWithoutRefresh(fixture, 'proposal')
       expect(slot(fixture).base).toBeNull()
       const hold = fixture.fixture().holdRestore(fixture.key.groupID)
