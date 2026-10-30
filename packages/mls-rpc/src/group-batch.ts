@@ -23,6 +23,7 @@ function batchBudget(
   const maxFrames = kind === 'open' ? Math.min(64, options.maxBatchFrames) : options.maxBatchFrames
   let started: number | undefined
   let taken = 0
+  let exhausted = false
   const begin = () => {
     started ??= now()
   }
@@ -33,9 +34,15 @@ function batchBudget(
     begin,
     take() {
       begin()
-      if (taken >= maxFrames) return false
+      if (exhausted) return false
       // Setup cannot pre-empt the first operation; subsequent operations honour the boundary.
-      if (taken > 0 && now() - (started as number) >= options.maxBatchWorkMs) return false
+      if (
+        taken >= maxFrames ||
+        (taken > 0 && now() - (started as number) >= options.maxBatchWorkMs)
+      ) {
+        exhausted = true
+        return false
+      }
       taken++
       return true
     },
@@ -57,17 +64,35 @@ export function createGroupBatchScheduler(params: {
   now?: () => number
 }): GroupBatchScheduler {
   const options = groupBatchOptions(params.options)
-  const now = params.now ?? Date.now
+  const readNow = params.now ?? Date.now
+  let latestTime = Number.NEGATIVE_INFINITY
+  const now = () => {
+    latestTime = Math.max(latestTime, readNow())
+    return latestTime
+  }
   const ready: Array<ReadyWork> = []
   const served = new Set<string>()
+  let round: Set<string> | undefined
   let active = false
   let closed: Error | undefined
 
   function pump(): void {
-    if (active || closed !== undefined || ready.length === 0) return
-    if (ready.every((work) => served.has(work.source))) served.clear()
-    let index = ready.findIndex((work) => !served.has(work.source) && work.kind === 'control')
-    if (index < 0) index = ready.findIndex((work) => !served.has(work.source))
+    if (active || closed !== undefined) return
+    if (ready.length === 0) {
+      served.clear()
+      round = undefined
+      return
+    }
+    // The immediate idle turn seeds service before the first waiting round starts.
+    if (round === undefined && served.size > 0) round = new Set(ready.map((work) => work.source))
+    const eligible = (work: ReadyWork) =>
+      !served.has(work.source) && (round === undefined || round.has(work.source))
+    if (!ready.some(eligible)) {
+      served.clear()
+      round = new Set(ready.map((work) => work.source))
+    }
+    let index = ready.findIndex((work) => eligible(work) && work.kind === 'control')
+    if (index < 0) index = ready.findIndex(eligible)
     const work = ready.splice(index, 1)[0]
     if (work === undefined) return
     active = true

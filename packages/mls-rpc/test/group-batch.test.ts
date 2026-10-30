@@ -111,6 +111,57 @@ describe('group batch arbitration', () => {
     })
   })
 
+  test('backward clock readings cannot revive an exhausted work budget', async () => {
+    let time = 100
+    const scheduler = createGroupBatchScheduler({ now: () => time })
+    await scheduler.schedule({
+      source: 'completion',
+      kind: 'completion',
+      async run(budget) {
+        budget.begin()
+        expect(budget.take()).toBe(true)
+        time = 108
+        expect(budget.take()).toBe(false)
+        time = 90
+        expect(budget.take()).toBe(false)
+        expect(budget.now()).toBe(108)
+        budget.begin()
+        expect(budget.take()).toBe(false)
+      },
+    })
+    await scheduler.schedule({
+      source: 'completion',
+      kind: 'completion',
+      async run(budget) {
+        expect(budget.now()).toBe(108)
+        budget.begin()
+        expect(budget.take()).toBe(true)
+        time = 115.99
+        expect(budget.take()).toBe(true)
+        time = 116
+        expect(budget.take()).toBe(false)
+      },
+    })
+  })
+
+  test('elapsed work retains the highest clock reading before a backward jump', async () => {
+    let time = 100
+    const scheduler = createGroupBatchScheduler({ now: () => time })
+    await scheduler.schedule({
+      source: 'completion',
+      kind: 'completion',
+      async run(budget) {
+        budget.begin()
+        expect(budget.take()).toBe(true)
+        time = 108
+        expect(budget.now()).toBe(108)
+        time = 90
+        expect(budget.take()).toBe(false)
+        expect(budget.now()).toBe(108)
+      },
+    })
+  })
+
   test('active A then control then B fits three batches', async () => {
     vi.useFakeTimers()
     const scheduler = createGroupBatchScheduler({})
@@ -153,6 +204,34 @@ describe('group batch arbitration', () => {
     await Promise.all(runs)
   })
 
+  test('idle ends prior control service before a new burst', async () => {
+    const scheduler = createGroupBatchScheduler({})
+    await scheduler.schedule({ source: 'control', kind: 'control', async run() {} })
+    const release = deferred<void>()
+    const entered: Array<string> = []
+    const active = scheduler.schedule({
+      source: 'A',
+      kind: 'open',
+      async run() {
+        entered.push('A')
+        await release.promise
+      },
+    })
+    const offer = (source: string, kind: BatchKind) =>
+      scheduler.schedule({
+        source,
+        kind,
+        async run() {
+          entered.push(source)
+        },
+      })
+    const b = offer('B', 'open')
+    const control = offer('control', 'control')
+    release.resolve()
+    await Promise.all([active, b, control])
+    expect(entered).toEqual(['A', 'control', 'B'])
+  })
+
   test('each ready source gets one turn per round', async () => {
     const scheduler = createGroupBatchScheduler({})
     const release = deferred<void>()
@@ -190,6 +269,79 @@ describe('group batch arbitration', () => {
     expect(entered.indexOf('A', 1)).toBeGreaterThan(5)
     expect(entered.indexOf('control', 2)).toBeGreaterThan(5)
     await Promise.all(runs)
+  })
+
+  test('later arrivals join the next round behind already-ready members', async () => {
+    const scheduler = createGroupBatchScheduler({})
+    const firstRelease = deferred<void>()
+    const roundRelease = deferred<void>()
+    const entered: Array<string> = []
+    const offer = (source: string, kind: BatchKind, wait?: Promise<void>) =>
+      scheduler.schedule({
+        source,
+        kind,
+        async run() {
+          entered.push(source)
+          await wait
+        },
+      })
+    const active = offer('A', 'open', firstRelease.promise)
+    const firstMember = offer('X', 'open', roundRelease.promise)
+    const waitingMember = offer('B', 'open')
+    firstRelease.resolve()
+    await idle()
+    expect(entered).toEqual(['A', 'X'])
+    const lateControl = offer('late control', 'control')
+    const repeat = offer('A', 'open')
+    roundRelease.resolve()
+    await Promise.all([active, firstMember, waitingMember, lateControl, repeat])
+    expect(entered).toEqual(['A', 'X', 'B', 'late control', 'A'])
+  })
+
+  test('already-waiting source runs within one round despite fresh sources', async () => {
+    const scheduler = createGroupBatchScheduler({})
+    const firstRelease = deferred<void>()
+    const roundRelease = deferred<void>()
+    const entered: Array<string> = []
+    const runs: Array<Promise<unknown>> = []
+    const offerFresh = (index: number): Promise<unknown> =>
+      scheduler.schedule({
+        source: `X${index}`,
+        kind: 'open',
+        async run() {
+          entered.push(`X${index}`)
+          if (index === 0) await roundRelease.promise
+          if (index < 8) runs.push(offerFresh(index + 1))
+        },
+      })
+    runs.push(
+      scheduler.schedule({
+        source: 'A',
+        kind: 'open',
+        async run() {
+          entered.push('A')
+          await firstRelease.promise
+        },
+      }),
+    )
+    runs.push(offerFresh(0))
+    firstRelease.resolve()
+    await idle()
+    expect(entered).toEqual(['A', 'X0'])
+    runs.push(
+      scheduler.schedule({
+        source: 'A',
+        kind: 'open',
+        async run() {
+          entered.push('A')
+        },
+      }),
+    )
+    roundRelease.resolve()
+    for (let turn = 0; turn < 4; turn++) await idle()
+    await Promise.all(runs)
+    expect(entered.slice(0, 3)).toEqual(['A', 'X0', 'A'])
+    expect(entered).toHaveLength(11)
   })
 
   test('post-release accounting cannot overtake buffered control and B', async () => {
@@ -273,6 +425,7 @@ describe('group batch arbitration', () => {
   })
 
   test('binding options are immutable after scheduling and opens retain their hard cap', async () => {
+    vi.useFakeTimers()
     const binding = {}
     const options = { maxBatchFrames: 100, maxBatchDelayMs: 0, maxBatchWorkMs: 0.25 }
     bindGroupBatchOptions(binding, options)
@@ -301,6 +454,9 @@ describe('group batch arbitration', () => {
       kind: 'open',
       async run(budget) {
         expect(budget.maxFrames).toBe(64)
+        const admissions = Array.from({ length: 65 }, () => budget.take())
+        expect(admissions.filter(Boolean)).toHaveLength(64)
+        expect(admissions[64]).toBe(false)
       },
     })
     await scheduler.schedule({
