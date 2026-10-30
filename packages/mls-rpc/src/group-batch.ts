@@ -65,10 +65,13 @@ export function createGroupBatchScheduler(params: {
 }): GroupBatchScheduler {
   const options = groupBatchOptions(params.options)
   const readNow = params.now ?? Date.now
-  let latestTime = Number.NEGATIVE_INFINITY
+  let lastRaw = readNow()
+  let accumulatedTime = lastRaw
   const now = () => {
-    latestTime = Math.max(latestTime, readNow())
-    return latestTime
+    const raw = readNow()
+    accumulatedTime += Math.max(0, raw - lastRaw)
+    lastRaw = raw
+    return accumulatedTime
   }
   const ready: Array<ReadyWork> = []
   const served = new Set<string>()

@@ -111,6 +111,29 @@ describe('group batch arbitration', () => {
     })
   })
 
+  test('fresh budget after clock rollback rejects after eight elapsed milliseconds', async () => {
+    let time = 108
+    const scheduler = createGroupBatchScheduler({ now: () => time })
+    await scheduler.schedule({
+      source: 'completion',
+      kind: 'completion',
+      async run(budget) {
+        expect(budget.now()).toBe(108)
+      },
+    })
+    time = 90
+    await scheduler.schedule({
+      source: 'completion',
+      kind: 'completion',
+      async run(budget) {
+        budget.begin()
+        expect(budget.take()).toBe(true)
+        time = 98
+        expect(budget.take()).toBe(false)
+      },
+    })
+  })
+
   test('backward clock readings cannot revive an exhausted work budget', async () => {
     let time = 100
     const scheduler = createGroupBatchScheduler({ now: () => time })
@@ -136,9 +159,9 @@ describe('group batch arbitration', () => {
         expect(budget.now()).toBe(108)
         budget.begin()
         expect(budget.take()).toBe(true)
-        time = 115.99
+        time = 97.99
         expect(budget.take()).toBe(true)
-        time = 116
+        time = 98
         expect(budget.take()).toBe(false)
       },
     })
