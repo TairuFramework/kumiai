@@ -18,6 +18,11 @@ import type {
   PreOpenAppFrameRef,
   RecoveryCompletion,
 } from '../src/index.js'
+import {
+  combineDurableHandlers,
+  createOpenedAppHandler,
+  normaliseOpenedAppHandler,
+} from '../src/index.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 
 const protocol = defineGroupProtocol({
@@ -161,4 +166,44 @@ function _completion(
     handlers: params.handlers,
   }
   return { both, withoutMLS, missing }
+}
+
+test('durable listener helper preserves context and transaction inference', () => {})
+function _listenerInference(
+  completion: HandlerCompletion<Transaction>,
+  openedDeliveryContext: Parameters<typeof normaliseOpenedAppHandler>[0]['openedDeliveryContext'],
+) {
+  const handlers: Handlers = {
+    posted: combineDurableHandlers([
+      {
+        mode: 'transactional',
+        async handle(context) {
+          expectTypeOf(context.tx).toEqualTypeOf<Transaction>()
+          expectTypeOf(context.data.text).toEqualTypeOf<string>()
+        },
+      },
+      {
+        mode: 'transactional',
+        async handle(context) {
+          await context.tx.put(context.data.text)
+        },
+      },
+    ]),
+    typing: () => {},
+    ping: () => {},
+    ask: ({ param }) => param,
+    watch: async () => {},
+    chat: async () => {},
+  }
+  const opened = createOpenedAppHandler({
+    localDID: 'receiver',
+    protocols: { chat: protocol },
+    handlers: { chat: handlers },
+    completion,
+    openedDeliveryContext,
+  })
+  expectTypeOf(opened.completion).toEqualTypeOf<HandlerCompletion<Transaction>>()
+  expectTypeOf(
+    normaliseOpenedAppHandler({ deliver: opened, completion, openedDeliveryContext }),
+  ).toEqualTypeOf<typeof opened>()
 }

@@ -18,6 +18,7 @@ import { describe, expect, test, vi } from 'vitest'
 import type { createAppLane as CreateAppLane } from '../../rpc/lib/app-lane.js'
 import type { createHubMux as CreateHubMux } from '../../rpc/lib/hub-mux.js'
 import { entryCapability } from '../src/entry-capability.js'
+import { createHandlerCompletion } from '../src/handler-completion.js'
 import { drainStoredOpened, registryOpenedDeliveryContext } from '../src/opened-delivery.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
 import type { PendingAppFrame } from '../src/persistence-types.js'
@@ -25,7 +26,6 @@ import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { retireToSuccessor } from '../src/successor.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
-import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture, registryFixtureForceOwnerMarker } from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
 
@@ -241,14 +241,18 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       const sealed = (await env.fixture.inspectRows()).pending
       let registered = false
       const handler = createOpenedAppHandler({
-        completion: createTestCompletion(env.key),
+        completion: createHandlerCompletion({
+          persistence: env.fixture.device.groups,
+          key: env.key,
+        }),
+        openedDeliveryContext: env.context,
         localDID: 'bob',
         protocols,
         handlers: { chat: { posted: async () => {} } },
       })
       let settled = false
       const drain = env.drain(async (record) => {
-        if (!registered) await handler(record)
+        if (!registered) await handler.deliver(record)
       })
       void drain.then(() => {
         settled = true
@@ -911,7 +915,11 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
             handoff: async () => {},
             completed: async () => {},
             deliver: createOpenedAppHandler({
-              completion: createTestCompletion(env.key),
+              completion: createHandlerCompletion({
+                persistence: env.fixture.device.groups,
+                key: env.key,
+              }),
+              openedDeliveryContext: env.context,
               localDID: env.fixture.identity.id,
               protocols,
               handlers: {
@@ -921,7 +929,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
                   },
                 },
               },
-            }),
+            }).deliver,
           })
           const storedDrain = env.fixture.registry.drainOpened(env.key)
           release.resolve()

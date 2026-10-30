@@ -5,11 +5,13 @@ import {
   type SuppressConfig,
   suppressible,
 } from '@kumiai/broadcast'
+import { toUTF } from '@sozai/codec'
 import { EventEmitter } from '@sozai/event'
 import { getReporter } from '@sozai/log'
 import { createValidator, type Validator } from '@sozai/schema'
 
-import type { AppFrameRef } from './crypto.js'
+import type { GroupKey } from './control/types.js'
+import type { AppFrameRef, PendingAppFrame } from './crypto.js'
 import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 
@@ -82,13 +84,73 @@ function busMessage(senderDID?: string): { payload: { iss?: string } } {
   return { payload: { iss: senderDID } }
 }
 
-type LooseHandler = (context: {
+type LooseContext = {
   data?: unknown
   param?: unknown
   signal?: AbortSignal
   message: { payload: { iss?: string } }
-  frame?: AppFrameRef
-}) => unknown
+} & GroupHandlerMetadata
+type LooseHandler = (context: LooseContext) => unknown
+
+export function groupHandlerMetadata(
+  transit: { epoch?: number },
+  key: GroupKey,
+): GroupHandlerMetadata {
+  if (!Number.isSafeInteger(transit.epoch) || (transit.epoch as number) < 0)
+    throw new TypeError('Handler requires authenticated epoch')
+  return { epoch: transit.epoch as number, incarnation: key.incarnation }
+}
+
+function durablePolicy<TContext, TTx extends GroupTransaction>(
+  handler: DurableHandler<TContext, TTx> | unknown,
+): DurableHandler<TContext, TTx> {
+  if (typeof handler === 'function')
+    return { handle: handler as DurableHandler<TContext, TTx>['handle'] }
+  if (
+    handler === null ||
+    typeof handler !== 'object' ||
+    !('handle' in handler) ||
+    typeof handler.handle !== 'function' ||
+    ('mode' in handler &&
+      handler.mode !== undefined &&
+      handler.mode !== 'at-least-once' &&
+      handler.mode !== 'transactional')
+  )
+    throw new TypeError('Invalid durable handler policy')
+  return handler as DurableHandler<TContext, TTx>
+}
+
+export function validateBusHandlers(
+  protocol: GroupProtocolDefinition,
+  handlers: Record<string, unknown>,
+): void {
+  for (const [prc, definition] of Object.entries(protocol)) {
+    const handler = handlers[prc]
+    if (handler == null) continue
+    if (definition.type === 'event' && definition.retain === 'log') durablePolicy(handler)
+    else if (typeof handler !== 'function')
+      throw new TypeError(`Ephemeral handler must be a function: ${prc}`)
+  }
+}
+
+export function combineDurableHandlers<TContext, TTx extends GroupTransaction>(
+  handlers: [DurableHandler<TContext, TTx>, ...Array<DurableHandler<TContext, TTx>>],
+): DurableHandler<TContext, TTx> {
+  if (handlers.length === 0) throw new TypeError('Durable listeners must be nonempty')
+  const listeners = handlers.map((handler) => durablePolicy<TContext, TTx>(handler))
+  const mode = listeners[0]?.mode ?? 'at-least-once'
+  if (listeners.some((handler) => (handler.mode ?? 'at-least-once') !== mode))
+    throw new TypeError('Mixed durable listener policies')
+  return {
+    mode,
+    async handle(
+      context: TContext &
+        GroupHandlerMetadata & { frame: AppFrameRef; idempotencyKey: string; tx?: TTx },
+    ) {
+      for (const listener of listeners) await listener.handle(context as never)
+    },
+  }
+}
 
 /**
  * Adapt native `@enkaku/server` handlers into a bus event emitter + request handler map.
@@ -107,39 +169,99 @@ export function adaptBusHandlers<
   handlers: GroupProcedureHandlers<TProtocol, TTx>,
   options: { completion: HandlerCompletion<TTx>; suppress?: SuppressConfig },
 ): BusHandlerMaps {
-  const { suppress = {} } = options
+  const { suppress = {}, completion } = options
+  validateBusHandlers(protocol, handlers)
+  const policies = new Map<string, DurableHandler<LooseContext, TTx>>()
+  for (const [prc, definition] of Object.entries(protocol)) {
+    const handler = handlers[prc]
+    if (handler != null && definition.type === 'event' && definition.retain === 'log')
+      policies.set(prc, durablePolicy(handler))
+  }
   const events = new EventEmitter<BusEvents>()
   const requestHandlers: BusHandlerMaps['requestHandlers'] = {}
 
   for (const [prc, definition] of Object.entries(protocol)) {
     const handler = handlers[prc] as LooseHandler | undefined
     if (handler == null) continue
-
     if (definition.type === 'event') {
       const validator: Validator<unknown> | undefined =
         definition.data != null ? createValidator(definition.data as never) : undefined
-      events.on(prc, (event) => {
-        const { data, senderDID, frame } = event as typeof event & { frame?: AppFrameRef }
+      const policy = policies.get(prc)
+      const invoke = async (
+        event: {
+          data: unknown
+          senderDID?: string
+          epoch?: number
+          frame?: AppFrameRef
+          idempotencyKey?: string
+        },
+        tx?: TTx,
+      ) => {
+        const metadata = groupHandlerMetadata(event, completion.key)
         if (validator != null) {
-          const result = validator(data)
+          const result = validator(event.data)
           if (result instanceof Error) {
             warnDropped(`Dropped invalid event "${prc}": ${result.message}`)
             return
           }
         }
-        return handler({
-          data,
-          message: busMessage(senderDID),
-          ...(frame == null ? {} : { frame }),
-        }) as void | Promise<void>
+        const context = { data: event.data, message: busMessage(event.senderDID), ...metadata }
+        if (policy === undefined) {
+          await handler(context)
+          return
+        }
+        await policy.handle({
+          ...context,
+          frame: { ...(event.frame as AppFrameRef) },
+          idempotencyKey: event.idempotencyKey as string,
+          ...(tx === undefined ? {} : { tx }),
+        } as never)
+      }
+      events.on(prc, async (input) => {
+        const event = input as typeof input & Partial<PendingAppFrame>
+        if (policy === undefined) {
+          await invoke(event)
+          return
+        }
+        // A frame-less bus event cannot invoke a retained policy.
+        if (event.frame === undefined) return
+        if (
+          event.frame.groupID !== completion.key.groupID ||
+          event.frame.incarnation !== completion.key.incarnation ||
+          event.frame.procedure !== prc ||
+          typeof event.idempotencyKey !== 'string'
+        )
+          throw new TypeError('Durable handler binding mismatch')
+        const id = event.frame.id
+        if (policy.mode === 'transactional') {
+          await completion.transact([id], async (tx, records) => {
+            for (const saved of records) {
+              if (
+                saved.frame.id !== id ||
+                saved.frame.groupID !== completion.key.groupID ||
+                saved.frame.incarnation !== completion.key.incarnation ||
+                saved.frame.procedure !== prc ||
+                saved.frame.protocol !== event.frame?.protocol
+              )
+                throw new TypeError('Saved handler binding mismatch')
+              const message = JSON.parse(toUTF(saved.payload)) as {
+                payload?: { typ?: string; prc?: string; data?: unknown }
+              }
+              if (message.payload?.typ !== 'event' || message.payload.prc !== prc)
+                throw new TypeError('Saved handler procedure mismatch')
+              await invoke({ ...saved, data: message.payload.data ?? {} }, tx)
+            }
+          })
+        } else {
+          await invoke(event)
+          await completion.complete([id])
+        }
       })
     } else if (definition.type === 'request') {
       const validator: Validator<unknown> | undefined =
         definition.param != null ? createValidator(definition.param as never) : undefined
-      // async: a validation failure must reach the caller as a REJECTED promise (the shape
-      // `createBroadcastResponder`'s handleRequest awaits), not a synchronous throw escaping the
-      // call expression before any promise exists.
       const fn: BroadcastHandler = async (param, context) => {
+        const metadata = groupHandlerMetadata((context ?? {}) as { epoch?: number }, completion.key)
         if (validator != null) {
           const result = validator(param)
           if (result instanceof Error) throw result
@@ -148,11 +270,17 @@ export function adaptBusHandlers<
           param,
           ...(context?.signal != null ? { signal: context.signal } : {}),
           message: busMessage(context?.senderDID),
+          ...metadata,
         })
       }
       requestHandlers[prc] = Object.keys(suppress).length > 0 ? suppressible(fn, suppress) : fn
     }
   }
-
+  const on = events.on.bind(events)
+  events.on = (name, listener, options) => {
+    if (protocol[name]?.type === 'event' && protocol[name]?.retain === 'log')
+      throw new TypeError('Retained listeners require an explicit durable policy')
+    return on(name, listener, options)
+  }
   return { events, requestHandlers }
 }

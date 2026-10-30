@@ -254,11 +254,13 @@ export {
 } from './fork-notice.js'
 export { assertFrameFits, FrameTooLargeError } from './frame-size.js'
 export type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
-export type {
-  DurableHandler,
-  GroupHandlerMetadata,
-  GroupProcedureHandlers,
-  MetadataHandler,
+export {
+  combineDurableHandlers,
+  type DurableHandler,
+  type GroupHandlerMetadata,
+  type GroupProcedureHandlers,
+  groupHandlerMetadata,
+  type MetadataHandler,
 } from './handlers.js'
 export {
   decodeHandshakeFrame,
@@ -283,6 +285,8 @@ export {
   assertOpenedDeliveryEntry,
   bindOpenedDelivery,
   createOpenedAppHandler,
+  normaliseOpenedAppHandler,
+  type OpenedAppHandler,
   type OpenedDeliveryBinding,
   type OpenedDeliveryContext,
   OpenedDeliveryReentryError,

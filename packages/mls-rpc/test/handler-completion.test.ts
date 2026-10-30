@@ -1,7 +1,10 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   type AppCompletionCoverage,
   appFrameIdempotencyKey,
   bindAppCompletionCoverage,
+  combineDurableHandlers,
+  createOpenedAppHandler,
   encodeAppAAD,
   type HandlerCompletion,
 } from '@kumiai/rpc'
@@ -250,6 +253,139 @@ for (const mode of ['real-mls', 'double'] as const)
           expect(await f.fixture.inspectSideRow('A')).toBeNull()
           expect((await f.pending()).map((r) => r.frame.id)).toEqual(['A'])
           expect(await f.cursor()).toBeNull()
+        } finally {
+          await f.fixture.close()
+        }
+      })
+      test('handler failure isolates its lane', async () => {
+        const f = await completionFixture(mode, supplied)
+        try {
+          const payload = new TextEncoder().encode(
+            JSON.stringify({ payload: { typ: 'event', prc: 'posted', data: {} } }),
+          )
+          const records = [
+            f.record('A'),
+            f.record('later-A'),
+            { ...f.record('B'), frame: { ...f.record('B').frame, protocol: 'other' } },
+          ].map((record) => ({ ...record, payload }))
+          await f.plant(records)
+          const context = new AsyncLocalStorage<object>()
+          const seen: Array<string> = []
+          let fail = true
+          const opened = createOpenedAppHandler({
+            localDID: 'receiver',
+            protocols: {
+              chat: { posted: { type: 'event', retain: 'log' } },
+              other: { posted: { type: 'event', retain: 'log' } },
+            },
+            completion: f.completion,
+            openedDeliveryContext: {
+              run: (token, fn) => context.run(token, fn),
+              get: () => context.getStore(),
+            },
+            handlers: {
+              chat: {
+                posted: combineDurableHandlers<unknown, MemoryTransaction>([
+                  {
+                    mode: 'transactional',
+                    async handle({ tx, frame }) {
+                      seen.push(frame.id)
+                      await writeSideRow(tx, frame.id, new Uint8Array([1]))
+                    },
+                  },
+                  {
+                    mode: 'transactional',
+                    async handle() {
+                      if (fail) throw new Error('lane A')
+                    },
+                  },
+                ]),
+              },
+              other: {
+                posted: {
+                  mode: 'transactional',
+                  async handle({ tx, frame }) {
+                    await writeSideRow(tx, frame.id, new Uint8Array([2]))
+                  },
+                },
+              },
+            },
+          })
+          const [first, later, other] = records
+          if (first === undefined || later === undefined || other === undefined)
+            throw new Error('Missing record')
+          // Each protocol drain stops at its first failed record.
+          const results = await Promise.allSettled([
+            (async () => {
+              await opened.deliver(first)
+              await opened.deliver(later)
+            })(),
+            opened.deliver(other),
+          ])
+          expect(results.map((r) => r.status)).toEqual(['rejected', 'fulfilled'])
+          expect(seen).toEqual(['A'])
+          expect((await f.pending()).map((r) => r.frame.id)).toEqual(['A', 'later-A'])
+          expect(await f.fixture.inspectSideRow('A')).toBeNull()
+          expect(await f.fixture.inspectSideRow('B')).toEqual(new Uint8Array([2]))
+          fail = false
+          await opened.deliver(first)
+          expect(seen).toEqual(['A', 'A'])
+          expect(await f.fixture.inspectSideRow('A')).toEqual(new Uint8Array([1]))
+        } finally {
+          await f.fixture.close()
+        }
+      })
+      test('production transactional handler preserves effects-phase restrictions', async () => {
+        const f = await completionFixture(mode, supplied)
+        try {
+          const saved = {
+            ...f.record('production'),
+            payload: new TextEncoder().encode(
+              JSON.stringify({ payload: { typ: 'event', prc: 'posted', data: { text: 'saved' } } }),
+            ),
+          }
+          await f.plant([saved])
+          const before = await f.fixture.inspectRawBytes()
+          const context = new AsyncLocalStorage<object>()
+          const complete = vi.spyOn(f.completion, 'complete')
+          const handle = vi.fn(async ({ tx, data }) => {
+            await Promise.resolve()
+            expect(data).toEqual({ text: 'saved' })
+            for (const view of [tx, { ...tx }, { ...tx, rows: { ...tx.rows } }]) {
+              const stores = f.fixture.constructGroupStores(view, f.key)
+              const life = await stores.lifetime.load()
+              const trust = await stores.trust.load()
+              const state = await stores.incarnation(1).state.load()
+              if (life === null || trust === null || state === null)
+                throw new Error('Missing domain')
+              for (const write of [
+                () => stores.lifetime.save(life),
+                () => stores.trust.save(trust),
+                () => stores.incarnation(1).state.save(state),
+              ])
+                await expect(write()).rejects.toMatchObject({ name: 'PersistencePhaseError' })
+            }
+            await writeSideRow(tx, 'production-effect', new Uint8Array([7]))
+          })
+          const opened = createOpenedAppHandler({
+            localDID: 'receiver',
+            protocols: { chat: { posted: { type: 'event', retain: 'log' } } },
+            completion: f.completion,
+            openedDeliveryContext: {
+              run: (token, fn) => context.run(token, fn),
+              get: () => context.getStore(),
+            },
+            handlers: { chat: { posted: { mode: 'transactional', handle } } },
+          })
+          await opened.deliver(saved)
+          await opened.deliver(saved)
+          expect(handle).toHaveBeenCalledOnce()
+          expect(complete).not.toHaveBeenCalled()
+          expect(await f.pending()).toEqual([])
+          expect(await f.fixture.inspectSideRow('production-effect')).toEqual(new Uint8Array([7]))
+          const domain = (rows: typeof before) =>
+            rows.filter((row) => ['state', 'trust', 'control', 'anchor'].includes(row.namespace))
+          expect(domain(await f.fixture.inspectRawBytes())).toEqual(domain(before))
         } finally {
           await f.fixture.close()
         }

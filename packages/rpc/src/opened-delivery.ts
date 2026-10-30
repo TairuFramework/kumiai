@@ -6,7 +6,13 @@ import { toUTF } from '@sozai/codec'
 import type { GroupKey } from './control/types.js'
 import type { PendingAppFrame, PendingAppFrames } from './crypto.js'
 import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
-import { adaptBusHandlers, type BusHandlerMaps, type GroupProcedureHandlers } from './handlers.js'
+import {
+  adaptBusHandlers,
+  type BusHandlerMaps,
+  type GroupProcedureHandlers,
+  groupHandlerMetadata,
+  validateBusHandlers,
+} from './handlers.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 import { retentionOf } from './protocol.js'
 
@@ -99,6 +105,7 @@ export function createOpenedRecordHandler(params: {
   protocols: Record<string, ProtocolDefinition>
   events: Map<string, BusHandlerMaps['events']>
   handlers?: Record<string, Record<string, unknown>>
+  ignored?(record: PendingAppFrame): Promise<void>
 }): (record: PendingAppFrame) => Promise<void> {
   const localDID = normalizeDID(params.localDID)
   return async (record) => {
@@ -109,15 +116,20 @@ export function createOpenedRecordHandler(params: {
     try {
       message = JSON.parse(toUTF(record.payload))
     } catch {
-      return
+      return params.ignored?.(record)
     }
     const prc = message?.payload?.prc
-    if (message?.payload?.typ !== 'event' || typeof prc !== 'string') return
+    if (message?.payload?.typ !== 'event' || typeof prc !== 'string')
+      return params.ignored?.(record)
     if (!Object.hasOwn(protocol, prc)) throw new Error(`Unknown opened procedure: ${prc}`)
-    if (normalizeDID(record.senderDID) === localDID || retentionOf(protocol, prc) !== 'log') return
+    if (prc !== record.frame.procedure) throw new TypeError('Opened procedure binding mismatch')
+    if (normalizeDID(record.senderDID) === localDID || retentionOf(protocol, prc) !== 'log')
+      return params.ignored?.(record)
     if (
       params.handlers !== undefined &&
-      typeof params.handlers[record.frame.protocol]?.[prc] !== 'function'
+      (!Object.hasOwn(params.handlers, record.frame.protocol) ||
+        !Object.hasOwn(params.handlers[record.frame.protocol] ?? {}, prc) ||
+        params.handlers[record.frame.protocol]?.[prc] == null)
     )
       throw new Error(`Missing opened handler: ${prc}`)
     const events = params.events.get(record.frame.protocol)
@@ -126,8 +138,63 @@ export function createOpenedRecordHandler(params: {
       data: message.payload.data ?? {},
       senderDID: normalizeDID(record.senderDID),
       frame: { ...record.frame },
+      epoch: record.epoch,
+      idempotencyKey: record.idempotencyKey,
     }
     await events.emit(prc, event)
+  }
+}
+
+export type OpenedAppHandler<TTx extends GroupTransaction> = {
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  deliver(record: PendingAppFrame): Promise<void>
+}
+
+function copyOpenedRecord(record: PendingAppFrame): PendingAppFrame {
+  return { ...record, frame: { ...record.frame }, payload: record.payload.slice() }
+}
+
+function assertRecordKey(record: PendingAppFrame, key: GroupKey): void {
+  groupHandlerMetadata(record, key)
+  if (typeof record.idempotencyKey !== 'string')
+    throw new TypeError('Opened handler requires idempotency key')
+  if (record.frame.groupID !== key.groupID || record.frame.incarnation !== key.incarnation)
+    throw new TypeError('Opened handler key mismatch')
+}
+
+export function normaliseOpenedAppHandler<TTx extends GroupTransaction>(params: {
+  deliver: OpenedAppHandler<TTx> | ((record: PendingAppFrame) => Promise<void>)
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  owner?: object
+}): OpenedAppHandler<TTx> {
+  const { completion, owner } = params
+  const openedDeliveryContext = requireOpenedDeliveryContext(params.openedDeliveryContext)
+  const deliver = params.deliver
+  if (typeof deliver !== 'function') {
+    if (
+      deliver == null ||
+      typeof deliver.deliver !== 'function' ||
+      deliver.completion !== completion ||
+      deliver.openedDeliveryContext !== openedDeliveryContext ||
+      deliver.completion.key.groupID !== completion.key.groupID ||
+      deliver.completion.key.incarnation !== completion.key.incarnation
+    )
+      throw new TypeError('Opened handler binding mismatch')
+    return deliver
+  }
+  return {
+    completion,
+    openedDeliveryContext,
+    async deliver(record) {
+      assertRecordKey(record, completion.key)
+      const id = record.frame.id
+      await runOpenedDelivery(openedDeliveryContext, { owner, key: completion.key }, () =>
+        deliver(copyOpenedRecord(record)),
+      )
+      await completion.complete([id])
+    },
   }
 }
 
@@ -139,16 +206,55 @@ export function createOpenedAppHandler<
   protocols: P
   handlers: { [K in keyof P]: GroupProcedureHandlers<P[K], TTx> }
   completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+  owner?: object
   suppress?: SuppressConfig
-}): (record: PendingAppFrame) => Promise<void> {
+}): OpenedAppHandler<TTx> {
+  const { completion, owner } = params
+  const openedDeliveryContext = requireOpenedDeliveryContext(params.openedDeliveryContext)
   const events = new Map<string, BusHandlerMaps['events']>()
+  const inputHandlers = params.handlers as Record<string, Record<string, unknown>>
   for (const [name, protocol] of Object.entries(params.protocols))
+    validateBusHandlers(protocol, inputHandlers[name] ?? {})
+  for (const [name, protocol] of Object.entries(params.protocols)) {
+    const handlers: Record<string, unknown> = {}
+    for (const [prc, handler] of Object.entries(inputHandlers[name] ?? {})) {
+      const invoke = (context: never) =>
+        runOpenedDelivery(openedDeliveryContext, { owner, key: completion.key }, async () => {
+          if (typeof handler === 'function') await handler(context)
+          else await (handler as { handle(context: never): Promise<void> }).handle(context)
+        })
+      handlers[prc] =
+        typeof handler === 'function'
+          ? invoke
+          : { mode: (handler as { mode?: unknown }).mode, handle: invoke }
+    }
     events.set(
       name,
-      adaptBusHandlers<GroupProtocolDefinition, TTx>(protocol, params.handlers[name] as never, {
-        completion: params.completion,
+      adaptBusHandlers<GroupProtocolDefinition, TTx>(protocol, handlers as never, {
+        completion,
         suppress: params.suppress,
       }).events,
     )
-  return createOpenedRecordHandler({ ...params, events })
+  }
+  const deliver = createOpenedRecordHandler({
+    ...params,
+    events,
+    ignored: (record) => completion.complete([record.frame.id]),
+  })
+  return {
+    completion,
+    openedDeliveryContext,
+    async deliver(record) {
+      assertRecordKey(record, completion.key)
+      const protocol = params.protocols[record.frame.protocol]
+      if (
+        protocol !== undefined &&
+        Object.hasOwn(protocol, record.frame.procedure) &&
+        retentionOf(protocol, record.frame.procedure) !== 'log'
+      )
+        throw new TypeError('Opened handler requires retained procedure')
+      await deliver(copyOpenedRecord(record))
+    },
+  }
 }

@@ -1,10 +1,18 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { encodeEventFrame } from '@kumiai/broadcast'
+import { EventEmitter } from '@sozai/event'
 import { describe, expect, test, vi } from 'vitest'
 
 import type { PendingAppFrame } from '../src/crypto.js'
+import type { GroupTransaction, HandlerCompletion } from '../src/handler-completion.js'
+import { combineDurableHandlers } from '../src/handlers.js'
 import { createHostBoundary, wrapPeerHost } from '../src/host-boundary.js'
-import { createOpenedAppHandler, OpenedDeliveryReentryError } from '../src/opened-delivery.js'
+import {
+  assertOpenedDeliveryEntry,
+  createOpenedAppHandler,
+  normaliseOpenedAppHandler,
+  OpenedDeliveryReentryError,
+} from '../src/opened-delivery.js'
 import {
   completeTestRecord,
   createFakeCrypto,
@@ -49,32 +57,37 @@ describe('opened delivery', () => {
   test('stored delivery reuses validation and authenticated sender policy', async () => {
     const handler = vi.fn()
     const deliver = createOpenedAppHandler({
-      completion: createTestCompletion(record.frame),
+      completion: { ...createTestCompletion(record.frame), complete: async () => {} },
+      openedDeliveryContext: deliveryContext(),
       localDID: 'bob',
       protocols,
       handlers: { chat: { posted: handler } },
     })
-    await deliver(record)
+    await deliver.deliver(record)
     expect(handler).toHaveBeenCalledWith({
       data: { text: 'original' },
       message: { payload: { iss: 'alice' } },
       frame: record.frame,
+      epoch: record.epoch,
+      incarnation: record.frame.incarnation,
+      idempotencyKey: record.idempotencyKey,
     })
-    await deliver({ ...record, senderDID: 'bob' })
-    await deliver({ ...record, payload: encodeEventFrame('posted', { text: 42 }) })
+    await deliver.deliver({ ...record, senderDID: 'bob' })
+    await deliver.deliver({ ...record, payload: encodeEventFrame('posted', { text: 42 }) })
     expect(handler).toHaveBeenCalledTimes(1)
     await expect(
-      deliver({ ...record, frame: { ...record.frame, protocol: 'unknown' } }),
+      deliver.deliver({ ...record, frame: { ...record.frame, protocol: 'unknown' } }),
     ).rejects.toThrow()
     await expect(
-      deliver({ ...record, payload: encodeEventFrame('unknown', { text: 'original' }) }),
+      deliver.deliver({ ...record, payload: encodeEventFrame('unknown', { text: 'original' }) }),
     ).rejects.toThrow()
   })
 
   test('handler mutation cannot change the saved frame identity', async () => {
     const saved = { ...record, frame: { ...record.frame } }
     const deliver = createOpenedAppHandler({
-      completion: createTestCompletion(record.frame),
+      completion: { ...createTestCompletion(record.frame), complete: async () => {} },
+      openedDeliveryContext: deliveryContext(),
       localDID: 'bob',
       protocols,
       handlers: {
@@ -85,7 +98,7 @@ describe('opened delivery', () => {
         },
       },
     })
-    await deliver(saved)
+    await deliver.deliver(saved)
     expect(saved.frame.id).toBe('saved-frame')
   })
 
@@ -111,13 +124,14 @@ describe('opened delivery', () => {
 
   test('unknown inherited procedures cannot complete opened records', async () => {
     const deliver = createOpenedAppHandler({
-      completion: createTestCompletion(record.frame),
+      completion: { ...createTestCompletion(record.frame), complete: async () => {} },
+      openedDeliveryContext: deliveryContext(),
       localDID: 'bob',
       protocols,
       handlers: { chat: { posted: () => {} } },
     })
     await expect(
-      deliver({ ...record, payload: encodeEventFrame('toString', {}) }),
+      deliver.deliver({ ...record, payload: encodeEventFrame('toString', {}) }),
     ).rejects.toThrow()
   })
 
@@ -144,7 +158,11 @@ describe('opened delivery', () => {
     })
     crypto.pending = {
       list: async () => [
-        { ...record, payload: encodeEventFrame('chat/posted', { text: 'original' }) },
+        {
+          ...record,
+          frame: { ...record.frame, groupID: 'memory-group', procedure: 'chat/posted' },
+          payload: encodeEventFrame('chat/posted', { text: 'original' }),
+        },
       ],
       complete,
     }
@@ -185,7 +203,13 @@ describe('opened delivery', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
     const pending = ['first', 'second'].map((id, index) => ({
       ...record,
-      frame: { ...record.frame, id, position: String(index + 1) },
+      frame: {
+        ...record.frame,
+        groupID: 'memory-group',
+        procedure: 'chat/posted',
+        id,
+        position: String(index + 1),
+      },
       payload: encodeEventFrame('chat/posted', { text: id }),
     }))
     crypto.pending = {
@@ -242,7 +266,13 @@ describe('opened delivery', () => {
       crypto.pending = {
         list: async () =>
           pending
-            ? [{ ...record, payload: encodeEventFrame('chat/posted', { text: 'original' }) }]
+            ? [
+                {
+                  ...record,
+                  frame: { ...record.frame, groupID: 'memory-group', procedure: 'chat/posted' },
+                  payload: encodeEventFrame('chat/posted', { text: 'original' }),
+                },
+              ]
             : [],
         complete: async () => {
           pending = false
@@ -273,4 +303,292 @@ describe('opened delivery', () => {
       await peer.drained()
     },
   )
+})
+
+function deliveryContext() {
+  const storage = new AsyncLocalStorage<object>()
+  return {
+    run: <T>(token: object, fn: () => T) => storage.run(token, fn),
+    get: () => storage.getStore(),
+  }
+}
+function policyFixture() {
+  const openedDeliveryContext = deliveryContext()
+  const ownership = new AsyncLocalStorage<object>()
+  const tx: GroupTransaction = {
+    providerID: 'test',
+    groupID: record.frame.groupID,
+    onCommit() {},
+    onRollback() {},
+  }
+  let saved: PendingAppFrame | undefined = structuredClone(record)
+  const complete = vi.fn(async (_ids: Array<string>) => {
+    expect(openedDeliveryContext.get()).toBeUndefined()
+    saved = undefined
+  })
+  const transact = vi.fn(
+    async (
+      _ids: Array<string>,
+      handle: (tx: GroupTransaction, records: Array<PendingAppFrame>) => Promise<void>,
+    ) => {
+      expect(openedDeliveryContext.get()).toBeUndefined()
+      if (saved === undefined) return
+      await ownership.run(tx, () => handle(tx, [structuredClone(saved as PendingAppFrame)]))
+      saved = undefined
+    },
+  )
+  const completion: HandlerCompletion<GroupTransaction> = {
+    key: { groupID: record.frame.groupID, incarnation: record.frame.incarnation },
+    complete,
+    transact,
+  }
+  return {
+    localDID: 'bob',
+    protocols,
+    completion,
+    openedDeliveryContext,
+    ownership,
+    tx,
+    complete,
+    transact,
+    pending: () => saved,
+  }
+}
+
+describe('opened completion policies', () => {
+  test('legacy and omitted mode handlers complete after success outside ownership', async () => {
+    for (const legacy of [true, false]) {
+      const f = policyFixture()
+      let fail = true
+      const handle = vi.fn(async (context) => {
+        expect(f.ownership.getStore()).toBeUndefined()
+        expect(context).toMatchObject({
+          frame: record.frame,
+          idempotencyKey: record.idempotencyKey,
+          epoch: 4,
+          incarnation: 1,
+        })
+        expect(context).not.toHaveProperty('tx')
+        if (fail) throw new Error('retry')
+      })
+      const opened = createOpenedAppHandler({
+        ...f,
+        handlers: { chat: { posted: legacy ? handle : { handle } } },
+      })
+      await expect(opened.deliver(record)).rejects.toThrow('retry')
+      expect(f.pending()).toBeDefined()
+      expect(f.complete).not.toHaveBeenCalled()
+      fail = false
+      await opened.deliver(record)
+      expect(f.complete).toHaveBeenCalledExactlyOnceWith([record.frame.id])
+      expect(f.transact).not.toHaveBeenCalled()
+    }
+  })
+  test('transactional dispatch uses saved records and one supplied transaction', async () => {
+    const f = policyFixture()
+    const handle = vi.fn(async (context) => {
+      expect(context.data).toEqual({ text: 'original' })
+      expect(context.tx).toBe(f.tx)
+      expect(f.ownership.getStore()).toBe(f.tx)
+    })
+    const policy = Object.defineProperty({ handle }, 'mode', { value: 'transactional' }) as {
+      mode: 'transactional'
+      handle: typeof handle
+    }
+    const opened = createOpenedAppHandler({
+      ...f,
+      handlers: { chat: { posted: policy } },
+    })
+    await opened.deliver({
+      ...record,
+      epoch: 99,
+      payload: encodeEventFrame('posted', { text: 'forged' }),
+    })
+    await opened.deliver(record)
+    expect(handle).toHaveBeenCalledOnce()
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({
+      epoch: record.epoch,
+      idempotencyKey: record.idempotencyKey,
+    })
+    expect(f.transact).toHaveBeenCalledTimes(2)
+    expect(f.complete).not.toHaveBeenCalled()
+  })
+  test('standalone opened helper retains lifecycle context after await', async () => {
+    for (const mode of ['at-least-once', 'transactional'] as const) {
+      const f = policyFixture()
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const opened = createOpenedAppHandler({
+        ...f,
+        handlers: {
+          chat: {
+            posted: {
+              mode,
+              async handle() {
+                await Promise.resolve()
+                expect(() =>
+                  assertOpenedDeliveryEntry(f.openedDeliveryContext, { key: f.completion.key }),
+                ).toThrow(OpenedDeliveryReentryError)
+                expect(() =>
+                  assertOpenedDeliveryEntry(f.openedDeliveryContext, {
+                    key: { groupID: 'independent', incarnation: 1 },
+                  }),
+                ).not.toThrow()
+                entered.resolve()
+                await release.promise
+              },
+            },
+          },
+        },
+      })
+      const delivering = opened.deliver(record)
+      await Promise.race([entered.promise, delivering])
+      expect(() =>
+        assertOpenedDeliveryEntry(f.openedDeliveryContext, { key: f.completion.key }),
+      ).not.toThrow()
+      release.resolve()
+      await delivering
+      expect(() =>
+        createOpenedAppHandler({
+          ...f,
+          openedDeliveryContext: undefined as never,
+          handlers: { chat: { posted: async () => {} } },
+        }),
+      ).toThrow(TypeError)
+    }
+  })
+  test('normalisation rejects mismatched binding before invocation', async () => {
+    const f = policyFixture()
+    const raw = vi.fn(async () => {
+      expect(f.openedDeliveryContext.get()).toBeDefined()
+    })
+    const opened = normaliseOpenedAppHandler({ ...f, deliver: raw })
+    expect(opened.completion).toBe(f.completion)
+    expect(opened.openedDeliveryContext).toBe(f.openedDeliveryContext)
+    expect(normaliseOpenedAppHandler({ ...f, deliver: opened })).toBe(opened)
+    expect(() =>
+      normaliseOpenedAppHandler({ ...f, deliver: opened, completion: { ...f.completion } }),
+    ).toThrow()
+    expect(() =>
+      normaliseOpenedAppHandler({
+        ...f,
+        deliver: opened,
+        openedDeliveryContext: deliveryContext(),
+      }),
+    ).toThrow()
+    await expect(
+      opened.deliver({ ...record, frame: { ...record.frame, incarnation: 2 } }),
+    ).rejects.toThrow()
+    await expect(opened.deliver({ ...record, epoch: undefined as never })).rejects.toThrow()
+    await expect(
+      opened.deliver({ ...record, idempotencyKey: undefined as never }),
+    ).rejects.toThrow()
+    expect(raw).not.toHaveBeenCalled()
+    await opened.deliver(record)
+    expect(raw).toHaveBeenCalledOnce()
+    expect(f.complete).toHaveBeenCalledOnce()
+  })
+  test('handler failure isolates its lane', async () => {
+    for (const mode of ['at-least-once', 'transactional'] as const) {
+      const f = policyFixture()
+      const seen: Array<string> = []
+      let fail = true
+      const handler = combineDurableHandlers([
+        {
+          mode,
+          async handle() {
+            seen.push('first')
+          },
+        },
+        {
+          mode,
+          async handle() {
+            seen.push('second')
+            if (fail) throw new Error('A')
+          },
+        },
+      ])
+      const opened = createOpenedAppHandler({ ...f, handlers: { chat: { posted: handler } } })
+      await expect(opened.deliver(record)).rejects.toThrow('A')
+      expect(f.pending()).toBeDefined()
+      expect(f.complete).not.toHaveBeenCalled()
+      const other = policyFixture()
+      await createOpenedAppHandler({
+        ...other,
+        handlers: { chat: { posted: async () => {} } },
+      }).deliver(record)
+      expect(other.complete).toHaveBeenCalledOnce()
+      fail = false
+      await opened.deliver(record)
+      expect(seen).toEqual(['first', 'second', 'first', 'second'])
+    }
+  })
+})
+
+test('opened helper validates every protocol before installing listeners', () => {
+  const f = policyFixture()
+  const installed = vi.spyOn(EventEmitter.prototype, 'on')
+  try {
+    expect(() =>
+      createOpenedAppHandler({
+        ...f,
+        protocols: { chat: protocols.chat, other: protocols.chat },
+        handlers: {
+          chat: { posted: async () => {} },
+          other: { posted: { mode: 'invalid', handle: async () => {} } as never },
+        },
+      }),
+    ).toThrow()
+    expect(() =>
+      createOpenedAppHandler({
+        ...f,
+        handlers: { chat: { posted: { mode: 'transactional' } as never } },
+      }),
+    ).toThrow()
+    expect(installed).not.toHaveBeenCalled()
+  } finally {
+    installed.mockRestore()
+  }
+})
+test('ignored opened records complete without invoking a durable callback', async () => {
+  const f = policyFixture()
+  const handle = vi.fn(async () => {})
+  const opened = createOpenedAppHandler({ ...f, handlers: { chat: { posted: handle } } })
+  await opened.deliver({ ...record, senderDID: f.localDID })
+  expect(handle).not.toHaveBeenCalled()
+  expect(f.complete).toHaveBeenCalledExactlyOnceWith([record.frame.id])
+})
+
+test('unknown protocol and missing handler retain pending', async () => {
+  const f = policyFixture()
+  const opened = createOpenedAppHandler({ ...f, handlers: { chat: {} as never } })
+  await expect(opened.deliver(record)).rejects.toThrow('Missing opened handler')
+  await expect(
+    opened.deliver({ ...record, frame: { ...record.frame, protocol: 'unknown' } }),
+  ).rejects.toThrow('Unknown opened protocol')
+  expect(f.pending()).toBeDefined()
+  expect(f.complete).not.toHaveBeenCalled()
+  expect(f.transact).not.toHaveBeenCalled()
+})
+
+test('wrong retention ingress never enters a completion policy', async () => {
+  const f = policyFixture()
+  const handle = vi.fn(async () => {})
+  const opened = createOpenedAppHandler({
+    ...f,
+    protocols: { chat: { posted: { type: 'event', retain: 'ephemeral' } } },
+    handlers: { chat: { posted: handle } },
+  })
+  await expect(opened.deliver(record)).rejects.toThrow()
+  const retained = createOpenedAppHandler({
+    ...f,
+    protocols: { chat: { ...protocols.chat, typing: { type: 'event', retain: 'ephemeral' } } },
+    handlers: { chat: { posted: handle, typing: handle } },
+  })
+  await expect(
+    retained.deliver({ ...record, payload: encodeEventFrame('typing', {}) }),
+  ).rejects.toThrow()
+  expect(handle).not.toHaveBeenCalled()
+  expect(f.complete).not.toHaveBeenCalled()
+  expect(f.transact).not.toHaveBeenCalled()
 })
