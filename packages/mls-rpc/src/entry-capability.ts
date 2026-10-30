@@ -83,6 +83,7 @@ export type EntryCapability<TTx extends GroupTransaction> = {
     request: { groupID: string; mutationID: string | null },
     prepare: (reads: EntryReads) => Promise<Prepared<P>>,
     work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
+    effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
   ): Promise<T>
 }
 

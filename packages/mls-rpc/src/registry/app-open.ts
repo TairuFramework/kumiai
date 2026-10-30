@@ -17,6 +17,7 @@ import {
 
 import type { ControlRead } from '../access.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import { handlerCompletionForEntry } from '../handler-completion.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import { bindRegistryOpenedDelivery } from '../opened-delivery.js'
 import { DisplacedGroupHandleError, GroupStateConflictError } from '../persistence-errors.js'
@@ -277,19 +278,11 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
       async complete(id) {
         params.assertAvailable()
         try {
-          await capability.run(
-            { groupID: owner.key.groupID, mutationID: crypto.randomUUID() },
-            async (reads) => {
-              params.assertCurrent()
-              const saved = await reads.appFrame(n, id)
-              if (saved.pending === null && saved.poison === null) throw new Noop()
-              return { expected: await reads.lifetime(), value: undefined }
-            },
-            async (stores) => {
-              params.assertCurrent()
-              await stores.incarnation(n).pending.complete([id])
-            },
-          )
+          await handlerCompletionForEntry({
+            capability,
+            binding: params.binding,
+            key: owner.key,
+          }).complete([id])
         } catch (error) {
           if (error instanceof Noop) return
           await params.diagnoseFailure(error)

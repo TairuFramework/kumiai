@@ -9,6 +9,7 @@ import {
 } from '@kumiai/rpc'
 
 import { coordinatorBinding, type EntryCapability, entryCapability } from './entry-capability.js'
+import { handlerCompletionForEntry } from './handler-completion.js'
 import { copyStoredValue } from './memory-incarnation-stores.js'
 import { GroupStateConflictError } from './persistence-errors.js'
 import type {
@@ -95,30 +96,6 @@ async function pauseOpenedRetry(delay: number, signal: AbortSignal | undefined):
     signal?.addEventListener('abort', abort, { once: true })
   })
 }
-class Completed extends Error {}
-async function completeStoredOpened<TTx extends GroupTransaction>(
-  capability: EntryCapability<TTx>,
-  key: GroupKey,
-  id: string,
-): Promise<void> {
-  try {
-    await capability.run(
-      { groupID: key.groupID, mutationID: crypto.randomUUID() },
-      async (reads) => {
-        if ((await reads.appFrame(key.incarnation, id)).pending === null) throw new Completed()
-        return { expected: await reads.lifetime(), value: undefined }
-      },
-      async (stores) => {
-        const pending = stores.incarnation(key.incarnation).pending
-        if ((await pending.list()).some((record) => record.frame.id === id))
-          await pending.complete([id])
-      },
-    )
-  } catch (error) {
-    if (!(error instanceof Completed)) throw error
-  }
-}
-
 export function bindRegistryOpenedDelivery<TTx extends GroupTransaction>(params: {
   binding: object
   capability: EntryCapability<TTx>
@@ -132,7 +109,8 @@ export function bindRegistryOpenedDelivery<TTx extends GroupTransaction>(params:
     key,
     failureSignal: capability.failureSignal,
     list: () => capability.read(key.groupID, (reads) => reads.pendingFrames(key.incarnation)),
-    complete: (id) => completeStoredOpened(capability, key, id),
+    complete: (id) =>
+      handlerCompletionForEntry({ capability, binding: params.binding, key }).complete([id]),
     async claim(record, fn) {
       return await serial(state, record.frame.protocol, async () => {
         const saved = await capability.read(key.groupID, (reads) =>
@@ -218,7 +196,9 @@ export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
               for (;;) {
                 assertHealthy(capability)
                 try {
-                  await completeStoredOpened(capability, key, record.frame.id)
+                  await handlerCompletionForEntry({ capability, binding, key }).complete([
+                    record.frame.id,
+                  ])
                   await Promise.all(
                     [...state.sources].map((source) => source.completed(record.frame.id)),
                   )

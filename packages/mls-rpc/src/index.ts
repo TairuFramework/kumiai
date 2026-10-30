@@ -91,6 +91,7 @@ export {
 } from './crypto.js'
 export { createGroupBatchScheduler } from './group-batch.js'
 export { bindGroupBatchOptions, groupBatchFor } from './group-batch-binding.js'
+export { createHandlerCompletion, handlerCompletionForEntry } from './handler-completion.js'
 export {
   type LegacyCommitJournalBoundary,
   LegacyControlActivationError,

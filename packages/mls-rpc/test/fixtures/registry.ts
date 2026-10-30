@@ -829,7 +829,7 @@ async function assemble(
         }
         return result
       },
-      run: (request, prepare, work) => {
+      run: (request, prepare, work, effects) => {
         return capability.run(
           request,
           async (reads) => {
@@ -854,6 +854,7 @@ async function assemble(
               prepared,
             )
           },
+          effects,
         )
       },
     },

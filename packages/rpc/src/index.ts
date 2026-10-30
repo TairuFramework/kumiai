@@ -1,3 +1,10 @@
+export {
+  type AppCompletionCoverage,
+  type AppCompletionCoverageBinding,
+  type AppCompletionCoverageSource,
+  bindAppCompletionCoverage,
+  registerAppCompletionCoverage,
+} from './app-completion-coverage.js'
 export { effectiveRecoveryEpochFloor } from './control/rejoin.js'
 export { RecoveryTargetBehindError, SavedControlCompatibilityError } from './errors.js'
 export { INTERNAL_OPERATION_PREFIX, type InternalOperations } from './peer-types.js'

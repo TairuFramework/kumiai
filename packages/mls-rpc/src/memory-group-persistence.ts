@@ -623,6 +623,7 @@ export function createMemoryGroupCoordinator(params: {
     participantTx?: MemoryTransaction,
     readyToCommit?: () => void,
     administrative = false,
+    entryEffects?: (stores: GroupStores<MemoryTransaction>, result: TValue) => Promise<void>,
   ): Promise<TValue> {
     let proof: Proof | undefined
     let id: string | undefined
@@ -936,6 +937,29 @@ export function createMemoryGroupCoordinator(params: {
             result = await entry.callback(() => work(stores, change.mutationID))
             // Host accessors can throw, so capture before starting a phase change.
             const capturedEffects = entry.callback(() => ({
+              entry:
+                entryEffects === undefined
+                  ? undefined
+                  : () =>
+                      entryEffects(
+                        {
+                          ...stores,
+                          incarnation(incarnation) {
+                            const rows = stores.incarnation(incarnation)
+                            const completionRows = createIncarnationStores({
+                              tx,
+                              key: { groupID: change.groupID, incarnation },
+                              atRest,
+                              allowRetiredCursor: true,
+                            })
+                            return {
+                              ...rows,
+                              cursor: { ...rows.cursor, save: completionRows.cursor.save },
+                            }
+                          },
+                        },
+                        result,
+                      ),
               outbox: effects?.outbox?.bind(effects),
               delete: effects?.delete?.bind(effects),
             }))
@@ -1282,6 +1306,7 @@ export function createMemoryGroupCoordinator(params: {
               },
             )
             await entry.enter('effects')
+            await entry.callback(() => capturedEffects.entry?.())
             for (const event of outboxEvents)
               await entry.callback(() => capturedEffects.outbox?.(tx, event))
             for (const key of deletedKeys)
@@ -1608,7 +1633,7 @@ export function createMemoryGroupCoordinator(params: {
         }
       })
     },
-    run(request, prepare, work) {
+    run(request, prepare, work, effects) {
       const owned = copyStoredValue(request)
       return owners.run(
         'transition',
@@ -1633,6 +1658,12 @@ export function createMemoryGroupCoordinator(params: {
               { ...owned, mutationID, expected },
               (stores) => work(stores, value),
               entry,
+              undefined,
+              undefined,
+              false,
+              effects === undefined
+                ? undefined
+                : (stores, result) => effects(stores, value, result),
             )
           } catch (error) {
             entry

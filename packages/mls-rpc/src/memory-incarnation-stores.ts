@@ -251,6 +251,7 @@ export function createUnlockedIncarnationStores(params: {
   atRest: AtRestCodec
   adoptionContext?: () => Promise<CommitOnceWriteContext | null>
   requiredOpen?: boolean
+  allowRetiredCursor?: boolean
 }): IncarnationStores {
   const { tx, atRest } = params
   const key = { ...params.key }
@@ -531,7 +532,11 @@ export function createUnlockedIncarnationStores(params: {
         return value?.position ?? null
       },
       async save(topicID, position) {
-        await active()
+        if (params.allowRetiredCursor) {
+          const life = await stateStores.lifetime.load()
+          if (life === null || key.incarnation < 1 || key.incarnation > life.latestIncarnation)
+            throw new DisplacedGroupHandleError('Unknown completion incarnation')
+        } else await active()
         await cursor.save(await topicLocator(topicID), { topicID, position })
       },
       async clear() {
