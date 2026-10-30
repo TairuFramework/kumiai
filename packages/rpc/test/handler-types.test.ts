@@ -1,3 +1,8 @@
+import type { ProcedureHandlers } from '@enkaku/server'
+import type {
+  ConformanceGroupProcedureHandlers,
+  ConformanceMetadataHandler,
+} from '@kumiai/rpc-conformance'
 import { expectTypeOf, test } from 'vitest'
 
 import type {
@@ -6,6 +11,7 @@ import type {
   GroupProcedureHandlers,
   GroupTransaction,
   HandlerCompletion,
+  MetadataHandler,
   OpenAppInput,
   OpenAppResult,
   PendingAppFrame,
@@ -32,6 +38,48 @@ const protocol = defineGroupProtocol({
 })
 type Transaction = GroupTransaction & { put(value: string): Promise<void> }
 type Handlers = GroupProcedureHandlers<typeof protocol, Transaction>
+type MirroredHandlers = ConformanceGroupProcedureHandlers<
+  typeof protocol,
+  ProcedureHandlers<typeof protocol>,
+  Transaction
+>
+
+test('independent handler mirrors preserve metadata, contexts and retained policy', () => {
+  expectTypeOf<MirroredHandlers>().toEqualTypeOf<Handlers>()
+  expectTypeOf<
+    ConformanceMetadataHandler<(context: { value: string }) => Promise<number>>
+  >().toEqualTypeOf<MetadataHandler<(context: { value: string }) => Promise<number>>>()
+  expectTypeOf<ConformanceMetadataHandler<string>>().toEqualTypeOf<never>()
+})
+
+function _handlerCompatibility(port: Handlers, mirror: MirroredHandlers) {
+  const mirrored: MirroredHandlers = port
+  const portable: Handlers = mirror
+  return { mirrored, portable }
+}
+
+const _mirroredTransactional: MirroredHandlers['posted'] = {
+  mode: 'transactional',
+  async handle(context) {
+    expectTypeOf(context.tx).toEqualTypeOf<Transaction>()
+    expectTypeOf(context.data.text).toEqualTypeOf<string>()
+    expectTypeOf(context.frame).toEqualTypeOf<AppFrameRef>()
+  },
+}
+const _mirroredLegacy: MirroredHandlers['posted'] = (context) => {
+  expectTypeOf(context.epoch).toEqualTypeOf<number>()
+}
+const _mirroredPolicy = { mode: 'transactional' as const, handle: async () => {} }
+// @ts-expect-error mirrored ephemeral events refuse transactional declarations
+const _mirroredTyping: MirroredHandlers['typing'] = _mirroredPolicy
+// @ts-expect-error mirrored default events refuse transactional declarations
+const _mirroredPing: MirroredHandlers['ping'] = _mirroredPolicy
+// @ts-expect-error mirrored requests refuse transactional declarations
+const _mirroredAsk: MirroredHandlers['ask'] = _mirroredPolicy
+// @ts-expect-error mirrored streams refuse transactional declarations
+const _mirroredWatch: MirroredHandlers['watch'] = _mirroredPolicy
+// @ts-expect-error mirrored channels refuse transactional declarations
+const _mirroredChat: MirroredHandlers['chat'] = _mirroredPolicy
 
 // Type witnesses run through test:types; their bodies need no live peer.
 test('pre-open refs exclude procedure and opened refs require origin', () => {})

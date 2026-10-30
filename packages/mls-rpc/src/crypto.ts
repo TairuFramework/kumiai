@@ -216,7 +216,8 @@ function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
                   idempotencyKey: appFrameIdempotencyKey(openedFrame),
                 })
               } catch (error) {
-                if (isAppFrameStorageError(error)) throw error
+                if (error instanceof InvalidAppEntryError || isAppFrameStorageError(error))
+                  throw error
                 throw new AppFrameStorageError('failed to stage opened app frame', { cause: error })
               }
             },

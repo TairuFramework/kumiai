@@ -8,6 +8,7 @@ import type { PendingAppFrame } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import {
   completeTestRecord,
@@ -15,6 +16,7 @@ import {
   createTestCompletion,
   fakeEpochSecret,
 } from './fixtures/fake-crypto.js'
+import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 afterEach(() => vi.useRealTimers())
@@ -107,10 +109,229 @@ function fixture(
       }),
     })
   }
-  return { lane, reader, records, complete, cursor, append, appendRaw }
+  return { lane, reader, records, complete, cursor, append, appendRaw, pending, messages }
 }
 
 describe('durable delivery queue', () => {
+  test.each([false, true])(
+    'opened drain recovers a failed reload without ciphertext and waits through disposal=%s',
+    async (dispose) => {
+      const handler = Promise.withResolvers<void>()
+      const completion = Promise.withResolvers<void>()
+      const entered = Promise.withResolvers<void>()
+      const completing = Promise.withResolvers<void>()
+      const reloading = Promise.withResolvers<void>()
+      const reload = Promise.withResolvers<void>()
+      const seen = vi.fn(async () => {
+        entered.resolve()
+        await handler.promise
+      })
+      const { lane, reader, records, complete, cursor, append, pending, messages } = fixture(seen)
+      onTestFinished(() => {
+        handler.resolve()
+        completion.resolve()
+        reload.resolve()
+        lane.dispose()
+      })
+      const list = vi.spyOn(pending, 'list').mockRejectedValue(new Error('reload unavailable'))
+      await append('000000000001', 'saved')
+      await expect(lane.deliver()).rejects.toThrow('Failed to reload saved app frame')
+      expect(records.size).toBe(1)
+      expect(lane.pendingRecords()).toEqual([])
+      if (dispose) lane.reset()
+      messages.length = 0
+      list.mockImplementation(async () => {
+        reloading.resolve()
+        await reload.promise
+        return [...records.values()]
+      })
+      list.mockRejectedValueOnce(new Error('reload still unavailable'))
+      complete.mockImplementation(async (id) => {
+        completing.resolve()
+        await completion.promise
+        records.delete(id)
+      })
+      let drained = false
+      const drain = lane.completeOpened().then(() => {
+        drained = true
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(drained).toBe(false)
+      await reloading.promise
+      reload.resolve()
+      await entered.promise
+      if (dispose) lane.dispose()
+      expect(drained).toBe(false)
+      handler.resolve()
+      await completing.promise
+      expect(drained).toBe(false)
+      completion.resolve()
+      await drain
+      expect(records.size).toBe(0)
+      expect(seen).toHaveBeenCalledOnce()
+      expect(reader.starts.unwrap).toBe(1)
+      expect(cursor.stored(topicID)).toBe(dispose ? null : '000000000001')
+    },
+  )
+
+  test('disposal during a saved-record reload preserves the opened drain for storage completion', async () => {
+    const reload = Promise.withResolvers<void>()
+    const reloading = Promise.withResolvers<void>()
+    const seen = vi.fn()
+    const { lane, records, append, pending, messages } = fixture(seen)
+    onTestFinished(() => {
+      reload.resolve()
+      lane.dispose()
+    })
+    const list = vi.spyOn(pending, 'list').mockRejectedValue(new Error('reload unavailable'))
+    await append('000000000001', 'saved')
+    await expect(lane.deliver()).rejects.toThrow('Failed to reload saved app frame')
+    lane.reset()
+    messages.length = 0
+    list.mockImplementation(async () => {
+      reloading.resolve()
+      await reload.promise
+      return [...records.values()]
+    })
+    let drained = false
+    const drain = lane.completeOpened().then(() => {
+      drained = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(drained).toBe(false)
+    await reloading.promise
+    lane.dispose()
+    reload.resolve()
+    await vi.waitFor(() => expect(lane.pendingRecords()).toHaveLength(1))
+    expect(drained).toBe(false)
+    expect(records.size).toBe(1)
+    expect(seen).not.toHaveBeenCalled()
+    const saved = [...records.values()][0]
+    if (saved == null) throw new Error('missing saved frame')
+    records.delete(saved.frame.id)
+    await lane.acknowledgeOpened(saved.frame.id)
+    await drain
+    expect(lane.pendingRecords()).toEqual([])
+  })
+
+  test('storage completion settles an unreloaded open after disposal while reads still fail', async () => {
+    const seen = vi.fn()
+    const { lane, records, append, pending } = fixture(seen)
+    vi.spyOn(pending, 'list').mockRejectedValue(new Error('reload unavailable'))
+    await append('000000000001', 'saved')
+    await expect(lane.deliver()).rejects.toThrow('Failed to reload saved app frame')
+    const saved = [...records.values()][0]
+    if (saved == null) throw new Error('missing saved frame')
+    let drained = false
+    const drain = lane.completeOpened().then(() => {
+      drained = true
+    })
+    onTestFinished(async () => {
+      lane.dispose()
+      await lane.restore([saved])
+      await lane.acknowledgeOpened(saved.frame.id)
+      await drain
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    lane.dispose()
+    expect(drained).toBe(false)
+    records.delete(saved.frame.id)
+    await lane.acknowledgeOpened(saved.frame.id)
+    await vi.waitFor(() => expect(drained).toBe(true))
+    expect(seen).not.toHaveBeenCalled()
+  })
+
+  test('terminal removal waits for an unreloaded open before clearing accepted sends', async () => {
+    const hub = new DurableFakeHub()
+    const records = new Map<string, PendingAppFrame>()
+    const entered = Promise.withResolvers<void>()
+    const handler = Promise.withResolvers<void>()
+    const completing = Promise.withResolvers<void>()
+    const completion = Promise.withResolvers<void>()
+    let failReload = false
+    let failedReads = 0
+    const pending = {
+      async persistOpened(_state: Uint8Array, record: PendingAppFrame) {
+        records.set(record.frame.id, record)
+        failReload = true
+      },
+      async list() {
+        if (failReload) {
+          failedReads++
+          throw new Error('reload unavailable')
+        }
+        return [...records.values()]
+      },
+      async complete(id: string) {
+        completing.resolve()
+        await completion.promise
+        records.delete(id)
+      },
+    }
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob', pending })
+    const secret = new Uint8Array(32).fill(0x91)
+    const cleared = vi.fn()
+    const seen = vi.fn(async () => {
+      entered.resolve()
+      await handler.promise
+    })
+    const bob = makeMLSPeer(hub, 'bob', secret, {
+      crypto,
+      handlers: { 'chat/posted': seen },
+      onAppOutboxCleared: cleared,
+    })
+    onTestFinished(async () => {
+      failReload = false
+      handler.resolve()
+      completion.resolve()
+      await bob.peer.dispose()
+      await bob.peer.drained()
+    })
+    await bob.peer.protocol('chat').to('alice')
+    await hub.publish({
+      topicID,
+      senderDID: 'alice',
+      payload: await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(payload('saved'), {
+        aad: encodeAppAAD({ topicID, intent: 'log' }),
+      }),
+      retain: 'log',
+    })
+    await vi.waitFor(() => expect(failedReads).toBeGreaterThan(0))
+    hub.detach('bob')
+    await publishCommit({
+      authenticator: memoryAuthenticator(bob.mls),
+      hub,
+      senderDID: 'alice',
+      recoverySecret: secret,
+      epoch: 1,
+      removes: ['bob'],
+    })
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'unsent' } })
+    await vi.waitFor(async () => expect((await bob.control.load()).applied).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(records.size).toBe(1)
+    expect(await bob.appOutbox.list()).toHaveLength(1)
+    expect(cleared).not.toHaveBeenCalled()
+    expect(seen).not.toHaveBeenCalled()
+    const opens = crypto.starts.unwrap
+    const fetches = vi.spyOn(hub, 'fetchTopic')
+    const publications = hub.published.length
+    failReload = false
+    await entered.promise
+    expect(await bob.appOutbox.list()).toHaveLength(1)
+    handler.resolve()
+    await completing.promise
+    expect(await bob.appOutbox.list()).toHaveLength(1)
+    completion.resolve()
+    await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]))
+    expect(records.size).toBe(0)
+    expect(seen).toHaveBeenCalledOnce()
+    expect(cleared).toHaveBeenCalledWith({ reason: 'removed', seqs: [0] })
+    expect(crypto.starts.unwrap).toBe(opens)
+    expect(fetches).not.toHaveBeenCalled()
+    expect(hub.published).toHaveLength(publications)
+  })
+
   test('an earlier ahead frame blocks an at-epoch frame until both can deliver in log order', async () => {
     const seen: Array<string> = []
     const { lane, reader, cursor, append } = fixture(({ data, frame }) => {

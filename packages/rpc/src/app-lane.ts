@@ -268,7 +268,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
   const notifyOpened = (): void => {
     if (
       openedFailure === undefined &&
-      (pendingRecords.length !== 0 || deliveringRecords.size !== 0 || finishingRecords.size !== 0)
+      (openedFrameIDs.size !== 0 ||
+        pendingRecords.length !== 0 ||
+        deliveringRecords.size !== 0 ||
+        finishingRecords.size !== 0)
     )
       return
     for (const waiter of openedWaiters) {
@@ -1399,6 +1402,30 @@ export function createAppLane(params: AppLaneParams): AppLane {
     })
   }
 
+  const restoreRecords = (records: Array<PendingAppFrame>): void => {
+    for (const record of records) {
+      openedFrameIDs.delete(record.frame.id)
+      reportUnknown(record)
+      if (!pendingRecords.some((item) => item.frame.id === record.frame.id)) {
+        pendingRecords.push(record)
+      }
+      const buffered = segment
+        .get(record.frame.topicID)
+        ?.find((frame) => frame.position === record.frame.position)
+      if (
+        buffered?.sealed.state === 'sealed' &&
+        frameID(record.frame.topicID, buffered.sealed.bytes) === record.frame.id
+      ) {
+        buffered.sealed = { state: 'pending', id: record.frame.id }
+      }
+    }
+    pendingRecords.sort(
+      (a, b) =>
+        a.frame.segment - b.frame.segment ||
+        compareLogPositions(a.frame.position, b.frame.position),
+    )
+  }
+
   const stopOpening = (): void => {
     openedOnly = true
     for (const controller of pulls.keys()) controller.abort()
@@ -1460,6 +1487,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     acknowledgeOpened: async (id) => {
       const record = pendingRecords.find((record) => record.frame.id === id)
+      if (record === undefined && openedFrameIDs.delete(id)) {
+        // A cold owner can prove completion while the live copy still cannot reload it.
+        notifyOpened()
+      }
       if (record !== undefined) {
         if (openedReleased) {
           pendingRecords.splice(pendingRecords.indexOf(record), 1)
@@ -1487,9 +1518,31 @@ export function createAppLane(params: AppLaneParams): AppLane {
       stopOpening()
       // An open can have committed plaintext before returning its record to the lane.
       await runAppLane(async () => {})
+      let delay = 100
+      while (openedFrameIDs.size !== 0) {
+        try {
+          await runAppLane(async () => {
+            const records = (await crypto.pending?.list()) ?? []
+            const saved = records.filter((record) => openedFrameIDs.has(record.frame.id))
+            if (saved.length !== openedFrameIDs.size)
+              throw new AppFrameStorageError('Durable open has no saved app frame')
+            restoreRecords(saved)
+          })
+        } catch (error) {
+          if (params.openedFailureSignal?.aborted) {
+            openedFailure = error
+            notifyOpened()
+            throw error
+          }
+          // Saved plaintext must survive reload faults and disposal without another open or pull.
+          await new Promise((resolve) => setTimeout(resolve, delay))
+          delay = Math.min(delay * 2, 15_000)
+        }
+      }
       retryDelivery()
       if (openedFailure !== undefined) throw openedFailure
       if (
+        openedFrameIDs.size === 0 &&
         pendingRecords.length === 0 &&
         deliveringRecords.size === 0 &&
         finishingRecords.size === 0
@@ -1505,18 +1558,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     restore: async (records): Promise<void> => {
       await runAppLane(async () => {
-        for (const record of records) {
-          openedFrameIDs.delete(record.frame.id)
-          reportUnknown(record)
-          if (!pendingRecords.some((item) => item.frame.id === record.frame.id)) {
-            pendingRecords.push(record)
-          }
-        }
-        pendingRecords.sort(
-          (a, b) =>
-            a.frame.segment - b.frame.segment ||
-            compareLogPositions(a.frame.position, b.frame.position),
-        )
+        restoreRecords(records)
       })
     },
     dispose: (): void => {

@@ -41,6 +41,32 @@ export type ConformanceDurableHandler<TContext, TTx extends ConformanceGroupTran
       ): Promise<void>
     }
 
+export type ConformanceMetadataHandler<THandler> = THandler extends (
+  context: infer TContext,
+) => infer TResult
+  ? (context: TContext & ConformanceGroupHandlerMetadata) => TResult
+  : never
+
+// Base handler contexts come from the consumer, keeping the policy mirror independent of RPC.
+export type ConformanceGroupProcedureHandlers<
+  TProtocol extends Record<string, { type: string; retain?: string }>,
+  THandlers extends {
+    [TProcedure in keyof TProtocol & string]: (context: never) => unknown
+  },
+  TTx extends ConformanceGroupTransaction = ConformanceGroupTransaction,
+> = {
+  [TProcedure in keyof TProtocol & string]: TProtocol[TProcedure] extends {
+    type: 'event'
+    retain: 'log'
+  }
+    ?
+        | ConformanceDurableHandler<Parameters<THandlers[TProcedure]>[0], TTx>
+        | ((
+            context: Parameters<THandlers[TProcedure]>[0] & ConformanceGroupHandlerMetadata,
+          ) => void | Promise<void>)
+    : ConformanceMetadataHandler<THandlers[TProcedure]>
+}
+
 export type PendingCrypto = Omit<ConformanceGroupCrypto, 'unwrap'> & {
   unwrap(
     bytes: Uint8Array,
@@ -138,6 +164,29 @@ async function refuses(call: () => unknown): Promise<void> {
 export function testPendingGroupCryptoConformance(params: PendingCryptoConformanceParams): void {
   const { label, createFixture, isStorageError } = params
   describe(`GroupCrypto pending conformance — ${label}`, () => {
+    test.each(['{', '{"payload":{"typ":"request","prc":"posted"}}'])(
+      'malformed authenticated plaintext is a dead-frame refusal, not a storage fault: %s',
+      async (text) => {
+        const fixture = await createFixture('malformed-plaintext')
+        const sealed = await fixture.sender.wrap(bytes.encode(text))
+        const error = await Promise.resolve()
+          .then(() =>
+            fixture.receiver.unwrap(sealed, { frame: reference(fixture, sealed, 'malformed') }),
+          )
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          )
+        expect(error).toBeInstanceOf(Error)
+        expect(isStorageError(error)).toBe(false)
+        expect(error).toMatchObject({ message: 'unwrap: malformed app event plaintext' })
+        expect(await fixture.receiver.pending.list()).toEqual([])
+        const valid = await fixture.sender.wrap(encode(fixture, 'valid sibling'))
+        await fixture.receiver.unwrap(valid, { frame: reference(fixture, valid, 'valid', 1, '2') })
+        expect(await fixture.receiver.pending.list()).toHaveLength(1)
+      },
+    )
+
     test('a past frame is refused before a durable open or store write', async () => {
       const fixture = await createFixture('epoch-refusal')
       const sealed = await fixture.sender.wrap(encode(fixture, 'old frame'))

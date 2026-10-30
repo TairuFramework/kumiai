@@ -184,6 +184,8 @@ export {
 export type {
   ConformanceDurableHandler,
   ConformanceGroupHandlerMetadata,
+  ConformanceGroupProcedureHandlers,
+  ConformanceMetadataHandler,
 } from './pending-group-crypto.js'
 export {
   type ConformanceAppFrameRef,
