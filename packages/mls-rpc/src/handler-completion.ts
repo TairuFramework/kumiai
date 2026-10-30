@@ -2,7 +2,6 @@ import {
   type AppCompletionCoverage,
   type AppCompletionCoverageSource,
   type BatchBudget,
-  compareLogPositions,
   type HandlerCompletion,
   registerAppCompletionCoverage,
   sortPendingAppFrames,
@@ -36,7 +35,13 @@ type Staged = {
   consumed: Array<Capture>
   remaining: Array<string>
 }
-class NoCompletion extends Error {}
+class NoCompletion extends Error {
+  remaining: Array<string>
+  constructor(params: { remaining: Array<string> }) {
+    super()
+    this.remaining = params.remaining
+  }
+}
 class CoverageMoved extends Error {}
 const services = new WeakMap<object, Map<string, unknown>>()
 function occurrence(frame: PreOpenAppFrameRef): string {
@@ -102,13 +107,15 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
   function current(captured: Capture): boolean {
     return captured.registration.active && captured.registration.source.current(captured.coverage)
   }
+  function requireCurrent(captures: Array<Capture>): void {
+    for (const captured of captures) if (!current(captured)) throw new CoverageMoved()
+  }
   async function validate(reads: EntryReads, captures: Array<Capture>): Promise<void> {
     for (const captured of captures) {
-      if (!current(captured)) throw new CoverageMoved()
-      if (
-        (await reads.appCursor(key.incarnation, captured.coverage.topicID)) !==
-        captured.coverage.previous
-      )
+      requireCurrent(captures)
+      const previous = await reads.appCursor(key.incarnation, captured.coverage.topicID)
+      requireCurrent(captures)
+      if (previous !== captured.coverage.previous)
         throw new GroupStateConflictError('Completion cursor moved')
     }
   }
@@ -120,45 +127,40 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
     atomic: boolean,
     advance: boolean,
   ): Promise<Staged> {
+    requireCurrent(captures)
     const saved = new Map<string, Saved>()
+    const read = new Map<string, Saved>()
+    const charged = new Set<string>()
+    const missing = new Set<string>()
     budget.begin()
-    const found: Array<{ frame: PreOpenAppFrameRef; value: Saved }> = []
+    let next = 0
     for (const id of ids) {
+      if (!budget.take()) {
+        if (atomic) throw new RangeError('Atomic completion exceeds staging budget')
+        break
+      }
       const value = await reads.appFrame(key.incarnation, id)
+      requireCurrent(captures)
+      next++
+      read.set(id, value)
       const frame = frameOf(value)
       if (frame !== undefined) {
         if (!sameKey(frame, key) || frame.id !== id)
           throw new GroupStateConflictError('Saved completion identity mismatch')
-        found.push({ frame, value })
-      }
+        charged.add(occurrence(frame))
+        saved.set(id, value)
+      } else missing.add(id)
     }
-    if (found.length === 0 && !advance) throw new NoCompletion()
+    const remaining = ids.slice(next)
+    if (saved.size === 0 && !advance) throw new NoCompletion({ remaining })
     await validate(reads, captures)
-    if (atomic && new Set(found.map(({ frame }) => occurrence(frame))).size > budget.maxFrames)
-      throw new RangeError('Atomic completion exceeds frame budget')
-    const charged = new Set<string>()
     const take = (frame: PreOpenAppFrameRef) => {
       const id = occurrence(frame)
       if (charged.has(id)) return true
-      if (!budget.take()) return false
+      if (!missing.delete(frame.id) && !budget.take()) return false
       charged.add(id)
       return true
     }
-    // Saved order is independent of the caller's array order.
-    const ordered = found.sort(
-      (a, b) =>
-        a.frame.segment - b.frame.segment ||
-        (a.frame.topicID < b.frame.topicID ? -1 : a.frame.topicID > b.frame.topicID ? 1 : 0) ||
-        compareLogPositions(a.frame.position, b.frame.position),
-    )
-    for (const { frame, value } of ordered) {
-      if (!take(frame)) {
-        if (atomic) throw new RangeError('Atomic completion exceeds work budget')
-        break
-      }
-      saved.set(frame.id, value)
-    }
-    if (saved.size === 0 && !advance) throw new NoCompletion()
     const consumed: Array<Capture> = []
     for (const captured of captures) {
       const coverage = captured.coverage
@@ -167,13 +169,18 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
       for (const member of coverage.prefix) {
         const frame = member.frame
         if (!sameKey(frame, key) || frame.topicID !== coverage.topicID) break
-        const value = saved.get(frame.id) ?? (await reads.appFrame(key.incarnation, frame.id))
+        if (member.state === 'pending' && !saved.has(frame.id)) break
+        if (!take(frame)) break
+        let value = read.get(frame.id)
+        if (value === undefined) {
+          value = await reads.appFrame(key.incarnation, frame.id)
+          requireCurrent(captures)
+          read.set(frame.id, value)
+        }
         const storedFrame = frameOf(value)
         if (storedFrame !== undefined && occurrence(storedFrame) !== occurrence(frame)) break
-        if (member.state === 'pending' && !saved.has(frame.id)) break
         if (member.state === 'completed' && storedFrame !== undefined && !saved.has(frame.id)) break
         if (member.state === 'dead' && value.pending !== null) break
-        if (!take(frame)) break
         if (value.poison !== null) saved.set(frame.id, value)
         prefix.push(copyStoredValue(member))
         if (frame.position === coverage.through) break
@@ -188,7 +195,7 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
           },
         })
     }
-    if (saved.size === 0 && consumed.length === 0) throw new NoCompletion()
+    if (saved.size === 0 && consumed.length === 0) throw new NoCompletion({ remaining })
     const records = sortPendingAppFrames(
       [...saved.values()].flatMap((value) =>
         value.pending === null ? [] : [copyStoredValue(value.pending)],
@@ -198,7 +205,7 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
       saved,
       records,
       consumed,
-      remaining: found.filter(({ frame }) => !saved.has(frame.id)).map(({ frame }) => frame.id),
+      remaining,
     }
   }
   async function recheck(
@@ -208,12 +215,16 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
   ): Promise<void> {
     const rows = stores.incarnation(key.incarnation)
     for (const captured of captures) {
-      if (!current(captured)) throw new CoverageMoved()
-      if ((await rows.cursor.load(captured.coverage.topicID)) !== captured.coverage.previous)
+      requireCurrent(captures)
+      const previous = await rows.cursor.load(captured.coverage.topicID)
+      requireCurrent(captures)
+      if (previous !== captured.coverage.previous)
         throw new GroupStateConflictError('Completion cursor moved')
     }
     const pending = await rows.pending.list()
+    requireCurrent(captures)
     const poison = await rows.pending.listPoison()
+    requireCurrent(captures)
     for (const [id, value] of staged.saved) {
       if (
         !sameStoredValue(pending.find((row) => row.frame.id === id) ?? null, value.pending) ||
@@ -229,20 +240,31 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
     handle?: (tx: TTx, records: Array<PendingAppFrame>) => Promise<void>,
   ): Promise<void> {
     // Keep host invocation in the synchronous entry.callback scope, even without async context.
-    for (const captured of captures) if (!current(captured)) throw new CoverageMoved()
+    requireCurrent(captures)
     const rows = stores.incarnation(key.incarnation)
     if (handle !== undefined && staged.records.length > 0)
       await handle(stores.tx, copyStoredValue(staged.records))
-    // A source may withdraw while a non-preemptible callback is awaiting.
-    for (const captured of captures)
-      if (
-        !current(captured) ||
-        (await rows.cursor.load(captured.coverage.topicID)) !== captured.coverage.previous
-      )
+    // Withdrawal after effects start must roll back without reinvoking the host.
+    const check = () => {
+      for (const captured of captures)
+        if (!current(captured))
+          throw new GroupStateConflictError('Coverage changed during completion effects')
+    }
+    check()
+    for (const captured of captures) {
+      const previous = await rows.cursor.load(captured.coverage.topicID)
+      check()
+      if (previous !== captured.coverage.previous)
         throw new GroupStateConflictError('Coverage changed during completion callback')
+    }
     await rows.pending.complete([...staged.saved.keys()])
-    for (const { coverage } of staged.consumed)
-      if (coverage.through !== null) await rows.cursor.save(coverage.topicID, coverage.through)
+    check()
+    for (const { coverage } of staged.consumed) {
+      if (coverage.through === null) continue
+      check()
+      await rows.cursor.save(coverage.topicID, coverage.through)
+      check()
+    }
   }
   async function turn(
     ids: Array<string>,
@@ -276,7 +298,10 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
       }
       return staged
     } catch (error) {
-      if (error instanceof NoCompletion) return undefined
+      if (error instanceof NoCompletion)
+        return error.remaining.length === 0
+          ? undefined
+          : { saved: new Map(), records: [], consumed: [], remaining: error.remaining }
       throw error
     }
   }
@@ -290,21 +315,29 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
     let callback = handle
     let scheduledSource = sourceID
     if (handle !== undefined) {
-      const protocols = await scheduler.schedule({
-        source: JSON.stringify([sourceID, 'identify']),
-        kind: 'completion',
-        signal: capability.failureSignal,
-        run: () =>
-          capability.read(key.groupID, async (reads) => {
-            const protocols = new Set<string>()
-            for (const id of ids) {
-              const saved = await reads.appFrame(key.incarnation, id)
-              const frame = frameOf(saved)
-              if (frame !== undefined) protocols.add(frame.protocol)
-            }
-            return [...protocols].sort()
-          }),
-      })
+      const found = new Set<string>()
+      let next = 0
+      while (next < ids.length) {
+        next = await scheduler.schedule({
+          source: JSON.stringify([sourceID, 'identify']),
+          kind: 'completion',
+          signal: capability.failureSignal,
+          run: (budget) =>
+            capability.read(key.groupID, async (reads) => {
+              budget.begin()
+              let index = next
+              for (const id of ids.slice(next)) {
+                if (!budget.take()) break
+                const saved = await reads.appFrame(key.incarnation, id)
+                const frame = frameOf(saved)
+                if (frame !== undefined) found.add(frame.protocol)
+                index++
+              }
+              return index
+            }),
+        })
+      }
+      const protocols = [...found].sort()
       if (protocols.length === 0) return
       scheduledSource =
         protocols.length === 1

@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { entryCapability } from '../src/entry-capability.js'
 import { groupBatchFor } from '../src/group-batch-binding.js'
 import { createHandlerCompletion, handlerCompletionForEntry } from '../src/handler-completion.js'
-import type { MemoryTransaction } from '../src/persistence-types.js'
+import type { GroupStores, MemoryTransaction } from '../src/persistence-types.js'
 import {
   authenticatedCompletionFixture,
   completionFixture,
@@ -489,6 +489,158 @@ for (const mode of ['real-mls', 'double'] as const)
           await f.fixture.close()
         }
       })
+      test('coverage withdrawn during an awaited cursor read preserves the cursor', async () => {
+        for (const phase of ['prepare', 'work', 'effects'] as const) {
+          const f = await completionFixture(mode, supplied)
+          const entered = Promise.withResolvers<void>()
+          const release = Promise.withResolvers<void>()
+          try {
+            const record = f.record('A', '100')
+            await f.plant([record])
+            await f.groups.ports(f.key).cursor.save('chat', '000')
+            const coverage = orderedCoverage([record])
+            const capture = coverage.source.capture
+            coverage.source.capture = (ids) =>
+              capture(ids).map((proof) => ({ ...proof, previous: '000' }))
+            coverage.source.current = (proof) => proof.previous === '000'
+            const binding = bind(f.completion, coverage)
+            let suspended = false
+            const suspend = async () => {
+              if (suspended) return
+              suspended = true
+              entered.resolve()
+              await release.promise
+            }
+            const wrap = (
+              stores: GroupStores<MemoryTransaction>,
+            ): GroupStores<MemoryTransaction> => ({
+              ...stores,
+              incarnation(incarnation) {
+                const rows = stores.incarnation(incarnation)
+                return {
+                  ...rows,
+                  cursor: {
+                    ...rows.cursor,
+                    async load(topicID) {
+                      const value = await rows.cursor.load(topicID)
+                      await suspend()
+                      return value
+                    },
+                  },
+                }
+              },
+            })
+            const run = f.capability.run
+            f.capability.run = (request, prepare, work, effects) =>
+              run(
+                request,
+                (reads) =>
+                  prepare(
+                    phase === 'prepare'
+                      ? {
+                          ...reads,
+                          async appCursor(incarnation, topicID) {
+                            const value = await reads.appCursor(incarnation, topicID)
+                            await suspend()
+                            return value
+                          },
+                        }
+                      : reads,
+                  ),
+                (stores, prepared) => work(phase === 'work' ? wrap(stores) : stores, prepared),
+                (stores, prepared, result) =>
+                  effects?.(phase === 'effects' ? wrap(stores) : stores, prepared, result) ??
+                  Promise.resolve(),
+              )
+            const before = await f.fixture.inspectRows()
+            const result = f.completion.complete(['A']).then(
+              () => null,
+              (error: unknown) => error,
+            )
+            await entered.promise
+            binding.unbind()
+            release.resolve()
+            const error = await result
+            expect(await f.cursor()).toBe('000')
+            if (phase === 'effects') {
+              expect(error).toMatchObject({ name: 'GroupStateConflictError' })
+              expect(await f.fixture.inspectRows()).toEqual(before)
+            } else {
+              expect(error).toBeNull()
+              expect(await f.pending()).toEqual([])
+            }
+          } finally {
+            release.resolve()
+            await f.fixture.close()
+          }
+        }
+      })
+      test('coverage withdrawn during awaited completion writes rolls back all progress', async () => {
+        for (const boundary of ['complete', 'save'] as const) {
+          const f = await completionFixture(mode, supplied)
+          const entered = Promise.withResolvers<void>()
+          const release = Promise.withResolvers<void>()
+          try {
+            const record = f.record('A', '100')
+            await f.plant([record])
+            const binding = bind(f.completion, orderedCoverage([record]))
+            const run = f.capability.run
+            f.capability.run = (request, prepare, work, effects) =>
+              run(request, prepare, work, (stores, prepared, result) => {
+                const wrapped: GroupStores<MemoryTransaction> = {
+                  ...stores,
+                  incarnation(incarnation) {
+                    const rows = stores.incarnation(incarnation)
+                    return {
+                      ...rows,
+                      pending: {
+                        ...rows.pending,
+                        async complete(ids) {
+                          await rows.pending.complete(ids)
+                          if (boundary === 'complete') {
+                            entered.resolve()
+                            await release.promise
+                          }
+                        },
+                      },
+                      cursor: {
+                        ...rows.cursor,
+                        async save(topicID, position) {
+                          await rows.cursor.save(topicID, position)
+                          if (boundary === 'save') {
+                            entered.resolve()
+                            await release.promise
+                          }
+                        },
+                      },
+                    }
+                  },
+                }
+                return effects?.(wrapped, prepared, result) ?? Promise.resolve()
+              })
+            const before = await f.fixture.inspectRows()
+            const result = f.completion
+              .transact(['A'], async (tx) => {
+                await writeSideRow(tx, 'withdrawn-effect', new Uint8Array([9]))
+              })
+              .then(
+                () => null,
+                (error: unknown) => error,
+              )
+            await entered.promise
+            binding.unbind()
+            release.resolve()
+            const error = await result
+            expect(await f.cursor()).toBeNull()
+            expect(await f.fixture.inspectRows()).toEqual(before)
+            expect(await f.fixture.inspectSideRow('withdrawn-effect')).toBeNull()
+            expect(error).toMatchObject({ name: 'GroupStateConflictError' })
+          } finally {
+            release.resolve()
+            await f.fixture.close()
+          }
+        }
+      })
       test('transactional root reentry obeys ownership diagnostics', async () => {
         const f = await completionFixture(mode, supplied)
         try {
@@ -539,6 +691,136 @@ for (const mode of ['real-mls', 'double'] as const)
             )
             expect(handle).not.toHaveBeenCalled()
             expect(await f.fixture.inspectRows()).toEqual(before)
+          } finally {
+            await f.fixture.close()
+          }
+        }
+      })
+      test('saved completion staging stops reading at the frame boundary', async () => {
+        const f = await completionFixture(mode, supplied, 32)
+        try {
+          const records = Array.from({ length: 33 }, (_, i) => f.record(String(i).padStart(3, '0')))
+          await f.plant(records)
+          const stagedReads: Array<Array<string>> = []
+          const run = f.capability.run
+          f.capability.run = (request, prepare, work, effects) =>
+            run(
+              request,
+              async (reads) => {
+                const batch: Array<string> = []
+                stagedReads.push(batch)
+                return prepare({
+                  ...reads,
+                  async appFrame(incarnation, id) {
+                    batch.push(id)
+                    return reads.appFrame(incarnation, id)
+                  },
+                })
+              },
+              work,
+              effects,
+            )
+          await f.completion.complete(records.map((r) => r.frame.id))
+          expect(stagedReads).toEqual([
+            records.slice(0, 32).map((r) => r.frame.id),
+            [records[32]?.frame.id],
+          ])
+          expect(await f.pending()).toEqual([])
+        } finally {
+          await f.fixture.close()
+        }
+      })
+      test('atomic protocol identification bounds saved reads before staging refusal', async () => {
+        const f = await completionFixture(mode, supplied, 32)
+        try {
+          const records = Array.from({ length: 33 }, (_, i) => f.record(String(i).padStart(3, '0')))
+          await f.plant(records)
+          const batches: Array<Array<string>> = []
+          const read = f.capability.read
+          f.capability.read = (groupID, fn) =>
+            read(groupID, (reads) => {
+              const batch: Array<string> = []
+              batches.push(batch)
+              return fn({
+                ...reads,
+                async appFrame(incarnation, id) {
+                  batch.push(id)
+                  return reads.appFrame(incarnation, id)
+                },
+              })
+            })
+          const before = await f.fixture.inspectRows()
+          const handle = vi.fn(async () => {})
+          await expect(
+            f.completion.transact(
+              records.map((r) => r.frame.id),
+              handle,
+            ),
+          ).rejects.toBeInstanceOf(RangeError)
+          expect(batches).toEqual([
+            records.slice(0, 32).map((r) => r.frame.id),
+            [records[32]?.frame.id],
+          ])
+          expect(handle).not.toHaveBeenCalled()
+          expect(await f.fixture.inspectRows()).toEqual(before)
+        } finally {
+          await f.fixture.close()
+        }
+      })
+      test('callback-free clock exhaustion yields before reading the saved suffix', async () => {
+        for (const maxWorkMs of [8, 3]) {
+          const f = await completionFixture(mode, supplied, 64, maxWorkMs)
+          try {
+            const records = [f.record('A'), f.record('B'), f.record('C')]
+            await f.plant(records)
+            let clock = 1000
+            vi.spyOn(Date, 'now').mockImplementation(() => clock)
+            const batches: Array<Array<string>> = []
+            const order: Array<string> = []
+            let ready: Promise<void> | undefined
+            const run = f.capability.run
+            f.capability.run = (request, prepare, work, effects) =>
+              run(
+                request,
+                async (reads) => {
+                  const batch: Array<string> = []
+                  batches.push(batch)
+                  return prepare({
+                    ...reads,
+                    async appFrame(incarnation, id) {
+                      batch.push(id)
+                      const value = await reads.appFrame(incarnation, id)
+                      clock += maxWorkMs
+                      if (ready === undefined)
+                        ready = groupBatchFor(f.binding, f.key.groupID).schedule({
+                          source: 'ready-clock-peer',
+                          kind: 'completion',
+                          async run() {
+                            order.push('peer')
+                            await run(
+                              { groupID: f.key.groupID, mutationID: crypto.randomUUID() },
+                              async (reads) => ({ expected: await reads.lifetime(), value: null }),
+                              async (stores) =>
+                                writeSideRow(stores.tx, 'clock-peer', new Uint8Array([9])),
+                            )
+                          },
+                        })
+                      return value
+                    },
+                  })
+                },
+                work,
+                async (stores, prepared, result) => {
+                  order.push('completion')
+                  await effects?.(stores, prepared, result)
+                },
+              )
+            await f.completion.complete(records.map((r) => r.frame.id))
+            await ready
+            expect(batches).toEqual([['A'], ['B'], ['C']])
+            expect(order).toEqual(['completion', 'peer', 'completion', 'completion'])
+            expect(await f.fixture.inspectSideRow('clock-peer')).toEqual(new Uint8Array([9]))
+            expect(await f.pending()).toEqual([])
           } finally {
             await f.fixture.close()
           }
