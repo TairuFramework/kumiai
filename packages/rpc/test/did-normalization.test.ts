@@ -1,7 +1,7 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { normalizeDID } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createGroupPeer } from '../src/peer.js'
@@ -113,7 +113,7 @@ describe('DID normalization at rpc ingress', () => {
 
     // The long-form echo of bob's own SHORT identity is suppressed; carol's frame, a genuinely
     // different sender, still delivers — proving the suppression is DID-specific, not blanket.
-    expect(seen).toEqual([{ text: 'from carol' }])
+    await vi.waitFor(() => expect(seen).toEqual([{ text: 'from carol' }]))
 
     await bob.peer.dispose()
   })

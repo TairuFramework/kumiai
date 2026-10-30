@@ -407,7 +407,6 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
             newID: () => crypto.randomUUID(),
           })
           const peer = createGroupPeer({
-            completion: createTestCompletion(key, rawAccess.pending),
             openedDeliveryContext,
             ...options,
             hub,

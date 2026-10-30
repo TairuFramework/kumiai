@@ -4,17 +4,12 @@ import { describe, expect, test, vi } from 'vitest'
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane, frameID } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
-import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import {
-  completeTestRecord,
-  createFakeCrypto,
-  createTestCompletion,
-  fakeEpochSecret,
-} from './fixtures/fake-crypto.js'
+import { completeTestRecord, createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { chat, makeMLSPeer } from './fixtures/peer.js'
 
 const recoverySecret = new Uint8Array(32).fill(0x91)
@@ -294,7 +289,7 @@ describe('durable pending restoration', () => {
         payload: payload('old'),
         senderDID: 'alice',
       },
-      { groupID: 'memory-group', incarnation: 1 },
+      { groupID: 'group', incarnation: 1 },
       'chat/posted',
       1,
     )
@@ -310,49 +305,46 @@ describe('durable pending restoration', () => {
     const seen = vi.fn()
     const notices = vi.fn()
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux: {
-        retainTopic() {},
-        async fetchTopic({ topicID }: { topicID: string }) {
-          return {
-            messages:
-              topicID === oldTopic ? [{ sequenceID: record.frame.position, payload: sealed }] : [],
-            head: null,
-            oldest: null,
-          }
-        },
-      } as never,
-      appliedEpoch: () => 2,
-      crypto: createFakeCrypto({
-        epoch: 2,
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux: {
+          retainTopic() {},
+          async fetchTopic({ topicID }: { topicID: string }) {
+            return {
+              messages:
+                topicID === oldTopic
+                  ? [{ sequenceID: record.frame.position, payload: sealed }]
+                  : [],
+              head: null,
+              oldest: null,
+            }
+          },
+        } as never,
+        appliedEpoch: () => 2,
+        crypto: createFakeCrypto({
+          epoch: 2,
+          localDID: 'bob',
+          pending: {
+            async persistOpened() {
+              throw new Error('must not reopen')
+            },
+            async list() {
+              return [...rows.values()]
+            },
+            complete,
+          },
+        }),
         localDID: 'bob',
-        pending: {
-          async persistOpened() {
-            throw new Error('must not reopen')
-          },
-          async list() {
-            return [...rows.values()]
-          },
-          complete,
-        },
+        protocols: { chat },
+        handlers: { chat: { 'chat/posted': seen } },
+        retentionSeconds: 60,
+        appCursorStore: cursor,
+        anchor: () => anchor,
+        groupID: () => 'group',
+        onAppDeliveryStalled: notices,
       }),
-      localDID: 'bob',
-      protocols: { chat },
-      eventHandlers: new Map([
-        [
-          'chat',
-          adaptBusHandlers(chat, { 'chat/posted': seen } as never, {
-            completion: createTestCompletion(),
-          }).events,
-        ],
-      ]),
-      retentionSeconds: 60,
-      appCursorStore: cursor,
-      anchor: () => anchor,
-      groupID: () => 'group',
-      onAppDeliveryStalled: notices,
-    })
+    )
     await lane.restore([record, unknown])
     await lane.restore([record, unknown])
     expect(complete).not.toHaveBeenCalledWith('unknown-id')
@@ -390,7 +382,7 @@ describe('durable pending restoration', () => {
         payload: payload('saved'),
         senderDID: 'alice',
       },
-      { groupID: 'memory-group', incarnation: 1 },
+      { groupID: 'group', incarnation: 1 },
       'chat/posted',
       1,
     )
@@ -408,33 +400,26 @@ describe('durable pending restoration', () => {
     const notices = vi.fn()
     const seen = vi.fn()
     const makeLane = (registered: boolean) =>
-      createAppLane({
-        groupKey: { groupID: 'group', incarnation: 1 },
-        mux: {
-          retainTopic() {},
-          async fetchTopic() {
-            return { messages: [], head: null, oldest: null }
-          },
-        } as never,
-        appliedEpoch: () => 2,
-        crypto: createFakeCrypto({ epoch: 2, localDID: 'bob', pending }),
-        localDID: 'bob',
-        protocols: registered ? { later: chat } : {},
-        eventHandlers: registered
-          ? new Map([
-              [
-                'later',
-                adaptBusHandlers(chat, { 'chat/posted': seen } as never, {
-                  completion: createTestCompletion(),
-                }).events,
-              ],
-            ])
-          : new Map(),
-        retentionSeconds: 60,
-        anchor: () => ({ epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }),
-        groupID: () => 'group',
-        onAppDeliveryStalled: notices,
-      })
+      createAppLane(
+        testAppLaneParams({
+          groupKey: { groupID: 'group', incarnation: 1 },
+          mux: {
+            retainTopic() {},
+            async fetchTopic() {
+              return { messages: [], head: null, oldest: null }
+            },
+          } as never,
+          appliedEpoch: () => 2,
+          crypto: createFakeCrypto({ epoch: 2, localDID: 'bob', pending }),
+          localDID: 'bob',
+          protocols: registered ? { later: chat } : {},
+          handlers: { later: { 'chat/posted': seen } },
+          retentionSeconds: 60,
+          anchor: () => ({ epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }),
+          groupID: () => 'group',
+          onAppDeliveryStalled: notices,
+        }),
+      )
     const first = makeLane(false)
     await first.restore([record])
     await first.deliver()
@@ -463,7 +448,7 @@ describe('durable pending restoration', () => {
         payload: payload('saved'),
         senderDID: 'alice',
       },
-      { groupID: 'memory-group', incarnation: 1 },
+      { groupID: 'group', incarnation: 1 },
       'chat/posted',
       1,
     )
@@ -536,7 +521,7 @@ describe('durable pending restoration', () => {
           payload: payload('old hub'),
           senderDID: 'alice',
         },
-        { groupID: 'memory-group', incarnation: 1 },
+        { groupID: 'group', incarnation: 1 },
         'chat/posted',
         1,
       )
@@ -545,54 +530,49 @@ describe('durable pending restoration', () => {
         rows.set(opened.frame.id, opened)
       })
       const seen: Array<string> = []
-      const lane = createAppLane({
-        groupKey: { groupID: 'group', incarnation: 1 },
-        mux: {
-          retainTopic() {},
-          async fetchTopic({ topicID, after }: { topicID: string; after?: string }) {
-            return {
-              messages:
-                topicID === oldTopic && after == null
-                  ? [{ sequenceID: position, payload: fetched }]
-                  : [],
-              head: null,
-              oldest: null,
-            }
-          },
-        } as never,
-        appliedEpoch: () => 1,
-        crypto: createFakeCrypto({
-          epoch: 1,
+      const lane = createAppLane(
+        testAppLaneParams({
+          groupKey: { groupID: 'group', incarnation: 1 },
+          mux: {
+            retainTopic() {},
+            async fetchTopic({ topicID, after }: { topicID: string; after?: string }) {
+              return {
+                messages:
+                  topicID === oldTopic && after == null
+                    ? [{ sequenceID: position, payload: fetched }]
+                    : [],
+                head: null,
+                oldest: null,
+              }
+            },
+          } as never,
+          appliedEpoch: () => 1,
+          crypto: createFakeCrypto({
+            epoch: 1,
+            localDID: 'bob',
+            pending: {
+              persistOpened,
+              async list() {
+                return [...rows.values()]
+              },
+              async complete(id: string) {
+                rows.delete(id)
+              },
+            },
+          }),
           localDID: 'bob',
-          pending: {
-            persistOpened,
-            async list() {
-              return [...rows.values()]
-            },
-            async complete(id: string) {
-              rows.delete(id)
+          protocols: { chat },
+          handlers: {
+            chat: {
+              'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
             },
           },
+          retentionSeconds: 60,
+          appCursorStore: createMemoryAppCursorStore(),
+          anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+          groupID: () => 'group',
         }),
-        localDID: 'bob',
-        protocols: { chat },
-        eventHandlers: new Map([
-          [
-            'chat',
-            adaptBusHandlers(
-              chat,
-              {
-                'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
-              } as never,
-              { completion: createTestCompletion() },
-            ).events,
-          ],
-        ]),
-        retentionSeconds: 60,
-        appCursorStore: createMemoryAppCursorStore(),
-        anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
-        groupID: () => 'group',
-      })
+      )
       await lane.restore([record])
       await lane.deliver()
       const expected = served === 'same' ? ['old hub'] : ['old hub', 'new hub']

@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest'
 import { createAppLane } from '../src/app-lane.js'
 import { asLogPosition, assertForwardPage } from '../src/cursor.js'
 import { APP_TOPIC_LABEL, commitTopic } from '../src/topic.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
@@ -25,28 +26,30 @@ describe('hub log paging', () => {
   })
   test('the app drain bounds a repeated full page without raising', async () => {
     let fetches = 0
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux: {
-        retainTopic() {},
-        async fetchTopic() {
-          if (++fetches > 4) throw new Error('fixture cutoff')
-          return {
-            messages: repeated,
-            head: repeated.at(-1)?.sequenceID,
-            oldest: repeated[0]?.sequenceID,
-          }
-        },
-      } as never,
-      appliedEpoch: () => 1,
-      crypto: createFakeCrypto({ localDID: 'bob' }),
-      localDID: 'bob',
-      protocols: { chat },
-      eventHandlers: new Map(),
-      retentionSeconds: 60,
-      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux: {
+          retainTopic() {},
+          async fetchTopic() {
+            if (++fetches > 4) throw new Error('fixture cutoff')
+            return {
+              messages: repeated,
+              head: repeated.at(-1)?.sequenceID,
+              oldest: repeated[0]?.sequenceID,
+            }
+          },
+        } as never,
+        appliedEpoch: () => 1,
+        crypto: createFakeCrypto({ localDID: 'bob' }),
+        localDID: 'bob',
+        protocols: { chat },
+        eventHandlers: new Map(),
+        retentionSeconds: 60,
+        anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+        groupID: () => 'group',
+      }),
+    )
     await expect(lane.deliver()).resolves.toBeUndefined()
     expect(fetches).toBe(2)
     lane.dispose()

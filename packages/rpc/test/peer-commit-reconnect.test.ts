@@ -50,7 +50,7 @@ function makeDurablePeer(hub: DurableFakeHub, localDID: string, recoverySecret: 
     onAdvance: (e) => crypto.setEpoch(e),
   })
   const peer = createGroupPeer<Protocols>({
-    completion: createTestCompletion(),
+    completion: createTestCompletion(mls.control().key, crypto.pending),
     ...memoryApplicationPorts(mls, crypto),
     appOutboxLimit: 128,
     hub,

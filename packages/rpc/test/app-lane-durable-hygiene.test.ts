@@ -6,17 +6,12 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import * as appLaneModule from '../src/app-lane.js'
 import { createAppLane, frameID } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
-import { adaptBusHandlers } from '../src/handlers.js'
 import { createHubMux } from '../src/hub-mux.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import {
-  completeTestRecord,
-  createFakeCrypto,
-  createTestCompletion,
-  fakeEpochSecret,
-} from './fixtures/fake-crypto.js'
+import { completeTestRecord, createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { chat, makeMLSPeer } from './fixtures/peer.js'
 
 const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
@@ -59,28 +54,30 @@ describe('durable app lane hygiene', () => {
       }
       await save(topic, position)
     }
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux,
-      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
-      appliedEpoch: () => 1,
-      localDID: 'bob',
-      protocols: { chat, other: chat },
-      eventHandlers: new Map(),
-      deliverOpened: async (record) => {
-        if (record.frame.protocol === 'chat') {
-          entered.resolve()
-          await first.promise
-          throw new Error('Retain the failed live record')
-        }
-        refused.resolve()
-        throw new Error('Leave this record for cold delivery')
-      },
-      retentionSeconds: 60,
-      appCursorStore: cursor,
-      anchor: () => anchor,
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux,
+        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
+        appliedEpoch: () => 1,
+        localDID: 'bob',
+        protocols: { chat, other: chat },
+        eventHandlers: new Map(),
+        deliver: async (record) => {
+          if (record.frame.protocol === 'chat') {
+            entered.resolve()
+            await first.promise
+            throw new Error('Retain the failed live record')
+          }
+          refused.resolve()
+          throw new Error('Leave this record for cold delivery')
+        },
+        retentionSeconds: 60,
+        appCursorStore: cursor,
+        anchor: () => anchor,
+        groupID: () => 'group',
+      }),
+    )
     onTestFinished(async () => {
       first.resolve()
       saved.resolve()
@@ -173,19 +170,21 @@ describe('durable app lane hygiene', () => {
       }
       await save(topic, position)
     }
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux,
-      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
-      appliedEpoch: () => 1,
-      localDID: 'bob',
-      protocols: { chat },
-      eventHandlers: new Map(),
-      retentionSeconds: 60,
-      appCursorStore: cursor,
-      anchor: () => anchor,
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux,
+        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
+        appliedEpoch: () => 1,
+        localDID: 'bob',
+        protocols: { chat },
+        eventHandlers: new Map(),
+        retentionSeconds: 60,
+        appCursorStore: cursor,
+        anchor: () => anchor,
+        groupID: () => 'group',
+      }),
+    )
     onTestFinished(() => {
       gate.resolve()
       lane.dispose()
@@ -224,19 +223,21 @@ describe('durable app lane hygiene', () => {
       await gate.promise
       await save(topic, position)
     }
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux,
-      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
-      appliedEpoch: () => 1,
-      localDID: 'bob',
-      protocols: { chat },
-      eventHandlers: new Map(),
-      retentionSeconds: 60,
-      appCursorStore: cursor,
-      anchor: () => anchor,
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux,
+        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
+        appliedEpoch: () => 1,
+        localDID: 'bob',
+        protocols: { chat },
+        eventHandlers: new Map(),
+        retentionSeconds: 60,
+        appCursorStore: cursor,
+        anchor: () => anchor,
+        groupID: () => 'group',
+      }),
+    )
     onTestFinished(() => {
       gate.resolve()
       lane.dispose()
@@ -310,27 +311,22 @@ describe('durable app lane hygiene', () => {
     const stalled = vi.fn()
     const resumed = vi.fn()
     const handler = vi.fn()
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux,
-      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
-      appliedEpoch: () => 1,
-      localDID: 'bob',
-      protocols: { chat },
-      eventHandlers: new Map([
-        [
-          'chat',
-          adaptBusHandlers(chat, { 'chat/posted': handler } as never, {
-            completion: createTestCompletion(),
-          }).events,
-        ],
-      ]),
-      retentionSeconds: 60,
-      onAppDeliveryStalled: stalled,
-      onAppDeliveryResumed: resumed,
-      anchor: () => anchor,
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux,
+        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
+        appliedEpoch: () => 1,
+        localDID: 'bob',
+        protocols: { chat },
+        handlers: { chat: { 'chat/posted': handler } },
+        retentionSeconds: 60,
+        onAppDeliveryStalled: stalled,
+        onAppDeliveryResumed: resumed,
+        anchor: () => anchor,
+        groupID: () => 'group',
+      }),
+    )
     onTestFinished(() => {
       lane.dispose()
       mux.dispose()
@@ -398,28 +394,23 @@ describe('durable app lane hygiene', () => {
     let currentAnchor: Anchor = anchor
     let appliedEpoch = 1
     const reader = createFakeCrypto({ epoch: 1, localDID: 'bob', pending })
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux,
-      crypto: reader,
-      appliedEpoch: () => appliedEpoch,
-      localDID: 'bob',
-      protocols,
-      eventHandlers: new Map([
-        [
-          'chat',
-          adaptBusHandlers(chat, { 'chat/posted': handler } as never, {
-            completion: createTestCompletion(),
-          }).events,
-        ],
-      ]),
-      retentionSeconds: 60,
-      onAppDeliveryStalled: stalled,
-      onAppDeliveryResumed: resumed,
-      anchor: () => currentAnchor,
-      departing: () => (currentAnchor === anchor ? [] : [{ anchor, departedAt: 2 }]),
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux,
+        crypto: reader,
+        appliedEpoch: () => appliedEpoch,
+        localDID: 'bob',
+        protocols,
+        handlers: { chat: { 'chat/posted': handler } },
+        retentionSeconds: 60,
+        onAppDeliveryStalled: stalled,
+        onAppDeliveryResumed: resumed,
+        anchor: () => currentAnchor,
+        departing: () => (currentAnchor === anchor ? [] : [{ anchor, departedAt: 2 }]),
+        groupID: () => 'group',
+      }),
+    )
     onTestFinished(async () => {
       gate.resolve()
       lane.dispose()

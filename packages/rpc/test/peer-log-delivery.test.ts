@@ -11,7 +11,7 @@ import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createDurableTestCrypto, createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import {
   createMemoryGroupMLS,
@@ -157,7 +157,7 @@ describe('recovery ordering', { concurrent: false }, () => {
   ) {
     const row = hub.published.filter((message) => message.topicID === commitTopic(secret)).at(-1)
     if (row === undefined) throw new Error('Missing applied baseline commit')
-    const providerCrypto = createFakeCrypto({ epoch: epoch - 1, localDID: 'alice' })
+    const providerCrypto = createDurableTestCrypto({ epoch: epoch - 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({
       storageID: 'alice',
       localDID: 'alice',
@@ -494,7 +494,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       })
       await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'rejoined' } })
       await drainUntil(async () => (await bob.appOutbox.list()).length === 0, 'settled log message')
-      expect(received).toEqual([{ text: 'rejoined' }, { text: 'rejoined' }])
+      await vi.waitFor(() => expect(received).toEqual([{ text: 'rejoined' }, { text: 'rejoined' }]))
       expect(notices[0]).toMatchObject({
         kind: 'retention-gap',
         confidence: 'claimed',
@@ -508,7 +508,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         ),
       ).toHaveLength(2)
       await alice.peer.retryAppDelivery()
-      expect(received).toEqual([{ text: 'rejoined' }, { text: 'rejoined' }])
+      await vi.waitFor(() => expect(received).toEqual([{ text: 'rejoined' }, { text: 'rejoined' }]))
     },
   )
 
@@ -1383,7 +1383,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await bob.peer.dispose()
     release.resolve()
     await bob.peer.drained()
-    expect(received).toEqual([{ text: 'at-risk restart' }])
+    await vi.waitFor(() => expect(received).toEqual([{ text: 'at-risk restart' }]))
     expect(await store.list()).toHaveLength(1)
     publishSpy.mockRestore()
     const replacement = member(hub, 'bob', { restartOf: bob, appOutbox: store })
@@ -1391,7 +1391,9 @@ describe('recovery ordering', { concurrent: false }, () => {
       async () => (await replacement.appOutbox.list()).length === 0,
       'restart delivery',
     )
-    expect(received).toEqual([{ text: 'at-risk restart' }, { text: 'at-risk restart' }])
+    await vi.waitFor(() =>
+      expect(received).toEqual([{ text: 'at-risk restart' }, { text: 'at-risk restart' }]),
+    )
     const current = replacement.anchorStore.stored()
     if (current == null) throw new Error('Missing replacement anchor')
     const topics = [
@@ -1402,7 +1404,9 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect(apps.map((m) => bob.crypto.frameEpoch(m.payload))).toEqual([1, 2])
     expect(await replacement.mls.readEpoch()).toBe(2)
     await alice.peer.retryAppDelivery()
-    expect(received).toEqual([{ text: 'at-risk restart' }, { text: 'at-risk restart' }])
+    await vi.waitFor(() =>
+      expect(received).toEqual([{ text: 'at-risk restart' }, { text: 'at-risk restart' }]),
+    )
   })
 
   test('retrying confirmed adoption repairs the floor after the host adopted then threw', async () => {
@@ -1482,8 +1486,8 @@ describe('recovery ordering', { concurrent: false }, () => {
       const alice = member(hub, 'alice', {
         epoch: base,
         handlers: {
-          'chat/posted': (ctx: { data: { seq: number } }) => {
-            received.push({ epoch: alice.mls.epoch(), seq: ctx.data.seq })
+          'chat/posted': (ctx: { data: { seq: number }; epoch: number }) => {
+            received.push({ epoch: ctx.epoch, seq: ctx.data.seq })
           },
         },
       })

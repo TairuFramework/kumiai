@@ -4,7 +4,11 @@ import { describe, expect, test } from 'vitest'
 import { encodeAppAAD } from '../src/app-aad.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  createDurableTestCrypto,
+  type FakeCrypto,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 const flush = (ms = 50) => new Promise((r) => setTimeout(r, ms))
@@ -18,7 +22,7 @@ function lie(crypto: FakeCrypto, offset: number): FakeCrypto {
 }
 
 async function sealAt(epoch: number, topicID: string, text: string, intent: 'log' | 'ephemeral') {
-  return await createFakeCrypto({ epoch, localDID: 'alice' }).wrap(
+  return await createDurableTestCrypto({ epoch, localDID: 'alice' }).wrap(
     encodeEventFrame('chat/posted', { text }),
     { aad: encodeAppAAD({ topicID, intent }) },
   )
@@ -46,7 +50,7 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
       const seen: Array<unknown> = []
       const bob = makeMLSPeer(hub, 'bob', secret, {
         epoch: 1,
-        crypto: lie(createFakeCrypto({ epoch: 1, localDID: 'bob' }), offset),
+        crypto: lie(createDurableTestCrypto({ epoch: 1, localDID: 'bob' }), offset),
         handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
       })
       await flush(200)
@@ -67,7 +71,7 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
       const seen: Array<unknown> = []
       const bob = makeMLSPeer(hub, 'bob', secret, {
         epoch: 1,
-        crypto: lie(createFakeCrypto({ epoch: 1, localDID: 'bob' }), offset),
+        crypto: lie(createDurableTestCrypto({ epoch: 1, localDID: 'bob' }), offset),
         handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
       })
       await flush(200)
@@ -100,7 +104,7 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
       const secret = new Uint8Array(32).fill(0xc4)
       const alice = makeMLSPeer(hub, 'alice', secret, {
         epoch: 1,
-        crypto: lie(createFakeCrypto({ epoch: 1, localDID: 'alice' }), offset),
+        crypto: lie(createDurableTestCrypto({ epoch: 1, localDID: 'alice' }), offset),
       })
       await flush()
 
@@ -133,7 +137,7 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
       await seedBuiltOperation(first, buildLedgerCommit(first, ['token']))
       const second = makeMLSPeer(hub, 'alice', secret, {
         restartOf: first,
-        crypto: lie(createFakeCrypto({ epoch: 1, localDID: 'alice' }), offset),
+        crypto: lie(createDurableTestCrypto({ epoch: 1, localDID: 'alice' }), offset),
       })
       await flush(200)
 

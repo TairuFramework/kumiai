@@ -7,6 +7,7 @@ import { type AppLane, createAppLane } from '../src/app-lane.js'
 import { FrameEpochError, type PendingAppFrame } from '../src/crypto.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
@@ -265,7 +266,7 @@ test('replacement receives a retained event whose handler never started before d
       handlers: { 'chat/posted': ({ data }: { data: unknown }) => void received.push(data) },
     })
     await replacement.peer.replay()
-    expect(received).toEqual([{ text: 'second' }])
+    await vi.waitFor(() => expect(received).toEqual([{ text: 'second' }]))
     expect(cursorWhileBlocked).toBeNull()
     expect(replacement.appCursorStore.stored(topicID)).toBe('000000000002')
   } finally {
@@ -276,7 +277,7 @@ test('replacement receives a retained event whose handler never started before d
   }
 })
 
-test('a blocked retained handler applies backpressure across new batches and public retries', async () => {
+test('a blocked retained handler serialises saved callbacks across batches and public retries', async () => {
   const hub = new DurableFakeHub()
   const release = Promise.withResolvers<void>()
   const handler = vi.fn(async () => {
@@ -316,7 +317,8 @@ test('a blocked retained handler applies backpressure across new batches and pub
       cursors.push(bob.appCursorStore.stored(topicID))
     }
     expect(starts).toEqual([1, 1, 1, 1])
-    expect(unwraps).toEqual([1, 1, 1, 1])
+    expect(unwraps).toEqual([52, 102, 152, 202])
+    expect(await bob.crypto.pending?.list()).toHaveLength(202)
     expect(cursors).toEqual([null, null, null, null])
   } finally {
     await bob.peer.dispose()
@@ -544,25 +546,27 @@ async function futureLane(
     gap: false,
   }))
   const create = () => {
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux: { retainTopic() {}, fetchTopic: fetch } as never,
-      appliedEpoch: () => reader.epoch(),
-      crypto: reader,
-      localDID: 'bob',
-      protocols: { chat },
-      eventHandlers: new Map([['chat', { emit }]]) as never,
-      retentionSeconds: 60,
-      appCursorStore: cursor,
-      anchor: () => anchor,
-      groupID: () => 'group',
-      ...(options.now == null ? {} : { now: options.now }),
-      ...{
-        commitLaneCaughtUp: () => caught,
-        commitWorkVersion: () => workVersion,
-        ...(options.scheduleDrain == null ? {} : { scheduleDrain: options.scheduleDrain }),
-      },
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux: { retainTopic() {}, fetchTopic: fetch } as never,
+        appliedEpoch: () => reader.epoch(),
+        crypto: reader,
+        localDID: 'bob',
+        protocols: { chat },
+        eventHandlers: new Map([['chat', { emit }]]) as never,
+        retentionSeconds: 60,
+        appCursorStore: cursor,
+        anchor: () => anchor,
+        groupID: () => 'group',
+        ...(options.now == null ? {} : { now: options.now }),
+        ...{
+          commitLaneCaughtUp: () => caught,
+          commitWorkVersion: () => workVersion,
+          ...(options.scheduleDrain == null ? {} : { scheduleDrain: options.scheduleDrain }),
+        },
+      }),
+    )
     lanes.push(lane)
     return lane
   }

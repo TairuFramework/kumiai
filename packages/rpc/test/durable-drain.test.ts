@@ -8,6 +8,7 @@ import type { PendingAppFrame } from '../src/crypto.js'
 import { FrameEpochError, isAppFrameStorageError } from '../src/crypto.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
@@ -47,28 +48,30 @@ function retainedLane() {
   const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
   const messages: Array<{ sequenceID: string; payload: Uint8Array }> = []
   const cursor = createMemoryAppCursorStore()
-  const lane = createAppLane({
-    groupKey: { groupID: 'group', incarnation: 1 },
-    mux: {
-      retainTopic() {},
-      async fetchTopic({ after }: { after?: string }) {
-        return {
-          messages: messages.filter((message) => after == null || message.sequenceID > after),
-          head: messages.at(-1)?.sequenceID ?? null,
-          oldest: messages[0]?.sequenceID ?? null,
-        }
-      },
-    } as never,
-    appliedEpoch: () => reader.epoch(),
-    crypto: reader,
-    localDID: 'bob',
-    protocols: { chat },
-    eventHandlers: new Map([['chat', { emit: async () => {} }]]) as never,
-    retentionSeconds: 60,
-    appCursorStore: cursor,
-    anchor: () => anchor,
-    groupID: () => 'group',
-  })
+  const lane = createAppLane(
+    testAppLaneParams({
+      groupKey: { groupID: 'group', incarnation: 1 },
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: messages.filter((message) => after == null || message.sequenceID > after),
+            head: messages.at(-1)?.sequenceID ?? null,
+            oldest: messages[0]?.sequenceID ?? null,
+          }
+        },
+      } as never,
+      appliedEpoch: () => reader.epoch(),
+      crypto: reader,
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map([['chat', { emit: async () => {} }]]) as never,
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      anchor: () => anchor,
+      groupID: () => 'group',
+    }),
+  )
   const append = async (position: string, intent: 'log' | 'ephemeral') => {
     messages.push({
       sequenceID: position,
@@ -219,30 +222,32 @@ describe('durable retained drain', () => {
     })
     let chatFetches = 0
     let otherFetches = 0
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux: {
-        retainTopic() {},
-        async fetchTopic(params: { topicID: string }) {
-          if (params.topicID === chatTopic) {
-            chatFetches += 1
-            if (chatFetches === 1) throw new Error('first fetch failed')
-          } else {
-            otherFetches += 1
-            if (otherFetches === 1) await delayed
-          }
-          return { messages: [], head: null, oldest: null }
-        },
-      } as never,
-      appliedEpoch: () => 1,
-      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
-      localDID: 'bob',
-      protocols: { chat, other: chat },
-      eventHandlers: new Map(),
-      retentionSeconds: 60,
-      anchor: () => anchor,
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux: {
+          retainTopic() {},
+          async fetchTopic(params: { topicID: string }) {
+            if (params.topicID === chatTopic) {
+              chatFetches += 1
+              if (chatFetches === 1) throw new Error('first fetch failed')
+            } else {
+              otherFetches += 1
+              if (otherFetches === 1) await delayed
+            }
+            return { messages: [], head: null, oldest: null }
+          },
+        } as never,
+        appliedEpoch: () => 1,
+        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
+        localDID: 'bob',
+        protocols: { chat, other: chat },
+        eventHandlers: new Map(),
+        retentionSeconds: 60,
+        anchor: () => anchor,
+        groupID: () => 'group',
+      }),
+    )
     onTestFinished(() => {
       releaseDelayed?.()
       lane.dispose()

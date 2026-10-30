@@ -5,6 +5,7 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppWindowPruned } from '../src/app-cursor.js'
 import { createAppLane } from '../src/app-lane.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
@@ -377,20 +378,22 @@ describe('the app-lane drain reads from a durable position and reports what aged
         }
       },
     }
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux: mux as never,
-      appliedEpoch: () => 1,
-      crypto: { pending: null, frameEpoch: () => null } as never,
-      localDID: 'bob',
-      protocols: { chat: {} as never },
-      eventHandlers: new Map(),
-      retentionSeconds: 60,
-      appCursorStore: { load: async () => cursor, save: async () => {} },
-      onAppWindowPruned: (event) => void notices.push(event),
-      anchor: () => ({ secret: new Uint8Array(), epoch: 1 }),
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux: mux as never,
+        appliedEpoch: () => 1,
+        crypto: { pending: null, frameEpoch: () => null } as never,
+        localDID: 'bob',
+        protocols: { chat: {} as never },
+        eventHandlers: new Map(),
+        retentionSeconds: 60,
+        appCursorStore: { load: async () => cursor, save: async () => {} },
+        onAppWindowPruned: (event) => void notices.push(event),
+        anchor: () => ({ secret: new Uint8Array(), epoch: 1 }),
+        groupID: () => 'group',
+      }),
+    )
 
     await lane.deliver()
 

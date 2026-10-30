@@ -18,6 +18,7 @@ import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import { encodeAppAAD } from './app-aad.js'
 import type { SafetyHold } from './control/safety.js'
+import type { GroupKey } from './control/types.js'
 import type { GroupCrypto, GroupUnwrapResult } from './crypto.js'
 import {
   decodeDirectedPayload,
@@ -25,6 +26,7 @@ import {
   isLegacyDirectedPayload,
 } from './directed-tag.js'
 import { SendNotAdmissibleError } from './errors.js'
+import { groupHandlerMetadata } from './handlers.js'
 import type { HubMux } from './hub-mux.js'
 import { createOpenOncePath } from './open-once.js'
 
@@ -39,6 +41,8 @@ import { createOpenOncePath } from './open-once.js'
  */
 export type OpenedInbound = {
   sequenceID: string
+  epoch: number
+  incarnation: number
   /** Recovered from the ciphertext by the open, never the hub-asserted one. */
   senderDID: string
   topicID: string
@@ -52,6 +56,7 @@ export type OpenedInbound = {
 export type InboundPath = (onOpened: (message: OpenedInbound) => void) => () => void
 
 export type InboxPathParams = {
+  key: GroupKey
   mux: HubMux
   topicID: string
   unwrap: (bytes: Uint8Array) => GroupUnwrapResult | Promise<GroupUnwrapResult>
@@ -75,6 +80,7 @@ export function createInboxPath(params: InboxPathParams): InboundPath {
     ...(retainOnFailure != null ? { retainOnFailure } : {}),
     project: (message, opened) => {
       if (opened.senderDID == null) return undefined
+      const metadata = groupHandlerMetadata({ epoch: opened.frameEpoch }, params.key)
       // The tag is inside the seal, so it is authenticated to the recovered sender. A legacy or
       // malformed payload is dropped HERE — the open already spent the ratchet key.
       if (isLegacyDirectedPayload(opened.payload)) return undefined
@@ -86,6 +92,7 @@ export function createInboxPath(params: InboxPathParams): InboundPath {
       }
       return {
         sequenceID: message.sequenceID,
+        ...metadata,
         // Normalized at the open: every consumer keyed on this (the directed client's own
         // `senderDID` filter, the acceptor's session binding) must see one canonical sender
         // regardless of which DID form MLS recovered the frame under.
@@ -271,6 +278,8 @@ type ServerSession = {
  * The namespaced, unlikely-to-collide name keeps that reservation explicit.
  */
 const HEADER_SENDER_KEY = 'kumiai/senderDID'
+const HEADER_EPOCH_KEY = 'kumiai/epoch'
+const HEADER_INCARNATION_KEY = 'kumiai/incarnation'
 
 /**
  * Wrap every handler so it surfaces the frame's MLS-recovered sender at `message.payload.iss`,
@@ -286,6 +295,8 @@ function withHeaderSenderIss(handlers: Record<string, unknown>): Record<string, 
   const wrapped: Record<string, unknown> = {}
   for (const [procedure, handler] of Object.entries(handlers)) {
     const fn = handler as (context: {
+      epoch?: unknown
+      incarnation?: unknown
       message?: { header?: Record<string, unknown>; payload?: Record<string, unknown> }
     }) => unknown
     wrapped[procedure] = (context: {
@@ -295,6 +306,8 @@ function withHeaderSenderIss(handlers: Record<string, unknown>): Record<string, 
       const senderDID = message?.header?.[HEADER_SENDER_KEY]
       return fn({
         ...context,
+        epoch: message?.header?.[HEADER_EPOCH_KEY],
+        incarnation: message?.header?.[HEADER_INCARNATION_KEY],
         message: { ...message, payload: { ...message?.payload, iss: senderDID } },
       })
     }
@@ -464,7 +477,12 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     // so the shared Server's handler wrapper can surface it as `message.payload.iss`. The header
     // schema is open (the payload schema is not); the acceptor is the authority on the sender, so
     // the write is unconditional and a caller cannot assert its own.
-    frame.body.header = { ...frame.body.header, [HEADER_SENDER_KEY]: senderDID }
+    frame.body.header = {
+      ...frame.body.header,
+      [HEADER_SENDER_KEY]: senderDID,
+      [HEADER_EPOCH_KEY]: message.epoch,
+      [HEADER_INCARNATION_KEY]: message.incarnation,
+    }
     const stamped = encodeFrame(frame)
     if (existing != null) {
       existing.feed(stamped)

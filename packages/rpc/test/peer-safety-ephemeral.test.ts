@@ -209,6 +209,8 @@ test.each(reasons)('unrouted NACK handoff rechecks after sealing (%s)', async (r
     ...{ safetyHold: () => safety },
   })
   receive?.({
+    epoch: 1,
+    incarnation: 1,
     sequenceID: '1',
     senderDID: 'alice',
     topicID: 'bob-inbox',

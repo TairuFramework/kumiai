@@ -37,7 +37,7 @@ async function startPeerWithLocalDID(localDID: string) {
   const anchorStore = createMemoryAnchorStore()
   const appCursorStore = createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
-    completion: createTestCompletion(),
+    completion: createTestCompletion(mls.control().key, crypto.pending),
     ...memoryApplicationPorts(mls, crypto),
     appOutboxLimit: 128,
     hub,

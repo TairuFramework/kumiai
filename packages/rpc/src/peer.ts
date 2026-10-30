@@ -7,6 +7,7 @@ import { createRuntime } from '@sozai/runtime'
 
 import type { Anchor, AnchorSlot } from './anchor.js'
 import { decodeAppAAD } from './app-aad.js'
+import { appBatch } from './app-batch.js'
 import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
@@ -118,10 +119,9 @@ import {
 import { checkedFetchResult, createLogDelivery, type EpochFloor } from './log-delivery.js'
 import {
   assertOpenedDeliveryEntry,
-  createOpenedRecordHandler,
+  createOpenedAppHandler,
   openedDeliveryBinding,
   requireOpenedDeliveryContext,
-  runOpenedDelivery,
 } from './opened-delivery.js'
 import { createEpochRuntime } from './peer-epoch.js'
 import {
@@ -375,12 +375,21 @@ export function createGroupPeerWithControlWalk<
     throw new TypeError('Installed recovery continuation required')
   if (input.crypto.pending != null && input.mls == null)
     throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
+  const completion = input.completion
+  const batch = appBatch(input.crypto)
   const openedBinding = openedDeliveryBinding(input.crypto.pending)
+  for (const key of [openedBinding?.key, batch?.key, input.control?.key]) {
+    if (
+      key !== undefined &&
+      (key.groupID !== completion.key.groupID || key.incarnation !== completion.key.incarnation)
+    )
+      throw new TypeError('Peer coordination key mismatch')
+  }
   const openedContext =
     input.crypto.pending == null
       ? input.openedDeliveryContext
       : requireOpenedDeliveryContext(input.openedDeliveryContext)
-  const openedScope = { owner: {}, key: openedBinding?.key ?? input.control?.key }
+  const openedScope = { owner: {}, key: completion.key }
   const boundary = createHostBoundary()
   // Certified removal outlives the public host boundary.
   const settlementBoundary = createHostBoundary()
@@ -536,22 +545,13 @@ export function createGroupPeerWithControlWalk<
    * drain outlives any one epoch's runtime (it runs mid-walk, when the app lane has been torn
    * down and not yet rebuilt).
    */
-  const inputBusHandlers = input.handlers as unknown as Record<string, Record<string, unknown>>
   const busHandlers = handlers as unknown as Record<string, Record<string, unknown>>
   const appEventHandlers = new Map<string, BusHandlerMaps['events']>()
-  const openedEvents = new Map<string, BusHandlerMaps['events']>()
   for (const [name, protocol] of Object.entries(protocols)) {
-    openedEvents.set(
-      name,
-      adaptBusHandlers<GroupProtocolDefinition, TTx>(protocol, inputBusHandlers[name] as never, {
-        completion: input.completion,
-        suppress: input.suppress,
-      }).events,
-    )
     appEventHandlers.set(
       name,
       adaptBusHandlers<GroupProtocolDefinition, TTx>(protocol, busHandlers[name] as never, {
-        completion: params.completion,
+        completion,
         suppress,
       }).events,
     )
@@ -610,28 +610,27 @@ export function createGroupPeerWithControlWalk<
    * reads the anchor back through the accessor below rather than being handed one, since the
    * anchor moves under it and every topic it derives belongs to the segment the anchor names.
    */
-  const openedHandler = createOpenedRecordHandler({
-    localDID,
-    protocols,
-    events: openedEvents,
-    handlers: input.handlers,
-  })
+  const openedHandler =
+    openedContext === undefined
+      ? undefined
+      : createOpenedAppHandler<Record<string, GroupProtocolDefinition>, TTx>({
+          localDID,
+          protocols,
+          handlers: input.handlers as never,
+          completion,
+          openedDeliveryContext: openedContext,
+          owner: openedScope.owner,
+          suppress: input.suppress,
+        })
   const appLane = createAppLane({
     mux,
     crypto,
     localDID,
     protocols,
     eventHandlers: appEventHandlers,
-    deliverOpened: (record) =>
-      openedContext === undefined || openedScope.key === undefined
-        ? openedHandler(record)
-        : runOpenedDelivery(openedContext, { owner: openedScope.owner, key: openedScope.key }, () =>
-            openedHandler(record),
-          ),
-    completeOpenedRecord:
-      openedBinding === undefined
-        ? (id) => openedPending?.complete(id) ?? Promise.resolve()
-        : (id) => openedBinding.complete(id),
+    completion,
+    batch,
+    openedHandler,
     claimOpened:
       openedBinding === undefined ? undefined : (record, fn) => openedBinding.claim(record, fn),
     openedFailureSignal: openedBinding?.failureSignal,
@@ -639,7 +638,7 @@ export function createGroupPeerWithControlWalk<
     anchor: () => anchor,
     departing: () => departing,
     groupID: () => commitTopicID,
-    groupKey: params.completion.key,
+    groupKey: completion.key,
     safetyHold,
     commitLaneCaughtUp: () => commitLaneCaughtUp,
     commitWorkVersion: () => commitWorkVersion,
@@ -691,7 +690,10 @@ export function createGroupPeerWithControlWalk<
           handoff: () => appLane.handoffOpened(),
           completed: (id) => appLane.acknowledgeOpened(id),
           canDeliver: () => !disposed,
-          deliver: openedHandler,
+          deliver: (record) => {
+            if (openedHandler === undefined) throw new TypeError('Opened handler required')
+            return openedHandler.deliver(record)
+          },
         })
   let openedDrain: Promise<void> | undefined
   const drainOpened = (): Promise<void> => {
@@ -952,7 +954,7 @@ export function createGroupPeerWithControlWalk<
     localDID,
     protocols,
     handlers: busHandlers as never,
-    completion: params.completion,
+    completion,
     suppress,
     runtime: params.runtime,
     appLogRetentionSeconds,

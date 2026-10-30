@@ -34,10 +34,7 @@ import { decodeStoredValue } from '../../../packages/mls-rpc/src/persistence-cod
 import { recoveryTrustFor } from '../../../packages/mls-rpc/src/registry/trust.js'
 import { createForkRecoveryRealFixture } from '../../../packages/mls-rpc/test/fixtures/captured-recovery.js'
 import { createAsyncLocalOwnershipContext } from '../../../packages/mls-rpc/test/fixtures/ownership-context.js'
-import {
-  createRealGroup,
-  createTestCompletion,
-} from '../../../packages/mls-rpc/test/fixtures/real-group.js'
+import { createRealGroup } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   createRegistryFixture,
   type RegistryFixture,
@@ -81,7 +78,6 @@ async function start(
       const crypto = api.createGroupCrypto({ access })
       const ports = fixture.device.groups.ports(current)
       return createGroupPeer({
-        completion: createTestCompletion(current, access.pending),
         openedDeliveryContext,
         ...options,
         hub: options.hub ?? new FakeHub(),
@@ -340,7 +336,6 @@ async function liveOwner(
       const hub = options.hub ?? params.hub
       hubs.push(hub)
       return createGroupPeer({
-        completion: createTestCompletion(current, access.pending),
         openedDeliveryContext,
         recoveryTarget: params.target,
         ...options,

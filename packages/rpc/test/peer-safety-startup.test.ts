@@ -498,6 +498,9 @@ test.each(reasons.flatMap((reason) => [false, true].map((restart) => [reason, re
       data: { text: 'owed plaintext' },
       message: { payload: { iss: 'bob' } },
       frame: record.frame,
+      epoch: record.epoch,
+      incarnation: record.frame.incarnation,
+      idempotencyKey: record.idempotencyKey,
     })
     expect(complete).toHaveBeenCalledExactlyOnceWith('opened')
     assertZero(network)

@@ -36,7 +36,7 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
-      completion: createTestCompletion(),
+      completion: createTestCompletion(mls.control().key, crypto.pending),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -107,7 +107,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
-      completion: createTestCompletion(),
+      completion: createTestCompletion(mls.control().key, crypto.pending),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -136,7 +136,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
-      completion: createTestCompletion(),
+      completion: createTestCompletion(mls.control().key, crypto.pending),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -172,7 +172,7 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
-      completion: createTestCompletion(),
+      completion: createTestCompletion(mls.control().key, crypto.pending),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,
@@ -212,7 +212,7 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
-      completion: createTestCompletion(),
+      completion: createTestCompletion(mls.control().key, crypto.pending),
       ...memoryApplicationPorts(mls, crypto),
       appOutboxLimit: 128,
       hub,

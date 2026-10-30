@@ -35,12 +35,13 @@ export type BroadcastMessage = {
    * to nobody.
    */
   senderDID?: string
+  epoch?: number
 }
 
 export type ByteTransform = (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
 
 /** Result of unwrapping inbound bytes: plaintext plus the recovered sender. */
-export type UnwrapResult = { payload: Uint8Array; senderDID?: string }
+export type UnwrapResult = { payload: Uint8Array; senderDID?: string; epoch?: number }
 
 /**
  * Inbound transform. May return raw plaintext bytes (no sender) or an
@@ -145,7 +146,7 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
         let handled = true
         Promise.resolve(unwrap(payload))
           .then((result) => {
-            const { payload: bytes, senderDID } = normalizeUnwrap(result)
+            const { payload: bytes, senderDID, epoch } = normalizeUnwrap(result)
             const message = decodeFrame(bytes)
             if (authenticating) {
               // The recovered sender is the ONLY sender here and REPLACES what the bytes claimed
@@ -154,6 +155,8 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
               // where the wire value is all there is.
               if (senderDID == null) delete message.senderDID
               else message.senderDID = senderDID
+              if (epoch == null) delete message.epoch
+              else message.epoch = epoch
             }
             try {
               controller.enqueue(message as R)

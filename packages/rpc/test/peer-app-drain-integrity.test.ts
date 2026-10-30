@@ -5,7 +5,11 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppWindowPruned } from '../src/app-cursor.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import {
+  createDurableTestCrypto,
+  createFakeCrypto,
+  fakeEpochSecret,
+} from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -300,14 +304,13 @@ describe('the drain retains unread frames and advances only completed positions'
     await flush()
     expect(alice.mls.epoch()).toBe(2)
 
-    // The mid-walk publish, hung off the delivery of the epoch-1 frame: at that moment bob's walk
-    // has pulled the segment and has not yet applied the commit that leaves epoch 1. Published
-    // while he is not listening — the live lane must not be what saves this.
+    // Inject during the consuming open, before deferred host delivery can outlive the walk.
     let injected = false
-    const handlers = {
-      'chat/posted': async (ctx: { data: unknown }) => {
-        seen.push(ctx.data)
-        if (injected) return
+    const receiver = createDurableTestCrypto({ localDID: 'bob', state: bob.crypto.saveState() })
+    const unwrap = receiver.unwrap
+    receiver.unwrap = async (...args) => {
+      const opened = await unwrap(...args)
+      if (!injected && args[1]?.frame !== undefined) {
         injected = true
         const atTwo = createFakeCrypto({ epoch: 2, localDID: 'alice' })
         hub.detach('bob')
@@ -320,19 +323,22 @@ describe('the drain retains unread frames and advances only completed positions'
           }),
         })
         hub.reattach('bob')
-      },
+      }
+      return opened
     }
-
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
       members: ['alice', 'bob'],
       restartOf: bob,
-      handlers,
+      crypto: receiver,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) },
     })
     hub.reattach('bob')
     await flush()
 
     expect(restarted.mls.epoch()).toBe(2)
-    expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'mid-walk, at two' }])
+    await vi.waitFor(() =>
+      expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'mid-walk, at two' }]),
+    )
 
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
@@ -412,10 +418,13 @@ describe('the drain delivers only what the live lane would', () => {
     expect(posted).toEqual([{ text: 'a logged event' }])
     expect(changed).toEqual([])
 
-    // And it is consumed rather than left to be re-offered: the cursor is past both frames.
+    // The refused durable record remains pending and holds the cursor.
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frames[1]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBe(frames[0]?.sequenceID)
+    expect(await restarted.crypto.pending?.list()).toMatchObject([
+      { frame: { position: frames[1]?.sequenceID, procedure: 'chat/changed' } },
+    ])
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

@@ -71,7 +71,19 @@ describe('directed RPC over real MLS, end to end', () => {
       group: bobHandle,
       entrySlot: bobSlot,
       handlers: {
-        'chat/double': (ctx: { param: { n: number } }) => {
+        'chat/double': (ctx: {
+          param: { n: number }
+          epoch: number
+          incarnation: number
+          message: { payload: { iss?: string } }
+        }) => {
+          expect(ctx).toMatchObject({
+            epoch: Number(aliceHandle.epoch),
+            incarnation: 1,
+            message: { payload: { iss: aliceID.id } },
+          })
+          expect(ctx).not.toHaveProperty('frame')
+          expect(ctx).not.toHaveProperty('idempotencyKey')
           calls.push(ctx.param.n)
           return { n: ctx.param.n * 2 }
         },

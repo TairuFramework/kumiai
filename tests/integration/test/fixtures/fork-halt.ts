@@ -270,7 +270,6 @@ export async function createCapturedRecoveryFixture(
             },
           })
           const peer = createGroupPeerWithControlWalk<Protocols>({
-            completion: createTestCompletion(current, access.pending),
             openedDeliveryContext,
             ...options,
             hub,

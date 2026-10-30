@@ -8,6 +8,7 @@ import type { PendingAppFrame } from '../src/crypto.js'
 import { GroupSafetyHeldError } from '../src/errors.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { completeTestRecord, createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { chat } from './fixtures/peer.js'
 
@@ -60,21 +61,23 @@ async function fixture() {
   const held = vi.fn((reason: NonNullable<SafetyHold>) => {
     hold ??= reason
   })
-  const lane = createAppLane({
-    groupKey: { groupID: 'group', incarnation: 1 },
-    mux: { retainTopic: retain, fetchTopic: fetch } as never,
-    appliedEpoch: () => reader.epoch(),
-    crypto: reader,
-    localDID: 'bob',
-    protocols: { chat },
-    eventHandlers: new Map([['chat', { emit }]]) as never,
-    retentionSeconds: 60,
-    appCursorStore: cursor,
-    anchor: () => anchor,
-    groupID: () => 'group',
-    safetyHold: () => hold,
-    onSafetyHeld: held,
-  })
+  const lane = createAppLane(
+    testAppLaneParams({
+      groupKey: { groupID: 'group', incarnation: 1 },
+      mux: { retainTopic: retain, fetchTopic: fetch } as never,
+      appliedEpoch: () => reader.epoch(),
+      crypto: reader,
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map([['chat', { emit }]]) as never,
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      anchor: () => anchor,
+      groupID: () => 'group',
+      safetyHold: () => hold,
+      onSafetyHeld: held,
+    }),
+  )
   lanes.push(lane)
   return {
     lane,

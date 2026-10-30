@@ -111,7 +111,15 @@ function openedFrame(protocol: string, senderDID: string, typ: string, rid: stri
     kind: 'message',
     body: { header: {}, payload: { typ, rid } },
   })
-  return { sequenceID: '', senderDID, topicID: 'inbox', protocol, payload }
+  return {
+    epoch: 1,
+    incarnation: 1,
+    sequenceID: '',
+    senderDID,
+    topicID: 'inbox',
+    protocol,
+    payload,
+  }
 }
 
 describe('the responder answers only what it should', () => {

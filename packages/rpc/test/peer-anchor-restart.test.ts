@@ -9,7 +9,7 @@ import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './fixture
 import { memoryApplicationPorts } from './fixtures/app-publication.js'
 import { publishCommit } from './fixtures/commits.js'
 import {
-  createFakeCrypto,
+  createDurableTestCrypto,
   createTestCompletion,
   type FakeCrypto,
   fakeEpochSecret,
@@ -20,6 +20,7 @@ import {
   type MemoryGroupMLS,
   memoryAuthenticator,
 } from './fixtures/memory-group-mls.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
 import { makeMLSPeer, memoryOperationHost } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -68,7 +69,7 @@ function makeRoomPeer(
   handlers: Record<string, unknown>,
   options: RoomPeerOptions = {},
 ) {
-  const crypto = options.crypto ?? createFakeCrypto({ epoch: 1, localDID })
+  const crypto = options.crypto ?? createDurableTestCrypto({ epoch: 1, localDID })
   const mls =
     options.mls ??
     createMemoryGroupMLS({
@@ -81,7 +82,8 @@ function makeRoomPeer(
   const anchorStore = options.anchorStore ?? createMemoryAnchorStore({ backing: mls.anchorStore() })
   const appCursorStore = options.appCursorStore ?? createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
-    completion: createTestCompletion(),
+    openedDeliveryContext,
+    completion: createTestCompletion(mls.control().key, crypto.pending),
     ...memoryApplicationPorts(mls, crypto),
     appOutboxLimit: 128,
     hub,

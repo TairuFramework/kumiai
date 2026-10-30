@@ -58,7 +58,12 @@ import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
 import { memoryApplicationPorts } from './app-publication.js'
 import { publishCommit } from './commits.js'
-import { createFakeCrypto, createTestCompletion, type FakeCrypto } from './fake-crypto.js'
+import {
+  createDurableTestCrypto,
+  createFakeCrypto,
+  createTestCompletion,
+  type FakeCrypto,
+} from './fake-crypto.js'
 import { FakeHub } from './fake-hub.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import { memoryCapturedRecord } from './memory-captured-recovery.js'
@@ -214,8 +219,18 @@ export function makeMLSPeer(
     createMemoryHostDatabase({
       readIdentity: (state, key) => decodeMemoryGroupIdentity(state, key, recoverySecret),
     })
+  const restoredCrypto =
+    restartOf === undefined
+      ? undefined
+      : options.handlers?.['chat/posted'] !== undefined && restartOf.crypto.pending == null
+        ? createDurableTestCrypto({ epoch, localDID, state: restartOf.crypto.saveState() })
+        : restartOf.crypto.restart()
   const crypto =
-    options.crypto ?? restartOf?.crypto.restart() ?? createFakeCrypto({ epoch, localDID })
+    options.crypto ??
+    restoredCrypto ??
+    (options.handlers?.['chat/posted'] === undefined
+      ? createFakeCrypto({ epoch, localDID })
+      : createDurableTestCrypto({ epoch, localDID }))
   const mls =
     options.mls ??
     createMemoryGroupMLS({
@@ -278,7 +293,7 @@ export function makeMLSPeer(
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const ports = memoryControlPorts(mls, crypto, options.build ?? buildOperation, recoverySecret)
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
-    completion: createTestCompletion(mls.control().key, crypto.pending),
+    completion: createTestCompletion(control.key, crypto.pending),
     openedDeliveryContext:
       'openedDeliveryContext' in options ? options.openedDeliveryContext : openedDeliveryContext,
     hub,

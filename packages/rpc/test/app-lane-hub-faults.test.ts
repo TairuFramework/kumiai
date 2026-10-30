@@ -7,17 +7,12 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import type * as AppLaneModule from '../src/app-lane.js'
 import { type AppLaneParams, createAppLane } from '../src/app-lane.js'
 import { FrameEpochError, type PendingAppFrame } from '../src/crypto.js'
-import { adaptBusHandlers } from '../src/handlers.js'
 import { createHubMux } from '../src/hub-mux.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { laneEventObservers, testAppLaneParams } from './fixtures/app-lane.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import {
-  completeTestRecord,
-  createFakeCrypto,
-  createTestCompletion,
-  fakeEpochSecret,
-} from './fixtures/fake-crypto.js'
+import { completeTestRecord, createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 const captured = vi.hoisted(
@@ -92,47 +87,56 @@ function fixture(
       : {}),
   })
   const seen: Array<string> = []
-  const events = adaptBusHandlers(
-    chat,
-    {
-      'chat/posted': ({ data }: { data: { text: string } }) => {
-        seen.push(data.text)
-        return options.handler?.()
-      },
-    } as never,
-    { completion: createTestCompletion() },
-  ).events
+  const handlers = {
+    'chat/posted': ({ data }: { data: { text: string } }) => {
+      seen.push(data.text)
+      return options.handler?.()
+    },
+  }
   const cursor = createMemoryAppCursorStore()
   const hub = new DurableFakeHub()
   const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
   const pruned = vi.fn()
   const drains = { pending: 0, peak: 0, starts: 0 }
-  const lane = createAppLane({
-    groupKey: { groupID: 'group', incarnation: 1 },
-    mux,
-    crypto: reader,
-    appliedEpoch: () => reader.epoch(),
-    localDID: 'bob',
-    protocols: options.protocols ?? { chat },
-    eventHandlers: new Map(
-      Object.keys(options.protocols ?? { chat }).map((name) => [name, events]),
-    ),
-    retentionSeconds: 60,
-    appCursorStore: cursor,
-    onAppWindowPruned: pruned,
-    anchor: () => anchor,
-    groupID: () => 'group',
-    scheduleDrain: async (drain) => {
-      drains.pending++
-      drains.starts++
-      drains.peak = Math.max(drains.peak, drains.pending)
-      try {
-        await drain()
-      } finally {
-        drains.pending--
-      }
-    },
-  })
+  const lane = createAppLane(
+    testAppLaneParams({
+      groupKey: { groupID: 'group', incarnation: 1 },
+      mux,
+      crypto: reader,
+      appliedEpoch: () => reader.epoch(),
+      localDID: 'bob',
+      protocols: options.protocols ?? { chat },
+      ...(options.durable
+        ? {
+            handlers: Object.fromEntries(
+              Object.keys(options.protocols ?? { chat }).map((name) => [name, handlers]),
+            ),
+          }
+        : {
+            eventHandlers: laneEventObservers(
+              Object.fromEntries(
+                Object.keys(options.protocols ?? { chat }).map((name) => [name, handlers]),
+              ),
+              { groupID: 'group', incarnation: 1 },
+            ),
+          }),
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      onAppWindowPruned: pruned,
+      anchor: () => anchor,
+      groupID: () => 'group',
+      scheduleDrain: async (drain) => {
+        drains.pending++
+        drains.starts++
+        drains.peak = Math.max(drains.peak, drains.pending)
+        try {
+          await drain()
+        } finally {
+          drains.pending--
+        }
+      },
+    }),
+  )
   onTestFinished(() => {
     lane.dispose()
     mux.dispose()

@@ -1,10 +1,17 @@
 import { describe, expect, test } from 'vitest'
 
 import { decodeAppAAD } from '../src/app-aad.js'
+import type { GroupCrypto } from '../src/crypto.js'
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
+import { createMemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { memoryApplicationPorts } from './fixtures/app-publication.js'
+import { createDurableTestCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
+import { memoryOperationHost } from './fixtures/peer.js'
 
 const room = defineGroupProtocol({
   'room/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
@@ -16,7 +23,7 @@ type Protocols = { room: typeof room }
 type Aad = ReturnType<typeof decodeAppAAD>
 
 function peer(hub: FakeHub, localDID: string, handlers: Record<string, unknown>) {
-  const base = createFakeCrypto({ epoch: 1, localDID })
+  const base = createDurableTestCrypto({ epoch: 1, localDID })
   const sealed: Array<Aad> = []
   const opened: Array<Aad> = []
   const crypto = {
@@ -25,14 +32,26 @@ function peer(hub: FakeHub, localDID: string, handlers: Record<string, unknown>)
       sealed.push(decodeAppAAD(opts?.aad ?? new Uint8Array()))
       return base.wrap(bytes, opts)
     },
-    unwrap: (bytes: Uint8Array, opts?: { expectedAAD?: Uint8Array }) => {
+    unwrap: (bytes: Uint8Array, opts?: Parameters<GroupCrypto['unwrap']>[1]) => {
       opened.push(decodeAppAAD(opts?.expectedAAD ?? new Uint8Array()))
       return base.unwrap(bytes, opts)
     },
   }
+  const mls = createMemoryGroupMLS({
+    recoverySecret: new Uint8Array(32).fill(91),
+    localDID,
+    epoch: 1,
+  })
   return {
     peer: createGroupPeer<Protocols>({
-      completion: createTestCompletion(),
+      completion: createTestCompletion(mls.control().key, crypto.pending),
+      openedDeliveryContext,
+      mls,
+      ...memoryApplicationPorts(mls, crypto),
+      appOutboxLimit: 16,
+      ...memoryOperationHost(mls),
+      anchorStore: createMemoryAnchorStore({ backing: mls.anchorStore() }),
+      appCursorStore: createMemoryAppCursorStore(),
       hub,
       crypto,
       localDID,
@@ -64,7 +83,7 @@ describe('versioned AAD through app and directed lanes', () => {
     expect(await directed.request('room/double', { param: { n: 21 } })).toEqual({ n: 42 })
     await flush()
 
-    expect(seen).toEqual(['posted', 'typing'])
+    expect(seen.toSorted()).toEqual(['posted', 'typing'])
     expect(alice.sealed).toContainEqual(expect.objectContaining({ intent: 'log' }))
     expect(alice.sealed.filter((aad) => aad?.intent === 'ephemeral').length).toBeGreaterThanOrEqual(
       2,

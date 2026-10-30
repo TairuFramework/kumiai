@@ -24,13 +24,14 @@ describe('createInboxPath tag decoding', () => {
   test('surfaces the protocol and strips the tag', async () => {
     const mux = fakeMux()
     const path = createInboxPath({
+      key: { groupID: 'directed-test', incarnation: 3 },
       mux: mux as unknown as HubMux,
       topicID: 't',
       unwrap: async (b: Uint8Array) => ({
         payload: b,
         senderDID: 'did:key:alice',
-        epoch: 1,
-        frameEpoch: 1,
+        epoch: 9,
+        frameEpoch: 4,
       }),
     })
     const seen: Array<OpenedInbound> = []
@@ -40,19 +41,21 @@ describe('createInboxPath tag decoding', () => {
     await vi.waitFor(() => expect(seen).toHaveLength(1))
     const [first] = seen
     expect(first?.protocol).toBe('chat')
+    expect(first).toMatchObject({ epoch: 4, incarnation: 3 })
     expect(first?.payload).toEqual(inner)
   })
 
   test('drops a legacy untagged frame', async () => {
     const mux = fakeMux()
     const path = createInboxPath({
+      key: { groupID: 'directed-test', incarnation: 3 },
       mux: mux as unknown as HubMux,
       topicID: 't',
       unwrap: async (b: Uint8Array) => ({
         payload: b,
         senderDID: 'did:key:alice',
-        epoch: 1,
-        frameEpoch: 1,
+        epoch: 9,
+        frameEpoch: 4,
       }),
     })
     const seen: Array<OpenedInbound> = []
@@ -61,4 +64,30 @@ describe('createInboxPath tag decoding', () => {
     await new Promise((r) => setTimeout(r, 10))
     expect(seen).toHaveLength(0)
   })
+})
+
+test('missing authenticated frame epoch refuses directed ingress', async () => {
+  const mux = fakeMux()
+  const path = createInboxPath({
+    key: { groupID: 'directed-origin', incarnation: 3 },
+    mux: mux as unknown as HubMux,
+    topicID: 't',
+    unwrap: async (payload) => ({
+      payload,
+      senderDID: 'alice',
+      epoch: 9,
+      frameEpoch: undefined as never,
+    }),
+  })
+  const seen = vi.fn()
+  const unsubscribe = path(seen)
+  mux.deliver(
+    encodeDirectedPayload(
+      'chat',
+      fromUTF(JSON.stringify({ v: 1, sessionID: 's', seq: 0, kind: 'message' })),
+    ),
+  )
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  expect(seen).not.toHaveBeenCalled()
+  unsubscribe()
 })

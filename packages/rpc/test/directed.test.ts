@@ -3,7 +3,7 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
 import { encodeFrame } from '@kumiai/hub-tunnel'
 import { createRuntime } from '@sozai/runtime'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { decodeAppAAD } from '../src/app-aad.js'
 import type { GroupUnwrapResult } from '../src/crypto.js'
@@ -67,7 +67,12 @@ function member(
     mux,
     localDID,
     selfInboxTopic: topicID,
-    inbound: createInboxPath({ mux, topicID, unwrap: unwrap ?? crypto.unwrap }),
+    inbound: createInboxPath({
+      key: { groupID: 'directed-test', incarnation: 3 },
+      mux,
+      topicID,
+      unwrap: unwrap ?? crypto.unwrap,
+    }),
     resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
     protocol,
     protocolName: 'rpc',
@@ -101,7 +106,12 @@ function caller(
     memberDID,
     sendTopicID: inboxTopic(SECRET, EPOCH, memberDID),
     receiveTopicID,
-    inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
+    inbound: createInboxPath({
+      key: { groupID: 'directed-test', incarnation: 3 },
+      mux,
+      topicID: receiveTopicID,
+      unwrap: crypto.unwrap,
+    }),
     runtime: createRuntime({ getRandomID: () => sessionID }),
     protocol: 'rpc',
     wrap: (bytes, opts) => {
@@ -511,7 +521,12 @@ describe('directed RPC security', () => {
       mux: bobMux,
       localDID: 'bob',
       selfInboxTopic: bobTopic,
-      inbound: createInboxPath({ mux: bobMux, topicID: bobTopic, unwrap: delayedUnwrap }),
+      inbound: createInboxPath({
+        key: { groupID: 'directed-test', incarnation: 3 },
+        mux: bobMux,
+        topicID: bobTopic,
+        unwrap: delayedUnwrap,
+      }),
       resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
       protocol,
       protocolName: 'rpc',
@@ -542,4 +557,140 @@ describe('directed RPC security', () => {
     await bobAcceptor.dispose()
     await bobMux.dispose()
   })
+})
+
+test('directed invocation metadata is per frame across a surviving session', async () => {
+  const hub = new FakeHub()
+  const muxA = createHubMux({ hub, localDID: 'alice' })
+  const muxB = createHubMux({ hub, localDID: 'bob' })
+  const a = createFakeCrypto({ localDID: 'alice', epoch: 4 })
+  const b = createFakeCrypto({ localDID: 'bob', epoch: 4, retainedEpochs: 16 })
+  for (const epoch of [5, 6, 7, 9]) b.setEpoch(epoch)
+  const aReceiver = createFakeCrypto({ localDID: 'alice', epoch: 9 })
+  const key = { groupID: 'directed-metadata', incarnation: 3 }
+  const seen: Array<{
+    epoch: number
+    incarnation: number
+    message: { payload: { iss?: string } }
+  }> = []
+  const release = Promise.withResolvers<void>()
+  const entered = Promise.withResolvers<void>()
+  const metadataProtocol = {
+    changed: { type: 'event', data: { type: 'object' } },
+    ping: { type: 'request', param: { type: 'object' }, result: { type: 'number' } },
+    stream: {
+      type: 'stream',
+      param: { type: 'object' },
+      receive: { type: 'number' },
+      result: { type: 'number' },
+    },
+    channel: {
+      type: 'channel',
+      param: { type: 'object' },
+      send: { type: 'number' },
+      receive: { type: 'number' },
+      result: { type: 'number' },
+    },
+  } as const
+  const receiveTopicID = 'alice-inbox'
+  const sendTopicID = 'bob-inbox'
+  const acceptor = createInboxAcceptor({
+    mux: muxB,
+    localDID: 'bob',
+    selfInboxTopic: sendTopicID,
+    inbound: createInboxPath({ key, mux: muxB, topicID: sendTopicID, unwrap: b.unwrap }),
+    resolveSendTopic: () => receiveTopicID,
+    protocolName: 'metadata',
+    protocol: metadataProtocol,
+    handlers: {
+      changed: (context) => {
+        seen.push(context as never)
+      },
+      ping: (context) => {
+        seen.push(context as never)
+        return 42
+      },
+      stream: async (context) => {
+        seen.push(context as never)
+        entered.resolve()
+        await release.promise
+        expect(context).toMatchObject({ epoch: 5, incarnation: 3 })
+        const writer = context.writable.getWriter()
+        await writer.write(5)
+        await writer.close()
+        return 5
+      },
+      channel: async (context) => {
+        seen.push(context as never)
+        const writer = context.writable.getWriter()
+        const reader = context.readable.getReader()
+        const { value } = await reader.read()
+        reader.releaseLock()
+        expect(context).toMatchObject({ epoch: 6, incarnation: 3 })
+        if (value !== undefined) await writer.write(value)
+        await writer.close()
+        return 6
+      },
+    },
+    wrap: b.wrap,
+  })
+  const client = createDirectedClient<typeof metadataProtocol>({
+    mux: muxA,
+    localDID: 'alice',
+    memberDID: 'bob',
+    sendTopicID,
+    receiveTopicID,
+    inbound: createInboxPath({ key, mux: muxA, topicID: receiveTopicID, unwrap: aReceiver.unwrap }),
+    protocol: 'metadata',
+    wrap: a.wrap,
+  })
+  const header = {
+    typ: 'JWT',
+    alg: 'none',
+    'kumiai/epoch': 99,
+    'kumiai/incarnation': 99,
+    'kumiai/senderDID': 'forged',
+  } as const
+  try {
+    await client.client.sendEvent('changed', { data: {}, header })
+    await vi.waitFor(() => expect(seen).toHaveLength(1))
+    expect(seen[0]).toMatchObject({
+      epoch: 4,
+      incarnation: 3,
+      message: { payload: { iss: 'alice' } },
+    })
+    a.setEpoch(5)
+    const stream = client.client.createStream('stream', { param: {}, header })
+    await entered.promise
+    a.setEpoch(6)
+    expect(await client.client.request('ping', { param: {}, header })).toBe(42)
+    expect(seen[2]).toMatchObject({ epoch: 6, incarnation: 3 })
+    release.resolve()
+    const values: Array<number> = []
+    for await (const value of stream.readable) values.push(value)
+    expect(await stream).toBe(5)
+    expect(values).toEqual([5])
+    const channel = client.client.createChannel('channel', { param: {}, header })
+    await vi.waitFor(() => expect(seen).toHaveLength(4))
+    a.setEpoch(7)
+    await channel.send(6)
+    const replies: Array<number> = []
+    for await (const value of channel.readable) replies.push(value)
+    expect(await channel).toBe(6)
+    expect(replies).toEqual([6])
+    expect(await client.client.request('ping', { param: {}, header })).toBe(42)
+    expect(seen[4]).toMatchObject({ epoch: 7, incarnation: 3 })
+    for (const context of seen) {
+      expect(context.message.payload.iss).toBe('alice')
+      expect(context).not.toHaveProperty('frame')
+      expect(context).not.toHaveProperty('idempotencyKey')
+      expect(context).not.toHaveProperty('tx')
+    }
+  } finally {
+    release.resolve()
+    await client.dispose()
+    await acceptor.dispose()
+    muxA.dispose()
+    muxB.dispose()
+  }
 })

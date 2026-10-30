@@ -337,3 +337,44 @@ describe('createBroadcastResponder', () => {
     await client.dispose()
   })
 })
+
+test('anycast metadata survives suppression delay', async () => {
+  const bus = createMemoryBus()
+  const sleeping = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let epoch = 7
+  const handler = vi.fn(() => 'ok')
+  const responder = createBroadcastResponder({
+    transport: createBroadcastTransport({
+      topicID: TOPIC,
+      bus,
+      unwrap: (payload) => ({ payload, senderDID: 'alice', epoch }),
+    }),
+    from: 'bob',
+    requestHandlers: { ping: suppressible(handler) },
+    sleep: async () => {
+      sleeping.resolve()
+      await release.promise
+    },
+  })
+  try {
+    await bus.publish(
+      TOPIC,
+      encodeFrame({
+        payload: {
+          typ: 'ctrl',
+          prc: 'ping',
+          data: { kind: 'req', rid: 'metadata-request', prm: {} },
+        },
+      }),
+    )
+    await sleeping.promise
+    epoch = 9
+    release.resolve()
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce())
+    expect(handler.mock.calls).toMatchObject([[{}, { senderDID: 'alice', epoch: 7 }]])
+  } finally {
+    release.resolve()
+    await responder.dispose()
+  }
+})

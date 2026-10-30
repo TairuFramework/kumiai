@@ -5,17 +5,12 @@ import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
-import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import {
-  completeTestRecord,
-  createFakeCrypto,
-  createTestCompletion,
-  fakeEpochSecret,
-} from './fixtures/fake-crypto.js'
+import { completeTestRecord, createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
@@ -62,36 +57,31 @@ function fixture(
     },
   } as const
   const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
-  const lane = createAppLane({
-    groupKey: { groupID: 'group', incarnation: 1 },
-    mux: {
-      retainTopic() {},
-      async fetchTopic({ after }: { after?: string }) {
-        const page = messages.filter((message) => after == null || message.sequenceID > after)
-        return {
-          messages: page,
-          head: messages.at(-1)?.sequenceID ?? null,
-          oldest: messages[0]?.sequenceID ?? null,
-        }
-      },
-    } as never,
-    appliedEpoch: () => reader.epoch(),
-    crypto: reader,
-    localDID: 'bob',
-    protocols,
-    eventHandlers: new Map([
-      [
-        'chat',
-        adaptBusHandlers(protocols.chat, { 'chat/posted': handler } as never, {
-          completion: createTestCompletion(),
-        }).events,
-      ],
-    ]),
-    retentionSeconds: 60,
-    appCursorStore: cursor,
-    anchor: () => anchor,
-    groupID: () => 'group',
-  })
+  const lane = createAppLane(
+    testAppLaneParams({
+      groupKey: { groupID: 'group', incarnation: 1 },
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          const page = messages.filter((message) => after == null || message.sequenceID > after)
+          return {
+            messages: page,
+            head: messages.at(-1)?.sequenceID ?? null,
+            oldest: messages[0]?.sequenceID ?? null,
+          }
+        },
+      } as never,
+      appliedEpoch: () => reader.epoch(),
+      crypto: reader,
+      localDID: 'bob',
+      protocols,
+      handlers: { chat: { 'chat/posted': handler } },
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      anchor: () => anchor,
+      groupID: () => 'group',
+    }),
+  )
   const append = async (position: string, text: string, epoch = 1) => {
     messages.push({
       sequenceID: position,
@@ -410,40 +400,35 @@ describe('durable delivery queue', () => {
     )
     const seen = vi.fn()
     const complete = vi.fn(async () => {})
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux: {
-        retainTopic() {},
-        async fetchTopic({ topicID: requested }: { topicID: string }) {
-          if (requested !== topicID) throw new Error('other protocol fetch failed')
-          return { messages: [], head: null, oldest: null }
-        },
-      } as never,
-      appliedEpoch: () => 1,
-      crypto: createFakeCrypto({
-        localDID: 'bob',
-        pending: {
-          async persistOpened() {},
-          async list() {
-            return [record]
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux: {
+          retainTopic() {},
+          async fetchTopic({ topicID: requested }: { topicID: string }) {
+            if (requested !== topicID) throw new Error('other protocol fetch failed')
+            return { messages: [], head: null, oldest: null }
           },
-          complete,
-        },
+        } as never,
+        appliedEpoch: () => 1,
+        crypto: createFakeCrypto({
+          localDID: 'bob',
+          pending: {
+            async persistOpened() {},
+            async list() {
+              return [record]
+            },
+            complete,
+          },
+        }),
+        localDID: 'bob',
+        protocols: { chat, other: chat },
+        handlers: { chat: { 'chat/posted': seen } },
+        retentionSeconds: 60,
+        anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+        groupID: () => 'group',
       }),
-      localDID: 'bob',
-      protocols: { chat, other: chat },
-      eventHandlers: new Map([
-        [
-          'chat',
-          adaptBusHandlers(chat, { 'chat/posted': seen } as never, {
-            completion: createTestCompletion(),
-          }).events,
-        ],
-      ]),
-      retentionSeconds: 60,
-      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
-      groupID: () => 'group',
-    })
+    )
     await lane.restore([record])
     await expect(lane.deliver()).rejects.toThrow('other protocol fetch failed')
     await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
@@ -481,7 +466,7 @@ describe('durable delivery queue', () => {
     })
     await appendRaw('000000000001', fromUTF('{'))
     await appendRaw('000000000002', fromUTF('{"payload":{"typ":"request","prc":"chat/posted"}}'))
-    await appendRaw('000000000003', encodeEventFrame('chat/changed', {}))
+    await appendRaw('000000000003', encodeEventFrame('chat/posted', { text: null }))
     await appendRaw('000000000004', encodeEventFrame('chat/posted', { text: 42 }))
     await appendRaw('000000000005', payload('echo'), true)
     await append('000000000006', 'valid')

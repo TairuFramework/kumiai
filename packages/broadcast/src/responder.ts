@@ -6,13 +6,13 @@ import type { BroadcastMessage } from './transport.js'
 import { defaultJitter, defaultSleep, isSuppressible } from './utils.js'
 
 /** The payload an inbound fire-and-forget event carries to its listener. */
-export type BusEvent = { data: unknown; senderDID?: string }
+export type BusEvent = { data: unknown; senderDID?: string; epoch?: number }
 /** Event fan-out keyed by procedure name. */
 export type BusEvents = Record<string, BusEvent>
 
 export type BroadcastHandler = (
   prm: unknown,
-  context?: { senderDID?: string; signal?: AbortSignal },
+  context?: { senderDID?: string; epoch?: number; signal?: AbortSignal },
 ) => unknown | Promise<unknown>
 export type SuppressConfig = { jitterMs?: number; suppressTtlMs?: number }
 export type SuppressibleHandler = BroadcastHandler & { suppress: SuppressConfig }
@@ -86,7 +86,7 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     prc: string,
     request: RequestData,
     handler: BroadcastHandler | SuppressibleHandler,
-    senderDID?: string,
+    transit: { senderDID?: string; epoch?: number },
   ): Promise<void> => {
     // Gather requests must reach every responder — bypass storm-collapse.
     const isGather = request.gather === true
@@ -107,7 +107,7 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     inFlight.add(controller)
     let reply: ReplyData
     try {
-      const ok = await handler(request.prm, { senderDID, signal: controller.signal })
+      const ok = await handler(request.prm, { ...transit, signal: controller.signal })
       reply = { kind: 'res', rid: request.rid, ok }
     } catch (error) {
       reply = {
@@ -165,7 +165,10 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
         ) {
           const handler = requestHandlers[payload.prc]
           if (handler != null) {
-            void handleRequest(payload.prc, data as RequestData, handler, msg.senderDID)
+            void handleRequest(payload.prc, data as RequestData, handler, {
+              senderDID: msg.senderDID,
+              epoch: msg.epoch,
+            })
           }
         }
         // Any other ctrl frame is malformed control; drop it. It is never an app event.
@@ -177,7 +180,7 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
         continue
       }
       void events
-        ?.emit(payload.prc, { data: payload.data, senderDID: msg.senderDID })
+        ?.emit(payload.prc, { data: payload.data, senderDID: msg.senderDID, epoch: msg.epoch })
         .catch(() => {})
     }
   })().catch(() => {})

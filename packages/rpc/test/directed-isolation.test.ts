@@ -1,6 +1,7 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { describe, expect, test } from 'vitest'
 
+import type { GroupHandlerMetadata } from '../src/handlers.js'
 import { createGroupPeer } from '../src/peer.js'
 import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -42,13 +43,19 @@ describe('directed frames route to only the addressed protocol', () => {
     const a = makePeer(hub, 'a', {})
     const b = makePeer(hub, 'b', {
       alpha: {
-        ping: () => {
+        ping: (context: GroupHandlerMetadata) => {
+          expect(context).toMatchObject({ epoch: 1, incarnation: 1 })
+          expect(context).not.toHaveProperty('frame')
+          expect(context).not.toHaveProperty('idempotencyKey')
           counts.alpha++
           return { from: 'alpha' }
         },
       },
       beta: {
-        ping: () => {
+        ping: (context: GroupHandlerMetadata) => {
+          expect(context).toMatchObject({ epoch: 1, incarnation: 1 })
+          expect(context).not.toHaveProperty('frame')
+          expect(context).not.toHaveProperty('idempotencyKey')
           counts.beta++
           return { from: 'beta' }
         },
@@ -73,13 +80,19 @@ describe('directed frames route to only the addressed protocol', () => {
     const a = makePeer(hub, 'a', {})
     const b = makePeer(hub, 'b', {
       alpha: {
-        ping: () => {
+        ping: (context: GroupHandlerMetadata) => {
+          expect(context).toMatchObject({ epoch: 1, incarnation: 1 })
+          expect(context).not.toHaveProperty('frame')
+          expect(context).not.toHaveProperty('idempotencyKey')
           counts.alpha++
           return { from: 'alpha' }
         },
       },
       beta: {
-        ping: () => {
+        ping: (context: GroupHandlerMetadata) => {
+          expect(context).toMatchObject({ epoch: 1, incarnation: 1 })
+          expect(context).not.toHaveProperty('frame')
+          expect(context).not.toHaveProperty('idempotencyKey')
           counts.beta++
           return { from: 'beta' }
         },

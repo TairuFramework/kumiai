@@ -546,3 +546,21 @@ export function completeTestRecord(
   const frame = { ...key, ...record.frame, procedure }
   return { ...record, frame, epoch, idempotencyKey: appFrameIdempotencyKey(frame) }
 }
+
+export function createDurableTestCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
+  const records = new Map<string, PendingAppFrame>()
+  return createFakeCrypto({
+    ...options,
+    pending: options.pending ?? {
+      async persistOpened(_state, record) {
+        records.set(record.frame.id, record)
+      },
+      async list() {
+        return [...records.values()]
+      },
+      async complete(id) {
+        records.delete(id)
+      },
+    },
+  })
+}

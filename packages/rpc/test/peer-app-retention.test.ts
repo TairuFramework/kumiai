@@ -5,8 +5,14 @@ import { describe, expect, test } from 'vitest'
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
-import { createFakeCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
+import { createMemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { memoryApplicationPorts } from './fixtures/app-publication.js'
+import { createDurableTestCrypto, createTestCompletion } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { openedDeliveryContext } from './fixtures/opened-delivery.js'
+import { memoryOperationHost } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
 
@@ -24,9 +30,21 @@ const room = defineGroupProtocol({
 type Protocols = { room: typeof room }
 
 function makePeer(hub: FakeHub, localDID: string, handlers: Record<string, unknown>) {
-  const crypto = createFakeCrypto({ epoch: 1, localDID })
+  const crypto = createDurableTestCrypto({ epoch: 1, localDID })
+  const mls = createMemoryGroupMLS({
+    recoverySecret: new Uint8Array(32).fill(91),
+    localDID,
+    epoch: 1,
+  })
   const peer = createGroupPeer<Protocols>({
-    completion: createTestCompletion(),
+    completion: createTestCompletion(mls.control().key, crypto.pending),
+    openedDeliveryContext,
+    mls,
+    ...memoryApplicationPorts(mls, crypto),
+    appOutboxLimit: 16,
+    ...memoryOperationHost(mls),
+    anchorStore: createMemoryAnchorStore({ backing: mls.anchorStore() }),
+    appCursorStore: createMemoryAppCursorStore(),
     hub,
     crypto,
     localDID,
@@ -71,7 +89,7 @@ describe('per-procedure retention for app events', () => {
     // crypto: opening is a consuming operation on the real port (a ratchet generation is spent),
     // and bob's peer opened this frame on the live lane above. The claim under test is that the
     // frame is RETAINED and openable at this epoch, which is exactly what a fresh reader shows.
-    const reader = createFakeCrypto({ epoch: 1, localDID: 'carol' })
+    const reader = createDurableTestCrypto({ epoch: 1, localDID: 'carol' })
     const [firstMessage] = drained.messages
     if (firstMessage === undefined) throw new Error('expected a drained message')
     const opened = await reader.unwrap(firstMessage.payload)

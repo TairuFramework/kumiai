@@ -52,7 +52,6 @@ import * as verdictAPI from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
 import { drainRegistryMaintenance } from '../src/testing.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
-import { createTestCompletion } from './fixtures/real-group.js'
 import {
   createNotMemberFixture,
   createRegistryFixture,
@@ -619,7 +618,6 @@ describe('registry peer recovery coordination', () => {
           createPeer: async (key, options) => {
             const ports = f.device.groups.ports(key)
             return createGroupPeer({
-              completion: createTestCompletion(key),
               openedDeliveryContext,
               ...options,
               hub,
@@ -2236,5 +2234,32 @@ test('not member retains target behind reason', async () => {
     owner?.dispose()
     await owner?.drained()
     await f.close()
+  }
+})
+
+test('registry peer forwards the canonical completion for its requested key', async () => {
+  const s = await setup()
+  const owner = await s.start()
+  try {
+    await owner.ready
+    const requested = s.created[0]?.key
+    if (requested === undefined) throw new Error('Missing peer creation')
+    const options = s.created[0]?.options
+    const completion = api.createHandlerCompletion({
+      persistence: s.f.device.groups,
+      key: requested,
+    })
+    expect(options?.completion).toBe(completion)
+    expect(options?.completion.key).toEqual(requested)
+    expect(options?.completion).not.toBe(options?.recoveryCompletion)
+    expect(options?.completion).not.toBe(
+      api.createHandlerCompletion({
+        persistence: s.f.device.groups,
+        key: requested.incarnation === 1 ? destination : source,
+      }),
+    )
+  } finally {
+    owner.dispose()
+    await owner.drained()
   }
 })

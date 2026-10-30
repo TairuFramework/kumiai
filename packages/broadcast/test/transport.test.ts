@@ -155,3 +155,34 @@ describe('createBroadcastTransport', () => {
     expect(() => decodeFrame(v1)).toThrow(/version/i)
   })
 })
+
+test('wire metadata cannot override authenticated transit facts', async () => {
+  const bus = createMemoryBus()
+  let epoch: number | undefined = 7
+  const receiver = createBroadcastTransport({
+    topicID: 'metadata',
+    bus,
+    unwrap: (payload) => ({ payload, senderDID: 'alice', epoch }),
+  })
+  try {
+    for (const expected of [7, undefined]) {
+      epoch = expected
+      await bus.publish(
+        'metadata',
+        fromUTF(
+          JSON.stringify({
+            v: 2,
+            payload: { typ: 'event', prc: 'posted', data: {} },
+            senderDID: 'forged',
+            epoch: 99,
+          }),
+        ),
+      )
+      const message = (await receiver.read()).value
+      expect(message).toMatchObject({ senderDID: 'alice' })
+      expect((message as { epoch?: number }).epoch).toBe(expected)
+    }
+  } finally {
+    await receiver.dispose()
+  }
+})

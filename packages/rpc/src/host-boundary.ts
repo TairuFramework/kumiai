@@ -7,6 +7,7 @@ import type { CheckpointPort, CheckpointService } from './checkpoint-types.js'
 import type { ControlValidation, ControlValidationPort } from './control/search.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
 import { PeerDisposedError } from './errors.js'
+import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
 import type { GroupPeerMLSParams, GroupPeerParams } from './peer-types.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 import type { CapturedPendingRecovery, CapturedRecoveryPort } from './recovery-types.js'
@@ -87,6 +88,12 @@ export const cryptoHostMembers = {
   openEntries: 'host',
   pending: 'port',
 } as const satisfies HostMembers<GroupCrypto>
+
+export const handlerCompletionHostMembers = {
+  key: 'data',
+  complete: 'host',
+  transact: 'host',
+} as const satisfies HostMembers<HandlerCompletion<GroupTransaction>>
 
 export const pendingFrameHostMembers = {
   list: 'host',
@@ -375,6 +382,12 @@ export function wrapPeerHost<TParams extends object>(
             ? undefined
             : selectHostMembers(boundary, crypto.pending, pendingFrameHostMembers),
       })
+    } else if (key === 'completion') {
+      selected = selectHostMembers(
+        boundary,
+        value as HandlerCompletion<GroupTransaction>,
+        handlerCompletionHostMembers,
+      )
     } else if (key === 'validation') {
       const port = selectHostMembers(
         boundary,

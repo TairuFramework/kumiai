@@ -8,6 +8,7 @@ import {
   type GroupCrypto,
   type LogHub,
   type MailboxHub,
+  normaliseOpenedAppHandler,
   OpenedDeliveryReentryError,
   openedDeliveryBinding,
   protocolTopic,
@@ -1044,14 +1045,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           localDID,
           pending: {
             async persistOpened(_state, record) {
-              await env.plant([
-                {
-                  ...record,
-                  frame: { ...record.frame, ...env.key, procedure: 'posted' },
-                  epoch: 1,
-                  idempotencyKey: record.frame.id,
-                },
-              ])
+              await env.plant([record])
             },
             list: env.pending,
             complete: (id) => binding.complete(id),
@@ -1079,11 +1073,21 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           groupID: () => env.key.groupID,
           appCursorStore: cursor,
           claimOpened: (record, fn) => binding.claim(record, fn),
-          completeOpenedRecord: (id) => binding.complete(id),
-          deliverOpened: async () => {
-            entered.resolve()
-            await releaseHandler.promise
-          },
+          completion: createHandlerCompletion({
+            persistence: env.fixture.device.groups,
+            key: env.key,
+          }),
+          openedHandler: normaliseOpenedAppHandler({
+            completion: createHandlerCompletion({
+              persistence: env.fixture.device.groups,
+              key: env.key,
+            }),
+            openedDeliveryContext: env.context,
+            deliver: async () => {
+              entered.resolve()
+              await releaseHandler.promise
+            },
+          }),
         })
         const detach = binding.attach(env.context, {
           handoff: () => lane.handoffOpened(),

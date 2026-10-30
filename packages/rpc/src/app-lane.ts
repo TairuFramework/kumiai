@@ -7,6 +7,7 @@ import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { Anchor } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
+import type { AppBatchBinding } from './app-batch.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import { createMonotoneClock } from './clock.js'
@@ -27,10 +28,11 @@ import {
   type LogPosition,
 } from './cursor.js'
 import { GroupSafetyHeldError, PeerDisposedError } from './errors.js'
+import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
 import type { BusHandlerMaps } from './handlers.js'
 import { notifyHost } from './host-notice.js'
 import { APP_OUTSTANDING_FETCHES_MAX, AppFetchBusyError, type HubMux } from './hub-mux.js'
-import { createOpenedRecordHandler } from './opened-delivery.js'
+import { normaliseOpenedAppHandler, type OpenedAppHandler } from './opened-delivery.js'
 import { retentionOf } from './protocol.js'
 import { protocolTopic } from './topic.js'
 
@@ -108,7 +110,10 @@ type ReportPrunedWindowParams = {
   oldest: string | null
 }
 
-export type AppLaneParams = {
+export type AppLaneParams<TTx extends GroupTransaction = GroupTransaction> = {
+  completion: HandlerCompletion<TTx>
+  batch?: AppBatchBinding
+  openedHandler?: OpenedAppHandler<TTx>
   mux: HubMux
   crypto: GroupCrypto
   localDID: string
@@ -119,8 +124,6 @@ export type AppLaneParams = {
    * same door.
    */
   eventHandlers: Map<string, BusHandlerMaps['events']>
-  deliverOpened?: (record: PendingAppFrame) => Promise<void>
-  completeOpenedRecord?: (id: string) => Promise<void>
   claimOpened?: (record: PendingAppFrame, fn: () => Promise<void>) => Promise<boolean>
   openedFailureSignal?: AbortSignal
   /** App-log retention the hub is asked to hold on every topic this lane pulls, in seconds. */
@@ -225,7 +228,27 @@ function takeAppFrame(frames: Array<AppFrame>, incoming: AppFrame, durable: bool
  * outside it may touch the buffer. That rule was a comment when this state sat in the peer's own
  * closure; here it is the module boundary.
  */
-export function createAppLane(params: AppLaneParams): AppLane {
+export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
+  params: AppLaneParams<TTx>,
+): AppLane {
+  for (const key of [params.groupKey, params.batch?.key]) {
+    if (
+      key !== undefined &&
+      (key.groupID !== params.completion.key.groupID ||
+        key.incarnation !== params.completion.key.incarnation)
+    )
+      throw new TypeError('App lane coordination key mismatch')
+  }
+  if (params.crypto.pending != null && params.openedHandler === undefined)
+    throw new TypeError('Durable app lane requires opened handler')
+  const openedHandler =
+    params.openedHandler === undefined
+      ? undefined
+      : normaliseOpenedAppHandler({
+          deliver: params.openedHandler,
+          completion: params.completion,
+          openedDeliveryContext: params.openedHandler.openedDeliveryContext,
+        })
   const {
     mux,
     crypto,
@@ -830,9 +853,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     return false
   }
 
-  const finishRecord = async (record: PendingAppFrame, completed = false): Promise<void> => {
-    if (!completed)
-      await (params.completeOpenedRecord ?? crypto.pending?.complete)?.(record.frame.id)
+  const finishRecord = async (record: PendingAppFrame): Promise<void> => {
     let advance: CursorAdvance | undefined
     try {
       await runAppLane(async () => {
@@ -878,16 +899,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
   }
 
-  const openedHandler =
-    params.deliverOpened ??
-    createOpenedRecordHandler({
-      localDID,
-      protocols,
-      events: appEventHandlers,
-    })
   const deliverRecord = async (record: PendingAppFrame): Promise<void> => {
     const invoke = async () => {
-      await openedHandler(record)
+      if (openedHandler === undefined) throw new TypeError('Opened handler required')
+      await openedHandler.deliver(record)
       let delay = 100
       for (;;) {
         if (params.openedFailureSignal?.aborted) throw params.openedFailureSignal.reason
@@ -919,7 +934,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
     }
     if (params.claimOpened === undefined) await invoke()
-    else if (!(await params.claimOpened(record, invoke))) await finishRecord(record, true)
+    else if (!(await params.claimOpened(record, invoke))) await finishRecord(record)
   }
 
   const scheduleWorker = (name: string, delay = 0): void => {
@@ -1302,7 +1317,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
         try {
           // Same door as the live push: emit the retained frame's plaintext into the
           // per-protocol emitter the live bus is also built from. No listener → no-op.
-          await events.emit(prc, { data: message.payload.data ?? {}, senderDID })
+          await events.emit(prc, {
+            data: message.payload.data ?? {},
+            senderDID,
+            epoch: opened.frameEpoch,
+          })
         } catch {
           // A host listener that threw has been delivered to. Re-delivering on the next pull
           // would retry the host's own bug at it, so the frame is consumed.
@@ -1497,7 +1516,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           notifyOpened()
           return
         }
-        const finishing = finishRecord(record, true)
+        const finishing = finishRecord(record)
         finishingRecords.add(finishing)
         try {
           await finishing

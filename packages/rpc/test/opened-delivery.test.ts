@@ -158,11 +158,16 @@ describe('opened delivery', () => {
     })
     crypto.pending = {
       list: async () => [
-        {
-          ...record,
-          frame: { ...record.frame, groupID: 'memory-group', procedure: 'chat/posted' },
-          payload: encodeEventFrame('chat/posted', { text: 'original' }),
-        },
+        completeTestRecord(
+          {
+            ...record,
+            frame: { ...record.frame, groupID: 'memory-group' },
+            payload: encodeEventFrame('chat/posted', { text: 'original' }),
+          },
+          { groupID: 'memory-group', incarnation: 1 },
+          'chat/posted',
+          record.epoch,
+        ),
       ],
       complete,
     }
@@ -201,17 +206,23 @@ describe('opened delivery', () => {
     const completing = Promise.withResolvers<void>()
     const completion = Promise.withResolvers<void>()
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
-    const pending = ['first', 'second'].map((id, index) => ({
-      ...record,
-      frame: {
-        ...record.frame,
-        groupID: 'memory-group',
-        procedure: 'chat/posted',
-        id,
-        position: String(index + 1),
-      },
-      payload: encodeEventFrame('chat/posted', { text: id }),
-    }))
+    const pending = ['first', 'second'].map((id, index) =>
+      completeTestRecord(
+        {
+          ...record,
+          frame: {
+            ...record.frame,
+            groupID: 'memory-group',
+            id,
+            position: String(index + 1),
+          },
+          payload: encodeEventFrame('chat/posted', { text: id }),
+        },
+        { groupID: 'memory-group', incarnation: 1 },
+        'chat/posted',
+        record.epoch,
+      ),
+    )
     crypto.pending = {
       list: async () => [...pending],
       complete: async (id) => {
@@ -267,11 +278,16 @@ describe('opened delivery', () => {
         list: async () =>
           pending
             ? [
-                {
-                  ...record,
-                  frame: { ...record.frame, groupID: 'memory-group', procedure: 'chat/posted' },
-                  payload: encodeEventFrame('chat/posted', { text: 'original' }),
-                },
+                completeTestRecord(
+                  {
+                    ...record,
+                    frame: { ...record.frame, groupID: 'memory-group' },
+                    payload: encodeEventFrame('chat/posted', { text: 'original' }),
+                  },
+                  { groupID: 'memory-group', incarnation: 1 },
+                  'chat/posted',
+                  record.epoch,
+                ),
               ]
             : [],
         complete: async () => {

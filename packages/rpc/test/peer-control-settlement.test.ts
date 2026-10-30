@@ -40,7 +40,7 @@ test('a synchronous report dependency failure releases the reporting latch for r
   const load = vi.spyOn(bob.control, 'load')
   // JavaScript hosts can supply control storage without the required MLS ports.
   const peer = createGroupPeer({
-    completion: createTestCompletion(),
+    completion: createTestCompletion(bob.control.key),
     hub,
     crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
     localDID: 'bob',

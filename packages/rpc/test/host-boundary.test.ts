@@ -811,3 +811,40 @@ test.each(['Uint8Array', 'Buffer'] as const)(
     expect(Array.from(authenticator)).toEqual([3])
   },
 )
+
+test('completion classification preserves key access and drains complete and transact', async () => {
+  for (const method of ['complete', 'transact'] as const) {
+    const boundary = createHostBoundary()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const key = { groupID: 'classified-completion', incarnation: 3 }
+    const work = async () => {
+      entered.resolve()
+      await release.promise
+    }
+    const completion = {
+      get key() {
+        return key
+      },
+      complete: work,
+      transact: work,
+    }
+    const host = wrapPeerHost(boundary, { completion })
+    const running = host.completion[method]()
+    await entered.promise
+    boundary.close()
+    expect(() => host.completion.key).not.toThrow()
+    expect(host.completion.key).toBe(key)
+    expect(() => host.completion[method]()).toThrow(PeerDisposedError)
+    let drained = false
+    const draining = boundary.drained(Promise.resolve()).then(() => {
+      drained = true
+    })
+    await Promise.resolve()
+    expect(drained).toBe(false)
+    release.resolve()
+    await running
+    await draining
+    expect(drained).toBe(true)
+  }
+})

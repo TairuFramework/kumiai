@@ -6,12 +6,12 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import type * as AppLaneModule from '../src/app-lane.js'
 import { type AppLane, type AppLaneParams, createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
-import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
+import { testAppLaneParams } from './fixtures/app-lane.js'
 import { publishCommit, publishNextCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, createTestCompletion, fakeEpochSecret } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { createMemoryGroupMLS, memoryAuthenticator } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, chat, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
@@ -211,7 +211,7 @@ describe('app work leaves the commit queue', () => {
     const f = await setup(
       {
         handlers: {
-          'chat/posted': () => {
+          [durable ? 'chat/posted' : 'chat/changed']: () => {
             pause.entered.resolve()
             return pause.release.promise
           },
@@ -219,7 +219,20 @@ describe('app work leaves the commit queue', () => {
       },
       durable,
     )
-    await append(f.hub)
+    if (durable) await append(f.hub)
+    else {
+      f.hub.reattach('bob')
+      await f.hub.publish({
+        senderDID: 'alice',
+        topicID,
+        payload: await createFakeCrypto({ localDID: 'alice' }).wrap(
+          encodeEventFrame('chat/changed', {}),
+          {
+            aad: encodeAppAAD({ topicID, intent: 'ephemeral' }),
+          },
+        ),
+      })
+    }
     const retry = track(f.params.scheduleDrain?.(() => f.lane.deliver()) ?? Promise.resolve())
     await pause.entered.promise
     await remoteCommit(f)
@@ -252,28 +265,30 @@ describe('app work leaves the commit queue', () => {
   test('kicks coalesce', async () => {
     const pause = gate()
     let fetches = 0
-    const lane = createAppLane({
-      groupKey: { groupID: 'group', incarnation: 1 },
-      mux: {
-        retainTopic() {},
-        async fetchTopic() {
-          fetches += 1
-          if (fetches === 1) {
-            pause.entered.resolve()
-            await pause.release.promise
-          }
-          return { messages: [], head: null, oldest: null, gap: false }
-        },
-      } as never,
-      appliedEpoch: () => 1,
-      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
-      localDID: 'bob',
-      protocols: { chat },
-      eventHandlers: new Map(),
-      retentionSeconds: 60,
-      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
-      groupID: () => 'group',
-    })
+    const lane = createAppLane(
+      testAppLaneParams({
+        groupKey: { groupID: 'group', incarnation: 1 },
+        mux: {
+          retainTopic() {},
+          async fetchTopic() {
+            fetches += 1
+            if (fetches === 1) {
+              pause.entered.resolve()
+              await pause.release.promise
+            }
+            return { messages: [], head: null, oldest: null, gap: false }
+          },
+        } as never,
+        appliedEpoch: () => 1,
+        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
+        localDID: 'bob',
+        protocols: { chat },
+        eventHandlers: new Map(),
+        retentionSeconds: 60,
+        anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+        groupID: () => 'group',
+      }),
+    )
     lanes.push(lane)
     const kick = () => lane.kick()
     expect(kick()).toBeUndefined()
@@ -503,45 +518,40 @@ describe('app work leaves the commit queue', () => {
         ),
       }
       const seen: Array<string> = []
-      const lane = createAppLane({
-        groupKey: { groupID: 'group', incarnation: 1 },
-        mux: {
-          retainTopic() {},
-          async fetchTopic({ topicID: topic, after }: { topicID: string; after?: string }) {
-            if (boundary === 'fetch' && topic === topicID) {
-              pause.entered.resolve()
-              await pause.release.promise
-            }
-            const frame = topic === topicID ? oldFrame : newFrame
-            return {
-              messages: after == null || frame.sequenceID > after ? [frame] : [],
-              head: frame.sequenceID,
-              oldest: frame.sequenceID,
-              gap: false,
-            }
+      const lane = createAppLane(
+        testAppLaneParams({
+          groupKey: { groupID: 'group', incarnation: 1 },
+          mux: {
+            retainTopic() {},
+            async fetchTopic({ topicID: topic, after }: { topicID: string; after?: string }) {
+              if (boundary === 'fetch' && topic === topicID) {
+                pause.entered.resolve()
+                await pause.release.promise
+              }
+              const frame = topic === topicID ? oldFrame : newFrame
+              return {
+                messages: after == null || frame.sequenceID > after ? [frame] : [],
+                head: frame.sequenceID,
+                oldest: frame.sequenceID,
+                gap: false,
+              }
+            },
+          } as never,
+          crypto: reader,
+          appliedEpoch: () => reader.epoch(),
+          localDID: 'bob',
+          protocols: { chat },
+          handlers: {
+            chat: {
+              'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
+            },
           },
-        } as never,
-        crypto: reader,
-        appliedEpoch: () => reader.epoch(),
-        localDID: 'bob',
-        protocols: { chat },
-        eventHandlers: new Map([
-          [
-            'chat',
-            adaptBusHandlers(
-              chat,
-              {
-                'chat/posted': ({ data }: { data: { text: string } }) => void seen.push(data.text),
-              } as never,
-              { completion: createTestCompletion() },
-            ).events,
-          ],
-        ]),
-        retentionSeconds: 60,
-        appCursorStore: cursor,
-        anchor: () => anchor,
-        groupID: () => 'group',
-      })
+          retentionSeconds: 60,
+          appCursorStore: cursor,
+          anchor: () => anchor,
+          groupID: () => 'group',
+        }),
+      )
       lanes.push(lane)
       lane.kick()
       await pause.entered.promise

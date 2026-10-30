@@ -7,6 +7,7 @@ import type {
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
+  HandlerCompletion,
   InternalOperations,
   ManualRecoveryRecord,
   NotMemberEvidence,
@@ -28,6 +29,7 @@ import {
 
 import { createAutoRotationScheduler } from './auto-rotation.js'
 import { createRegistryCheckpointService } from './checkpoint.js'
+import { handlerCompletionForEntry } from './handler-completion.js'
 import {
   type ManualRecoveryStore,
   manualRecoveryAttempt,
@@ -85,7 +87,8 @@ export type RecoveryPendingReason =
   | 'no-eligible-responder'
   | 'target-behind'
   | 'target-unresolved'
-export type RegistryPeerOptions = {
+export type RegistryPeerOptions<TTx extends GroupTransaction = GroupTransaction> = {
+  completion: HandlerCompletion<TTx>
   openedDeliveryContext?: OpenedDeliveryContext
   internalOperations?: InternalOperations
   hub?: RecoveryTarget['hub']
@@ -104,7 +107,7 @@ export type RegistryPeerOptions = {
   recoveryOnly: boolean
   target: RecoveryRouting
   onConfirmedRecovery(handoff: ConfirmedRecoveryHandoff): void
-  settleAcceptedRecovery?: RegistryPeerParams['settleAcceptedRecovery']
+  settleAcceptedRecovery?: RegistryPeerParams<TTx>['settleAcceptedRecovery']
   reconcileConfirmedRecovery?: string
   reconcileAcceptedRecovery?: (
     record: CapturedRejoinRecord,
@@ -141,7 +144,7 @@ export type RegistryPeer = {
   dispose(): void
   drained(): Promise<void>
 }
-export type RegistryPeerParams = {
+export type RegistryPeerParams<TTx extends GroupTransaction = GroupTransaction> = {
   openedDeliveryContext?: OpenedDeliveryContext
   resolveTarget?: (targetID: string) => Promise<RecoveryTarget>
   registry: GroupHandleRegistry
@@ -164,14 +167,16 @@ export type RegistryPeerParams = {
       manualRecovery?: { authorisationID: string; source: GroupKey }
     },
   ): GroupMLS | Promise<GroupMLS>
-  createPeer(key: GroupKey, options: RegistryPeerOptions): Promise<Peer>
+  createPeer(key: GroupKey, options: RegistryPeerOptions<TTx>): Promise<Peer>
 }
 
-export async function createRegistryPeer(params: RegistryPeerParams): Promise<RegistryPeer> {
+export async function createRegistryPeer<TTx extends GroupTransaction = GroupTransaction>(
+  params: RegistryPeerParams<TTx>,
+): Promise<RegistryPeer> {
   const { registry } = params
   const openedDeliveryContext =
     params.openedDeliveryContext ?? registryOpenedDeliveryContext(registry)
-  const registered = registrySafety<GroupTransaction>(registry)
+  const registered = registrySafety<TTx>(registry)
   if (registered === null) throw new TypeError('Registry peer requires a registered registry')
   const capability = registered
   const coordinator = registryRecoveryCoordinator(registry)
@@ -568,6 +573,11 @@ export async function createRegistryPeer(params: RegistryPeerParams): Promise<Re
         { ...requested },
         {
           mls,
+          completion: handlerCompletionForEntry({
+            capability: capability.entry,
+            binding: capability.binding,
+            key: requested,
+          }),
           openedDeliveryContext,
           internalOperations: startingScheduler ?? undefined,
           ...(authority === undefined

@@ -198,7 +198,11 @@ export function createEpochRuntime<
         // Normalized at the open, before it is keyed: every consumer of `openedFrames` (the
         // acceptor, `gather`'s quorum) must see one canonical sender regardless of which DID form
         // MLS recovered this frame under.
-        openedFrames.set(payload, { ...opened, senderDID: normalizeDID(senderDID) })
+        openedFrames.set(payload, {
+          ...opened,
+          epoch: opened.frameEpoch,
+          senderDID: normalizeDID(senderDID),
+        })
         return payload
       },
       note: (message, failure) => params.note(name, topicID, message, failure),
@@ -264,6 +268,7 @@ export function createEpochRuntime<
       topicID: selfInbox,
       path: createInboxPath({
         mux,
+        key: params.completion.key,
         topicID: selfInbox,
         unwrap: (b) => {
           assertOpen()

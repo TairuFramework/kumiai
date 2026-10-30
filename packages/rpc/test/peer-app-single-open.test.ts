@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
-import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
+import { createDurableTestCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -25,13 +25,13 @@ describe('the app lane opens each live frame once', () => {
     const recoverySecret = new Uint8Array(32).fill(0x51)
     const seen: Array<unknown> = []
 
-    const base = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const base = createDurableTestCrypto({ epoch: 1, localDID: 'bob' })
     const opens: Array<number> = []
     const counting: FakeCrypto = {
       ...base,
-      unwrap: (bytes) => {
+      unwrap: (bytes, options) => {
         opens.push(bytes.length)
-        return base.unwrap(bytes)
+        return base.unwrap(bytes, options)
       },
     }
 
