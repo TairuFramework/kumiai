@@ -89,6 +89,8 @@ export {
   openEntries,
   sealEntries,
 } from './crypto.js'
+export { createGroupBatchScheduler } from './group-batch.js'
+export { bindGroupBatchOptions, groupBatchFor } from './group-batch-binding.js'
 export {
   type LegacyCommitJournalBoundary,
   LegacyControlActivationError,

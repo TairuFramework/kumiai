@@ -17,6 +17,7 @@ import type { ControlReadScope, HandleAccess } from '../access.js'
 import type {
   DevicePersistence,
   EpochIdentity,
+  GroupBatchOptions,
   GroupKey,
   GroupRecoveryTrust,
   GroupStateRecord,
@@ -149,6 +150,7 @@ export type RetirementAttempt = {
 export type GroupHandleRegistryParams<TTx extends GroupTransaction> = {
   persistence: DevicePersistence<TTx>
   providerID: string
+  batch?: GroupBatchOptions
   /** Required when deliverOpened is configured; shared by every peer and drain. */
   openedDeliveryContext?: OpenedDeliveryContext
   deliverOpened?: (record: PendingAppFrame) => Promise<void>

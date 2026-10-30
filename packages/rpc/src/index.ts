@@ -11,6 +11,15 @@ export type { LogHub, MailboxHub } from '@kumiai/hub-tunnel'
 
 export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
+export {
+  type AppBatchBinding,
+  appBatch,
+  type BatchBudget,
+  type BatchKind,
+  bindAppBatch,
+  type GroupBatchScheduler,
+  type StreamingOpenResult,
+} from './app-batch.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export { decodeAppEntry } from './app-entry.js'
 export {

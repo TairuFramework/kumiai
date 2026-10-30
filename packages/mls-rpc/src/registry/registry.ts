@@ -15,6 +15,7 @@ import {
   type EntryReads,
   entryCapability,
 } from '../entry-capability.js'
+import { bindGroupBatchOptions } from '../group-batch-binding.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   assertStoredOpenedEntry,
@@ -121,6 +122,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   registeredCapability.assertRoot()
   if (liveRegistries.has(binding))
     throw new GroupStateConflictError('Coordinator already has a live registry')
+  bindGroupBatchOptions(binding, params.batch)
   const capability = registeredCapability
   const registryBinding = binding
   const environment: ColdEnvironment = {
