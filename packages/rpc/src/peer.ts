@@ -2827,9 +2827,9 @@ export function createGroupPeerWithControlWalk<
           }),
         )
         if (disposed || generation !== controlGeneration) return
-        controlFetchBackoff = 1000
         if (result.messages.length === COMMIT_FETCH_LIMIT)
           assertForwardPage(after === null ? null : asLogPosition(after), result.messages)
+        controlFetchBackoff = 1000
         bufferedControl.offer({ topicID, after, generation, result })
         bufferedAfter = result.messages.at(-1)?.sequenceID ?? after
         if (

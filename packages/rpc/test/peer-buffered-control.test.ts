@@ -271,6 +271,93 @@ test('peer doubles control retry delay up to 60000ms and resets it after success
   }
 })
 
+test('peer backs off invalid full control pages and resets only after a valid page', async () => {
+  const s = await setup()
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    let invalid = 8
+    let calls = 0
+    let delivered = 0
+    const offer = vi.spyOn(s.intake, 'offer')
+    s.fetch.mockImplementation(async ({ topicID }) => {
+      if (topicID !== s.topicID) return { messages: [], head: null, oldest: null, gap: false }
+      calls++
+      if (invalid-- > 0) {
+        return {
+          messages: Array.from({ length: 100 }, () => s.frame(delivered + 1)),
+          head: s.frame(delivered + 1).sequenceID,
+          oldest: '000001',
+          gap: false,
+        }
+      }
+      const message = s.frame(++delivered)
+      return { messages: [message], head: message.sequenceID, oldest: '000001', gap: false }
+    })
+    await s.wake()
+    await flush()
+    expect(calls).toBe(1)
+    for (const [index, delay] of [1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000].entries()) {
+      expect(offer).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(delay - 1)
+      expect(calls).toBe(index + 1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toBe(index + 2)
+    }
+    expect(consume(s.intake)).toBe('000001')
+    invalid = 1
+    await s.wake()
+    await flush()
+    expect(calls).toBe(10)
+    await vi.advanceTimersByTimeAsync(999)
+    expect(calls).toBe(10)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(calls).toBe(11)
+    expect(consume(s.intake)).toBe('000002')
+  } finally {
+    await s.close()
+  }
+})
+
+test('peer keeps exactly one active control fetch across repeated wakeups', async () => {
+  const s = await setup()
+  const pending = Promise.withResolvers<void>()
+  let active = 0
+  let maxActive = 0
+  let calls = 0
+  try {
+    s.fetch.mockImplementation(async ({ topicID }) => {
+      if (topicID !== s.topicID) return { messages: [], head: null, oldest: null, gap: false }
+      calls++
+      active++
+      maxActive = Math.max(maxActive, active)
+      try {
+        await pending.promise
+        return { messages: [], head: null, oldest: null, gap: false }
+      } finally {
+        active--
+      }
+    })
+    await s.wake()
+    await flush()
+    expect(active).toBe(1)
+    for (let i = 0; i < 4; i++) {
+      await s.wake()
+      await flush()
+    }
+    expect(maxActive).toBe(1)
+    expect(calls).toBe(1)
+    pending.resolve()
+    await flush()
+    expect(calls).toBe(2)
+    expect(active).toBe(0)
+    expect(maxActive).toBe(1)
+  } finally {
+    pending.resolve()
+    await flush()
+    await s.close()
+  }
+})
+
 test.each(['resolve', 'reject'] as const)(
   'peer ignores an active control fetch settling after disposal / %s',
   async (outcome) => {
