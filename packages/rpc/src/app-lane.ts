@@ -517,9 +517,10 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       coverage.get(item.topicID)?.previous === item.previous,
     committed: (ids, consumed) => {
       const completed = new Set(ids)
-      for (const item of coverage.values()) {
-        for (const member of item.prefix) {
-          if (completed.has(member.frame.id)) completedIDs.add(member.frame.id)
+      // A held occurrence can hide completed successors from cursor coverage.
+      for (const frames of segment.values()) {
+        for (const frame of frames) {
+          if (frame.ref !== undefined && completed.has(frame.ref.id)) completedIDs.add(frame.ref.id)
         }
       }
       for (const item of consumed) {
@@ -1214,6 +1215,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
 
   const openingTurns = new Set<Promise<unknown>>()
   const reserved = new Set<AppFrame>()
+  const reservedSources = new Set<AppCursor>()
   const drain = async (): Promise<boolean> => {
     let progress = false
     const generation = segmentGeneration
@@ -1229,6 +1231,8 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
         const sources = []
         for (const cursor of [...cursors.values()].sort((a, b) => a.anchorEpoch - b.anchorEpoch)) {
           if (!appEventHandlers.has(cursor.protocol) && crypto.pending == null) continue
+          // New arrivals must stay behind a turn's unconsumed suffix until it merges.
+          if (reservedSources.has(cursor)) continue
           const frames = (segment.get(cursor.topicID) ?? []).filter(
             (frame) =>
               frame.sealed.state === 'sealed' && !reserved.has(frame) && !attempted.has(frame),
@@ -1252,6 +1256,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
             })
             reserved.add(frame)
           }
+          reservedSources.add(cursor)
           sources.push({ cursor, frames, inputs })
         }
         return sources
@@ -1452,6 +1457,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
         } finally {
           await runAppLane(async () => {
             for (const frame of frames) reserved.delete(frame)
+            reservedSources.delete(cursor)
           })
         }
       })

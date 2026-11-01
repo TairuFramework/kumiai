@@ -19,6 +19,7 @@ import type { MemoryTransaction } from '../src/persistence-types.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
+import { writeSideRow } from './fixtures/storage-persistence.js'
 
 const protocol = { posted: { type: 'event', retain: 'log', data: { type: 'object' } } } as const
 const { FakeHub } = (await import(
@@ -246,35 +247,81 @@ for (const mode of ['real-mls', 'double'] as const)
       }
     })
 
-    test('completion behind a held occurrence survives its row removal', async () => {
-      let time = Date.now()
-      const clock = vi.spyOn(Date, 'now').mockImplementation(() => time)
-      const handler = vi.fn(async () => {})
-      const s = await setup(mode, handler)
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-      try {
-        const b = await s.seal('2')
-        const a = await s.group.sealFuture(
-          encodeEventFrame('posted'),
-          1,
-          encodeAppAAD({ topicID: s.topicID, intent: 'log' }),
-        )
-        s.messages.set(s.topicID, [{ sequenceID: '10', payload: a }, b])
-        s.peer.retryAppDelivery()
-        await vi.waitFor(async () => expect(await s.group.access().pending.list()).toHaveLength(1))
-        await s.completion.complete([frameID(s.topicID, b.payload)])
-        expect(await s.ports.cursor.load(s.topicID)).toBeNull()
-        expect(handler).not.toHaveBeenCalled()
-        time += 30_000
-        await vi.advanceTimersByTimeAsync(30_000)
-        await vi.waitFor(async () => expect(await s.ports.cursor.load(s.topicID)).toBe('2'))
-        expect(handler).not.toHaveBeenCalled()
-      } finally {
-        vi.useRealTimers()
-        clock.mockRestore()
-        await s.close()
-      }
-    })
+    test.each(['default', 'transactional'] as const)(
+      'completion behind a held occurrence survives its row removal / %s',
+      async (policy) => {
+        for (const earlierPending of [false, true]) {
+          let time = Date.now()
+          const clock = vi.spyOn(Date, 'now').mockImplementation(() => time)
+          const release = Promise.withResolvers<void>()
+          const handler = vi.fn(async () => release.promise)
+          const effect = vi.fn(async (tx: MemoryTransaction) => {
+            await writeSideRow(tx, 'held-suffix-effect', new Uint8Array([2]))
+          })
+          const s = await setup(mode, handler)
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+          try {
+            const first = earlierPending ? [await s.seal('1')] : []
+            const b = await s.seal('2')
+            const a = await s.group.sealFuture(
+              encodeEventFrame('posted'),
+              1,
+              encodeAppAAD({ topicID: s.topicID, intent: 'log' }),
+            )
+            s.messages.set(s.topicID, [...first, { sequenceID: '10', payload: a }, b])
+            s.peer.retryAppDelivery()
+            await vi.waitFor(async () =>
+              expect(await s.group.access().pending.list()).toHaveLength(earlierPending ? 2 : 1),
+            )
+            if (earlierPending) await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce())
+            const ids = [frameID(s.topicID, b.payload)]
+            if (policy === 'transactional') await s.completion.transact(ids, effect)
+            else await s.completion.complete(ids)
+            expect(await s.ports.cursor.load(s.topicID)).toBeNull()
+            expect(await s.group.access().pending.list()).toHaveLength(earlierPending ? 1 : 0)
+            expect(handler).toHaveBeenCalledTimes(earlierPending ? 1 : 0)
+            release.resolve()
+            if (earlierPending) {
+              await vi.waitFor(async () => expect(await s.ports.cursor.load(s.topicID)).toBe('1'))
+              expect(await s.group.access().pending.list()).toEqual([])
+            }
+            time += 30_000
+            await vi.advanceTimersByTimeAsync(30_000)
+            await vi.waitFor(async () => expect(await s.ports.cursor.load(s.topicID)).toBe('2'))
+            expect(handler).toHaveBeenCalledTimes(earlierPending ? 1 : 0)
+            expect(effect).toHaveBeenCalledTimes(policy === 'transactional' ? 1 : 0)
+            expect(
+              Object.values(await s.f.inspectRows()).flatMap((rows) =>
+                rows.has('held-suffix-effect') ? [rows.get('held-suffix-effect')] : [],
+              ),
+            ).toEqual(policy === 'transactional' ? [new Uint8Array([2])] : [])
+            vi.useRealTimers()
+            await s.peer.dispose()
+            await s.peer.drained()
+            await s.group.reopen()
+            const reopened = await setup(mode, handler, ['chat'], s.group, s.messages)
+            try {
+              expect(
+                reopened.fetch.mock.calls.some(
+                  ([request]) => request.topicID === s.topicID && request.after === '2',
+                ),
+              ).toBe(true)
+              expect(await reopened.group.access().pending.list()).toEqual([])
+              expect(handler).toHaveBeenCalledTimes(earlierPending ? 1 : 0)
+              expect(effect).toHaveBeenCalledTimes(policy === 'transactional' ? 1 : 0)
+            } finally {
+              await reopened.peer.dispose()
+              await reopened.peer.drained()
+            }
+          } finally {
+            release.resolve()
+            vi.useRealTimers()
+            clock.mockRestore()
+            await s.close()
+          }
+        }
+      },
+    )
 
     test('coverage capture cannot deadlock completion behind app mutex', async () => {
       const release = Promise.withResolvers<void>()
