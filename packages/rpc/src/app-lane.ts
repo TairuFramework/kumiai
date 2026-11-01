@@ -433,10 +433,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
             frames,
             {
               position,
+              // This member's own frame, read back from the log: MLS cannot open what its own
+              // sender ratchet sealed, and the drain would drop it as its own echo anyway.
               sealed:
-                restored == null
-                  ? { state: 'sealed', bytes: message.payload }
-                  : { state: 'pending', id: restored.frame.id },
+                restored != null
+                  ? { state: 'pending', id: restored.frame.id }
+                  : normalizeDID(message.senderDID) === localDID
+                    ? { state: 'done' }
+                    : { state: 'sealed', bytes: message.payload },
             },
             crypto.pending != null,
           )
