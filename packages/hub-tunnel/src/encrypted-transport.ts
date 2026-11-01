@@ -4,7 +4,7 @@ import { fromB64, toB64 } from '@sozai/codec'
 
 import type { Encryptor } from './encryptor.js'
 import { decodeEnvelope, encodeEnvelope, type TunnelEnvelope } from './envelope.js'
-import { DecryptError, EncryptError, EnvelopeDecodeError } from './errors.js'
+import { DecryptError, DuplicateFrameError, EncryptError, EnvelopeDecodeError } from './errors.js'
 import type { ObservabilityEventListener } from './events.js'
 import {
   createHubTunnelTransport,
@@ -148,6 +148,13 @@ function wrapHub({
             try {
               plaintext = await decryptWork
             } catch (cause) {
+              if (cause instanceof DuplicateFrameError) {
+                // Opened once already: the redelivery of a frame whose ack was lost. Acked so the
+                // hub stops redelivering it.
+                onEvent?.({ type: 'frame-dropped', reason: 'dedup' })
+                ackHandled(message.sequenceID)
+                continue
+              }
               const err = new DecryptError('decrypt failed', { cause })
               onEvent?.({ type: 'decrypt-failed', error: err })
               onEvent?.({ type: 'frame-dropped', reason: 'decrypt' })

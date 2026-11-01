@@ -10,6 +10,15 @@ export class DecryptError extends Error {
   override name = 'DecryptError'
 }
 
+/**
+ * Thrown by an `Encryptor.decrypt` for a ciphertext this reader has already opened. A hub
+ * redelivers a frame whose ack was lost, and a ratcheting cipher cannot open it twice: that is a
+ * duplicate, not a lost frame.
+ */
+export class DuplicateFrameError extends Error {
+  override name = 'DuplicateFrameError'
+}
+
 export class EncryptError extends Error {
   override name = 'EncryptError'
 }

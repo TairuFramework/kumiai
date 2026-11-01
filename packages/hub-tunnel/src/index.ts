@@ -14,6 +14,7 @@ export {
 export {
   BackpressureError,
   DecryptError,
+  DuplicateFrameError,
   EncryptError,
   EnvelopeDecodeError,
   FrameDecodeError,
