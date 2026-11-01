@@ -46,7 +46,6 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
           payload: await sealAt(epoch, topicID, text, 'log'),
         })
       }
-      const posted = hub.published.filter((m) => m.topicID === topicID)
       const seen: Array<unknown> = []
       const bob = makeMLSPeer(hub, 'bob', secret, {
         epoch: 1,
@@ -57,7 +56,7 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
 
       expect(bob.peer.anchorEpoch()).toBe(1)
       expect(seen).toEqual([{ text: 'now' }])
-      expect(bob.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+      expect(bob.appCursorStore.stored(topicID)).toBeNull()
       await bob.peer.dispose()
     },
   )
@@ -89,10 +88,9 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
         await flush()
       }
       await flush(200)
-      const posted = hub.published.filter((m) => m.topicID === topicID)
 
       expect(seen).toEqual([{ text: 'now' }])
-      expect(bob.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+      expect(bob.appCursorStore.stored(topicID)).toBeNull()
       await bob.peer.dispose()
     },
   )

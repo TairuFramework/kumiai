@@ -41,6 +41,7 @@ import type {
 } from '../persistence-types.js'
 import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements } from './access.js'
+import { bindRegistryStreamingOpen, registryStreamingOpen } from './app-open-binding.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
 import { registryReceiveSlots, setReceiveBase } from './live-receive.js'
 import {
@@ -807,6 +808,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         adopt: access.adopt,
         onRetire: access.onRetire,
       }
+      const batch = registryStreamingOpen(access)
+      if (batch !== undefined) bindRegistryStreamingOpen(owner.access, batch)
       const live = registryLiveSend.get(access)
       if (live === undefined) throw new Error('Missing live sender')
       registryLiveSend.set(owner.access, live)

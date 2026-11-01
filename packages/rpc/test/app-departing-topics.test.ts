@@ -396,7 +396,7 @@ describe('departing app topics', () => {
     const { lane, params } = currentLane()
     await publishOld(hub, 'cursor before pruning')
     await lane.deliver()
-    await expect.poll(() => params.appCursorStore?.load(topic(1))).toBe(pos(1))
+    await expect.poll(() => params.appCursorStore?.load(topic(1))).toBeNull()
     await bob.peer.commit(buildRemoveCommit(bob, 'carol'))
     let reportedPruned: Map<unknown, unknown> | undefined
     const set = Map.prototype.set
@@ -720,7 +720,7 @@ describe('departing app topics', () => {
     await delivery
     await expect.poll(() => f.seen).toEqual(['gated'])
     expect(f.saved[0]?.frame.segment).toBe(1)
-    await expect.poll(() => f.cursor.load(topic(1))).toBe(pos(1))
+    await expect.poll(() => f.cursor.load(topic(1))).toBeNull()
     expect(await f.cursor.load(topic(2))).toBeNull()
   })
 

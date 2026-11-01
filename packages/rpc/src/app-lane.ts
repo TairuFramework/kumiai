@@ -8,6 +8,7 @@ import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 import type { Anchor } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppBatchBinding } from './app-batch.js'
+import { type AppCompletionCoverage, bindAppCompletionCoverage } from './app-completion-coverage.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import { createMonotoneClock } from './clock.js'
@@ -19,7 +20,10 @@ import {
   type GroupUnwrapResult,
   isAppFrameStorageError,
   isFrameAhead,
+  type OpenAppInput,
+  type OpenAppResult,
   type PendingAppFrame,
+  type PreOpenAppFrameRef,
 } from './crypto.js'
 import {
   asLogPosition,
@@ -29,7 +33,7 @@ import {
 } from './cursor.js'
 import { GroupSafetyHeldError, PeerDisposedError } from './errors.js'
 import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
-import type { BusHandlerMaps } from './handlers.js'
+import { type BusHandlerMaps, groupHandlerMetadata } from './handlers.js'
 import { notifyHost } from './host-notice.js'
 import { APP_OUTSTANDING_FETCHES_MAX, AppFetchBusyError, type HubMux } from './hub-mux.js'
 import { normaliseOpenedAppHandler, type OpenedAppHandler } from './opened-delivery.js'
@@ -55,6 +59,7 @@ export const APP_FUTURE_HOLD_MS = 30_000
 export type AppFrame = {
   position: LogPosition
   caughtUpAt?: number
+  ref?: PreOpenAppFrameRef
   sealed:
     | { state: 'sealed'; bytes: Uint8Array }
     | { state: 'pending'; id: string }
@@ -279,6 +284,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
    */
   let segment = new Map<string, Array<AppFrame>>()
   let segmentGeneration = 0
+  let openCancellation = new AbortController()
   const pendingRecords: Array<PendingAppFrame> = []
   // Buffer resets must not reopen consumed frames whose saved records still need reloading.
   const openedFrameIDs = new Set<string>()
@@ -449,6 +455,98 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
   /** App topics whose retention this segment has already been asked for. See {@link pull}. */
   let retained = new Set<string>()
 
+  let coverage = new Map<string, AppCompletionCoverage>()
+  const completedIDs = new Set<string>()
+  const provenThrough = new Map<string, string>()
+  const refreshCoverage = (): void => {
+    const next = new Map<string, AppCompletionCoverage>()
+    for (const [topicID, cursor] of cursors) {
+      const frames = segment.get(topicID) ?? []
+      const proven = provenThrough.get(topicID)
+      if (
+        proven != null &&
+        (cursor.position == null || compareLogPositions(cursor.position, proven) < 0)
+      ) {
+        cursor.position = asLogPosition(proven)
+        while (frames[0] != null && compareLogPositions(frames[0].position, proven) <= 0) {
+          const frame = frames.shift()
+          if (frame?.ref != null) completedIDs.delete(frame.ref.id)
+        }
+        if (bufferBlockedTopics.delete(topicID)) scheduleContinuation()
+      }
+      const prefix: AppCompletionCoverage['prefix'] = []
+      for (const frame of frames) {
+        if (frame.sealed.state === 'sealed' || frame.ref === undefined) break
+        if (frame.sealed.state === 'pending' && completedIDs.has(frame.sealed.id))
+          frame.sealed = { state: 'done' }
+        prefix.push({
+          frame: { ...frame.ref },
+          state: completedIDs.has(frame.ref.id)
+            ? 'completed'
+            : frame.sealed.state === 'pending'
+              ? 'pending'
+              : 'dead',
+        })
+      }
+      if (prefix.length > 0)
+        next.set(topicID, {
+          key: { ...params.groupKey },
+          topicID,
+          generation: segmentGeneration,
+          previous: cursor.position,
+          through: prefix.at(-1)?.frame.position ?? null,
+          prefix,
+        })
+    }
+    coverage = next
+  }
+  const coverageBinding = bindAppCompletionCoverage(params.completion, {
+    // Completion may own the group gate. Capture must never wait for the app mutex.
+    capture: () =>
+      [...coverage.values()].map((item) => ({
+        ...item,
+        key: { ...item.key },
+        prefix: item.prefix.map((member) => ({
+          frame: { ...member.frame },
+          state: completedIDs.has(member.frame.id) ? 'completed' : member.state,
+        })),
+      })),
+    current: (item) =>
+      !openedReleased &&
+      item.generation === segmentGeneration &&
+      coverage.get(item.topicID)?.previous === item.previous,
+    committed: (ids, consumed) => {
+      const completed = new Set(ids)
+      for (const item of coverage.values()) {
+        for (const member of item.prefix) {
+          if (completed.has(member.frame.id)) completedIDs.add(member.frame.id)
+        }
+      }
+      for (const item of consumed) {
+        if (item.generation !== segmentGeneration || item.through === null) continue
+        provenThrough.set(item.topicID, item.through)
+        const live = coverage.get(item.topicID)
+        if (live !== undefined)
+          coverage.set(item.topicID, {
+            ...live,
+            previous: item.through,
+            prefix: live.prefix.filter(
+              (member) => compareLogPositions(member.frame.position, item.through as string) > 0,
+            ),
+          })
+      }
+      void runAppLane(async () => {
+        for (const record of [...pendingRecords]) {
+          if (!completed.has(record.frame.id) && !completedIDs.has(record.frame.id)) continue
+          pendingRecords.splice(pendingRecords.indexOf(record), 1)
+          resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
+          resumeUnknown(record)
+        }
+        notifyOpened()
+      })
+    },
+  })
+
   /**
    * The app lane's own mutex: everything that reads or writes {@link segment} and {@link cursors}
    * runs through here, one task at a time.
@@ -467,6 +565,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       try {
         return await fn()
       } finally {
+        refreshCoverage()
         // State and cursor writes settle before observers can re-enter this lane.
         // A reentrant reset can append more notices to this batch.
         for (let index = 0; index < notices.length; index++) notices[index]?.()
@@ -539,6 +638,8 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     for (const push of staged.get(topicID) ?? []) caughtUpTimes.delete(push.frame)
     segment.delete(topicID)
     cursors.delete(topicID)
+    coverage.delete(topicID)
+    provenThrough.delete(topicID)
     staged.delete(topicID)
     reportedPruned.delete(topicID)
     retained.delete(topicID)
@@ -733,6 +834,14 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
                 frames,
                 {
                   position,
+                  ref: {
+                    ...params.groupKey,
+                    id: frameID(topic.topicID, message.payload),
+                    topicID: topic.topicID,
+                    protocol: topic.name,
+                    segment: cursor.anchorEpoch,
+                    position,
+                  },
                   ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
                   sealed: oversized
                     ? { state: 'done' }
@@ -777,54 +886,25 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     }
   }
 
-  /**
-   * Move this topic's read position over the frames the drain has finished with, and persist it.
-   *
-   * The advance stops at the FIRST frame that is not done — the safety property: a cursor may only
-   * pass a frame that is DELIVERED or DEAD. A done frame further along is left in place, since a
-   * position is a place in the LOG and passing it passes everything before it too.
-   *
-   * The passed frames are dropped from the buffer here and only here: the cursor is what
-   * remembers them from now on.
-   */
-  type CursorAdvance = { topicID: string; position: LogPosition; apply(): void }
-  const advanceCursor = async (
-    topicID: string,
-    frames: Array<AppFrame>,
-    capture?: (advance: CursorAdvance) => void,
-  ): Promise<void> => {
-    if (segment.get(topicID) !== frames) return
+  // Unregistered adapters own durable proof. This prefix is deliberately volatile.
+  const advanceCursor = (topicID: string, frames: Array<AppFrame>): void => {
+    if (coverageBinding !== undefined || segment.get(topicID) !== frames) return
     const cursor = cursors.get(topicID)
     if (cursor == null) return
     let passed = 0
     let position: LogPosition | null = null
     while (passed < frames.length && (frames[passed] as AppFrame).sealed.state === 'done') {
       position = (frames[passed] as AppFrame).position
-      passed += 1
+      passed++
     }
     if (position == null || position === cursor.position) return
-    const covered = position
-    const advance: CursorAdvance = {
-      topicID: cursor.topicID,
-      position: covered,
-      apply() {
-        if (
-          segment.get(topicID) !== frames ||
-          cursors.get(topicID) !== cursor ||
-          (cursor.position !== null && compareLogPositions(cursor.position, covered) >= 0)
-        )
-          return
-        cursor.position = covered
-        if (cursor.accepted == null || compareLogPositions(covered, cursor.accepted) > 0) {
-          cursor.accepted = covered
-        }
-        frames.splice(0, passed)
-        if (bufferBlockedTopics.delete(topicID)) scheduleContinuation()
-      },
+    cursor.position = position
+    if (cursor.accepted == null || compareLogPositions(position, cursor.accepted) > 0)
+      cursor.accepted = position
+    for (const frame of frames.splice(0, passed)) {
+      if (frame.ref !== undefined) completedIDs.delete(frame.ref.id)
     }
-    capture?.(advance)
-    await appCursorStore?.save(cursor.topicID, covered)
-    advance.apply()
+    if (bufferBlockedTopics.delete(topicID)) scheduleContinuation()
   }
 
   const orderedRecords = (name: string): Array<PendingAppFrame> =>
@@ -854,49 +934,23 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
   }
 
   const finishRecord = async (record: PendingAppFrame): Promise<void> => {
-    let advance: CursorAdvance | undefined
-    try {
-      await runAppLane(async () => {
-        const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
-        if (index !== -1) pendingRecords.splice(index, 1)
-        resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
-        resumeUnknown(record)
-        notifyOpened()
-        const cursor = cursors.get(record.frame.topicID)
-        const frames = segment.get(record.frame.topicID)
-        if (cursor?.topicID === record.frame.topicID && frames != null) {
-          const buffered = frames.find((frame) => frame.position === record.frame.position)
-          if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id) {
-            buffered.sealed = { state: 'done' }
-          }
-          await advanceCursor(record.frame.topicID, frames, (captured) => {
-            advance = captured
-          })
-        }
-      })
-      return
-    } catch (error) {
-      if (advance === undefined) throw error
-    }
-    // Retain proven coverage even if a notice resets the lane after a failed save.
-    const covered = advance
-    let delay = 100
-    for (;;) {
-      if (params.openedFailureSignal?.aborted) throw params.openedFailureSignal.reason
-      await new Promise((resolve) => setTimeout(resolve, delay))
-      try {
-        await runAppLane(async () => {
-          const saved = await appCursorStore?.load(covered.topicID)
-          if (saved == null || compareLogPositions(saved, covered.position) < 0)
-            await appCursorStore?.save(covered.topicID, covered.position)
-          covered.apply()
-        })
-        return
-      } catch (_error) {
-        if (params.openedFailureSignal?.aborted) throw params.openedFailureSignal.reason
-        delay = Math.min(delay * 2, 15000)
-      }
-    }
+    // The supplied completion promise has already proved row removal.
+    await runAppLane(async () => {
+      const buffered = segment
+        .get(record.frame.topicID)
+        ?.find((frame) => frame.position === record.frame.position)
+      if (buffered !== undefined) completedIDs.add(record.frame.id)
+      const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
+      if (index !== -1) pendingRecords.splice(index, 1)
+      resumeBlocked(record.frame.topicID, record.frame.position, record.frame.id)
+      resumeUnknown(record)
+      if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id)
+        buffered.sealed = { state: 'done' }
+      const frames = segment.get(record.frame.topicID)
+      if (frames !== undefined) await advanceCursor(record.frame.topicID, frames)
+      notifyOpened()
+    })
+    await coverageBinding?.advance()
   }
 
   const deliverRecord = async (record: PendingAppFrame): Promise<void> => {
@@ -1087,13 +1141,14 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     if (syncScheduled) return
     syncScheduled = true
     syncRequested = false
-    void pull()
+    void (crypto.pending == null ? legacyDrain.then(() => pull()) : pull())
       .then(() =>
         runAppLane(async () => {
           if (safetyHold() !== null || disposed) return
           for (const [name, frames] of segment) await advanceCursor(name, frames)
         }),
       )
+      .then(() => coverageBinding?.advance())
       .finally(() => {
         syncScheduled = false
         if (syncRequested) scheduleSync()
@@ -1157,181 +1212,270 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     if (ahead) retryDelivery()
   }
 
+  const openingTurns = new Set<Promise<unknown>>()
+  const reserved = new Set<AppFrame>()
   const drain = async (): Promise<boolean> => {
-    if (disposed || openedOnly) return false
     let progress = false
     const generation = segmentGeneration
-    applyCaughtUpTimes()
-    expireTopics()
-    const lanes = [...cursors.values()].sort((a, b) => a.anchorEpoch - b.anchorEpoch)
-    for (const cursor of lanes) {
-      const name = cursor.protocol
-      const topicID = cursor.topicID
-      const frames = segment.get(topicID) ?? []
-      const events = appEventHandlers.get(name)
-      if (frames.length === 0 || (events == null && crypto.pending == null)) {
-        continue
-      }
-      for (const frame of frames) {
-        if (frame.sealed.state !== 'sealed') continue
+    const signal = openCancellation.signal
+    const attempted = new Set<AppFrame>()
+    let halted = false
+    for (;;) {
+      const sources = await runAppLane(async () => {
         if (disposed || openedOnly || generation !== segmentGeneration || safetyHold() !== null)
-          break
-        const sealed = frame.sealed.bytes
-        const id = frameID(cursor.topicID, sealed)
-        // Unreadable bytes are dead. Past and future are the open's locked answer, below.
-        if (crypto.frameEpoch(sealed) == null) {
-          frame.sealed = { state: 'done' }
-          resumeBlocked(cursor.topicID, frame.position, id)
-          continue
-        }
-        const aad = crypto.frameAAD(sealed)
-        const decoded = aad == null ? null : decodeAppAAD(aad)
-        if ((aad != null && decoded == null) || crypto.pending != null) {
-          if (decoded?.topicID !== cursor.topicID || decoded.intent !== 'log') {
-            frame.sealed = { state: 'done' }
-            resumeBlocked(cursor.topicID, frame.position, id)
-            continue
+          return []
+        applyCaughtUpTimes()
+        expireTopics()
+        const sources = []
+        for (const cursor of [...cursors.values()].sort((a, b) => a.anchorEpoch - b.anchorEpoch)) {
+          if (!appEventHandlers.has(cursor.protocol) && crypto.pending == null) continue
+          const frames = (segment.get(cursor.topicID) ?? []).filter(
+            (frame) =>
+              frame.sealed.state === 'sealed' && !reserved.has(frame) && !attempted.has(frame),
+          )
+          if (frames.length === 0) continue
+          const inputs: Array<OpenAppInput> = []
+          for (const frame of frames) {
+            if (frame.sealed.state !== 'sealed') continue
+            frame.ref = {
+              ...params.groupKey,
+              id: frameID(cursor.topicID, frame.sealed.bytes),
+              topicID: cursor.topicID,
+              protocol: cursor.protocol,
+              segment: cursor.anchorEpoch,
+              position: frame.position,
+            }
+            inputs.push({
+              frame: { ...frame.ref },
+              ciphertext: frame.sealed.bytes,
+              expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
+            })
+            reserved.add(frame)
           }
+          sources.push({ cursor, frames, inputs })
         }
-        const ref =
-          crypto.pending == null
-            ? undefined
-            : {
-                ...params.groupKey,
-                id,
-                topicID: cursor.topicID,
-                protocol: name,
-                segment: cursor.anchorEpoch,
-                position: frame.position,
-              }
+        return sources
+      })
+      if (sources.length === 0) break
+      // Advertise every ready source before awaiting any owned preparation.
+      const turns = sources.map(async ({ cursor, frames, inputs }) => {
         const caughtUpBefore = commitLaneCaughtUp()
         const workVersion = commitWorkVersion()
-        let opened: GroupUnwrapResult
+        let opened: GroupUnwrapResult | undefined
         try {
-          if (ref != null) {
-            const load = async () => {
-              try {
-                return (await crypto.pending?.list())?.find((saved) => saved.frame.id === ref.id)
-              } catch (cause) {
-                throw new AppFrameStorageError('Failed to reload saved app frame', { cause })
-              }
-            }
-            // A successful open may need its saved record reloaded again after a read fault.
-            if (!openedFrameIDs.has(id)) {
-              await crypto.unwrap(sealed, {
-                expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
-                frame: ref,
-              })
-              openedFrameIDs.add(id)
-            }
-            const record = await load()
-            if (record == null)
-              throw new AppFrameStorageError('Durable open has no saved app frame')
-            openedFrameIDs.delete(id)
-            frame.sealed = { state: 'pending', id: record.frame.id }
-            pendingRecords.push(record)
-            progress = true
-            continue
-          }
-          // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
-          // no bare-`Uint8Array` shortcut left to normalize away here. `expectedAAD` is bound to
-          // the cursor's own topic, the authoritative answer to "what lane is this drain reading".
-          opened = await crypto.unwrap(sealed, {
-            expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
-          })
-        } catch (error) {
-          if (error instanceof GroupSafetyHeldError) {
-            onSafetyHeld(error.reason)
-            break
-          }
-          if (isFrameAhead(error)) {
-            if (disposed || safetyHold() !== null) break
-            if (caughtUpBefore && commitLaneCaughtUp() && workVersion === commitWorkVersion()) {
-              frame.caughtUpAt ??= now()
-              const remaining = APP_FUTURE_HOLD_MS - (now() - frame.caughtUpAt)
+          let results: Array<OpenAppResult>
+          let consumed: number
+          const batch = params.batch
+          if (crypto.pending != null && batch !== undefined) {
+            const result = await batch.scheduler.schedule({
+              source: JSON.stringify(['kumiai/app-open/v1', cursor.topicID]),
+              kind: 'open',
+              signal,
+              run: (budget) => batch.openReady(inputs, budget),
+            })
+            if (
+              result.consumed < 1 ||
+              result.consumed > inputs.length ||
+              result.results.length !== result.consumed
+            )
+              throw new AppFrameStorageError('Invalid streaming open prefix')
+            consumed = result.consumed
+            results = result.results
+          } else {
+            // Portable adapters release the source after each singleton open.
+            const input = inputs[0] as OpenAppInput
+            consumed = 1
+            try {
+              const aad = crypto.frameAAD(input.ciphertext)
+              const decoded = aad == null ? null : decodeAppAAD(aad)
               if (
-                error.frameEpoch > error.handleEpoch + APP_FUTURE_EPOCH_WINDOW ||
-                remaining <= 0
+                crypto.frameEpoch(input.ciphertext) == null ||
+                ((crypto.pending != null || aad != null) &&
+                  (decoded?.topicID !== cursor.topicID || decoded.intent !== 'log'))
               ) {
-                frame.sealed = { state: 'done' }
-                resumeBlocked(cursor.topicID, frame.position, id)
+                throw new Error('Retained frame refuses metadata')
+              }
+              if (crypto.pending == null) {
+                opened = await crypto.unwrap(input.ciphertext, { expectedAAD: input.expectedAAD })
+                results = []
+              } else {
+                if (!openedFrameIDs.has(input.frame.id)) {
+                  await crypto.unwrap(input.ciphertext, {
+                    expectedAAD: input.expectedAAD,
+                    frame: input.frame,
+                  })
+                  openedFrameIDs.add(input.frame.id)
+                }
+                let record: PendingAppFrame | undefined
+                try {
+                  record = (await crypto.pending.list()).find(
+                    (saved) => saved.frame.id === input.frame.id,
+                  )
+                } catch (cause) {
+                  throw new AppFrameStorageError('Failed to reload saved app frame', { cause })
+                }
+                if (record == null)
+                  throw new AppFrameStorageError('Durable open has no saved app frame')
+                openedFrameIDs.delete(input.frame.id)
+                results = [{ kind: 'opened', record, handleEpoch: crypto.epoch() }]
+              }
+            } catch (error) {
+              if (error instanceof GroupSafetyHeldError || isAppFrameStorageError(error))
+                throw error
+              results = [
+                isFrameAhead(error)
+                  ? {
+                      kind: 'held',
+                      frame: input.frame,
+                      reason: 'future-epoch',
+                      frameEpoch: error.frameEpoch,
+                      handleEpoch: error.handleEpoch,
+                    }
+                  : {
+                      kind: 'refused',
+                      frame: input.frame,
+                      reason: 'invalid-ciphertext',
+                      keyConsumed: false,
+                    },
+              ]
+            }
+          }
+          await runAppLane(async () => {
+            // Proven plaintext survives a reset, while old suffixes never enter its new generation.
+            for (const result of results) {
+              if (
+                result.kind === 'opened' &&
+                !pendingRecords.some((record) => record.frame.id === result.record.frame.id)
+              )
+                pendingRecords.push(result.record)
+            }
+            if (generation !== segmentGeneration) return
+            for (let i = 0; i < consumed; i++) {
+              const frame = frames[i] as AppFrame
+              const input = inputs[i] as OpenAppInput
+              attempted.add(frame)
+              const result = results[i]
+              if (result?.kind === 'held' && result.reason === 'future-epoch') {
+                if (caughtUpBefore && commitLaneCaughtUp() && workVersion === commitWorkVersion()) {
+                  frame.caughtUpAt ??= now()
+                  const remaining = APP_FUTURE_HOLD_MS - (now() - frame.caughtUpAt)
+                  if (
+                    result.frameEpoch > result.handleEpoch + APP_FUTURE_EPOCH_WINDOW ||
+                    remaining <= 0
+                  ) {
+                    frame.sealed = { state: 'done' }
+                    resumeBlocked(cursor.topicID, frame.position, input.frame.id)
+                    continue
+                  }
+                  const deadline = frame.caughtUpAt + APP_FUTURE_HOLD_MS
+                  if (futureDeadline == null || deadline < futureDeadline) {
+                    if (futureTimer != null) clearTimeout(futureTimer)
+                    futureDeadline = deadline
+                    futureTimer = setTimeout(() => {
+                      futureTimer = undefined
+                      futureDeadline = undefined
+                      if (!disposed && safetyHold() === null && commitLaneCaughtUp())
+                        retryDelivery()
+                    }, remaining)
+                  }
+                }
+                if (crypto.pending != null)
+                  reportBlocked(
+                    cursor.protocol,
+                    cursor.topicID,
+                    frame.position,
+                    input.frame.id,
+                    new Error(`frame claims future epoch ${result.frameEpoch}`),
+                    'future-epoch',
+                  )
                 continue
               }
-              const deadline = frame.caughtUpAt + APP_FUTURE_HOLD_MS
-              if (futureDeadline == null || deadline < futureDeadline) {
-                if (futureTimer != null) clearTimeout(futureTimer)
-                futureDeadline = deadline
-                futureTimer = setTimeout(() => {
-                  futureTimer = undefined
-                  futureDeadline = undefined
-                  if (!disposed && safetyHold() === null && commitLaneCaughtUp()) retryDelivery()
-                }, remaining)
+              if (opened !== undefined) continue
+              frame.sealed =
+                result?.kind === 'opened'
+                  ? { state: 'pending', id: result.record.frame.id }
+                  : { state: 'done' }
+              if (result?.kind === 'opened') progress = true
+              else resumeBlocked(cursor.topicID, frame.position, input.frame.id)
+            }
+          })
+          if (opened !== undefined && generation === segmentGeneration) {
+            const senderDID = normalizeDID(opened.senderDID)
+            if (senderDID !== localDID) {
+              let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } } | undefined
+              try {
+                message = JSON.parse(toUTF(opened.payload))
+              } catch {}
+              const prc = message?.payload?.prc
+              const protocol = protocols[cursor.protocol]
+              if (
+                message?.payload?.typ === 'event' &&
+                typeof prc === 'string' &&
+                protocol !== undefined &&
+                retentionOf(protocol, prc) === 'log'
+              ) {
+                progress = true
+                try {
+                  await appEventHandlers.get(cursor.protocol)?.emit(prc, {
+                    data: message.payload.data ?? {},
+                    senderDID,
+                    ...groupHandlerMetadata({ epoch: opened.frameEpoch }, params.groupKey),
+                  })
+                } catch {}
               }
             }
-            if (crypto.pending != null) {
-              reportBlocked(
-                name,
-                cursor.topicID,
-                frame.position,
-                id,
-                new Error(`frame claims future epoch ${error.frameEpoch}`),
-                'future-epoch',
-              )
-            }
-            continue
           }
-          if (crypto.pending != null && isAppFrameStorageError(error)) {
-            reportBlocked(name, cursor.topicID, frame.position, id, error)
+          if (opened !== undefined) {
+            await runAppLane(async () => {
+              if (generation === segmentGeneration && frames[0] !== undefined) {
+                frames[0].sealed = { state: 'done' }
+                resumeBlocked(cursor.topicID, frames[0].position, inputs[0]?.frame.id)
+              }
+            })
+          }
+        } catch (error) {
+          if (error instanceof GroupSafetyHeldError) {
+            halted = true
+            onSafetyHeld(error.reason)
+          } else {
+            const input = inputs[0]
+            if (input !== undefined && isAppFrameStorageError(error))
+              reportBlocked(
+                cursor.protocol,
+                cursor.topicID,
+                input.frame.position,
+                input.frame.id,
+                error,
+              )
             throw error
           }
-          // A past epoch is not retained. Other refusals also finish without delivery.
-          frame.sealed = { state: 'done' }
-          resumeBlocked(cursor.topicID, frame.position, id)
-          continue
-        }
-        // Opened, so it is done whatever the payload turns out to be — every path below either
-        // delivers it or drops it exactly as the live transport would.
-        frame.sealed = { state: 'done' }
-        resumeBlocked(cursor.topicID, frame.position, id)
-        if (events == null) continue
-        // This `unwrap` is its own ingress — not fed by `peer.ts`'s normalized inbound path — so
-        // the recovered sender is normalized HERE, once, before either use below: `localDID` (the
-        // param above) is already normalized at peer construction, and the two must compare on
-        // the same canonical form for the self-echo check to hold across DID forms.
-        const senderDID = normalizeDID(opened.senderDID)
-        if (senderDID === localDID) continue // its own echo, as the live path would not
-        let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } }
-        try {
-          message = JSON.parse(toUTF(opened.payload))
-        } catch {
-          continue // malformed: dropped, exactly as the live transport drops it
-        }
-        const prc = message.payload?.prc
-        if (message.payload?.typ !== 'event' || typeof prc !== 'string') continue
-        // A retained frame naming an EPHEMERAL procedure was published `retain: 'log'` by a member
-        // whose dispatch would never do that. Retention is the protocol's word, not the frame's.
-        const protocol = protocols[name]
-        if (protocol === undefined) continue
-        if (retentionOf(protocol, prc) !== 'log') continue
-        progress = true
-        try {
-          // Same door as the live push: emit the retained frame's plaintext into the
-          // per-protocol emitter the live bus is also built from. No listener → no-op.
-          await events.emit(prc, {
-            data: message.payload.data ?? {},
-            senderDID,
-            epoch: opened.frameEpoch,
+        } finally {
+          await runAppLane(async () => {
+            for (const frame of frames) reserved.delete(frame)
           })
-        } catch {
-          // A host listener that threw has been delivered to. Re-delivering on the next pull
-          // would retry the host's own bug at it, so the frame is consumed.
         }
-      }
-      await advanceCursor(topicID, frames)
+      })
+      for (const turn of turns) openingTurns.add(turn)
+      const results = await Promise.allSettled(turns)
+      for (const turn of turns) openingTurns.delete(turn)
+      const failure = results.find((result) => result.status === 'rejected')
+      if (
+        failure?.status === 'rejected' &&
+        generation === segmentGeneration &&
+        !openedOnly &&
+        !disposed
+      )
+        throw failure.reason
+      if (halted || generation !== segmentGeneration || safetyHold() !== null) break
     }
+    await runAppLane(async () => {
+      for (const [topicID, frames] of segment) await advanceCursor(topicID, frames)
+    })
+    await coverageBinding?.advance()
     return progress
   }
 
+  let legacyDrain: Promise<unknown> = Promise.resolve()
   let drainingEpoch: number | undefined
   const deliver = async (
     generation = segmentGeneration,
@@ -1339,15 +1483,19 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
   ): Promise<void> => {
     try {
       const continuation = await pull(onlyTopics)
-      const progress = await runAppLane(async () => {
-        if (generation !== segmentGeneration || disposed || openedOnly) return
-        drainingEpoch = anchor().epoch
-        try {
-          return await drain()
-        } finally {
-          drainingEpoch = undefined
+      if (generation !== segmentGeneration || disposed || openedOnly) return
+      drainingEpoch = anchor().epoch
+      let progress: boolean
+      try {
+        if (crypto.pending != null) progress = await drain()
+        else {
+          const work = legacyDrain.then(drain)
+          legacyDrain = work.catch(() => {})
+          progress = await work
         }
-      })
+      } finally {
+        drainingEpoch = undefined
+      }
       if (generation === segmentGeneration) {
         if (progress) continuationBackoff = APP_CONTINUATION_BACKOFF_MS
         if (continuation || (progress && continuationTimer != null)) {
@@ -1435,6 +1583,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
         buffered?.sealed.state === 'sealed' &&
         frameID(record.frame.topicID, buffered.sealed.bytes) === record.frame.id
       ) {
+        buffered.ref = { ...record.frame }
         buffered.sealed = { state: 'pending', id: record.frame.id }
       }
     }
@@ -1447,6 +1596,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
 
   const stopOpening = (): void => {
     openedOnly = true
+    openCancellation.abort(new Error('App lane opening stopped'))
     for (const controller of pulls.keys()) controller.abort()
     if (futureTimer != null) clearTimeout(futureTimer)
     if (retryTimer != null) clearTimeout(retryTimer)
@@ -1455,8 +1605,8 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
   }
 
   return {
-    dropFrame: (topicID, position) =>
-      runAppLane(async () => {
+    dropFrame: async (topicID, position) => {
+      const unknown = await runAppLane(async () => {
         if (disposed) throw new PeerDisposedError('Peer is disposed')
         if (crypto.pending == null) throw new Error('durable app delivery is disabled')
         const unknown = pendingRecords.find(
@@ -1466,16 +1616,13 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
             record.frame.position === position,
         )
         if (unknown != null) {
-          await crypto.pending.complete(unknown.frame.id)
-          pendingRecords.splice(pendingRecords.indexOf(unknown), 1)
-          resumeUnknown(unknown)
-          notifyOpened()
-          return
+          return unknown
         }
         const frames = segment.get(topicID)
         const frame = frames?.find((item) => item.position === position)
         if (frames == null || frame == null) throw new Error('app frame is not buffered')
         if (
+          reserved.has(frame) ||
           frame.sealed.state === 'pending' ||
           (frame.sealed.state === 'sealed' &&
             openedFrameIDs.has(frameID(topicID, frame.sealed.bytes)))
@@ -1493,7 +1640,13 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
         frame.sealed = { state: 'done' }
         resumeBlocked(topicID, position)
         await advanceCursor(topicID, frames)
-      }),
+        return undefined
+      })
+      if (unknown !== undefined) {
+        await params.completion.complete([unknown.frame.id])
+        await finishRecord(unknown)
+      } else await coverageBinding?.advance()
+    },
     retryDelivery,
     kick,
     /** Fetches run outside the mutex; opening and non-durable handlers reserve the app lane. */
@@ -1503,6 +1656,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     stopOpening,
     releaseOpened: () => {
       openedReleased = true
+      coverageBinding?.unbind()
     },
     acknowledgeOpened: async (id) => {
       const record = pendingRecords.find((record) => record.frame.id === id)
@@ -1529,6 +1683,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     handoffOpened: async () => {
       deliveryHandedOff = true
       stopOpening()
+      while (openingTurns.size > 0) await Promise.allSettled([...openingTurns])
       await runAppLane(async () => {})
       // Live claims already hold their protocol serialisation through completion.
       if (openedFailure !== undefined) throw openedFailure
@@ -1536,6 +1691,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     completeOpened: async () => {
       stopOpening()
       // An open can have committed plaintext before returning its record to the lane.
+      while (openingTurns.size > 0) await Promise.allSettled([...openingTurns])
       await runAppLane(async () => {})
       let delay = 100
       while (openedFrameIDs.size !== 0) {
@@ -1599,7 +1755,11 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       const interrupted =
         (drainingEpoch != null && drainingEpoch !== anchor().epoch) ||
         [...pulls.values()].some((epoch) => epoch !== anchor().epoch)
+      openCancellation.abort(new Error('App lane generation changed'))
+      openCancellation = new AbortController()
       segmentGeneration += 1
+      coverage = new Map()
+      provenThrough.clear()
       cancelBusyRetry?.()
       cancelBusyRetry = undefined
       busyTopics.clear()

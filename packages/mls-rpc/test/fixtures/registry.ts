@@ -225,6 +225,17 @@ export function registryFixtureObserveDecrypts(
   decryptObservers.set(fixture, observe)
 }
 
+const stagedDecryptObservers = new WeakMap<
+  RegistryFixtureBase,
+  (ciphertext: Uint8Array) => void | Promise<void>
+>()
+export function registryFixtureObserveStagedDecrypts(
+  fixture: RegistryFixtureBase,
+  observe: (ciphertext: Uint8Array) => void | Promise<void>,
+): void {
+  stagedDecryptObservers.set(fixture, observe)
+}
+
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
@@ -505,6 +516,15 @@ async function assemble(
       handle.decrypt = (ciphertext, options) => {
         observe(ciphertext)
         return decrypt(ciphertext, options)
+      }
+    }
+    const stagedObserver = stagedDecryptObservers.get(fixture)
+    if (stagedObserver !== undefined) {
+      const decryptStaged = handle.decryptStaged.bind(handle)
+      handle.decryptStaged = async (...args) => {
+        const result = await decryptStaged(...args)
+        await stagedObserver(args[0])
+        return result
       }
     }
     return handle

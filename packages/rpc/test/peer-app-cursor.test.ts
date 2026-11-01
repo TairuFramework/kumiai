@@ -67,7 +67,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     // Both frames are delivered, so both are done, so the position sits on the second of them.
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     // He dies again and comes back over the same durable state — the same handle at the same
     // epoch, so every one of those frames is still openable by him. The position is the only
@@ -127,13 +127,15 @@ describe('the app-lane drain reads from a durable position and reports what aged
     expect(posted).toHaveLength(2)
 
     const first = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers, recovery })
-    await vi.waitFor(() => expect(first.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID))
+    await vi.waitFor(() => expect(first.appCursorStore.stored(topicID)).toBeNull())
     expect(first.mls.epoch()).toBe(1)
 
     expect(first.controlWalk.safetyHold()).toBeNull()
-    expect((await first.control.load()).cursor?.position).toBe(own.sequenceID)
+    await vi.waitFor(async () =>
+      expect((await first.control.load()).cursor?.position).toBe(own.sequenceID),
+    )
     expect(seen).toEqual([{ text: 'at epoch one' }])
-    expect(first.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+    expect(first.appCursorStore.stored(topicID)).toBeNull()
     expect(JSON.parse(new TextDecoder().decode(first.crypto.saveState()))).toMatchObject({
       spent: ['1:alice:0'],
     })
@@ -152,7 +154,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
       expect(next.controlWalk.safetyHold()).toBeNull()
       expect((await next.control.load()).cursor?.position).toBe(own.sequenceID)
       expect(seen).toEqual([{ text: 'at epoch one' }])
-      expect(next.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+      expect(next.appCursorStore.stored(topicID)).toBeNull()
       expect(JSON.parse(new TextDecoder().decode(next.crypto.saveState()))).toMatchObject({
         spent: ['1:alice:0'],
       })
@@ -204,6 +206,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
     await flush()
     expect(seen).toEqual([{ text: 'read before the gap' }])
     await first.peer.dispose()
+    const prior = hub.published.find((message) => message.topicID === topicID)?.sequenceID
+    if (prior === undefined) throw new Error('Missing prior cursor')
+    await first.appCursorStore.save(topicID, prior)
     hub.detach('bob')
 
     // He is away long enough for the group to talk and for the hub's window to close over part of
@@ -436,7 +441,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     })
     hub.reattach('bob')
     await flush()
-    expect(bob.appCursorStore.stored(topicID)).toBe(cursor)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
     hub.detach('bob')
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } })
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'survivor' } })

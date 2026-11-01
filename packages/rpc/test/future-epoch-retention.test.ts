@@ -84,7 +84,7 @@ describe('future-epoch app retention', () => {
     hub.redeliver('bob')
     await vi.waitFor(() => expect(restarted.mls.epoch()).toBe(2))
     await vi.waitFor(() => expect(seen).toHaveBeenCalledWith({ text: 'epoch two' }))
-    expect(restarted.appCursorStore.stored(topicID)).toBe(frame?.sequenceID)
+    expect(restarted.appCursorStore.stored(topicID)).toBeNull()
     await alice.peer.dispose()
     await restarted.peer.dispose()
   })
@@ -100,7 +100,7 @@ describe('future-epoch app retention', () => {
     hub.detach('bob')
 
     const forged = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
-    const blocked = await hub.publish({
+    await hub.publish({
       senderDID: 'mallory',
       topicID,
       retain: 'log',
@@ -117,7 +117,7 @@ describe('future-epoch app retention', () => {
     await restarted.peer.replay()
     expect(notices).not.toHaveBeenCalled()
     expect(seen).not.toHaveBeenCalled()
-    expect(restarted.appCursorStore.stored(topicID)).toBe(blocked.sequenceID)
+    expect(restarted.appCursorStore.stored(topicID)).toBeNull()
     await restarted.peer.dispose()
     const again = makeMLSPeer(hub, 'bob', secret, {
       restartOf: restarted,
@@ -125,7 +125,7 @@ describe('future-epoch app retention', () => {
       onAppDeliveryStalled: notices,
     })
     await again.peer.protocol('chat').to('alice')
-    expect(again.appCursorStore.stored(topicID)).toBe(blocked.sequenceID)
+    expect(again.appCursorStore.stored(topicID)).toBeNull()
     expect(notices).not.toHaveBeenCalled()
     await again.peer.dispose()
   })
@@ -138,7 +138,7 @@ test('a peer expires a near-future occurrence without later commit or app traffi
   await bob.peer.protocol('chat').to('alice')
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   try {
-    const frame = await hub.publish({
+    await hub.publish({
       senderDID: 'alice',
       topicID,
       retain: 'log',
@@ -151,7 +151,7 @@ test('a peer expires a near-future occurrence without later commit or app traffi
     await vi.advanceTimersByTimeAsync(29_999)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
     expect(seen).not.toHaveBeenCalled()
     expect(bob.controlWalk.safetyHold()).toBeNull()
     expect((await bob.control.load()).controlHold).toBeNull()
@@ -218,7 +218,7 @@ test('an expiry gap observer can await resync without blocking later serial work
     })
     await expectCompletion(Promise.all([observed.promise, bob.peer.resync()]))
     expect(notices).toEqual(['stalled', 'pruned', 'resumed'])
-    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
   } finally {
     await bob.peer.dispose()
   }
@@ -268,7 +268,7 @@ test('replacement receives a retained event whose handler never started before d
     await replacement.peer.replay()
     await vi.waitFor(() => expect(received).toEqual([{ text: 'second' }]))
     expect(cursorWhileBlocked).toBeNull()
-    expect(replacement.appCursorStore.stored(topicID)).toBe('000000000002')
+    expect(replacement.appCursorStore.stored(topicID)).toBeNull()
   } finally {
     await bob.peer.dispose()
     release.resolve()
@@ -340,7 +340,7 @@ test('a peer starts hold age only when a paused commit walk catches up', async (
     recoverySecret: secret,
     epoch: 1,
   })
-  const frame = await hub.publish({
+  await hub.publish({
     senderDID: 'alice',
     topicID,
     retain: 'log',
@@ -372,7 +372,7 @@ test('a peer starts hold age only when a paused commit walk catches up', async (
     await vi.advanceTimersByTimeAsync(29_999)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
   } finally {
     release.resolve()
     await bob.peer.dispose()
@@ -388,7 +388,7 @@ test('a local commit awaiting its publication acknowledgement suspends app expir
   const release = Promise.withResolvers<void>()
   let committing: Promise<unknown> | undefined
   try {
-    const frame = await hub.publish({
+    await hub.publish({
       senderDID: 'alice',
       topicID,
       retain: 'log',
@@ -432,7 +432,7 @@ test('a local commit awaiting its publication acknowledgement suspends app expir
     ])
     expect(snapshot.outcomes[0]?.id).not.toBe(provisionalID)
     await vi.advanceTimersByTimeAsync(0)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
   } finally {
     release.resolve()
     await committing
@@ -446,7 +446,7 @@ test('a local commit restores catch-up so a quiet future occurrence still expire
   await bob.peer.protocol('chat').to('alice')
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   try {
-    const frame = await hub.publish({
+    await hub.publish({
       senderDID: 'alice',
       topicID,
       retain: 'log',
@@ -460,7 +460,7 @@ test('a local commit restores catch-up so a quiet future occurrence still expire
     await bob.peer.commit(buildLedgerCommit(bob, []))
     expect(bob.mls.epoch()).toBe(2)
     await vi.advanceTimersByTimeAsync(30_000)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
   } finally {
     await bob.peer.dispose()
   }
@@ -476,7 +476,7 @@ test('live unsupported outer app versions complete without decrypting or a handl
   try {
     const aad = encodeAppAAD({ topicID, intent: 'log' })
     aad[0] = 255
-    const frame = await hub.publish({
+    await hub.publish({
       senderDID: 'alice',
       topicID,
       retain: 'log',
@@ -486,7 +486,7 @@ test('live unsupported outer app versions complete without decrypting or a handl
       ),
     })
     await vi.advanceTimersByTimeAsync(0)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
     expect(opens).not.toHaveBeenCalled()
     expect(seen).not.toHaveBeenCalled()
     expect(bob.controlWalk.safetyHold()).toBeNull()
@@ -617,13 +617,15 @@ describe('caught-up future occurrence bounds', () => {
     expect(f.cursor.stored(topicID)).toBeNull()
     wallClock.mockReturnValue(130_000)
     await f.lane.deliver()
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
     wallClock.mockReturnValue(149_999)
     await f.lane.deliver()
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
+    await expect(f.lane.dropFrame(topicID, '000000000001')).rejects.toThrow('not buffered')
     wallClock.mockReturnValue(150_000)
     await f.lane.deliver()
-    expect(f.cursor.stored(topicID)).toBe('000000000002')
+    expect(f.cursor.stored(topicID)).toBeNull()
+    await expect(f.lane.dropFrame(topicID, '000000000002')).rejects.toThrow('not buffered')
     expect(f.emit).not.toHaveBeenCalled()
   })
 
@@ -641,7 +643,7 @@ describe('caught-up future occurrence bounds', () => {
     expect(f.cursor.stored(topicID)).toBeNull()
     time += 1
     await f.lane.deliver()
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
     expect(f.emit).not.toHaveBeenCalled()
   })
 
@@ -723,7 +725,7 @@ describe('caught-up future occurrence bounds', () => {
         expect(scheduled).toBe(2)
         expect(vi.getTimerCount()).toBe(1)
         await vi.advanceTimersByTimeAsync(30_000)
-        expect(f.cursor.stored(topicID)).toBe('000000000001')
+        expect(f.cursor.stored(topicID)).toBeNull()
         expect(vi.getTimerCount()).toBe(0)
       } finally {
         release.resolve()
@@ -761,7 +763,7 @@ describe('caught-up future occurrence bounds', () => {
       }
       await vi.advanceTimersByTimeAsync(0)
       expect(f.emit).toHaveBeenCalledOnce()
-      expect(f.cursor.stored(topicID)).toBe(message.sequenceID)
+      expect(f.cursor.stored(topicID)).toBeNull()
     },
   )
 
@@ -794,7 +796,7 @@ describe('caught-up future occurrence bounds', () => {
       await f.lane.deliver()
       await vi.advanceTimersByTimeAsync(0)
       expect(f.emit).toHaveBeenCalledOnce()
-      expect(f.cursor.stored(topicID)).toBe('000000000001')
+      expect(f.cursor.stored(topicID)).toBeNull()
     },
   )
 
@@ -802,7 +804,7 @@ describe('caught-up future occurrence bounds', () => {
     'expiry retries one failed %s without traffic and never reopens completed poison',
     async (failure) => {
       const f = await futureLane()
-      const message = await f.append(3)
+      await f.append(3)
       await f.lane.deliver()
       if (failure === 'fetch') f.fetch.mockRejectedValueOnce(new Error('fetch unavailable'))
       else vi.spyOn(f.cursor, 'save').mockRejectedValueOnce(new Error('cursor unavailable'))
@@ -812,7 +814,7 @@ describe('caught-up future occurrence bounds', () => {
       await vi.advanceTimersByTimeAsync(999)
       expect(f.cursor.stored(topicID)).toBeNull()
       await vi.advanceTimersByTimeAsync(1)
-      expect(f.cursor.stored(topicID)).toBe(message.sequenceID)
+      expect(f.cursor.stored(topicID)).toBeNull()
       if (failure === 'cursor save') expect(f.reader.starts.unwrap).toBe(opens)
       expect(f.emit).not.toHaveBeenCalled()
       expect(f.rows.size).toBe(0)
@@ -829,7 +831,7 @@ describe('caught-up future occurrence bounds', () => {
       await vi.advanceTimersByTimeAsync(29_999)
       expect(f.cursor.stored(topicID)).toBeNull()
       await vi.advanceTimersByTimeAsync(1)
-      expect(f.cursor.stored(topicID)).toBe('000000000001')
+      expect(f.cursor.stored(topicID)).toBeNull()
       expect(f.emit).not.toHaveBeenCalled()
       expect(f.rows.size).toBe(0)
     },
@@ -839,7 +841,7 @@ describe('caught-up future occurrence bounds', () => {
     const f = await futureLane({ hint })
     await f.append(4)
     await f.lane.deliver()
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
     expect(f.rows.size).toBe(0)
     expect(f.emit).not.toHaveBeenCalled()
   })
@@ -856,7 +858,7 @@ describe('caught-up future occurrence bounds', () => {
     await vi.advanceTimersByTimeAsync(29_999)
     expect(f.cursor.stored(topicID)).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test('catch-up starts age while a lagging retry is blocked in app refetch', async () => {
@@ -879,7 +881,7 @@ describe('caught-up future occurrence bounds', () => {
     await vi.advanceTimersByTimeAsync(9_999)
     expect(f.cursor.stored(topicID)).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
-    expect(f.cursor.stored(topicID)).toBe(message.sequenceID)
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test('expiry suspends enforcement during new commit lag and opens before applying bounds', async () => {
@@ -893,7 +895,7 @@ describe('caught-up future occurrence bounds', () => {
     f.setCaught(true)
     await vi.advanceTimersByTimeAsync(0)
     expect(f.emit).toHaveBeenCalledOnce()
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test('catch-up completes a far-future claim without more traffic', async () => {
@@ -904,7 +906,7 @@ describe('caught-up future occurrence bounds', () => {
     expect(f.cursor.stored(topicID)).toBeNull()
     f.setCaught(true)
     await vi.advanceTimersByTimeAsync(0)
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test('duplicate pushes and refetches cannot renew age', async () => {
@@ -939,10 +941,10 @@ describe('caught-up future occurrence bounds', () => {
     release.resolve()
     await f.lane.deliver()
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(f.cursor.stored(topicID)).toBe(message.sequenceID)
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
-  test('restart gives a fresh bounded wait, while committed poison is never reopened', async () => {
+  test('restart gives portable dead prefixes a fresh bounded wait', async () => {
     const f = await futureLane()
     await f.append(2)
     await f.lane.deliver()
@@ -953,11 +955,11 @@ describe('caught-up future occurrence bounds', () => {
     await vi.advanceTimersByTimeAsync(29_999)
     expect(f.cursor.stored(topicID)).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
     restarted.dispose()
     const opens = vi.spyOn(f.reader, 'unwrap')
     await f.create().deliver()
-    expect(opens).not.toHaveBeenCalled()
+    expect(opens).toHaveBeenCalledOnce()
   })
 
   test('poison behind an earlier pending record cannot pass its cursor', async () => {
@@ -973,21 +975,22 @@ describe('caught-up future occurrence bounds', () => {
     await f.lane.deliver()
     release.resolve()
     await vi.advanceTimersByTimeAsync(0)
-    expect(f.cursor.stored(topicID)).toBe('000000000002')
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
-  test('cursor storage failure retains completed poison until a successful save', async () => {
+  test('portable dead prefixes never attempt a root cursor save', async () => {
     const f = await futureLane()
     await f.append(4)
     const save = f.cursor.save.bind(f.cursor)
     vi.spyOn(f.cursor, 'save')
       .mockRejectedValueOnce(new Error('ambiguous cursor save'))
       .mockImplementation(save)
-    await expect(f.lane.deliver()).rejects.toThrow('ambiguous cursor save')
+    await f.lane.deliver()
+    expect(f.cursor.save).not.toHaveBeenCalled()
     expect(f.cursor.stored(topicID)).toBeNull()
     const opens = vi.spyOn(f.reader, 'unwrap')
     await f.lane.deliver()
-    expect(f.cursor.stored(topicID)).toBe('000000000001')
+    expect(f.cursor.stored(topicID)).toBeNull()
     expect(opens).not.toHaveBeenCalled()
   })
 
@@ -1016,7 +1019,7 @@ describe('caught-up future occurrence bounds', () => {
       })
       const opens = vi.spyOn(f.reader, 'unwrap')
       await f.lane.deliver()
-      expect(f.cursor.stored(topicID)).toBe('000000000001')
+      expect(f.cursor.stored(topicID)).toBeNull()
       expect(opens).not.toHaveBeenCalled()
       expect(f.rows.size).toBe(0)
       expect(f.emit).not.toHaveBeenCalled()

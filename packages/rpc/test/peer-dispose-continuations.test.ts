@@ -332,6 +332,8 @@ describe('work resumed after disposal', () => {
     expect(notices).toHaveBeenCalledWith(
       expect.objectContaining({ position: blocked.sequenceID, reason: 'future-epoch' }),
     )
+    // The observed open must release its reservation before the later ledger-wait check.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     const isLedgerComplete = restarted.mls.isLedgerComplete.bind(restarted.mls)
     let releaseCheck = (): void => {}
     const checkGate = new Promise<void>((resolve) => {

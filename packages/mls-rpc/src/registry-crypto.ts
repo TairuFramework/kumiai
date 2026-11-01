@@ -2,6 +2,7 @@ import { readMessageAAD } from '@kumiai/mls'
 import {
   AppFrameStorageError,
   appFrameIdempotencyKey,
+  bindAppBatch,
   decodeAppAAD,
   FrameEpochError,
   type GroupCrypto,
@@ -21,6 +22,7 @@ import {
   type OpenAppResult,
   type PendingAppFrames,
 } from './persistence-types.js'
+import { registryStreamingOpen } from './registry/app-open-binding.js'
 
 /** Registry crypto uses byte-level seal/receive and owns durable pending frames. */
 export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): GroupCrypto & {
@@ -58,7 +60,7 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
     }
   }
 
-  return {
+  const result: GroupCrypto & { pending: PendingAppFrames; unwrapBatch: typeof unwrapBatch } = {
     ...base,
     /**
      * Cold, deferred and exhausted ephemeral sends throw ApplicationLeaseUnavailableError at once.
@@ -123,4 +125,7 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
       throw new Error(`unwrap: app frame refused (${result.reason})`)
     },
   }
+  const binding = registryStreamingOpen(access)
+  if (binding !== undefined) bindAppBatch(result, binding)
+  return result
 }

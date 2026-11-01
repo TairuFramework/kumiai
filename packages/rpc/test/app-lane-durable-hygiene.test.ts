@@ -46,13 +46,13 @@ describe('durable app lane hygiene', () => {
     const saving = Promise.withResolvers<void>()
     const saved = Promise.withResolvers<void>()
     const otherTopic = protocolTopic(anchor.secret, anchor.epoch, 'other')
-    const save = cursor.save
-    cursor.save = async (topic, position) => {
-      if (topic === otherTopic) {
+    const complete = pending.complete
+    pending.complete = async (id) => {
+      if (pending.rows.get(id)?.frame.topicID === otherTopic) {
         saving.resolve()
         await saved.promise
       }
-      await save(topic, position)
+      await complete(id)
     }
     const lane = createAppLane(
       testAppLaneParams({
@@ -70,7 +70,7 @@ describe('durable app lane hygiene', () => {
             throw new Error('Retain the failed live record')
           }
           refused.resolve()
-          throw new Error('Leave this record for cold delivery')
+          return
         },
         retentionSeconds: 60,
         appCursorStore: cursor,
@@ -102,15 +102,13 @@ describe('durable app lane hygiene', () => {
     })
     const record = lane.pendingRecords().find((record) => record.frame.protocol === 'other')
     if (record === undefined) throw new Error('Missing retained record')
-    await pending.complete(record.frame.id)
-    const acknowledged = lane.acknowledgeOpened(record.frame.id)
     await saving.promise
     first.resolve()
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(idle).toBe(false)
     saved.resolve()
-    await Promise.all([drain, acknowledged])
-    expect(cursor.stored(otherTopic)).toBe(record.frame.position)
+    await drain
+    expect(cursor.stored(otherTopic)).toBeNull()
     expect([...pending.rows.values()].map((record) => record.frame.protocol)).toEqual(['chat'])
     lane.releaseOpened()
     const retained = lane.pendingRecords()[0]
@@ -153,28 +151,25 @@ describe('durable app lane hygiene', () => {
     expect(drained).toBe(true)
   })
 
-  test('idle retains a failed cursor save during disposal until its retry succeeds', async () => {
+  test('portable completion survives an unavailable root cursor during disposal', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
     const cursor = createMemoryAppCursorStore()
+    const save = vi.spyOn(cursor, 'save').mockRejectedValue(new Error('root cursor unavailable'))
+    const pending = pendingStore()
     const entered = Promise.withResolvers<void>()
     const gate = Promise.withResolvers<void>()
-    const save = cursor.save
-    let failed = false
-    cursor.save = async (topic, position) => {
+    const complete = pending.complete
+    pending.complete = async (id) => {
       entered.resolve()
       await gate.promise
-      if (!failed) {
-        failed = true
-        throw new Error('cursor save failed')
-      }
-      await save(topic, position)
+      await complete(id)
     }
     const lane = createAppLane(
       testAppLaneParams({
         groupKey: { groupID: 'group', incarnation: 1 },
         mux,
-        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
+        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
         appliedEpoch: () => 1,
         localDID: 'bob',
         protocols: { chat },
@@ -191,7 +186,7 @@ describe('durable app lane hygiene', () => {
       mux.dispose()
     })
     const payload = await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(
-      encodeEventFrame('chat/posted', { text: 'failed save' }),
+      encodeEventFrame('chat/posted'),
       { aad },
     )
     await hub.publish({ topicID, senderDID: 'alice', payload, retain: 'log' })
@@ -202,81 +197,30 @@ describe('durable app lane hygiene', () => {
     const drain = lane.idle().then(() => {
       idle = true
     })
-    const settled = expect(drain).resolves.toBeUndefined()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(idle).toBe(false)
-    gate.resolve()
-    await settled
-    expect(idle).toBe(true)
-    expect(cursor.stored(topicID)).toBe('000000000001')
-  })
-
-  test('idle awaits an in-flight cursor save after disposal', async () => {
-    const hub = new DurableFakeHub()
-    const mux = createHubMux({ hub, localDID: 'bob', onReceiveEnded() {} })
-    const cursor = createMemoryAppCursorStore()
-    const entered = Promise.withResolvers<void>()
-    const gate = Promise.withResolvers<void>()
-    const save = cursor.save
-    cursor.save = async (topic, position) => {
-      entered.resolve()
-      await gate.promise
-      await save(topic, position)
-    }
-    const lane = createAppLane(
-      testAppLaneParams({
-        groupKey: { groupID: 'group', incarnation: 1 },
-        mux,
-        crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore() }),
-        appliedEpoch: () => 1,
-        localDID: 'bob',
-        protocols: { chat },
-        eventHandlers: new Map(),
-        retentionSeconds: 60,
-        appCursorStore: cursor,
-        anchor: () => anchor,
-        groupID: () => 'group',
-      }),
-    )
-    onTestFinished(() => {
-      gate.resolve()
-      lane.dispose()
-      mux.dispose()
-    })
-    const payload = await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(
-      encodeEventFrame('chat/posted', { text: 'saved' }),
-      { aad },
-    )
-    const frame = await hub.publish({ topicID, senderDID: 'alice', payload, retain: 'log' })
-    await lane.deliver()
-    await entered.promise
-    lane.dispose()
-    let idle = false
-    const drain = lane.idle().then(() => {
-      idle = true
-    })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(idle).toBe(false)
     gate.resolve()
     await drain
-    expect(cursor.stored(topicID)).toBe(frame.sequenceID)
+    expect(pending.rows.size).toBe(0)
+    expect(save).not.toHaveBeenCalled()
+    expect(cursor.stored(topicID)).toBeNull()
   })
 
-  test('drained awaits an in-flight cursor save', async () => {
+  test('drained awaits an in-flight portable completion', async () => {
     const hub = new DurableFakeHub()
     const pending = pendingStore()
-    const appCursorStore = createMemoryAppCursorStore()
+    const cursor = createMemoryAppCursorStore()
     const entered = Promise.withResolvers<void>()
     const gate = Promise.withResolvers<void>()
-    const save = appCursorStore.save
-    appCursorStore.save = async (topic, position) => {
+    const complete = pending.complete
+    pending.complete = async (id) => {
       entered.resolve()
       await gate.promise
-      await save(topic, position)
+      await complete(id)
     }
     const bob = makeMLSPeer(hub, 'bob', new Uint8Array(32).fill(0xb6), {
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending }),
-      appCursorStore,
+      appCursorStore: cursor,
     })
     onTestFinished(async () => {
       gate.resolve()
@@ -285,11 +229,11 @@ describe('durable app lane hygiene', () => {
     })
     await bob.peer.protocol('chat').to('alice')
     const payload = await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(
-      encodeEventFrame('chat/posted', { text: 'saved' }),
+      encodeEventFrame('chat/posted'),
       { aad },
     )
-    const frame = await hub.publish({ topicID, senderDID: 'alice', payload, retain: 'log' })
-    await bob.peer.retryAppDelivery(topicID)
+    await hub.publish({ topicID, senderDID: 'alice', payload, retain: 'log' })
+    bob.peer.retryAppDelivery(topicID)
     await entered.promise
     await bob.peer.dispose()
     let drained = false
@@ -298,10 +242,10 @@ describe('durable app lane hygiene', () => {
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(drained).toBe(false)
-    expect(appCursorStore.stored(topicID)).toBeNull()
     gate.resolve()
     await drain
-    expect(appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(pending.rows.size).toBe(0)
+    expect(cursor.stored(topicID)).toBeNull()
   })
 
   test('a finished record does not resume another frame stalled at its position', async () => {

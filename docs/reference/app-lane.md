@@ -239,3 +239,8 @@ A matching cursor lets undelivered entries resume without a recovery rejoin, cos
 A stranded peer keeps the durable position before the frame that stranded it and records `stranded: true`.
 A restart at the same epoch then re-raises the strand and heals, including after a losing fork it had already stepped past.
 Recovery request keys remain available for at least the configured recovery or ledger deadline, with a 120-second minimum.
+
+A portable `HandlerCompletion` adapter owns idempotent durable completion and may maintain equivalent cursor proof internally.
+Without registered prefix coverage, the lane advances only its volatile position after the supplied completion promise resolves.
+It preserves the durable cursor, including for rowless dead frames. Restart therefore refetches that prefix and repeats refusal checks.
+Canonical completion binds live ordered coverage and commits pending removal, poison pruning and eligible cursor advancement together.

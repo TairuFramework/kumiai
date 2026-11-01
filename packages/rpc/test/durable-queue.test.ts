@@ -160,7 +160,7 @@ describe('durable delivery queue', () => {
       expect(records.size).toBe(0)
       expect(seen).toHaveBeenCalledOnce()
       expect(reader.starts.unwrap).toBe(1)
-      expect(cursor.stored(topicID)).toBe(dispose ? null : '000000000001')
+      expect(cursor.stored(topicID)).toBeNull()
     },
   )
 
@@ -337,7 +337,7 @@ describe('durable delivery queue', () => {
     reader.setEpoch(2)
     await lane.deliver()
     await vi.waitFor(() => expect(seen).toEqual(['A', 'B']))
-    await vi.waitFor(() => expect(cursor.stored(topicID)).toBe('000000000002'))
+    await vi.waitFor(() => expect(cursor.stored(topicID)).toBeNull())
     lane.dispose()
   })
 
@@ -473,7 +473,7 @@ describe('durable delivery queue', () => {
     await lane.deliver()
     await vi.waitFor(() => expect(seen).toEqual(['valid']))
     await vi.waitFor(() => expect(records.size).toBe(0))
-    expect(cursor.stored(topicID)).toBe('000000000006')
+    expect(cursor.stored(topicID)).toBeNull()
     lane.dispose()
   })
 

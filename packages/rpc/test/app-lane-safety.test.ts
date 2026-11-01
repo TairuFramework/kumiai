@@ -116,7 +116,7 @@ test.each(reasons)('two-frame drain stops at next open under %s', async (reason)
   await drain
   await vi.waitFor(() => expect(f.complete).toHaveBeenCalledOnce())
   expect(unwrap).toHaveBeenCalledOnce()
-  expect(f.cursor.stored(f.topicID)).toBe('000000000001')
+  expect(f.cursor.stored(f.topicID)).toBeNull()
   f.fetch.mockClear()
   f.retain.mockClear()
   await f.lane.deliver()
@@ -125,7 +125,7 @@ test.each(reasons)('two-frame drain stops at next open under %s', async (reason)
   expect(unwrap).toHaveBeenCalledOnce()
   // The unopened ciphertext remains droppable, rather than being silently consumed.
   await f.lane.dropFrame(f.topicID, '000000000002')
-  expect(f.cursor.stored(f.topicID)).toBe('000000000002')
+  expect(f.cursor.stored(f.topicID)).toBeNull()
 })
 
 test('terminal plaintext completion ignores sealed predecessors without fetching or opening', async () => {
@@ -231,7 +231,7 @@ test('terminal completion awaits an already committed open whose result is still
 })
 
 test.each([false, true])(
-  'completed plaintext waits for the later cursor save to succeed, terminal=%s',
+  'portable completion preserves the root cursor, terminal=%s',
   async (terminal) => {
     vi.useFakeTimers()
     const f = await fixture()
@@ -244,38 +244,18 @@ test.each([false, true])(
         oldest: first.sequenceID,
         gap: false,
       })
-      const save = f.cursor.save
-      let failures = 0
-      let blocked = true
-      f.cursor.save = async (topic, position) => {
-        failures++
-        if (blocked) throw new Error('Cursor save unavailable')
-        await save(topic, position)
-      }
+      const save = vi
+        .spyOn(f.cursor, 'save')
+        .mockRejectedValue(new Error('Root cursor unavailable'))
       await f.lane.deliver()
-      let completed = false
-      const completing = terminal
-        ? f.lane.completeOpened().then(() => {
-            completed = true
-          })
-        : Promise.resolve()
+      const completing = terminal ? f.lane.completeOpened() : Promise.resolve()
       await vi.advanceTimersByTimeAsync(0)
-      expect(failures).toBeGreaterThanOrEqual(1)
+      await completing
       expect(f.emit).toHaveBeenCalledOnce()
       expect(f.complete).toHaveBeenCalledOnce()
       expect(f.lane.pendingRecords()).toEqual([])
-      expect(completed).toBe(false)
+      expect(save).not.toHaveBeenCalled()
       expect(f.cursor.stored(f.topicID)).toBeNull()
-      blocked = false
-      if (!terminal) {
-        await f.lane.deliver()
-        expect(f.cursor.stored(f.topicID)).toBe(first.sequenceID)
-      }
-      await vi.advanceTimersByTimeAsync(100)
-      expect(f.emit).toHaveBeenCalledOnce()
-      expect(f.complete).toHaveBeenCalledOnce()
-      await completing
-      expect(f.cursor.stored(f.topicID)).toBe(first.sequenceID)
     } finally {
       f.lane.dispose()
       vi.useRealTimers()
@@ -311,7 +291,7 @@ test.each(reasons.flatMap((reason) => [false, true].map((delayed) => [reason, de
     expect(f.fetch).not.toHaveBeenCalled()
     expect(unwrap).toHaveBeenCalledOnce()
     await f.lane.dropFrame(f.topicID, '000000000001')
-    expect(f.cursor.stored(f.topicID)).toBe('000000000001')
+    expect(f.cursor.stored(f.topicID)).toBeNull()
   },
 )
 
@@ -382,7 +362,7 @@ test.each(reasons)(
     f.lane.retryDelivery()
     await vi.waitFor(() => expect(f.complete).toHaveBeenCalledOnce())
     expect(f.emit).toHaveBeenCalledTimes(2)
-    expect(f.cursor.stored(f.topicID)).toBe('000000000001')
+    expect(f.cursor.stored(f.topicID)).toBeNull()
     expect(f.fetch).not.toHaveBeenCalled()
   },
 )

@@ -224,7 +224,7 @@ describe('peer host drain', { concurrent: false }, () => {
     },
   )
 
-  test('drains a cursor write after delivering a retained event', async () => {
+  test('drains supplied completion after delivering a retained event', async () => {
     const pause = gate()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x7b)
@@ -243,6 +243,17 @@ describe('peer host drain', { concurrent: false }, () => {
     const bob = makeMLSPeer(hub, 'bob', secret, {
       members: ['bob', 'alice'],
       appCursorStore,
+      completion: {
+        key: { groupID: 'memory-group', incarnation: 1 },
+        async complete(ids) {
+          entered = true
+          await pause.promise
+          for (const id of ids) await bob.crypto.pending?.complete(id)
+        },
+        async transact() {
+          throw new Error('No transactional handler')
+        },
+      },
       handlers: {
         'chat/posted': () => {
           delivered++

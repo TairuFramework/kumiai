@@ -13,13 +13,16 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { createClearReportedHold } from '../src/clear-hold.js'
 import { entryCapability } from '../src/entry-capability.js'
+import { createGroupBatchScheduler } from '../src/group-batch.js'
 import type { OpenAppInput } from '../src/persistence-types.js'
+import { registryStreamingOpen } from '../src/registry/app-open-binding.js'
 import { registrySafety } from '../src/registry/safety.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixture,
   registryFixtureBumpStateVersion,
   registryFixtureMutateAppCursor,
+  registryFixtureObserveStagedDecrypts,
 } from './fixtures/registry.js'
 import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
@@ -147,6 +150,202 @@ for (const mode of ['real-mls', 'double'] as const) {
         await s.close()
       }
     }
+
+    test('streaming burst uses bounded atomic open batches', () =>
+      run(async (s) => {
+        const binding = registryStreamingOpen(s.access)
+        expect(binding).toBeDefined()
+        if (binding === undefined) throw new Error('Missing streaming binding')
+        for (const cap of [64, 32]) {
+          const topicID = `app-${cap}`
+          const frames: Array<OpenAppInput> = []
+          for (let i = 1; i <= 130; i++) frames.push(await s.seal(i, undefined, topicID))
+          const scheduler = createGroupBatchScheduler({
+            options: { maxBatchFrames: cap },
+            now: () => 0,
+          })
+          const sizes = []
+          const records = []
+          let remaining = frames
+          while (remaining.length > 0) {
+            const version = s.access.stateVersion()
+            const result = await scheduler.schedule({
+              source: 'chat',
+              kind: 'open',
+              run: (budget) => binding.openReady(remaining, budget),
+            })
+            expect(result.results).toHaveLength(result.consumed)
+            expect(s.access.stateVersion()).toBe(version + 1)
+            sizes.push(result.consumed)
+            for (const opened of result.results) {
+              expect(opened.kind).toBe('opened')
+              if (opened.kind === 'opened') records.push(opened.record)
+            }
+            remaining = remaining.slice(result.consumed)
+          }
+          expect(sizes).toEqual(cap === 64 ? [64, 64, 2] : [32, 32, 32, 32, 2])
+          expect(records).toEqual(
+            (await s.access.pending.list()).filter((record) => record.frame.topicID === topicID),
+          )
+        }
+      }))
+
+    test('streaming remainder belongs to its original source through rollback', () =>
+      run(async (s) => {
+        const binding = registryStreamingOpen(s.access)
+        if (binding === undefined) throw new Error('Missing streaming binding')
+        const frames: Array<OpenAppInput> = []
+        for (let i = 1; i <= 5; i++) frames.push(await s.seal(i))
+        const scheduler = createGroupBatchScheduler({
+          options: { maxBatchFrames: 2 },
+          now: () => 0,
+        })
+        const open = () =>
+          scheduler.schedule({
+            source: 'chat',
+            kind: 'open',
+            run: (budget) => binding.openReady(frames, budget),
+          })
+        s.f.onPhase('work', () => {
+          throw new Error('open rollback')
+        })
+        await expect(open()).rejects.toThrow()
+        expect(await s.access.pending.list()).toEqual([])
+        const result = await open()
+        expect(result.consumed).toBe(2)
+        expect(result.results).toMatchObject(
+          frames.slice(0, 2).map((input) => ({
+            kind: 'opened',
+            record: { frame: input.frame },
+          })),
+        )
+        for (const input of frames.slice(2))
+          expect(await s.saved(input.frame.id)).toEqual({ pending: null, poison: null })
+      }))
+
+    test('actual decrypt staging crosses eight milliseconds before the next batch', () =>
+      run(async (s) => {
+        const binding = registryStreamingOpen(s.access)
+        if (binding === undefined) throw new Error('Missing streaming binding')
+        for (const limit of [8, 3]) {
+          const inputs = [
+            await s.seal(`a${limit}`),
+            await s.seal(`b${limit}`),
+            await s.seal(`c${limit}`),
+          ]
+          let clock = 0
+          let stages = 0
+          registryFixtureObserveStagedDecrypts(s.f, () => {
+            if (++stages === 1) clock = limit
+          })
+          const scheduler = createGroupBatchScheduler({
+            options: { maxBatchWorkMs: limit },
+            now: () => clock,
+          })
+          const first = await scheduler.schedule({
+            source: 'chat',
+            kind: 'open',
+            run: (budget) => binding.openReady(inputs, budget),
+          })
+          expect(first.consumed).toBe(1)
+          expect(stages).toBe(1)
+          for (const input of inputs.slice(1))
+            expect(await s.saved(input.frame.id)).toEqual({ pending: null, poison: null })
+          const second = await scheduler.schedule({
+            source: 'chat',
+            kind: 'open',
+            run: (budget) => binding.openReady(inputs.slice(first.consumed), budget),
+          })
+          expect(second.consumed).toBe(2)
+          const explicit = [
+            await s.seal(`d${limit}`),
+            await s.seal(`e${limit}`),
+            await s.seal(`f${limit}`),
+          ]
+          stages = 0
+          expect(await s.access.openBatch(explicit)).toHaveLength(3)
+          expect(stages).toBe(3)
+        }
+      }))
+
+    test.each(['after-first-write', 'before-commit'] as const)(
+      'scheduled N open rollback exposes no plaintext: %s',
+      (point) =>
+        run(async (s) => {
+          const binding = registryStreamingOpen(s.access)
+          if (binding === undefined) throw new Error('Missing streaming binding')
+          const frames = [await s.seal(1), await s.seal(2, fromUTF('{}')), await s.seal(3)]
+          const capability = s.entry()
+          const runEntry = capability.run.bind(capability)
+          const spy = vi
+            .spyOn(capability, 'run')
+            .mockImplementationOnce((request, prepare, work, effects) => {
+              if (request.mutationID === null) throw new Error('Missing mutation id')
+              s.f.armWorkFault(request.mutationID, point)
+              return runEntry(request, prepare, work, effects)
+            })
+          const scheduler = createGroupBatchScheduler({ now: () => 0 })
+          const open = () =>
+            scheduler.schedule({
+              source: 'chat',
+              kind: 'open',
+              run: (budget) => binding.openReady(frames, budget),
+            })
+          const before = await s.snapshot()
+          await expect(open()).rejects.toThrow()
+          expect(await s.snapshot()).toEqual(before)
+          spy.mockRestore()
+          expect((await open()).results).toMatchObject([
+            { kind: 'opened' },
+            { kind: 'refused', reason: 'malformed-plaintext' },
+            { kind: 'opened' },
+          ])
+        }),
+    )
+
+    test('mixed refusal keeps valid siblings and holds incomplete prefix', () =>
+      run(async (s) => {
+        const binding = registryStreamingOpen(s.access)
+        if (binding === undefined) throw new Error('Missing streaming binding')
+        const a = await s.seal('10')
+        const poison = await s.seal('2', fromUTF('{}'))
+        const wrong = await s.seal('3')
+        wrong.expectedAAD = encodeAppAAD({ topicID: 'wrong', intent: 'log' })
+        const advanced = await s.f.advance(await s.access.read((handle) => handle))
+        const future = await s.seal('20')
+        future.ciphertext = await advanced.encrypt(encodeEventFrame('posted'), {
+          aad: future.expectedAAD,
+        })
+        future.frame.id = frameID(future.frame.topicID, future.ciphertext)
+        const duplicate = { ...a, frame: { ...a.frame, position: '4' } }
+        const before = await s.snapshot()
+        const fault = s.f.armNextWorkFault('pending')
+        const scheduler = createGroupBatchScheduler({ now: () => 0 })
+        let published = false
+        const opening = scheduler
+          .schedule({
+            source: 'chat',
+            kind: 'open',
+            run: (budget) => binding.openReady([a, poison, wrong, future, duplicate], budget),
+          })
+          .then((result) => {
+            published = true
+            return result
+          })
+        await fault.rejected
+        expect(published).toBe(false)
+        expect(await s.f.inspectRows()).toEqual(before.rows)
+        await fault.finish('commit')
+        const result = await opening
+        expect(result.consumed).toBe(5)
+        expect(result.results).toMatchObject([
+          { kind: 'opened' },
+          { kind: 'refused', reason: 'malformed-plaintext' },
+          { kind: 'refused', reason: 'wrong-aad' },
+          { kind: 'held', reason: 'future-epoch' },
+          { kind: 'refused', reason: 'duplicate' },
+        ])
+      }))
 
     test('mixed batch commits once in input order', () =>
       run(async (s) => {

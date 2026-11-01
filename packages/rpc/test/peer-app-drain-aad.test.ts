@@ -68,7 +68,7 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     // wrong-topic frame must not jam the read position behind it forever.
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frames[1]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
@@ -121,7 +121,7 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     // unrecoverable by design, not silently re-offered forever.
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frames[1]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

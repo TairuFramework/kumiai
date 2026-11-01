@@ -138,7 +138,7 @@ describe('the live lane and the drain share one read position', () => {
     const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
     const published = hub.published.filter((message) => message.topicID === topicID)
     expect(published).toHaveLength(1)
-    expect(bob.appCursorStore.stored(topicID)).toBe(published[0]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

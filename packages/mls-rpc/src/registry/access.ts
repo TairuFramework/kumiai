@@ -28,6 +28,7 @@ import { controlCompatible } from '../control-compat.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
 import { controlBuildContexts } from '../control-write-context.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import { groupBatchFor } from '../group-batch-binding.js'
 import { consumesInboundCommit } from '../inbound-commit.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import { decodeStoredValue, encodeStoredValue } from '../persistence-codec.js'
@@ -45,6 +46,7 @@ import type {
 } from '../persistence-types.js'
 import { clearGroupCondition } from '../safety-conditions.js'
 import { createRegistryAppOpen } from './app-open.js'
+import { bindRegistryStreamingOpen } from './app-open-binding.js'
 import { createPublicationPreparation } from './app-publication.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
 import { createLiveReceive, registryReceiveSlots } from './live-receive.js'
@@ -805,6 +807,14 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     if (live.committedRecord.terminal || !owner.snapshot.available)
       throw new GroupUnavailableError({ reason: 'invalid' })
   }
+  const appOpen = createRegistryAppOpen({
+    ...params,
+    run: live.run,
+    isolated,
+    recordFor,
+    assertSafety,
+    assertWorkSafety,
+  })
   const access: RegistryHandleAccess = {
     ...createPublicationPreparation({ ...params, live, assertWorkSafety }),
     receive: createLiveReceive({
@@ -820,14 +830,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
         })
       },
     }),
-    ...createRegistryAppOpen({
-      ...params,
-      run: live.run,
-      isolated,
-      recordFor,
-      assertSafety,
-      assertWorkSafety,
-    }),
+    openBatch: appOpen.openBatch,
+    pending: appOpen.pending,
     get key() {
       return { ...owner.key }
     },
@@ -863,6 +867,11 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       }
     },
   }
+  bindRegistryStreamingOpen(access, {
+    key: owner.key,
+    scheduler: groupBatchFor(params.binding, owner.key.groupID),
+    openReady: appOpen.openReady,
+  })
   registryLiveSend.set(access, live)
   registryReceiveSlots.set(access, params.live)
   leaseReaders.set(access, live.snapshot)

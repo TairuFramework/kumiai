@@ -58,18 +58,14 @@ describe('the drain retains unread frames and advances only completed positions'
     })
     hub.reattach('bob')
     await restarted.peer.replay()
-    await vi.waitFor(() =>
-      expect(restarted.appCursorStore.stored(topicID)).toBe(
-        hub.published.filter((item) => item.topicID === topicID).at(-1)?.sequenceID,
-      ),
-    )
+    await vi.waitFor(() => expect(restarted.appCursorStore.stored(topicID)).toBeNull())
 
-    expect(seen).toEqual([{ text: 'at epoch one' }])
+    await vi.waitFor(() => expect(seen).toEqual([{ text: 'at epoch one' }]))
 
     // The forged frame completes without reaching the host.
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
     expect(pruned).toEqual([])
 
     await alice.peer.dispose()
@@ -131,8 +127,8 @@ describe('the drain retains unread frames and advances only completed positions'
 
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    await vi.waitFor(() => expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID))
-    expect(cursorWrites.length).toBeGreaterThan(0)
+    await vi.waitFor(() => expect(bob.appCursorStore.stored(topicID)).toBeNull())
+    expect(cursorWrites).toEqual([])
     for (const write of cursorWrites) {
       expect([posted[0]?.sequenceID, posted[1]?.sequenceID]).toContain(write.position)
       expect(write.delivered).toContainEqual({ text: 'at epoch one' })
@@ -204,7 +200,7 @@ describe('the drain retains unread frames and advances only completed positions'
     // over.
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(2)
-    expect(bob.appCursorStore.history(topicID)).toEqual([frames[1]?.sequenceID])
+    expect(bob.appCursorStore.history(topicID)).toEqual([])
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
@@ -264,10 +260,7 @@ describe('the drain retains unread frames and advances only completed positions'
       },
       { timeout: 2500 },
     )
-    const posted = hub.published.filter((message) => message.topicID === topicID)
-    await vi.waitFor(() =>
-      expect(bob.appCursorStore.stored(topicID)).toBe(posted.at(-1)?.sequenceID),
-    )
+    await vi.waitFor(() => expect(bob.appCursorStore.stored(topicID)).toBeNull())
     expect(restarted.mls.epoch()).toBe(2)
 
     await alice.peer.dispose()
@@ -342,7 +335,7 @@ describe('the drain retains unread frames and advances only completed positions'
 
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
@@ -421,7 +414,7 @@ describe('the drain delivers only what the live lane would', () => {
     // The refused durable record remains pending and holds the cursor.
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frames[0]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
     expect(await restarted.crypto.pending?.list()).toMatchObject([
       { frame: { position: frames[1]?.sequenceID, procedure: 'chat/changed' } },
     ])
@@ -480,7 +473,7 @@ describe('the drain delivers only what the live lane would', () => {
     // Consumed rather than left to be re-offered.
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(1)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frames[0]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
@@ -545,7 +538,7 @@ describe('the drain delivers only what the live lane would', () => {
 
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(3)
-    expect(bob.appCursorStore.stored(topicID)).toBe(frames[2]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

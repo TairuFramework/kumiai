@@ -7,6 +7,7 @@ import {
 } from '@kumiai/mls'
 import {
   appFrameIdempotencyKey,
+  type BatchBudget,
   compareLogPositions,
   decodeAppEventPlaintext,
   frameID,
@@ -33,6 +34,7 @@ import {
   RECEIVE_SAVE_ATTEMPTS,
 } from '../persistence-types.js'
 import type { RegistryOwner } from './access.js'
+import type { RegistryStreamingOpen } from './app-open-binding.js'
 import type { createLiveSend } from './live-send.js'
 import type { Reservation } from './reserve.js'
 import { RetainedTrustUnavailableError } from './safety.js'
@@ -74,13 +76,20 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
   assertWorkSafety(stores: GroupStores<TTx>): Promise<void>
   publish(): void
   diagnoseFailure(error: unknown): Promise<void>
-}): Pick<RegistryHandleAccess, 'openBatch' | 'pending'> {
+}): Pick<RegistryHandleAccess, 'openBatch' | 'pending'> & { openReady: RegistryStreamingOpen } {
   const { owner, capability } = params
   const n = owner.key.incarnation
-  async function openBatch(inputs: Array<OpenAppInput>): Promise<Array<OpenAppResult>> {
+  async function prepare(
+    inputs: Array<OpenAppInput>,
+    budget?: BatchBudget,
+  ): Promise<Array<OpenAppResult>> {
+    capability.assertRoot()
     if (inputs.length === 0) return []
-    if (inputs.length > MAX_OPEN_BATCH_FRAMES) throw new RangeError('App batch exceeds 64 frames')
-    const frames = copyStoredValue(inputs)
+    if (budget === undefined && inputs.length > MAX_OPEN_BATCH_FRAMES)
+      throw new RangeError('App batch exceeds 64 frames')
+    const frames = copyStoredValue(
+      inputs.slice(0, budget === undefined ? inputs.length : Math.min(64, budget.maxFrames)),
+    )
     for (const { frame } of frames) {
       if (frame.groupID !== owner.key.groupID || frame.incarnation !== n)
         throw new DisplacedGroupHandleError('App frame belongs to another incarnation')
@@ -189,7 +198,9 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                 puts.push(record)
                 return { kind: 'opened', record, handleEpoch }
               }
+              budget?.begin()
               for (const input of frames) {
+                if (budget !== undefined && !budget.take()) break
                 if (input.frame.id !== frameID(input.frame.topicID, input.ciphertext)) {
                   results.push({
                     kind: 'refused',
@@ -245,7 +256,12 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
           )
         } catch (error) {
           if (error instanceof Noop) return error.results
-          if (error !== receiveConflict || attempt + 1 >= RECEIVE_SAVE_ATTEMPTS) throw error
+          if (
+            budget !== undefined ||
+            error !== receiveConflict ||
+            attempt + 1 >= RECEIVE_SAVE_ATTEMPTS
+          )
+            throw error
         }
       }
     } catch (error) {
@@ -258,8 +274,16 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
       params.publish()
     }
   }
-  const result: Pick<RegistryHandleAccess, 'openBatch' | 'pending'> = {
-    openBatch,
+  const result: Pick<RegistryHandleAccess, 'openBatch' | 'pending'> & {
+    openReady: RegistryStreamingOpen
+  } = {
+    openBatch: (inputs: Array<OpenAppInput>) => prepare(inputs),
+    openReady: async (inputs: Array<OpenAppInput>, budget: BatchBudget) => {
+      const results = await prepare(inputs, budget)
+      if (inputs.length > 0 && results.length === 0)
+        throw new RangeError('App open budget exhausted')
+      return { consumed: results.length, results }
+    },
     pending: {
       async list() {
         params.assertAvailable()

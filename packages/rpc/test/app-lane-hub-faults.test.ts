@@ -381,7 +381,7 @@ describe('app pulls against a faulty hub', () => {
     await f.lane.deliver()
     expect(new Set(f.seen)).toEqual(new Set(topics))
     expect(new Set(fetched.slice(0, 4))).toEqual(new Set(topics))
-    for (const topic of topics) expect(f.cursor.stored(topic)).toBe(position(100))
+    for (const topic of topics) expect(f.cursor.stored(topic)).toBeNull()
   })
 
   test('a busy mux rejects distinctly and retries after underlying fetches settle', async () => {
@@ -438,7 +438,7 @@ describe('app pulls against a faulty hub', () => {
         await vi.advanceTimersByTimeAsync(0)
         expect(fetch).toHaveBeenCalledTimes(6)
         expect(f.drains.pending).toBe(0)
-        for (const topic of topics) expect(f.cursor.stored(topic)).toBe('1')
+        for (const topic of topics) expect(f.cursor.stored(topic)).toBeNull()
       } finally {
         f.lane.dispose()
         withheld.resolve(empty())
@@ -471,7 +471,7 @@ describe('app pulls against a faulty hub', () => {
       await flush()
       expect(f.seen).toEqual(['recovered'])
       expect(fetch).toHaveBeenCalledTimes(3)
-      expect(f.cursor.stored(topicID)).toBe('1')
+      expect(f.cursor.stored(topicID)).toBeNull()
     } finally {
       f.lane.dispose()
       withheld.resolve(empty())
@@ -583,7 +583,7 @@ describe('app pulls against a faulty hub', () => {
     )
     await f.lane.deliver()
     expect(f.seen).toEqual(['after oversized'])
-    expect(f.cursor.stored(topicID)).toBe('2')
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test.each([null, '3'])(
@@ -598,7 +598,7 @@ describe('app pulls against a faulty hub', () => {
       await f.lane.deliver()
       if (stored == null) expect(fetch.mock.calls[1]?.[0].after).toBe('2')
       else expect(fetch).toHaveBeenCalledTimes(1)
-      expect(f.cursor.stored(topicID)).toBe(stored ?? '2')
+      expect(f.cursor.stored(topicID)).toBe(stored)
     },
   )
 
@@ -629,7 +629,7 @@ describe('app pulls against a faulty hub', () => {
       .mockResolvedValue(page(Array.from({ length: 100 }, (_, i) => entry(position(i + 1), bytes))))
     await f.lane.deliver()
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(f.cursor.stored(topicID)).toBe(position(4))
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test('protocol topics share the payload budget', async () => {
@@ -645,9 +645,12 @@ describe('app pulls against a faulty hub', () => {
       )
     })
     await f.lane.deliver()
-    const processed =
-      Number(f.cursor.stored(topicID) ?? '0') + Number(f.cursor.stored(otherTopic) ?? '0')
-    expect(processed).toBe(4)
+    const count = vi.mocked(f.hub.fetchTopic).mock.calls.length
+    await f.lane.deliver()
+    const fetched = vi.mocked(f.hub.fetchTopic).mock.calls.slice(count)
+    expect(fetched.reduce((sum, [request]) => sum + Number(request.after ?? '0'), 0)).toBe(4)
+    expect(f.cursor.stored(topicID)).toBeNull()
+    expect(f.cursor.stored(otherTopic)).toBeNull()
   })
 
   test('overlapping pulls discard a page when its fetched cursor moved', async () => {
@@ -664,12 +667,12 @@ describe('app pulls against a faulty hub', () => {
         secondDone = true
       })
       await flush()
-      expect(secondDone).toBe(true)
       await second
+      expect(secondDone).toBe(true)
       withheld.resolve(page([entry('2', await f.sealed('stale'))]))
       await first
       expect(f.seen).toEqual(['fresh'])
-      expect(f.cursor.stored(topicID)).toBe('1')
+      expect(f.cursor.stored(topicID)).toBeNull()
     } finally {
       withheld.resolve(empty())
       await first
@@ -917,7 +920,7 @@ describe('app pulls against a faulty hub', () => {
       await flush()
       release.resolve()
       await vi.waitFor(() => expect(f.complete).toHaveBeenCalledTimes(1), { timeout: 300 })
-      await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('1'), { timeout: 300 })
+      expect(f.cursor.stored(topicID)).toBeNull()
     } finally {
       release.resolve()
       withheld.resolve(empty())
@@ -971,7 +974,7 @@ describe('app pulls against a faulty hub', () => {
     )
     await expect(f.lane.deliver()).resolves.toBeUndefined()
     expect(f.seen).toEqual(['first', 'last'])
-    expect(f.cursor.stored(topicID)).toBe('3')
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test('reordered entries are sorted and duplicate positions are skipped', async () => {
@@ -986,7 +989,7 @@ describe('app pulls against a faulty hub', () => {
     )
     await expect(f.lane.deliver()).resolves.toBeUndefined()
     expect(f.seen).toEqual(['backwards', 'first', 'last'])
-    expect(f.cursor.stored(topicID)).toBe('2')
+    expect(f.cursor.stored(topicID)).toBeNull()
   })
 
   test('oversized sequenceID page ends the pull without raising', async () => {
@@ -1023,7 +1026,8 @@ test.each([false, true])(
       after == null ? page(messages) : empty(),
     )
     f.lane.kick()
-    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('2'), { timeout: 2000 })
+    await vi.waitFor(() => expect(f.seen).toHaveLength(2), { timeout: 2000 })
+    expect(f.cursor.stored(topicID)).toBeNull()
     expect(f.seen).toEqual(['first', 'second'])
   },
 )
@@ -1049,7 +1053,8 @@ test.each([false, true])(
       ),
     )
     f.lane.kick()
-    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe(position(1001)), { timeout: 5000 })
+    await vi.waitFor(() => expect(f.seen).toHaveLength(1001), { timeout: 5000 })
+    expect(f.cursor.stored(topicID)).toBeNull()
     expect(f.seen).toHaveLength(1001)
     expect(perPull.size).toBeGreaterThan(2)
     for (const count of perPull.values()) expect(count).toBeLessThanOrEqual(4)
@@ -1065,7 +1070,17 @@ test('one kick continues after a byte budget', async () => {
     page(messages.filter((message) => after == null || message.sequenceID > after)),
   )
   f.lane.kick()
-  await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe(position(5)), { timeout: 2000 })
+  await vi.waitFor(
+    () =>
+      expect(
+        vi.mocked(f.hub.fetchTopic).mock.calls.some(([request]) => request.after === position(4)),
+      ).toBe(true),
+    { timeout: 2000 },
+  )
+  await vi.waitFor(() => expect(f.drains.pending).toBe(0))
+  await f.lane.deliver()
+  expect(vi.mocked(f.hub.fetchTopic).mock.calls.at(-1)?.[0].after).toBe(position(5))
+  expect(f.cursor.stored(topicID)).toBeNull()
 })
 
 test('one kick continues after a fetch deadline when the hub heals', async () => {
@@ -1079,8 +1094,8 @@ test('one kick continues after a fetch deadline when the hub heals', async () =>
   try {
     f.lane.kick()
     await vi.advanceTimersByTimeAsync(10_000)
-    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('1'), { timeout: 1000 })
-    expect(f.seen).toEqual(['healed'])
+    await vi.waitFor(() => expect(f.seen).toEqual(['healed']), { timeout: 1000 })
+    expect(f.cursor.stored(topicID)).toBeNull()
   } finally {
     f.lane.dispose()
     withheld.resolve(empty())
@@ -1105,8 +1120,8 @@ test('two aborted hung fetches leave capacity to deliver after the hub heals', a
   await initial
   try {
     f.lane.kick()
-    await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('1'), { timeout: 1000 })
-    expect(f.seen).toEqual(['healed'])
+    await vi.waitFor(() => expect(f.seen).toEqual(['healed']), { timeout: 1000 })
+    expect(f.cursor.stored(topicID)).toBeNull()
     expect(fetch).toHaveBeenCalledTimes(3)
   } finally {
     f.lane.dispose()
@@ -1168,7 +1183,7 @@ test('replayed pages cannot spend byte budgets forever without cursor progress',
     return page(Array.from({ length: 100 }, () => message))
   })
   f.lane.kick()
-  await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBe('1'), { timeout: 1000 })
+  await vi.waitFor(() => expect(f.cursor.stored(topicID)).toBeNull(), { timeout: 1000 })
   await vi.waitFor(() => expect(f.drains.pending).toBe(0), { timeout: 1000 })
   expect(calls).toBeLessThanOrEqual(2)
 })

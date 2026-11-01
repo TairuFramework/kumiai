@@ -1003,13 +1003,13 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
     })
 
     test.each(['drain', 'delete', 'readmit', 'switch'] as const)(
-      'late cursor save is awaited before lifecycle handoff: %s',
+      'late completion promise is awaited before lifecycle handoff: %s',
       async (entry) => {
         const { createAppLane } = (await import(
-          new URL('../../rpc/src/app-lane.ts', import.meta.url).href
+          new URL('../../rpc/lib/app-lane.js', import.meta.url).href
         )) as { createAppLane: typeof CreateAppLane }
         const { createHubMux } = (await import(
-          new URL('../../rpc/src/hub-mux.ts', import.meta.url).href
+          new URL('../../rpc/lib/hub-mux.js', import.meta.url).href
         )) as { createHubMux: typeof CreateHubMux }
         const { DurableFakeHub } = (await import(
           new URL('../../rpc/test/fixtures/durable-fake-hub.ts', import.meta.url).href
@@ -1038,8 +1038,8 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
         const releaseHandler = Promise.withResolvers<void>()
         const reading = Promise.withResolvers<void>()
         const releaseRead = Promise.withResolvers<void>()
-        const saving = Promise.withResolvers<void>()
-        const releaseSave = Promise.withResolvers<void>()
+        const completing = Promise.withResolvers<void>()
+        const releaseCompletion = Promise.withResolvers<void>()
         const receiver = createFakeCrypto({
           epoch: 1,
           localDID,
@@ -1054,12 +1054,16 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
         const anchor = await receiver.exportSecret(APP_TOPIC_LABEL)
         const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
         const cursor = env.fixture.device.groups.ports(env.key).cursor
-        const save = cursor.save
-        cursor.save = async (topicID, position) => {
-          saving.resolve()
-          await releaseSave.promise
-          await save(topicID, position)
-        }
+        const completion = createHandlerCompletion({
+          persistence: env.fixture.device.groups,
+          key: env.key,
+        })
+        const complete = completion.complete.bind(completion)
+        const lateCompletion = vi.spyOn(completion, 'complete').mockImplementation(async (ids) => {
+          await complete(ids)
+          completing.resolve()
+          await releaseCompletion.promise
+        })
         const lane = createAppLane({
           groupKey: env.key,
           mux,
@@ -1073,15 +1077,9 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           groupID: () => env.key.groupID,
           appCursorStore: cursor,
           claimOpened: (record, fn) => binding.claim(record, fn),
-          completion: createHandlerCompletion({
-            persistence: env.fixture.device.groups,
-            key: env.key,
-          }),
+          completion,
           openedHandler: normaliseOpenedAppHandler({
-            completion: createHandlerCompletion({
-              persistence: env.fixture.device.groups,
-              key: env.key,
-            }),
+            completion,
             openedDeliveryContext: env.context,
             deliver: async () => {
               entered.resolve()
@@ -1162,16 +1160,16 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           })
           await reading.promise
           releaseHandler.resolve()
-          await saving.promise
+          await completing.promise
           expect(await env.pending()).toEqual([])
           releaseRead.resolve()
           await new Promise((resolve) => setTimeout(resolve, 100))
           expect({ settled, cursor: await cursor.load(topicID), coldCalls }).toEqual({
             settled: false,
-            cursor: null,
+            cursor: published.sequenceID,
             coldCalls: 0,
           })
-          releaseSave.resolve()
+          releaseCompletion.resolve()
           await drain
           expect(await cursor.load(topicID)).toBe(entry === 'delete' ? null : published.sequenceID)
           if (entry === 'readmit' || entry === 'switch')
@@ -1184,8 +1182,9 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
         } finally {
           releaseHandler.resolve()
           releaseRead.resolve()
-          releaseSave.resolve()
+          releaseCompletion.resolve()
           env.capability.read = read
+          lateCompletion.mockRestore()
           if (drain !== undefined) await drain
           lane.dispose()
           await lane.idle()

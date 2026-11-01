@@ -339,12 +339,12 @@ describe('app work leaves the commit queue', () => {
     const operation = track(f.bob.controlWalk.reconcileCommitPrefix())
     await pause.entered.promise
     f.hub.reattach('bob')
-    const frame = await append(f.hub)
+    await append(f.hub)
 
     await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1), { timeout: 500 })
     await vi.waitFor(() => {
       expect(f.rows.size).toBe(0)
-      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+      expect(f.bob.appCursorStore.stored(topicID)).toBeNull()
     })
     expect(f.bob.mls.epoch()).toBe(1)
     expect(f.queue.pending).toBe(0)
@@ -391,7 +391,7 @@ describe('app work leaves the commit queue', () => {
     await vi.waitFor(() => expect(seen).toEqual(['epoch four']))
     await vi.waitFor(() => {
       expect(f.rows.size).toBe(0)
-      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+      expect(f.bob.appCursorStore.stored(topicID)).toBeNull()
     })
     expect(f.bob.peer.anchorEpoch()).toBe(1)
     expect(f.queue.pending).toBe(0)
@@ -439,7 +439,7 @@ describe('app work leaves the commit queue', () => {
       if (topic === topicID && seen.length === 0) outcome.resolve('skipped')
     })
     f.hub.reattach('bob')
-    const frame = await append(f.hub, 4, 'epoch four')
+    await append(f.hub, 4, 'epoch four')
     await app.entered.promise
     snapshot.release.resolve()
     await operation
@@ -452,7 +452,7 @@ describe('app work leaves the commit queue', () => {
     await vi.waitFor(() => expect(seen).toEqual(['epoch four']))
     await vi.waitFor(() => {
       expect(f.rows.size).toBe(0)
-      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+      expect(f.bob.appCursorStore.stored(topicID)).toBeNull()
     })
     expect(f.bob.mls.epoch()).toBe(4)
     expect(f.bob.peer.anchorEpoch()).toBe(1)
@@ -561,12 +561,12 @@ describe('app work leaves the commit queue', () => {
       pause.release.resolve()
 
       await vi.waitFor(() => expect(seen).toContain('new'), { timeout: 500 })
-      await vi.waitFor(() => expect(cursor.stored(newTopic)).toBe('000000000001'))
+      await vi.waitFor(() => expect(cursor.stored(newTopic)).toBeNull())
       expect(seen.filter((text) => text === 'new')).toHaveLength(1)
       expect(persisted.filter((frame) => frame.topicID === newTopic)).toMatchObject([
         { segment: 2, position: '000000000001' },
       ])
-      expect(cursor.history(newTopic)).toEqual(['000000000001'])
+      expect(cursor.history(newTopic)).toEqual([])
       expect(cursor.stored(topicID)).toBe('000000000009')
       expect(records.size).toBe(0)
     },
@@ -602,12 +602,12 @@ describe('app work leaves the commit queue', () => {
       operation = track(f.bob.controlWalk.reconcileCommitPrefix())
       void operation.catch(() => {})
       await pause.entered.promise
-      const frame = await append(f.hub)
+      await append(f.hub)
       await f.lane.deliver()
       await vi.advanceTimersByTimeAsync(0)
       expect(seen).toHaveBeenCalledTimes(1)
       expect(f.rows.size).toBe(0)
-      expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+      expect(f.bob.appCursorStore.stored(topicID)).toBeNull()
     }
     const writer = createFakeCrypto({ epoch: 3, localDID: 'alice' })
     for (let i = 0; i < 200; i++) {
@@ -679,9 +679,9 @@ describe('app work leaves the commit queue', () => {
       await f.bob.controlWalk.reconcileCommitPrefix()
     }
     expect(f.bob.mls.epoch()).toBe(4)
-    const frame = await append(f.hub)
+    await append(f.hub)
     await f.lane.deliver()
-    expect(f.bob.appCursorStore.stored(topicID)).toBe(frame.sequenceID)
+    expect(f.bob.appCursorStore.stored(topicID)).toBeNull()
     expect(seen).not.toHaveBeenCalled()
     expect(stalled).not.toHaveBeenCalled()
   })

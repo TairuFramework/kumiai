@@ -895,7 +895,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       await alice.peer.replay()
       expect(received).toEqual(expectedTexts)
       for (const topicID of new Set(apps.map((m) => m.topicID))) {
-        expect(alice.appCursorStore.stored(topicID)).toBe(hub.head(topicID))
+        expect(alice.appCursorStore.stored(topicID)).toBeNull()
       }
     },
   )

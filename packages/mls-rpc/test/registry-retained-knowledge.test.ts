@@ -1,16 +1,21 @@
 import { type ControllerLog, createRotate, type FoldResult, snapshotOf } from '@kokuin/controller'
 import type { OwnIdentity } from '@kokuin/token'
+import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   commitKeyRotation,
   createGroup,
   type DeviceRegistry,
+  ownApplicationGeneration,
   publishControllerLog,
   RecoveryKnowledgeError,
 } from '@kumiai/mls'
+import { encodeAppAAD, frameID, type OpenAppInput } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { createGroupBatchScheduler } from '../src/group-batch.js'
 import { assertTrustTransition } from '../src/persistence-guards.js'
 import { knownRecoveryRegistry } from '../src/recovery.js'
+import { registryStreamingOpen } from '../src/registry/app-open-binding.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { bareTestHandle } from './fixtures/real-group.js'
 import { createGatedRegistryFixture } from './fixtures/registry.js'
@@ -107,9 +112,9 @@ test('trust transition refuses a settled lease rollback from 200 to 1000', async
 test('switch trust refuses a settled lease rollback from 200 to 1000', async () => {
   const s = await leaseSettlement()
   try {
-    expect(() =>
-      recoveryTrustFor(s.stale, { ...s.key, incarnation: 2 }, s.retained),
-    ).toThrow(new RecoveryKnowledgeError('forked'))
+    expect(() => recoveryTrustFor(s.stale, { ...s.key, incarnation: 2 }, s.retained)).toThrow(
+      new RecoveryKnowledgeError('forked'),
+    )
   } finally {
     await s.fixture.close()
   }
@@ -147,3 +152,55 @@ test.each(['seed', 'readmission'] as const)(
     }
   },
 )
+
+test('batching preserves controller knowledge and control progress', async () => {
+  const s = await leaseSettlement()
+  try {
+    const sender = await bareTestHandle(s.current)
+    await s.fixture.registry.seed(s.current, {
+      packageUse: { sourceID: 'batch-knowledge', ref: 'package', kind: 'ordinary' },
+    })
+    const access = await s.fixture.registry.access(s.key.groupID)
+    const binding = registryStreamingOpen(access)
+    if (binding === undefined) throw new Error('Missing binding')
+    const known = await access.read((handle) => structuredClone(handle.registry))
+    const floor = await access.read((handle) => ownApplicationGeneration(handle.state))
+    for (let i = 0; i < floor; i++) await sender.encrypt(encodeEventFrame('posted'))
+    const inputs: Array<OpenAppInput> = []
+    for (const position of ['10', '2']) {
+      const ciphertext = await sender.encrypt(encodeEventFrame('posted'), {
+        aad: encodeAppAAD({ topicID: 'knowledge', intent: 'log' }),
+      })
+      inputs.push({
+        frame: {
+          ...s.key,
+          id: frameID('knowledge', ciphertext),
+          topicID: 'knowledge',
+          protocol: 'chat',
+          segment: access.epoch(),
+          position,
+        },
+        ciphertext,
+        expectedAAD: encodeAppAAD({ topicID: 'knowledge', intent: 'log' }),
+      })
+    }
+    const scheduler = createGroupBatchScheduler({ now: () => 0 })
+    expect(
+      (
+        await scheduler.schedule({
+          source: 'chat',
+          kind: 'open',
+          run: (budget) => binding.openReady(inputs, budget),
+        })
+      ).consumed,
+    ).toBe(2)
+    expect(await access.read((handle) => handle.registry)).toEqual(known)
+    expect(s.lease(known)).toBe(200)
+    const next = await s.fixture.acceptedOrdinary(access)
+    expect(await access.adopt(next.candidate, next.expected, next.write)).toBe('installed')
+    expect(await access.pending.list()).toHaveLength(2)
+    expect(await access.read((handle) => handle.registry)).toEqual(known)
+  } finally {
+    await s.fixture.close()
+  }
+})

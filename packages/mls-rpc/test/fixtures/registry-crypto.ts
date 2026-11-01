@@ -13,7 +13,7 @@ import { createGroupCrypto } from '../../src/crypto.js'
 import type { OwnershipContextPort } from '../../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../../src/registry/registry.js'
 import { createRealGroup, testHandleAccess } from './real-group.js'
-import { createRegistryFixture } from './registry.js'
+import { createRegistryFixture, registryFixtureObserveStagedDecrypts } from './registry.js'
 import { registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
 import { createStorageFixture } from './storage-persistence.js'
@@ -61,7 +61,9 @@ export async function createRegistryCryptoGroup(
   let outstanding: Uint8Array | undefined
   let hintOffset = 0
   const receiver = () =>
-    createGroupCrypto({ access: { ...access, epoch: () => access.epoch() + hintOffset } })
+    createGroupCrypto({
+      access: hintOffset === 0 ? access : { ...access, epoch: () => access.epoch() + hintOffset },
+    })
   const sender = group.members[1] ?? group.committer
   const memberAccesses = group.members.map((member, index) =>
     index === 0
@@ -102,6 +104,9 @@ export async function createRegistryCryptoGroup(
     sender,
     receiver,
     access: () => access,
+    observeStage: (observe: (ciphertext: Uint8Array) => void | Promise<void>) => {
+      registryFixtureObserveStagedDecrypts(fixture, observe)
+    },
     fixture: () => fixture,
     setEpochHintOffset: (offset: number) => {
       hintOffset = offset
@@ -118,6 +123,10 @@ export async function createRegistryCryptoGroup(
               }),
       }
     }),
+    async sealFuture(plaintext: Uint8Array, steps: number, aad: Uint8Array) {
+      for (let i = 0; i < steps; i++) await rotate()
+      return sender.handle.encrypt(plaintext, { aad })
+    },
     async sealAhead(plaintext: Uint8Array) {
       if (outstanding !== undefined) throw new Error('Outstanding registry rotation')
       outstanding = await rotate()

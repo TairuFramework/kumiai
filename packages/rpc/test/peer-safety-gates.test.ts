@@ -566,7 +566,7 @@ test.each(reasons)('a held unwrap refusal latches %s before the next pull wake',
   expect(unwrap).not.toHaveBeenCalled()
   const ledger = vi.spyOn(member.mls, 'isLedgerComplete')
   await member.peer.dropAppFrame(topicID, '000000000001')
-  expect(member.appCursorStore.stored(topicID)).toBe('000000000001')
+  expect(member.appCursorStore.stored(topicID)).toBeNull()
   expect(ledger).not.toHaveBeenCalled()
   expect(fetch).not.toHaveBeenCalled()
 })

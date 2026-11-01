@@ -217,7 +217,7 @@ describe('durable pending restoration', () => {
     expect(first.appCursorStore.stored(oldTopic)).toBeNull()
     releaseFirst?.()
     await vi.waitFor(() => expect(rows.size).toBe(0))
-    expect(first.appCursorStore.stored(oldTopic)).toBe(hub.head(oldTopic))
+    expect(first.appCursorStore.stored(oldTopic)).toBeNull()
     await publish('second')
     await vi.waitFor(() => expect(seen.map((item) => item.text)).toEqual(['first', 'second']))
     await vi.waitFor(() => expect(rows.size).toBe(0))

@@ -286,7 +286,7 @@ describe('durable storage stall', () => {
     expect(stalled).toHaveBeenCalledTimes(1)
     reader.setEpoch(2)
     await lane.deliver()
-    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(topicID, position))
+    expect(save).not.toHaveBeenCalled()
     await vi.waitFor(() => expect(lane.pendingRecords()).toHaveLength(0))
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
       settlement: 'resumed',
@@ -352,8 +352,8 @@ describe('durable storage stall', () => {
     )
     await lane.deliver()
     expect(stalled).toHaveBeenCalledTimes(1)
-    await expect(lane.dropFrame(topicID, position)).rejects.toThrow('cursor unavailable')
-    expect(save).toHaveBeenCalledWith(topicID, position)
+    await lane.dropFrame(topicID, position)
+    expect(save).not.toHaveBeenCalled()
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
       settlement: 'resumed',
       groupID: 'group',
@@ -365,7 +365,7 @@ describe('durable storage stall', () => {
     lane.dispose()
   })
 
-  test('a resume observer reset cannot skip the cursor save for a dropped frame', async () => {
+  test('a resume observer reset preserves the portable cursor for a dropped frame', async () => {
     const position = '000000000001'
     const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('future'), {
       aad: encodeAppAAD({ topicID, intent: 'log' }),
@@ -415,14 +415,14 @@ describe('durable storage stall', () => {
     expect(stalled).toHaveBeenCalledTimes(1)
     await lane.dropFrame(topicID, position)
     expect(resumed).toHaveBeenCalledTimes(1)
-    expect(cursor.stored(topicID)).toBe(position)
+    expect(cursor.stored(topicID)).toBeNull()
     await lane.deliver()
-    expect(fetchTopic).toHaveBeenLastCalledWith(expect.objectContaining({ after: position }))
-    expect(stalled).toHaveBeenCalledTimes(1)
+    expect(fetchTopic.mock.calls.at(-1)?.[0]).not.toHaveProperty('after')
+    expect(stalled).toHaveBeenCalledTimes(2)
     lane.dispose()
   })
 
-  test('a resume observer reset cannot skip the cursor save for a completed record', async () => {
+  test('a resume observer reset preserves the portable cursor for a completed record', async () => {
     const position = '000000000001'
     const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('saved'), {
       aad: encodeAppAAD({ topicID, intent: 'log' }),
@@ -474,9 +474,9 @@ describe('durable storage stall', () => {
     reader.setEpoch(2)
     await lane.deliver()
     await vi.waitFor(() => expect(resumed).toHaveBeenCalledTimes(1))
-    expect(cursor.stored(topicID)).toBe(position)
+    expect(cursor.stored(topicID)).toBeNull()
     await lane.deliver()
-    expect(fetchTopic).toHaveBeenLastCalledWith(expect.objectContaining({ after: position }))
+    expect(fetchTopic.mock.calls.at(-1)?.[0]).not.toHaveProperty('after')
     expect(stalled).toHaveBeenCalledTimes(1)
     lane.dispose()
   })
@@ -543,11 +543,12 @@ describe('durable storage stall', () => {
     expect(stalled).toHaveBeenCalledTimes(1)
     reader.setEpoch(2)
     void lane.deliver()
-    await vi.waitFor(() => expect(saving).toBe(true))
+    await vi.waitFor(() => expect(resumed).toHaveBeenCalledOnce())
+    expect(saving).toBe(false)
     lane.dispose()
     releaseSave()
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(resumed).not.toHaveBeenCalled()
+    expect(resumed).toHaveBeenCalledOnce()
   })
 
   test('a direct lane contains throwing stall and resume observers across reset and drop', async () => {
@@ -712,7 +713,7 @@ describe('durable storage stall', () => {
     await lane.deliver()
     expect(notices).not.toHaveBeenCalled()
     expect(resumed).not.toHaveBeenCalled()
-    expect(cursor.stored(topicID)).toBe('000000000001')
+    expect(cursor.stored(topicID)).toBeNull()
     lane.dispose()
   })
 
@@ -956,7 +957,7 @@ describe('durable storage stall', () => {
     await bob.peer.dropAppFrame(topicID, first.sequenceID)
     expect(journalRead).toHaveBeenCalled()
     expect(bob.mls.epoch()).toBe(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(first.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBeNull()
     expect(store.rows.size).toBe(0)
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
       settlement: 'resumed',

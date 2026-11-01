@@ -33,6 +33,7 @@ import type { GroupMLS } from '../../src/crypto.js'
 import type { LogPosition } from '../../src/cursor.js'
 import { asLogPosition } from '../../src/cursor.js'
 import { OperationRejectedError } from '../../src/errors.js'
+import type { GroupTransaction, HandlerCompletion } from '../../src/handler-completion.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
 import {
@@ -143,6 +144,7 @@ export async function rollBackForkHalt(member: TestPeer): Promise<{ settled: Pro
 }
 
 export type MakeMLSPeerOptions = {
+  completion?: HandlerCompletion<GroupTransaction>
   openedDeliveryContext?: OpenedDeliveryContext
   recoveryOnly?: boolean
   continuation?: RecoveryContinuation | null
@@ -293,7 +295,7 @@ export function makeMLSPeer(
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const ports = memoryControlPorts(mls, crypto, options.build ?? buildOperation, recoverySecret)
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
-    completion: createTestCompletion(control.key, crypto.pending),
+    completion: options.completion ?? createTestCompletion(control.key, crypto.pending),
     openedDeliveryContext:
       'openedDeliveryContext' in options ? options.openedDeliveryContext : openedDeliveryContext,
     hub,
