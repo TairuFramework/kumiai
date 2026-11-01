@@ -11,6 +11,7 @@ import { appBatch } from './app-batch.js'
 import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
+import { createBufferedControlIntake } from './buffered-control.js'
 import { createCheckpointWorker } from './checkpoint-worker.js'
 import { classifyCommit, digestAppliedCommit } from './classify.js'
 import { createMonotoneClock } from './clock.js'
@@ -71,6 +72,7 @@ import type {
 } from './control/types.js'
 import { executableOperations } from './control/types.js'
 import { deliverObligations } from './control/welcome.js'
+import { controlBatch } from './control-batch.js'
 import {
   type AppliedRecovery,
   type GroupCrypto,
@@ -377,8 +379,9 @@ export function createGroupPeerWithControlWalk<
     throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
   const completion = input.completion
   const batch = appBatch(input.crypto)
+  const controlBinding = input.mls == null ? undefined : controlBatch(input.mls)
   const openedBinding = openedDeliveryBinding(input.crypto.pending)
-  for (const key of [openedBinding?.key, batch?.key, input.control?.key]) {
+  for (const key of [openedBinding?.key, batch?.key, controlBinding?.key, input.control?.key]) {
     if (
       key !== undefined &&
       (key.groupID !== completion.key.groupID || key.incarnation !== completion.key.incarnation)
@@ -835,12 +838,16 @@ export function createGroupPeerWithControlWalk<
         try {
           await ready
           if (disposed || safetyHold() !== null) return
-          await runSerial(async () => {
-            if (safetyHold() !== null) return
-            await settleOperations()
-            await ensureLedger(Date.now() + recoveryTimeoutMs)
-            await reconcileCommits()
-          })
+          if (controlBinding !== undefined) {
+            requestBufferedControl()
+            appLane.kick()
+          } else
+            await runSerial(async () => {
+              if (safetyHold() !== null) return
+              await settleOperations()
+              await ensureLedger(Date.now() + recoveryTimeoutMs)
+              await reconcileCommits()
+            })
           await healIfRequested()
           appPullBackoff = 1000
         } catch {
@@ -2560,6 +2567,10 @@ export function createGroupPeerWithControlWalk<
     topicID: string,
     requireCompletePrefix = false,
   ): Promise<boolean> => {
+    if (controlBinding !== undefined && port === mls) {
+      requestBufferedControl()
+      return false
+    }
     let advanced: boolean
     try {
       advanced = await walkCommitLog(port, topicID, requireCompletePrefix)
@@ -2587,6 +2598,10 @@ export function createGroupPeerWithControlWalk<
       )
     }
     if (mls == null || commitTopicID == null) return false
+    if (controlBinding !== undefined) {
+      requestBufferedControl()
+      return false
+    }
     const savedRecovery = (await control?.load())?.rejoin
     if (savedRecovery != null && !('format' in savedRecovery) && mls.capturedRecovery !== undefined)
       return false
@@ -2733,6 +2748,91 @@ export function createGroupPeerWithControlWalk<
     })
   }
 
+  let controlGeneration = 0
+  let bufferedAfter: string | null | undefined
+  let controlFetch: Promise<void> | undefined
+  let controlFetchNeeded = false
+  let controlAttempt: Promise<unknown> | undefined
+  const bufferedControl = createBufferedControlIntake({
+    key: completion.key,
+    ready: () => advertiseBufferedControl(),
+  })
+  function advertiseBufferedControl(): void {
+    if (
+      controlBinding === undefined ||
+      disposed ||
+      !startupComplete ||
+      safetyHold() !== null ||
+      locallyRemoved ||
+      rejoinHeld ||
+      awaitingBootstrap !== null ||
+      activeRecovery !== null ||
+      controlAttempt !== undefined
+    )
+      return
+    const occurrence = bufferedControl.next()
+    if (occurrence === undefined) return
+    // Readiness alone grants no authority to consume or classify the fetched occurrence.
+    const attempt = controlBinding.run({
+      source: JSON.stringify(['control', completion.key.incarnation, occurrence.page.topicID]),
+      signal: controlAbort.signal,
+      prepare: async () => {},
+    })
+    controlAttempt = attempt
+    void attempt
+      .catch(() => {})
+      .finally(() => {
+        if (controlAttempt === attempt) controlAttempt = undefined
+      })
+  }
+  function requestBufferedControl(): void {
+    advertiseBufferedControl()
+    void fetchBufferedControl().catch(() => {})
+  }
+  function fetchBufferedControl(): Promise<void> {
+    if (disposed || controlBinding === undefined || commitTopicID === undefined)
+      return Promise.resolve()
+    controlFetchNeeded = true
+    if (controlFetch !== undefined) return controlFetch
+    const generation = controlGeneration
+    const topicID = commitTopicID
+    const fetch = async () => {
+      while (controlFetchNeeded && !disposed && generation === controlGeneration) {
+        controlFetchNeeded = false
+        const workVersion = commitWorkVersion
+        const after = bufferedAfter === undefined ? reconciledHead : bufferedAfter
+        const result = checkedFetchResult(
+          await mux.fetchTopic({
+            topicID,
+            ...(after === null ? {} : { after }),
+            limit: COMMIT_FETCH_LIMIT,
+          }),
+        )
+        if (disposed || generation !== controlGeneration) return
+        if (result.messages.length === COMMIT_FETCH_LIMIT)
+          assertForwardPage(after === null ? null : asLogPosition(after), result.messages)
+        bufferedControl.offer({ topicID, after, generation, result })
+        bufferedAfter = result.messages.at(-1)?.sequenceID ?? after
+        if (
+          bufferedControl.next() === undefined &&
+          !result.gap &&
+          result.head === after &&
+          workVersion === commitWorkVersion
+        ) {
+          commitLogHead = result.head === null ? null : asLogPosition(result.head)
+          const becameCaughtUp = !commitLaneCaughtUp
+          commitLaneCaughtUp = true
+          if (becameCaughtUp) appLane.retryDelivery()
+        }
+        if (result.messages.length === COMMIT_FETCH_LIMIT) controlFetchNeeded = true
+      }
+    }
+    controlFetch = fetch().finally(() => {
+      controlFetch = undefined
+    })
+    return controlFetch
+  }
+
   /**
    * A commit-topic delivery is a WAKEUP, nothing more. Frames come from the pull, never the push:
    * an accepted log publish is pushed AND retained, so processing the pushed copy too would apply
@@ -2747,6 +2847,10 @@ export function createGroupPeerWithControlWalk<
     commitLaneCaughtUp = false
     commitWorkVersion += 1
     ack()
+    if (controlBinding !== undefined) {
+      void ready.then(requestBufferedControl).catch(() => {})
+      return
+    }
     scheduleControlSlotRetry(0)
     void ready
       .then(() => {
@@ -3847,6 +3951,7 @@ export function createGroupPeerWithControlWalk<
     }
     if (owed.length > 0) pendingReenact = [...pendingReenact, ...owed]
     awaitingBootstrap = null
+    advertiseBufferedControl()
     inFlightEntries = null
     if (bootstrapHealRequested) {
       healRequested = false
@@ -5390,6 +5495,7 @@ export function createGroupPeerWithControlWalk<
         pendingRecovery = null
         capturedPending = null
         if (activeRecovery === attempt) activeRecovery = null
+        advertiseBufferedControl()
         if (recovered) logDelivery?.trigger()
         scheduleOperations()
         flushHostOutbox()
@@ -5736,6 +5842,7 @@ export function createGroupPeerWithControlWalk<
         }
       }
       startupComplete = !stopped()
+      advertiseBufferedControl()
     } catch (error) {
       if (!safetyRefusal(error)) throw error
     } finally {
@@ -5981,6 +6088,7 @@ export function createGroupPeerWithControlWalk<
       if (internalRetry !== undefined) clearTimeout(internalRetry)
       const checkpointDrain = checkpointWorker?.dispose()
       unsubscribeSafety?.()
+      bufferedControl.reset(++controlGeneration)
       controlAbort.abort(new PeerDisposedError('Peer is disposed'))
       if (reportTimer !== undefined) clearTimeout(reportTimer)
       if (operationTimer != null) clearTimeout(operationTimer)

@@ -5,7 +5,18 @@ export {
   bindAppCompletionCoverage,
   registerAppCompletionCoverage,
 } from './app-completion-coverage.js'
+export {
+  type BufferedControlIntake,
+  type BufferedControlPage,
+  createBufferedControlIntake,
+} from './buffered-control.js'
 export { effectiveRecoveryEpochFloor } from './control/rejoin.js'
+export {
+  bindControlBatch,
+  type ControlBatchBinding,
+  controlBatch,
+  type ReadyControlScope,
+} from './control-batch.js'
 export { RecoveryTargetBehindError, SavedControlCompatibilityError } from './errors.js'
 export { INTERNAL_OPERATION_PREFIX, type InternalOperations } from './peer-types.js'
 /**
