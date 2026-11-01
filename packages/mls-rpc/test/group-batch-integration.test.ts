@@ -13,6 +13,8 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import type * as bufferedControlTypes from '../../rpc/lib/buffered-control.js'
+import type { BufferedControlIntake } from '../../rpc/lib/buffered-control.js'
 import { createRegistryAppPublication } from '../src/app-publication.js'
 import { createControlValidationPort } from '../src/control-validation.js'
 import { entryCapability } from '../src/entry-capability.js'
@@ -315,6 +317,89 @@ for (const mode of ['real-mls', 'double'] as const)
           }
         },
       )
+
+    test('held app owner bounds checked control intake and releases every occurrence in order', async () => {
+      const intakeModule = (await import(
+        new URL('../../rpc/lib/buffered-control.js', import.meta.url).href
+      )) as typeof bufferedControlTypes
+      let intake: BufferedControlIntake | undefined
+      const createIntake = intakeModule.createBufferedControlIntake
+      const capture = vi
+        .spyOn(intakeModule, 'createBufferedControlIntake')
+        .mockImplementation((params) => {
+          intake = createIntake(params)
+          return intake
+        })
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const s = await setup(mode, async () => {}, ['chat'], undefined, undefined, true)
+      try {
+        if (intake === undefined) throw new Error('Missing peer intake')
+        const buffered = intake
+        const frames = Array.from({ length: 2500 }, (_, index) => ({
+          sequenceID: String(index + 1).padStart(6, '0'),
+          payload: new Uint8Array([255]),
+        }))
+        let outstanding = 0
+        let maximum = 0
+        const offer = buffered.offer.bind(buffered)
+        vi.spyOn(buffered, 'offer').mockImplementation((page) => {
+          offer(page)
+          outstanding += page.result.messages.length
+          maximum = Math.max(maximum, outstanding)
+        })
+        const topicID = commitTopic(await s.mls.exportRecoverySecret())
+        s.messages.set(s.topicID, [await s.seal('1')])
+        let stages = 0
+        s.group.observeStage(async () => {
+          if (++stages === 1) {
+            entered.resolve()
+            await release.promise
+          }
+        })
+        s.peer.retryAppDelivery()
+        await entered.promise
+        const before = s.fetch.mock.calls.filter(([request]) => request.topicID === topicID).length
+        s.messages.set(topicID, frames)
+        await s.hub.publish({
+          topicID,
+          senderDID: s.group.sender.identity.id,
+          payload: new Uint8Array([0]),
+          retain: 'log',
+        })
+        for (let i = 0; i < 100; i++) await Promise.resolve()
+        expect(outstanding).toBe(200)
+        expect(buffered.pageCount()).toBe(2)
+        expect(s.fetch.mock.calls.filter(([request]) => request.topicID === topicID)).toHaveLength(
+          before + 2,
+        )
+        expect(s.selectedControl).not.toHaveBeenCalled()
+        release.resolve()
+        await vi.waitFor(() => expect(s.selectedControl).toHaveBeenCalledOnce())
+        // The readiness-only binding leaves acknowledgements to this recording consumer.
+        const applied: Array<string> = []
+        for (let turn = 0; turn < 40; turn++) {
+          let current = buffered.next()
+          while (current !== undefined) {
+            const position = current.page.result.messages[current.index]?.sequenceID
+            if (position === undefined) throw new Error('Missing occurrence')
+            applied.push(position)
+            outstanding--
+            buffered.consumed({ generation: current.page.generation, topicID, position })
+            current = buffered.next()
+          }
+          for (let i = 0; i < 100; i++) await Promise.resolve()
+          expect(buffered.pageCount()).toBeLessThanOrEqual(2)
+        }
+        expect(applied).toEqual(frames.map((frame) => frame.sequenceID))
+        expect(maximum).toBe(200)
+        expect(outstanding).toBe(0)
+      } finally {
+        release.resolve()
+        capture.mockRestore()
+        await s.close()
+      }
+    })
 
     test('real peer keeps registry batching and completion through host wrapping', async () => {
       const release = Promise.withResolvers<void>()

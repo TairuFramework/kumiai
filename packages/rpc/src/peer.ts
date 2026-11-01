@@ -208,6 +208,7 @@ export {
 
 /** How many commit frames a single pull asks for. Pull loops until the log is drained. */
 const COMMIT_FETCH_LIMIT = 100
+const CONTROL_BUFFERED_PAGES_MAX = 2
 
 /**
  * Runaway guard only. The deadline is the real bound; this stops a hub that accepts nothing and
@@ -2752,10 +2753,17 @@ export function createGroupPeerWithControlWalk<
   let bufferedAfter: string | null | undefined
   let controlFetch: Promise<void> | undefined
   let controlFetchNeeded = false
+  let controlFetchTimer: ReturnType<typeof setTimeout> | undefined
+  let controlFetchBackoff = 1000
   let controlAttempt: Promise<unknown> | undefined
   const bufferedControl = createBufferedControlIntake({
     key: completion.key,
     ready: () => advertiseBufferedControl(),
+    released: () => {
+      queueMicrotask(() => {
+        if (controlFetchNeeded) requestBufferedControl()
+      })
+    },
   })
   function advertiseBufferedControl(): void {
     if (
@@ -2794,10 +2802,20 @@ export function createGroupPeerWithControlWalk<
       return Promise.resolve()
     controlFetchNeeded = true
     if (controlFetch !== undefined) return controlFetch
+    if (
+      controlFetchTimer !== undefined ||
+      bufferedControl.pageCount() >= CONTROL_BUFFERED_PAGES_MAX
+    )
+      return Promise.resolve()
     const generation = controlGeneration
     const topicID = commitTopicID
     const fetch = async () => {
-      while (controlFetchNeeded && !disposed && generation === controlGeneration) {
+      while (
+        controlFetchNeeded &&
+        !disposed &&
+        generation === controlGeneration &&
+        bufferedControl.pageCount() < CONTROL_BUFFERED_PAGES_MAX
+      ) {
         controlFetchNeeded = false
         const workVersion = commitWorkVersion
         const after = bufferedAfter === undefined ? reconciledHead : bufferedAfter
@@ -2809,6 +2827,7 @@ export function createGroupPeerWithControlWalk<
           }),
         )
         if (disposed || generation !== controlGeneration) return
+        controlFetchBackoff = 1000
         if (result.messages.length === COMMIT_FETCH_LIMIT)
           assertForwardPage(after === null ? null : asLogPosition(after), result.messages)
         bufferedControl.offer({ topicID, after, generation, result })
@@ -2827,9 +2846,23 @@ export function createGroupPeerWithControlWalk<
         if (result.messages.length === COMMIT_FETCH_LIMIT) controlFetchNeeded = true
       }
     }
-    controlFetch = fetch().finally(() => {
-      controlFetch = undefined
-    })
+    controlFetch = fetch()
+      .catch((error: unknown) => {
+        if (!disposed && generation === controlGeneration) {
+          controlFetchNeeded = true
+          controlFetchTimer = setTimeout(() => {
+            controlFetchTimer = undefined
+            if (!disposed && generation === controlGeneration) requestBufferedControl()
+          }, controlFetchBackoff)
+          controlFetchBackoff = Math.min(controlFetchBackoff * 2, 60_000)
+        }
+        throw error
+      })
+      .finally(() => {
+        controlFetch = undefined
+        if (controlFetchNeeded && !disposed && generation === controlGeneration)
+          requestBufferedControl()
+      })
     return controlFetch
   }
 
@@ -6089,6 +6122,9 @@ export function createGroupPeerWithControlWalk<
       const checkpointDrain = checkpointWorker?.dispose()
       unsubscribeSafety?.()
       bufferedControl.reset(++controlGeneration)
+      controlFetchNeeded = false
+      if (controlFetchTimer !== undefined) clearTimeout(controlFetchTimer)
+      controlFetchTimer = undefined
       controlAbort.abort(new PeerDisposedError('Peer is disposed'))
       if (reportTimer !== undefined) clearTimeout(reportTimer)
       if (operationTimer != null) clearTimeout(operationTimer)

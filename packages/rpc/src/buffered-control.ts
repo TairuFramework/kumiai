@@ -9,6 +9,7 @@ export type BufferedControlPage = {
 }
 export type BufferedControlIntake = {
   offer(page: BufferedControlPage): void
+  pageCount(): number
   next(): { page: BufferedControlPage; index: number } | undefined
   consumed(input: { generation: number; topicID: string; position: string }): void
   reset(generation: number): void
@@ -17,6 +18,7 @@ export type BufferedControlIntake = {
 export function createBufferedControlIntake(params: {
   key: GroupKey
   ready(): void
+  released?(): void
 }): BufferedControlIntake {
   let generation = 0
   const pages: Array<BufferedControlPage> = []
@@ -35,6 +37,7 @@ export function createBufferedControlIntake(params: {
       if (available) params.ready()
     },
     next,
+    pageCount: () => pages.length,
     consumed(input) {
       const current = next()
       if (
@@ -47,6 +50,7 @@ export function createBufferedControlIntake(params: {
       if (++index === current.page.result.messages.length) {
         pages.shift()
         index = 0
+        params.released?.()
       }
       if (next() !== undefined) params.ready()
     },
