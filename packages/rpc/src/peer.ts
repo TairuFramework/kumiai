@@ -459,13 +459,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
-  // Live log pushes carry no authoritative bytes or position. One queued journal-first pull
-  // covers a burst; a failed pull retries without waiting for another hub delivery.
+  // Live log pushes carry no authoritative position. Ingress waits for a successful journal-first
+  // pull. Failures retry without releasing later live opens or waiting for another hub delivery.
   let appPullNeeded = false
   let appPullActive = false
   let appPullTimer: ReturnType<typeof setTimeout> | undefined
   let appPullBackoff = 1000
   let appPullRetryNow = false
+  const appPullWaiters = new Set<() => void>()
   const armAppPull = (delay: number): void => {
     if (disposed || appPullActive || appPullTimer != null) return
     appPullTimer = setTimeout(() => {
@@ -473,6 +474,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (disposed) return
       appPullActive = true
       appPullNeeded = false
+      // Requests arriving during this pass need a subsequent fetch, even if this pass succeeds.
+      const waiters = [...appPullWaiters]
       let retryDelay = 0
       void (async () => {
         try {
@@ -480,11 +483,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposed) return
           await runSerial(async () => {
             await replayJournal()
-            await ensureLedger(Date.now() + recoveryTimeoutMs)
+            if (!(await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+              throw new Error('app pull is waiting for the ledger')
+            }
             await reconcileCommits()
           })
           await healIfRequested()
           appPullBackoff = 1000
+          for (const resolve of waiters) {
+            appPullWaiters.delete(resolve)
+            resolve()
+          }
         } catch {
           appPullNeeded = true
           retryDelay = appPullBackoff
@@ -565,7 +574,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     sealError: () => sealError,
     isDisposed: () => disposed,
     note: (name, topicID, message, failure) => appLane.note(name, topicID, message, failure),
-    requestAppPull,
+    requestAppPull: () =>
+      new Promise<void>((resolve) => {
+        if (disposed) {
+          resolve()
+          return
+        }
+        appPullWaiters.add(resolve)
+        requestAppPull()
+      }),
   })
   const { buildEpoch, teardownEpoch, rebuildEpoch, epochSettled, surfaceFor, sealForSegment } =
     epochRuntime
@@ -2983,6 +3000,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (ledgerRetryTimer != null) clearTimeout(ledgerRetryTimer)
       ledgerRetryTimer = undefined
       appPullTimer = undefined
+      for (const resolve of appPullWaiters) resolve()
+      appPullWaiters.clear()
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
       // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
       // it — awaiting the commit mutex here is unsafe (`build()`/`onAccepted()` are host-supplied
