@@ -533,6 +533,10 @@
   dir: packages/rpc
   intents:
     - rpc-app-log-own-frames
+"@kumiai/rpc@0.12.4":
+  dir: packages/rpc
+  intents:
+    - rpc-retained-open-order
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:
