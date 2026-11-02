@@ -55,6 +55,7 @@ export type InboxPathParams = {
   unwrap: (bytes: Uint8Array) => GroupUnwrapResult | Promise<GroupUnwrapResult>
   /** Forwarded to {@link createOpenOncePath} — see there for what it decides. */
   retainOnFailure?: (message: StoredMessage, error: unknown) => boolean
+  ingress?: (task: () => Promise<void>) => Promise<void>
 }
 
 /**
@@ -70,6 +71,7 @@ export function createInboxPath(params: InboxPathParams): InboundPath {
     mux,
     topicID,
     unwrap,
+    ...(params.ingress != null ? { ingress: params.ingress } : {}),
     ...(retainOnFailure != null ? { retainOnFailure } : {}),
     project: (message, opened) => {
       if (opened.senderDID == null) return undefined

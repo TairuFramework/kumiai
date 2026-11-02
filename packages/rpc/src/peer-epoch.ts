@@ -67,7 +67,7 @@ export type EpochRuntimeParams<Protocols extends Record<string, ProtocolDefiniti
   sealError: () => Error | undefined
   isDisposed: () => boolean
   note: AppLane['note']
-  requestAppPull: () => void
+  requestAppPull: () => Promise<void>
 }
 
 export type EpochRuntime = {
@@ -108,6 +108,18 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
   } = params
 
   let runtimes = new Map<string, ProtocolRuntime>()
+  // Keep one queue across topics AND epoch rebuilds. A retained pull spends keys before
+  // any later live or inbox frame can advance the same group's receive ratchet.
+  let ingressTail: Promise<void> = Promise.resolve()
+  const ingress = (task: () => Promise<void>): Promise<void> => {
+    const op = ingressTail.then(async () => {
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
+      await task()
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
+    })
+    ingressTail = op.catch(() => {})
+    return op
+  }
 
   /**
    * The epoch's self-inbox topic and the one path that opens its frames. Held per peer rather
@@ -143,7 +155,8 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
    * of their own (unlike `app-lane.ts`'s `note`/`ahead`), which is what made acking a transient
    * refusal here a permanent loss.
    */
-  const retainOnFailure = (_message: StoredMessage, error: unknown): boolean => isFrameAhead(error)
+  const retainOnFailure = (_message: StoredMessage, error: unknown): boolean =>
+    isDisposed() || isFrameAhead(error)
 
   /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
@@ -156,6 +169,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     return createOpenOncePath<Uint8Array>({
       mux,
       topicID,
+      ingress,
       unwrap: (b) => {
         const hinted = crypto.frameAAD(b)
         const decoded = hinted == null ? null : decodeAppAAD(hinted)
@@ -179,11 +193,11 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         return payload
       },
       note: (message, failure) => params.note(name, topicID, message, failure),
-      wakeup: (message) => {
+      wakeup: async (message) => {
         if (crypto.pending == null) return false
         const aad = crypto.frameAAD(message.payload)
         if (aad == null || decodeAppAAD(aad)?.intent !== 'log') return false
-        params.requestAppPull()
+        await params.requestAppPull()
         return true
       },
     })
@@ -241,6 +255,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
       path: createInboxPath({
         mux,
         topicID: selfInbox,
+        ingress,
         unwrap: (b) =>
           crypto.unwrap(b, {
             expectedAAD: encodeAppAAD({ topicID: selfInbox, intent: 'ephemeral' }),

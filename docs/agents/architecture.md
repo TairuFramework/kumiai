@@ -87,8 +87,10 @@ read the topic. Take `@kumiai/mls-rpc` and it is right by construction; write yo
 With `pending`, the host atomically saves the consumed MLS handle state and each opened app record.
 The handler receives its stable frame id, applies its effect, and returns to acknowledge. A failed
 handler or completion retries the record. The host must let a handler settle; one that never does
-holds later events in that protocol. Live log-intent pushes only wake a retained fetch. The drain
-opens those fetched frames and the delivery worker runs outside the commit and app-lane mutexes.
+holds later events in that protocol. Live log-intent pushes await a retained fetch and open before
+later protocol or inbox frames can open for that group. A failed fetch retries while holding this
+ingress queue. A hung fetch stalls the group's live opens and retains queued ciphertext in memory.
+The delivery worker runs outside the commit and app-lane mutexes.
 
 ## Stated residuals
 
