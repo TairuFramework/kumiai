@@ -2829,8 +2829,7 @@ export function createGroupPeerWithControlWalk<
         }
         await refreshControl(undefined, { control: proven.control, epoch: proven.epoch })
         if (proven.control.cursor?.incomplete === true) {
-          if (value.diagnostic?.kind === 'ahead' || value.prerequisite === 'recovery')
-            healRequested = safetyHold() === null
+          if (value.diagnostic?.kind === 'ahead') healRequested = safetyHold() === null
           if (!appPullActive) {
             appPullNeeded = true
             armAppPull(appPullBackoff)

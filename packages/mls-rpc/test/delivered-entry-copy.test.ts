@@ -15,6 +15,7 @@ import {
   controlBatch,
   decodeCommitFrame,
   decodeHandshakeFrame,
+  digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
@@ -23,6 +24,7 @@ import {
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { deriveEntryKey, sealEntries } from '../src/crypto.js'
+import { entryCapability } from '../src/entry-capability.js'
 import { decodeStoredValue } from '../src/persistence-codec.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
@@ -130,13 +132,26 @@ async function foreignHarness(mode: 'double' | 'real-mls', context = false, regi
 afterEach(() => vi.useRealTimers())
 
 for (const mode of ['double', 'real-mls'] as const) {
-  test(`same-page gap and valid competitor preserve the saved build without loss (${mode})`, async () => {
+  test(`same-page gap and valid competitor close unknown atomically (${mode})`, async () => {
     const { h, competitor, foreignDID } = await foreignHarness(mode, true, true)
+    let unobserve: (() => void) | undefined
     try {
+      h.hooks.beforeWelcome = async () => {
+        throw new Error('Recipient offline')
+      }
       await h.peer.replay()
       const built = await h.build()
       await h.saveBuilt(built.intent, built.slot, built.expected, 'gap-competitor')
+      const owed = {
+        opID: 'owed-independent',
+        welcome: new Uint8Array([4, 2]),
+        recipients: ['owed-recipient'],
+      }
+      await h.control.apply({ putWelcomes: [owed] }, 'owed-gap-competitor')
       const before = await h.control.load()
+      expect(before.cursor?.incomplete).not.toBe(true)
+      expect(requireValue(before.commitOnce).journal.length).toBeGreaterThan(0)
+      expect(requireValue(before.commitOnce).welcome).not.toBeNull()
       const source = await requireValue(h.registryAccess).read((value) => value)
       let commit: Uint8Array
       let blob: Uint8Array
@@ -171,9 +186,13 @@ for (const mode of ['double', 'real-mls'] as const) {
       }
       const binding = requireValue(controlBatch(h.mls))
       const bridge = vi.spyOn(binding, 'run')
+      const checkpoints: Array<ControlSnapshot> = []
+      unobserve = requireValue(entryCapability(h.groups)).observe(h.key.groupID, ({ control }) => {
+        if (control !== null) checkpoints.push(control)
+      })
       h.setControlGap(true)
       const payload = encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, blob))
-      await h.hub.publish({
+      const winner = await h.hub.publish({
         topicID: await h.topic(),
         payload,
         senderDID: randomIdentity().id,
@@ -182,11 +201,35 @@ for (const mode of ['double', 'real-mls'] as const) {
       await vi.waitFor(() => expect(bridge).toHaveBeenCalled())
       await Promise.all(bridge.mock.results.map((result) => result.value))
       const after = await h.control.load()
-      expect(after.cursor?.incomplete).toBe(true)
-      expect(after.outcomes.some((row) => row.kind === 'lost')).toBe(false)
-      expect(after.commitOnce).toEqual(before.commitOnce)
-      expect(after.outcomes).toEqual(before.outcomes)
+      const consuming = requireValue(checkpoints.find((snapshot) => snapshot.cursor?.incomplete))
+      for (const snapshot of [consuming, after]) {
+        expect(snapshot.outcomes).toEqual([
+          expect.objectContaining({ opID: built.intent.id, kind: 'unknown' }),
+        ])
+        expect(snapshot.outcomes.some((row) => row.kind === 'lost')).toBe(false)
+        expect(snapshot.commitOnce).toBeNull()
+        expect(snapshot.operations).toEqual([])
+        expect(snapshot.welcomes).toEqual([owed])
+        expect(snapshot.cursor).toEqual({
+          position: winner.sequenceID,
+          epoch: built.slot.epoch + 1,
+          incomplete: true,
+        })
+        expect(snapshot.applied).toMatchObject([
+          {
+            epoch: built.slot.epoch,
+            digest: digestAppliedCommit(commit),
+            sequenceID: winner.sequenceID,
+            opID: null,
+          },
+        ])
+      }
+      expect(await h.mls.readEpoch()).toBe(built.slot.epoch + 1)
+      expect(h.observations.ownAdoptions).toBe(0)
+      const roster = await h.mls.rosterEntries()
+      expect(roster.some((entry) => built.slot.welcome?.recipients.includes(entry.did))).toBe(false)
     } finally {
+      unobserve?.()
       await h.fixture.close()
     }
   })

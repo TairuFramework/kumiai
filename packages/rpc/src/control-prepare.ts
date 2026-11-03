@@ -260,16 +260,6 @@ export async function prepareControlOccurrence(params: {
     }
   } else {
     const snapshot = scope.control()
-    // Keep incomplete saved work for authenticated recovery inspection.
-    if (snapshot.commitOnce !== null && snapshot.cursor?.incomplete === true) {
-      if (originalAnchor !== null) scope.stageAnchor(originalAnchor)
-      return {
-        consumed: false,
-        advanced: false,
-        prerequisite: 'recovery',
-        ...(diagnostic === undefined ? {} : { diagnostic }),
-      }
-    }
     const adoption = params.adoption({
       snapshot,
       epoch,
