@@ -826,17 +826,24 @@ export function createGroupPeerWithControlWalk<
   let appPullBackoff = 1000
   let appPullRetryNow = false
   const armAppPull = (delay: number): void => {
-    if (disposed || safetyHold() !== null || appPullActive || appPullTimer != null) return
+    if (
+      disposed ||
+      removalCommitted() ||
+      safetyHold() !== null ||
+      appPullActive ||
+      appPullTimer != null
+    )
+      return
     appPullTimer = setTimeout(() => {
       appPullTimer = undefined
-      if (disposed || safetyHold() !== null) return
+      if (disposed || removalCommitted() || safetyHold() !== null) return
       appPullActive = true
       appPullNeeded = false
       let retryDelay = 0
       void (async () => {
         try {
           await ready
-          if (disposed || safetyHold() !== null) return
+          if (disposed || removalCommitted() || safetyHold() !== null) return
           if (controlBinding !== undefined) {
             await reconcileBufferedControl()
             appLane.kick()
@@ -859,7 +866,7 @@ export function createGroupPeerWithControlWalk<
           appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
         } finally {
           appPullActive = false
-          if (appPullNeeded && !disposed) {
+          if (appPullNeeded && !disposed && !removalCommitted()) {
             armAppPull(appPullRetryNow ? 0 : retryDelay)
             appPullRetryNow = false
           }
@@ -868,7 +875,7 @@ export function createGroupPeerWithControlWalk<
     }, delay)
   }
   const requestAppPull = (): void => {
-    if (safetyHold() !== null) return
+    if (removalCommitted() || safetyHold() !== null) return
     // A wakeup invalidates catch-up evidence, including an in-flight walk's snapshot.
     commitLaneCaughtUp = mls == null
     commitWorkVersion += 1
@@ -912,7 +919,7 @@ export function createGroupPeerWithControlWalk<
     ledgerRetryBackoff = Math.min(ledgerRetryBackoff * 2, 60_000)
   }
   const retryAppPull = (): void => {
-    if (disposed || safetyHold() !== null) return
+    if (disposed || removalCommitted() || safetyHold() !== null) return
     appPullBackoff = 1000
     appPullNeeded = true
     if (appPullTimer != null) {
@@ -2759,7 +2766,7 @@ export function createGroupPeerWithControlWalk<
   let controlPrepareBackoff = 1000
   let controlPrerequisite: Promise<void> | undefined
   function retryBufferedPreparation(): void {
-    if (disposed || controlPrepareTimer !== undefined) return
+    if (disposed || removalCommitted() || controlPrepareTimer !== undefined) return
     controlPrepareTimer = setTimeout(() => {
       controlPrepareTimer = undefined
       advertiseBufferedControl()
@@ -2818,6 +2825,7 @@ export function createGroupPeerWithControlWalk<
       .then(async (proven) => {
         if (disposed || occurrence.page.generation !== controlGeneration) return
         const { value } = proven
+        if (value.removed) commitRemoval()
         appliedEpoch = proven.epoch
         if (proven.anchor !== null) {
           anchor = proven.anchor.anchor
@@ -2825,7 +2833,7 @@ export function createGroupPeerWithControlWalk<
           anchorPending = proven.anchor.pending
         }
         await refreshControl(undefined, { control: proven.control, epoch: proven.epoch })
-        if (proven.control.cursor?.incomplete === true) {
+        if (!removalCommitted() && proven.control.cursor?.incomplete === true) {
           if (value.diagnostic?.kind === 'ahead') healRequested = safetyHold() === null
           if (!appPullActive) {
             appPullNeeded = true
@@ -2856,11 +2864,6 @@ export function createGroupPeerWithControlWalk<
         }
         consumed = true
         controlPrepareBackoff = 1000
-        if (value.removed) {
-          locallyRemoved = true
-          appLane.stopOpening()
-          logDelivery?.removed()
-        }
         bufferedControl.consumed({
           generation: occurrence.page.generation,
           topicID: occurrence.page.topicID,
@@ -2928,7 +2931,12 @@ export function createGroupPeerWithControlWalk<
     void fetchBufferedControl().catch(() => {})
   }
   function fetchBufferedControl(): Promise<void> {
-    if (disposed || controlBinding === undefined || commitTopicID === undefined)
+    if (
+      disposed ||
+      removalCommitted() ||
+      controlBinding === undefined ||
+      commitTopicID === undefined
+    )
       return Promise.resolve()
     controlFetchNeeded = true
     if (controlFetch !== undefined) return controlFetch
@@ -2943,6 +2951,7 @@ export function createGroupPeerWithControlWalk<
       while (
         controlFetchNeeded &&
         !disposed &&
+        !removalCommitted() &&
         generation === controlGeneration &&
         bufferedControl.pageCount() < CONTROL_BUFFERED_PAGES_MAX
       ) {
@@ -2956,7 +2965,7 @@ export function createGroupPeerWithControlWalk<
             limit: COMMIT_FETCH_LIMIT,
           }),
         )
-        if (disposed || generation !== controlGeneration) return
+        if (disposed || removalCommitted() || generation !== controlGeneration) return
         if (result.messages.length === COMMIT_FETCH_LIMIT)
           assertForwardPage(after === null ? null : asLogPosition(after), result.messages)
         controlFetchBackoff = 1000
@@ -2978,11 +2987,12 @@ export function createGroupPeerWithControlWalk<
     }
     controlFetch = fetch()
       .catch((error: unknown) => {
-        if (!disposed && generation === controlGeneration) {
+        if (!disposed && !removalCommitted() && generation === controlGeneration) {
           controlFetchNeeded = true
           controlFetchTimer = setTimeout(() => {
             controlFetchTimer = undefined
-            if (!disposed && generation === controlGeneration) requestBufferedControl()
+            if (!disposed && !removalCommitted() && generation === controlGeneration)
+              requestBufferedControl()
           }, controlFetchBackoff)
           controlFetchBackoff = Math.min(controlFetchBackoff * 2, 60_000)
         }
@@ -2990,7 +3000,12 @@ export function createGroupPeerWithControlWalk<
       })
       .finally(() => {
         controlFetch = undefined
-        if (controlFetchNeeded && !disposed && generation === controlGeneration)
+        if (
+          controlFetchNeeded &&
+          !disposed &&
+          !removalCommitted() &&
+          generation === controlGeneration
+        )
           requestBufferedControl()
       })
     return controlFetch
@@ -3434,16 +3449,35 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
+  function removalCommitted(): boolean {
+    if (!locallyRemoved) {
+      const admission = mls?.sendAdmission()
+      if (admission?.admissible === false && admission.reason === 'terminal') commitRemoval()
+    }
+    return locallyRemoved
+  }
+
+  function commitRemoval(): void {
+    locallyRemoved = true
+    appLane.stopOpening()
+    logDelivery?.removed()
+    appPullNeeded = false
+    appPullRetryNow = false
+    clearTimeout(appPullTimer)
+    appPullTimer = undefined
+    controlFetchNeeded = false
+    clearTimeout(controlFetchTimer)
+    controlFetchTimer = undefined
+    clearTimeout(controlPrepareTimer)
+    controlPrepareTimer = undefined
+  }
+
   const reportedEvidenceErrors = new Set<string>()
   const removalEffect = async (): Promise<void> => {
     if (control == null || safetyHold() !== null) return
     const evidence = await params.readEvidence?.()
     if (safetyHold() !== null || !evidence?.terminal) return
-    if (!locallyRemoved) {
-      locallyRemoved = true
-      appLane.stopOpening()
-      logDelivery?.removed()
-    }
+    if (!locallyRemoved) commitRemoval()
   }
 
   const adoptionWrite = (input: {
@@ -4379,6 +4413,7 @@ export function createGroupPeerWithControlWalk<
     }
     await ready
     assertLive()
+    if (removalCommitted()) return {}
     if (controlBinding !== undefined) await reconcileBufferedControl()
     if (locallyRemoved) return {}
     const savedRejoin = (await control?.load())?.rejoin

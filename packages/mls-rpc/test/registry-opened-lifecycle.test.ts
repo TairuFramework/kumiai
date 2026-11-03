@@ -2,17 +2,23 @@ import { randomIdentity } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   asLogPosition,
+  commitTopic,
   controlBatch,
   createOpenedAppHandler,
   digestAppliedCommit,
   encodeAppAAD,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
   frameID,
+  HANDSHAKE_KIND,
   OpenedDeliveryReentryError,
   openedDeliveryBinding,
   runOpenedDelivery,
 } from '@kumiai/rpc'
+import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
+import type * as BufferedControlModule from '../../rpc/lib/buffered-control.js'
 import * as checkpoint from '../src/checkpoint.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
@@ -326,12 +332,29 @@ for (const mode of ['real-mls', 'double'] as const) {
       )
 
       test.each(
-        (['at-least-once', 'transactional'] as const).flatMap((policy) =>
-          [true, false].map((restart) => ({ policy, restart })),
-        ),
+        (['at-least-once', 'transactional'] as const)
+          .flatMap((policy) =>
+            [true, false].map((restart) => ({ policy, restart, interruption: 'idle' })),
+          )
+          .concat(
+            [
+              'replay-only',
+              'separate-route',
+              'fetch-pending',
+              'fetch-failure',
+              'fetch-backoff',
+              'prepare-failure',
+              'ahead',
+            ].map((interruption) => ({
+              policy: 'at-least-once' as const,
+              restart: false,
+              interruption,
+            })),
+          ),
       )(
-        'terminal self-removal drains saved plaintext without crypto or network ($policy, restart $restart)',
-        async ({ policy, restart }) => {
+        'terminal self-removal drains saved plaintext without crypto or network ($policy, restart $restart, $interruption)',
+        async ({ policy, restart, interruption }) => {
+          const interrupted = !['idle', 'replay-only', 'separate-route'].includes(interruption)
           const context = createAsyncLocalOwnershipContext()
           const groupID = crypto.randomUUID()
           const group = await createRealGroup(1, groupID)
@@ -398,6 +421,25 @@ for (const mode of ['real-mls', 'double'] as const) {
           }
           let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
           let restoreCompletion: (() => void) | undefined
+          const releaseControl = Promise.withResolvers<void>()
+          const releaseFetch = Promise.withResolvers<void>()
+          let removalReplay: Promise<unknown> | undefined
+          let restoreNetwork: (() => void) | undefined
+          let restoreTimers: (() => void) | undefined
+          const retryTimers: Array<ReturnType<typeof setTimeout>> = []
+          let cancelledRetries: (() => boolean) | undefined
+          let offered: ReturnType<typeof vi.fn> | undefined
+          const intakeModule = (await import(
+            new URL('../../rpc/lib/buffered-control.js', import.meta.url).href
+          )) as typeof BufferedControlModule
+          let intake: BufferedControlModule.BufferedControlIntake | undefined
+          const createIntake = intakeModule.createBufferedControlIntake
+          const capture = vi
+            .spyOn(intakeModule, 'createBufferedControlIntake')
+            .mockImplementation((params) => {
+              intake = createIntake(params)
+              return intake
+            })
           const stop = new AbortController()
           let work: Promise<void> | undefined
           try {
@@ -427,7 +469,10 @@ for (const mode of ['real-mls', 'double'] as const) {
               })
               await running.owner.ready
               await running.owner.peer()?.replay()
+              if (intake === undefined) throw new Error('Missing control intake')
+              offered = vi.spyOn(intake, 'offer')
             }
+            capture.mockRestore()
             const openedAccess = await fixture.registry.access(groupID)
             const expectedAAD = encodeAppAAD({ topicID: 'chat', intent: 'log' })
             const inputs = []
@@ -474,35 +519,207 @@ for (const mode of ['real-mls', 'double'] as const) {
               mode === 'real-mls'
                 ? await buildRealCommit(group, { removes: 0 })
                 : memoryModel(sender).buildCommit([], { removes: [local.identity.id] })
+            const topicID = commitTopic(await mls.exportRecoverySecret())
+            const remotePublish = running?.hub.publish.bind(running.hub)
+            const wake = async () => {
+              if (interruption === 'replay-only') return
+              await remotePublish?.({
+                topicID,
+                senderDID: group.committer.identity.id,
+                payload: new Uint8Array([255]),
+                retain: 'log',
+              })
+            }
             const position = asLogPosition('0001')
+            if (running !== undefined && interruption !== 'separate-route') {
+              if (interrupted) vi.useFakeTimers()
+              if (interrupted) {
+                const schedule = globalThis.setTimeout
+                const clear = globalThis.clearTimeout
+                const cleared: Array<unknown> = []
+                // Later restoreAllMocks must not reinstall this fake clock.
+                globalThis.setTimeout = new Proxy(schedule, {
+                  apply(target, receiver: unknown, args: Array<unknown>) {
+                    const handle = Reflect.apply(target, receiver, args) as ReturnType<
+                      typeof setTimeout
+                    >
+                    const delay = args[1]
+                    if (typeof delay === 'number' && delay >= 1000 && delay <= 60_000)
+                      retryTimers.push(handle)
+                    return handle
+                  },
+                })
+                globalThis.clearTimeout = new Proxy(clear, {
+                  apply(target, receiver: unknown, args: Array<unknown>) {
+                    cleared.push(args[0])
+                    return Reflect.apply(target, receiver, args)
+                  },
+                })
+                cancelledRetries = () => retryTimers.every((timer) => cleared.includes(timer))
+                restoreTimers = () => {
+                  globalThis.setTimeout = schedule
+                  globalThis.clearTimeout = clear
+                }
+              }
+              if (interruption === 'ahead') {
+                let ahead: Uint8Array
+                if (mode === 'double') {
+                  const parsed: unknown = JSON.parse(new TextDecoder().decode(commit))
+                  if (parsed === null || typeof parsed !== 'object')
+                    throw new Error('Missing model commit')
+                  ahead = new TextEncoder().encode(JSON.stringify({ ...parsed, epoch: 99 }))
+                } else {
+                  const parsed = decode(mlsMessageDecoder, commit)
+                  if (parsed?.wireformat !== wireformats.mls_private_message)
+                    throw new Error('Missing private commit')
+                  parsed.privateMessage.epoch += 3n
+                  ahead = encode(mlsMessageEncoder, parsed)
+                }
+                await remotePublish?.({
+                  topicID,
+                  senderDID: group.committer.identity.id,
+                  payload: encodeHandshakeFrame(
+                    HANDSHAKE_KIND.commit,
+                    encodeCommitFrame(ahead, new Uint8Array()),
+                  ),
+                  retain: 'log',
+                })
+                await running.owner.peer()?.replay()
+                expect(
+                  (await fixture.device.groups.ports(key).control.load()).cursor?.incomplete,
+                ).toBe(true)
+                expect(vi.getTimerCount()).toBeGreaterThan(0)
+                const fetch = running.hub.fetchTopic.bind(running.hub)
+                const network = vi
+                  .spyOn(running.hub, 'fetchTopic')
+                  .mockImplementation(async (request) => ({
+                    ...(await fetch(request)),
+                    gap: request.topicID === topicID,
+                  }))
+                restoreNetwork = () => network.mockRestore()
+              } else if (interruption === 'prepare-failure') {
+                if (intake === undefined) throw new Error('Missing control intake')
+                vi.spyOn(intake, 'consumed').mockImplementationOnce(() => {
+                  throw new Error('Late control notification failed')
+                })
+              } else if (interrupted) {
+                const binding = controlBatch(running.mls())
+                if (binding === undefined) throw new Error('Missing live control binding')
+                const run = binding.run.bind(binding)
+                binding.run = async (input) => {
+                  await releaseControl.promise
+                  return await run(input)
+                }
+                const fetch = running.hub.fetchTopic.bind(running.hub)
+                const network = vi.spyOn(running.hub, 'fetchTopic')
+                restoreNetwork = () => network.mockRestore()
+                let first = true
+                const fetching = Promise.withResolvers<void>()
+                network.mockImplementation(async (request) => {
+                  if (request.topicID !== topicID) return await fetch(request)
+                  if (first) {
+                    first = false
+                    const page = await fetch(request)
+                    const removal = page.messages[0]
+                    if (removal === undefined) throw new Error('Missing removal frame')
+                    return {
+                      ...page,
+                      messages: [
+                        removal,
+                        ...Array.from({ length: 99 }, (_, index) => ({
+                          ...removal,
+                          sequenceID: String(Number(removal.sequenceID) + index + 1).padStart(
+                            12,
+                            '0',
+                          ),
+                          payload: new Uint8Array([255]),
+                        })),
+                      ],
+                      head: '000000000200',
+                    }
+                  }
+                  fetching.resolve()
+                  if (interruption !== 'fetch-backoff') await releaseFetch.promise
+                  if (interruption !== 'fetch-pending') throw new Error('Interrupted control fetch')
+                  return {
+                    messages: [
+                      {
+                        topicID,
+                        senderDID: group.committer.identity.id,
+                        sequenceID: '000000000101',
+                        payload: new Uint8Array([255]),
+                      },
+                    ],
+                    head: '000000000101',
+                    oldest: '000000000001',
+                    gap: false,
+                  }
+                })
+                removalReplay = fetching.promise
+              }
+              await remotePublish?.({
+                topicID,
+                senderDID: group.committer.identity.id,
+                payload: encodeHandshakeFrame(
+                  HANDSHAKE_KIND.commit,
+                  encodeCommitFrame(commit, new Uint8Array()),
+                ),
+                retain: 'log',
+              })
+              if (removalReplay !== undefined) {
+                await removalReplay
+                // Let the failed fetch arm its retry before the removal entry commits.
+                for (let turn = 0; turn < 100; turn++) await Promise.resolve()
+                if (interruption === 'fetch-backoff') expect(vi.getTimerCount()).toBeGreaterThan(0)
+                releaseControl.resolve()
+              } else await running.owner.peer()?.replay()
+              await vi.waitFor(async () => {
+                expect(await fixture.device.groups.loadState(key)).toMatchObject({ terminal: true })
+              })
+              offered?.mockClear()
+              releaseFetch.resolve()
+              for (let turn = 0; turn < 200; turn++) await Promise.resolve()
+              if (interruption === 'ahead')
+                expect(
+                  (await fixture.device.groups.ports(key).control.load()).cursor?.incomplete,
+                ).toBe(true)
+              if (interruption === 'ahead' || interruption === 'fetch-backoff')
+                expect(retryTimers.length).toBeGreaterThan(0)
+              expect(cancelledRetries?.() ?? true).toBe(true)
+              restoreTimers?.()
+              restoreTimers = undefined
+              expect(offered).not.toHaveBeenCalled()
+              restoreNetwork?.()
+            } else {
+              const result = await route.run({
+                source: 'terminal-removal',
+                prepare: async (scope) => {
+                  const epoch = await scope.readEpoch()
+                  return scope.prepareCommit(commit, {
+                    adoption: (staged) => ({
+                      mutationID: crypto.randomUUID(),
+                      changes: {
+                        commitOnce: null,
+                        cursor: { position, epoch: staged.epochAfter },
+                        putApplied: [
+                          {
+                            epoch,
+                            digest: digestAppliedCommit(commit),
+                            payloadDigest: 'terminal-removal',
+                            sequenceID: position,
+                            opID: null,
+                            removed: staged.removed,
+                          },
+                        ],
+                      },
+                    }),
+                  })
+                },
+              })
+              expect(result.value).toMatchObject({ applied: true })
+            }
             const fetch = running === undefined ? vi.fn() : vi.spyOn(running.hub, 'fetchTopic')
             const publish = running === undefined ? vi.fn() : vi.spyOn(running.hub, 'publish')
-            const result = await route.run({
-              source: 'terminal-removal',
-              prepare: async (scope) => {
-                const epoch = await scope.readEpoch()
-                return scope.prepareCommit(commit, {
-                  adoption: (staged) => ({
-                    mutationID: crypto.randomUUID(),
-                    changes: {
-                      commitOnce: null,
-                      cursor: { position, epoch: staged.epochAfter },
-                      putApplied: [
-                        {
-                          epoch,
-                          digest: digestAppliedCommit(commit),
-                          payloadDigest: 'terminal-removal',
-                          sequenceID: position,
-                          opID: null,
-                          removed: staged.removed,
-                        },
-                      ],
-                    },
-                  }),
-                })
-              },
-            })
-            expect(result.value).toMatchObject({ applied: true })
             expect(await fixture.device.groups.loadState(key)).toMatchObject({ terminal: true })
             expect(await openedAccess.pending.list()).toEqual(pending)
             expect(calls).toBe(0)
@@ -565,6 +782,15 @@ for (const mode of ['real-mls', 'double'] as const) {
             const safety = registrySafety(fixture.registry)
             if (safety === null) throw new Error('Missing safety port')
             const unsubscribe = safety.onSwitchBlocked(key, (block) => blocks.push(block))
+            if (running !== undefined) {
+              const read = vi.spyOn(capability, 'read')
+              await expect(running.owner.peer()?.replay()).resolves.toEqual({})
+              expect(read).not.toHaveBeenCalled()
+              expect(fetch).not.toHaveBeenCalled()
+              read.mockRestore()
+              await wake()
+              expect(fetch).not.toHaveBeenCalled()
+            }
             let settled = false
             work = fixture.registry.delete(key).then(() => {
               settled = true
@@ -572,9 +798,18 @@ for (const mode of ['real-mls', 'double'] as const) {
             void work.catch(() => {})
             await Promise.race([entered.promise, work])
             expect(settled).toBe(false)
-            vi.useFakeTimers()
+            if (!vi.isFakeTimers()) vi.useFakeTimers()
+            await running?.owner.peer()?.replay()
+            await wake()
+            await vi.advanceTimersByTimeAsync(1000)
+            expect(fetch).not.toHaveBeenCalled()
+            expect(decrypt).not.toHaveBeenCalled()
+            expect(publish).not.toHaveBeenCalled()
             release.resolve()
             await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
+            await running?.owner.peer()?.replay()
+            await wake()
+            running?.owner.peer()?.retryAppDelivery()
             await vi.advanceTimersByTimeAsync(60_000)
             expect(settled).toBe(false)
             expect((await fixture.inspectRows()).pending?.size).toBe(2)
@@ -613,6 +848,11 @@ for (const mode of ['real-mls', 'double'] as const) {
                 new Uint8Array([1]),
               )
           } finally {
+            releaseControl.resolve()
+            releaseFetch.resolve()
+            capture.mockRestore()
+            restoreTimers?.()
+            restoreNetwork?.()
             vi.useRealTimers()
             failing = false
             release.resolve()

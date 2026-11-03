@@ -3,6 +3,7 @@ import {
   type AppOutbox,
   createGroupPeer,
   decodeAppAAD,
+  type GroupMLS,
   type GroupProcedureHandlers,
   type LogHub,
   type OpenedDeliveryContext,
@@ -43,6 +44,7 @@ export async function startLeaseRotationPeer(params: {
   }
   const hub = new FakeHub()
   const target = { targetID: 'lease-rotation-hub', topicID: 'lease-rotation-commits' }
+  let mls: GroupMLS | undefined
   let receiver: GroupHandle | undefined
   const restore = async (bytes: Uint8Array) => {
     const candidate = decodeAutoRotationCandidate(bytes)
@@ -70,15 +72,17 @@ export async function startLeaseRotationPeer(params: {
       registry: fixture.registry,
       persistence: fixture.device.groups,
     }),
-    createMLS: (key) =>
-      api.createRegistryGroupMLS({
+    createMLS: async (key) => {
+      mls = await api.createRegistryGroupMLS({
         registry: fixture.registry,
         key,
         recovery: fixture.environment,
         target,
         identity: fixture.identity,
         entrySlot: api.createLedgerEntrySlot(),
-      }),
+      })
+      return mls
+    },
     createPeer: async (key, options) => {
       const access = api.createRegistryHandleAccess({ access: rawAccess })
       const ports = fixture.device.groups.ports(key)
@@ -140,6 +144,10 @@ export async function startLeaseRotationPeer(params: {
   return {
     owner,
     hub,
+    mls: () => {
+      if (mls === undefined) throw new Error('Missing peer MLS')
+      return mls
+    },
     frames() {
       return hub.published.filter((frame) => {
         const aad = groupCrypto.frameAAD(frame.payload)
