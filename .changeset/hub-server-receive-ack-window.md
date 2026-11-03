@@ -1,5 +1,0 @@
----
-'@kumiai/hub-server': patch
----
-
-`hub/v1/receive` now paces delivery by acks: at most `receiveWindow` frames (default 256) and `receiveWindowBytes` bytes (default 512 KiB) are in flight on a channel, and the ack loop runs from connect instead of after the backlog drain. Before, the drain wrote a whole backlog at once; `@enkaku/http-serve` drops an SSE session whose unread buffer passes `maxSessionBufferBytes`, so a backlog larger than that buffer, read by a slow client, ended the session on every connect before any ack landed, and the next connect redelivered the identical backlog. The channel is ordered, so for the window an ack releases its frame and every frame written before it: frames a client never acks (a topic it reads with `hub/v1/topic/fetch`, or one no consumer claims) cannot hold the window. A full window with no ack at all for `receiveAckTimeout` (default 15 s, restarted by every ack) is released whole and the drain goes on; the channel is not ended. Abort and eviction now also end a channel that is still draining. New exports: `DEFAULT_RECEIVE_WINDOW`, `DEFAULT_RECEIVE_WINDOW_BYTES`, `DEFAULT_RECEIVE_ACK_TIMEOUT`.

@@ -193,6 +193,10 @@
   intents:
     - hub-adoption-host-seams
     - management-tier-0-12
+"@kumiai/hub-server@0.12.1":
+  dir: packages/hub-server
+  intents:
+    - hub-server-receive-ack-window
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
