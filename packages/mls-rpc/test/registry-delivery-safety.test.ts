@@ -39,6 +39,7 @@ import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
+import { requireValue } from './fixtures/require-value.js'
 import {
   memoryModel,
   restoreMemoryControlHandle,
@@ -133,7 +134,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         'past-winner',
       )
       const before = await h.control.load()
-      const bridge = vi.spyOn(controlBatch(h.mls)!, 'run')
+      const bridge = vi.spyOn(requireValue(controlBatch(h.mls)), 'run')
       await h.hub.publish({
         topicID: await h.topic(),
         payload: frame(loser),
@@ -165,9 +166,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         await h.saveBuilt(built.intent, built.slot, built.expected, 'gated-copy')
         const registry = h.registry
         if (registry === undefined) throw new Error('Missing registry')
-        if (gate === 'authenticated-hold') registrySafety(registry)!.latch(h.key, 'fork-halted')
+        if (gate === 'authenticated-hold')
+          requireValue(registrySafety(registry)).latch(h.key, 'fork-halted')
         else {
-          const source = await h.registryAccess!.read((value) => value)
+          const source = await requireValue(h.registryAccess).read((value) => value)
           const recovery = await createRegistryRecovery({
             format: 'captured',
             mode,
@@ -186,7 +188,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           )
         }
         const before = await h.control.load()
-        const bridge = vi.spyOn(controlBatch(h.mls)!, 'run')
+        const bridge = vi.spyOn(requireValue(controlBatch(h.mls)), 'run')
         await h.peer.replay()
         const topicID = await h.topic()
         for (const byte of [0, 1, 255])
@@ -250,9 +252,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (fault === 'sealed-outer' || fault === 'tamper' || fault === 'sealed-inner') {
           let sealed: Uint8Array = decoded.sealedEntries.slice()
           if (fault === 'sealed-outer') sealed[0] = 255
-          if (fault === 'tamper') sealed[sealed.length - 1]! ^= 1
+          if (fault === 'tamper')
+            sealed[sealed.length - 1] = requireValue(sealed[sealed.length - 1]) ^ 1
           if (fault === 'sealed-inner') {
-            const handle = await h.registryAccess!.read((value) => value)
+            const handle = await requireValue(h.registryAccess).read((value) => value)
             const key = await deriveEntryKey(handle)
             try {
               sealed = sealEntries(key, new Uint8Array([255, 0, 0]))
@@ -267,7 +270,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
         if (fault === 'signature') {
           const commit = decoded.commit.slice()
-          commit[commit.length - 1]! ^= 1
+          commit[commit.length - 1] = requireValue(commit[commit.length - 1]) ^ 1
           payload = frame(commit)
         }
         if (fault === 'gap') {
@@ -275,7 +278,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           payload[2] = 255
         }
         if (fault === 'unrecognised') {
-          const source = await h.registryAccess!.read((value) => value)
+          const source = await requireValue(h.registryAccess).read((value) => value)
           const state = decodeClientState(encodeClientState(source.state))
           if (state === undefined) throw new Error('Missing source')
           const commit =
@@ -344,7 +347,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect((await reopened.control.load()).commitOnce).toEqual(after.commitOnce)
         expect((await reopened.control.load()).welcomes).toEqual(before.welcomes)
         expect(controlBatch(reopened.mls)).toBeDefined()
-        const resumed = vi.spyOn(controlBatch(reopened.mls)!, 'run')
+        const resumed = vi.spyOn(requireValue(controlBatch(reopened.mls)), 'run')
         await reopened.peer.replay()
         await h.hub.publish({
           topicID: await reopened.topic(),

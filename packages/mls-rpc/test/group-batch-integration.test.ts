@@ -14,8 +14,10 @@ import {
   HANDSHAKE_KIND,
   type LogHub,
   protocolTopic,
+  type StrandObservation,
 } from '@kumiai/rpc'
 import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
+import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
 import type * as bufferedControlTypes from '../../rpc/lib/buffered-control.js'
@@ -34,6 +36,7 @@ import {
 } from './fixtures/ownership-context.js'
 import { registryFixtureObserveRestoredControl } from './fixtures/registry.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
+import { requireValue } from './fixtures/require-value.js'
 import { writeSideRow } from './fixtures/storage-persistence.js'
 
 const protocol = { posted: { type: 'event', retain: 'log', data: { type: 'object' } } } as const
@@ -51,6 +54,7 @@ async function setup(
   retained?: Map<string, Array<{ sequenceID: string; payload: Uint8Array }>>,
   recordControl = false,
   startupControl = false,
+  onStrand?: (notice: StrandObservation) => void,
 ) {
   const group =
     existingGroup ??
@@ -117,6 +121,8 @@ async function setup(
     ])
   const { peer, controlWalk } = createGroupPeerWithControlWalk({
     hub,
+    onStrand,
+    recovery: { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 0 },
     crypto: groupCrypto,
     completion,
     openedDeliveryContext,
@@ -231,7 +237,7 @@ for (const mode of ['real-mls', 'double'] as const)
         const fetchRelease = Promise.withResolvers<void>()
         let withheld = false
         try {
-          const anchor = (await s.ports.anchor.load())!.anchor
+          const anchor = requireValue(await s.ports.anchor.load()).anchor
           const [a, b] = ['A', 'B'].map((name) => protocolTopic(anchor.secret, anchor.epoch, name))
           if (a === undefined || b === undefined) throw new Error('Missing topics')
           s.messages.set(b, [
@@ -252,7 +258,7 @@ for (const mode of ['real-mls', 'double'] as const)
                   }),
             },
           ])
-          const fetch = s.fetch.getMockImplementation()!
+          const fetch = requireValue(s.fetch.getMockImplementation())
           s.fetch.mockImplementation(async (input) => {
             if (input.topicID === a) {
               withheld = true
@@ -302,8 +308,8 @@ for (const mode of ['real-mls', 'double'] as const)
       let networkStarted = false
       let bProven = false
       try {
-        const scheduler = appBatch(s.groupCrypto)!.scheduler
-        const binding = appBatch(s.groupCrypto)!
+        const scheduler = requireValue(appBatch(s.groupCrypto)).scheduler
+        const binding = requireValue(appBatch(s.groupCrypto))
         const openReady = binding.openReady.bind(binding)
         vi.spyOn(binding, 'openReady').mockImplementation(async (...args) => {
           const result = await openReady(...args)
@@ -320,7 +326,7 @@ for (const mode of ['real-mls', 'double'] as const)
           },
         })
         await started.promise
-        const anchor = (await s.ports.anchor.load())!.anchor
+        const anchor = requireValue(await s.ports.anchor.load()).anchor
         const topicID = protocolTopic(anchor.secret, anchor.epoch, 'B')
         s.messages.set(topicID, [
           {
@@ -411,7 +417,7 @@ for (const mode of ['real-mls', 'double'] as const)
             const entries: Array<string> = []
             let selectedSource = ''
             const schedule = batch.scheduler.schedule.bind(batch.scheduler)
-            const anchor = (await s.ports.anchor.load())!.anchor
+            const anchor = requireValue(await s.ports.anchor.load()).anchor
             const topics = ['A', 'B'].map((name) =>
               protocolTopic(anchor.secret, anchor.epoch, name),
             )
@@ -457,7 +463,7 @@ for (const mode of ['real-mls', 'double'] as const)
             const topic = commitTopic(await s.mls.exportRecoverySecret())
             const commit = await s.group.prepareCommit()
             proofObserved = aProof.resolve
-            const cap = entryCapability(s.f.device.groups)!
+            const cap = requireValue(entryCapability(s.f.device.groups))
             const originalRun = cap.run.bind(cap)
             vi.spyOn(cap, 'run').mockImplementation((...args) => {
               entries.push(selectedSource)
@@ -503,7 +509,7 @@ for (const mode of ['real-mls', 'double'] as const)
             await vi.waitFor(() => expect(stages).toBe(2))
             expect(selected.slice(0, 3)).toEqual(['A', 'control', 'B'])
             expect(entries.slice(0, 3)).toEqual(['A', 'control', 'B'])
-            await registryLiveSend.get(s.group.access())!.accounting()
+            await requireValue(registryLiveSend.get(s.group.access())).accounting()
             const beforeLate = selected.filter((source) => source === 'Read').length
             for (const start of releases.splice(0)) start()
             await new Promise((resolve) => setTimeout(resolve, 0))
@@ -561,7 +567,7 @@ for (const mode of ['real-mls', 'double'] as const)
               { cursor: { position: asLogPosition('01'), epoch: before } },
               'local-control',
             )
-            if (scope.anchor() !== null) scope.stageAnchor(scope.anchor()!)
+            if (scope.anchor() !== null) scope.stageAnchor(requireValue(scope.anchor()))
             expect(read).not.toHaveBeenCalled()
             return 'prepared'
           },
@@ -577,6 +583,159 @@ for (const mode of ['real-mls', 'double'] as const)
         await s.close()
       }
     })
+    test('ahead claims schedule bounded catch-up and authenticated inspection before queued sends resume', async () => {
+      const s = await setup(mode, async () => {})
+      const capability = requireValue(entryCapability(s.f.device.groups))
+      const timers: Array<{ delay: number; run(): void }> = []
+      const schedule = globalThis.setTimeout
+      const timer = vi
+        .spyOn(globalThis, 'setTimeout')
+        .mockImplementation((callback, delay, ...args) => {
+          if (
+            typeof callback === 'function' &&
+            delay !== undefined &&
+            delay >= 1000 &&
+            delay <= 60_000
+          ) {
+            capability.assertRoot()
+            const handle = schedule(callback, 60_000, ...args)
+            timers.push({
+              delay,
+              run: () => {
+                clearTimeout(handle)
+                callback(...args)
+              },
+            })
+            return handle
+          }
+          return schedule(callback, delay, ...args)
+        })
+      try {
+        const epoch = await s.mls.readEpoch()
+        const valid = await s.group.prepareCommit()
+        let ahead: Uint8Array
+        if (mode === 'double') {
+          const parsed: unknown = JSON.parse(new TextDecoder().decode(valid))
+          if (parsed === null || typeof parsed !== 'object') throw new Error('Missing model commit')
+          ahead = new TextEncoder().encode(JSON.stringify({ ...parsed, epoch: epoch + 3 }))
+        } else {
+          const parsed = decode(mlsMessageDecoder, valid)
+          if (parsed?.wireformat !== wireformats.mls_private_message)
+            throw new Error('Missing private commit')
+          parsed.privateMessage.epoch += 3n
+          ahead = encode(mlsMessageEncoder, parsed)
+        }
+        const topicID = commitTopic(await s.mls.exportRecoverySecret())
+        const payload = encodeHandshakeFrame(
+          HANDSHAKE_KIND.commit,
+          encodeCommitFrame(ahead, new Uint8Array()),
+        )
+        const before = await s.ports.control.load()
+        const state = await s.f.device.groups.loadState(s.key)
+        const inspection = vi.spyOn(s.mls, 'createRecoveryRequest')
+        s.messages.set(topicID, [{ sequenceID: '10', payload }])
+        await s.hub.publish({
+          topicID,
+          senderDID: s.group.sender.identity.id,
+          payload,
+          retain: 'log',
+        })
+        await vi.waitFor(async () =>
+          expect((await s.ports.control.load()).cursor?.incomplete).toBe(true),
+        )
+        const after = await s.ports.control.load()
+        expect(after).toEqual({ ...before, cursor: { position: '10', epoch, incomplete: true } })
+        const row = await s.f.device.groups.loadState(s.key)
+        expect(row).toEqual({ ...state, version: row?.version })
+        await s.peer.protocol('chat').dispatch('posted', { data: {} })
+        expect(await s.ports.outbox.list()).toMatchObject([{ lastAttempt: null }])
+        const fetches = () =>
+          s.fetch.mock.calls.filter(([request]) => request.topicID === topicID).length
+        const first = timers.shift()
+        expect(first?.delay).toBe(1000)
+        if (first === undefined) throw new Error('Missing bounded catch-up')
+        const count = fetches()
+        first.run()
+        await vi.waitFor(() => expect(fetches()).toBeGreaterThan(count))
+        await vi.waitFor(() => expect(inspection).toHaveBeenCalled())
+        expect(await s.ports.outbox.list()).toMatchObject([{ lastAttempt: null }])
+        await vi.waitFor(() => expect(timers.some((pending) => pending.delay === 2000)).toBe(true))
+        for (const delay of [2000, 4000, 8000, 16000, 32000, 60000]) {
+          await vi.waitFor(() =>
+            expect(timers.some((pending) => pending.delay === delay)).toBe(true),
+          )
+          const index = timers.findIndex((pending) => pending.delay === delay)
+          const retry = requireValue(timers.splice(index, 1)[0])
+          const before = fetches()
+          retry.run()
+          await vi.waitFor(() => expect(fetches()).toBeGreaterThan(before))
+        }
+        await vi.waitFor(() => expect(timers.some((pending) => pending.delay === 60000)).toBe(true))
+        expect(timers.every((pending) => pending.delay >= 1000 && pending.delay <= 60_000)).toBe(
+          true,
+        )
+        s.messages.set(topicID, [
+          {
+            sequenceID: '11',
+            payload: encodeHandshakeFrame(
+              HANDSHAKE_KIND.commit,
+              encodeCommitFrame(valid, new Uint8Array()),
+            ),
+          },
+        ])
+        const next = timers.find((pending) => pending.delay === 60000)
+        if (next === undefined) throw new Error('Missing next catch-up')
+        next.run()
+        await vi.waitFor(async () =>
+          expect((await s.ports.control.load()).cursor?.position).toBe('11'),
+        )
+        await vi.waitFor(async () => expect(await s.ports.outbox.list()).toEqual([]))
+        expect((await s.ports.control.load()).controlHold).toBeNull()
+        expect((await s.ports.control.load()).forkHalt).toBeNull()
+      } finally {
+        timer.mockRestore()
+        await s.close()
+      }
+    })
+
+    test('bound ingress flushes upgrade diagnostics after proof without another API call', async () => {
+      const notice = vi.fn()
+      const s = await setup(
+        mode,
+        async () => {},
+        ['chat'],
+        undefined,
+        undefined,
+        false,
+        false,
+        notice,
+      )
+      try {
+        const topicID = commitTopic(await s.mls.exportRecoverySecret())
+        const payload = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array())
+        payload[2] = 255
+        s.messages.set(topicID, [{ sequenceID: '10', payload }])
+        await s.hub.publish({
+          topicID,
+          senderDID: s.group.sender.identity.id,
+          payload,
+          retain: 'log',
+        })
+        await vi.waitFor(async () =>
+          expect((await s.ports.control.load()).cursor?.position).toBe('10'),
+        )
+        await vi.waitFor(() => expect(notice).toHaveBeenCalledTimes(1))
+        expect(notice.mock.calls[0]?.[0]).toMatchObject({
+          position: '10',
+          kind: 'unknown-version',
+          diagnostic: 'upgrade-required',
+          confidence: 'claimed',
+        })
+      } finally {
+        await s.close()
+      }
+    })
+
     test('bound startup buffers checked control without legacy walking', async () => {
       const s = await setup(mode, async () => {}, ['chat'], undefined, undefined, true, true)
       try {

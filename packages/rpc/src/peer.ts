@@ -841,7 +841,7 @@ export function createGroupPeerWithControlWalk<
           await ready
           if (disposed || safetyHold() !== null) return
           if (controlBinding !== undefined) {
-            requestBufferedControl()
+            await reconcileBufferedControl()
             appLane.kick()
           } else
             await runSerial(async () => {
@@ -851,7 +851,11 @@ export function createGroupPeerWithControlWalk<
               await reconcileCommits()
             })
           await healIfRequested()
-          appPullBackoff = 1000
+          if (controlBinding !== undefined && durableCursor?.incomplete === true) {
+            appPullNeeded = true
+            retryDelay = appPullBackoff
+            appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
+          } else appPullBackoff = 1000
         } catch {
           appPullNeeded = true
           retryDelay = appPullBackoff
@@ -2817,6 +2821,26 @@ export function createGroupPeerWithControlWalk<
       .then(async (proven) => {
         if (disposed || occurrence.page.generation !== controlGeneration) return
         const { value } = proven
+        appliedEpoch = proven.epoch
+        if (proven.anchor !== null) {
+          anchor = proven.anchor.anchor
+          departing = proven.anchor.departing ?? []
+          anchorPending = proven.anchor.pending
+        }
+        await refreshControl(undefined, { control: proven.control, epoch: proven.epoch })
+        if (proven.control.cursor?.incomplete === true) {
+          if (value.diagnostic?.kind === 'ahead' || value.prerequisite === 'recovery')
+            healRequested = safetyHold() === null
+          if (!appPullActive) {
+            appPullNeeded = true
+            armAppPull(appPullBackoff)
+            appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
+          }
+        }
+        if (value.diagnostic !== undefined && commitTopicID !== undefined) {
+          emitStrand({ ...value.diagnostic, groupID: commitTopicID })
+          flushHostOutbox()
+        }
         if (!value.consumed) {
           if (value.prerequisite === 'ledger' && mls != null) {
             const port = mls
@@ -2836,15 +2860,6 @@ export function createGroupPeerWithControlWalk<
         }
         consumed = true
         controlPrepareBackoff = 1000
-        appliedEpoch = proven.epoch
-        if (proven.anchor !== null) {
-          anchor = proven.anchor.anchor
-          departing = proven.anchor.departing ?? []
-          anchorPending = proven.anchor.pending
-        }
-        await refreshControl(undefined, { control: proven.control, epoch: proven.epoch })
-        if (value.diagnostic !== undefined && commitTopicID !== undefined)
-          emitStrand({ ...value.diagnostic, groupID: commitTopicID })
         if (value.removed) {
           locallyRemoved = true
           appLane.stopOpening()
@@ -2869,6 +2884,7 @@ export function createGroupPeerWithControlWalk<
           ) {
             commitLaneCaughtUp = true
             appLane.retryDelivery()
+            logDelivery?.trigger()
           }
         }
         if (value.advanced && !value.removed) {

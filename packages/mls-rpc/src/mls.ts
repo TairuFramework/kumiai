@@ -272,6 +272,13 @@ export async function deriveRecoverySecret(handle: GroupHandle): Promise<Uint8Ar
  *    host must not put anything on it that confidentiality depends on.
  */
 export function createGroupMLS(params: GroupMLSParams): GroupMLS {
+  return createGroupMLSBase(params)
+}
+
+function createGroupMLSBase(
+  params: GroupMLSParams,
+  deferNotifications?: (notify: () => void) => void,
+): GroupMLS {
   const { access, identity, entrySlot } = params
   const recoveryHandle = (handle: GroupHandle) =>
     params.denySend ? denyApplicationSend(handle) : handle
@@ -739,6 +746,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           const result = await applyCommit({
             ...context,
             handle: group,
+            deferNotifications,
             commit,
             resolveLedgerEntries: local
               ? context.resolveLedgerEntries
@@ -1072,10 +1080,13 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   if (batch !== undefined)
     bindControlBatch(port, {
       key: batch.key,
-      run: (input) =>
-        batch.run({
+      run: (input) => {
+        let notifications: Array<() => void> = []
+        const attempt = batch.run({
           ...input,
           prepare: async (local) => {
+            const preparedNotifications: Array<() => void> = []
+            notifications = preparedNotifications
             let active = true
             const assertActive = () => {
               if (!active) throw new Error('Control prepare scope has ended')
@@ -1084,13 +1095,16 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             let snapshot = await local.control.load()
             let anchor = await local.anchor.load()
             const writes: Array<Promise<void>> = []
-            const isolated = createGroupMLS({
-              ...params,
-              access: local.access,
-              control: local.control,
-              readRecoverySource: async () => source,
-              recoveryAdoption: undefined,
-            })
+            const isolated = createGroupMLSBase(
+              {
+                ...params,
+                access: local.access,
+                control: local.control,
+                readRecoverySource: async () => source,
+                recoveryAdoption: undefined,
+              },
+              (notify) => preparedNotifications.push(notify),
+            )
             const entryLabel = registryControlEntryLabels.get(batch)
             const crypto = createGroupCryptoBase({ access: local.access, entryLabel })
             const restoreCandidate = controlCandidateRestore(local.access)
@@ -1178,7 +1192,18 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
               active = false
             }
           },
-        }),
+        })
+        return attempt.then((proven) => {
+          for (const notify of notifications) {
+            try {
+              notify()
+            } catch {
+              // Host failure cannot undo a proven adoption or invite replay.
+            }
+          }
+          return proven
+        })
+      },
     })
   return port
 }

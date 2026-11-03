@@ -259,8 +259,19 @@ export async function prepareControlOccurrence(params: {
       return skip(header?.epoch)
     }
   } else {
+    const snapshot = scope.control()
+    // Keep incomplete saved work for authenticated recovery inspection.
+    if (snapshot.commitOnce !== null && snapshot.cursor?.incomplete === true) {
+      if (originalAnchor !== null) scope.stageAnchor(originalAnchor)
+      return {
+        consumed: false,
+        advanced: false,
+        prerequisite: 'recovery',
+        ...(diagnostic === undefined ? {} : { diagnostic }),
+      }
+    }
     const adoption = params.adoption({
-      snapshot: initial,
+      snapshot,
       epoch,
       digest,
       payloadDigest: toB64U(sha256(message.payload)),
@@ -273,7 +284,11 @@ export async function prepareControlOccurrence(params: {
         senderDID: message.senderDID,
         adoption: (staged) => {
           const write = adoption(staged)
-          if (incomplete && write.changes.cursor !== undefined && write.changes.cursor !== null)
+          if (
+            page.result.gap &&
+            write.changes.cursor !== undefined &&
+            write.changes.cursor !== null
+          )
             write.changes.cursor = { ...write.changes.cursor, incomplete: true }
           return write
         },

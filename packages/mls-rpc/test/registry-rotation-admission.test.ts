@@ -28,6 +28,7 @@ import { dropRegistryOwner, gateRegistryMaintenance } from '../src/testing.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
+import { requireValue } from './fixtures/require-value.js'
 import { restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
 
 const fixtures: Array<Awaited<ReturnType<typeof createRegistryLeaseFixture>>> = []
@@ -1023,7 +1024,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           key: fixture.key,
           state: { ...record, senderHWM, version: record.version + 1 },
         })
-        await groupBatchFor(coordinatorBinding(base.device.groups)!, fixture.key.groupID).schedule({
+        await groupBatchFor(
+          requireValue(coordinatorBinding(base.device.groups)),
+          fixture.key.groupID,
+        ).schedule({
           source: 'ownerless-observations-settled',
           kind: 'accounting',
           run: async () => {},

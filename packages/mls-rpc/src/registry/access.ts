@@ -11,7 +11,6 @@ import {
 import {
   type AdoptionExpected,
   type AdoptionWrite,
-  type AnchorSlot,
   applyChanges,
   type CheckpointFactRecord,
   type CommitOnceWriteContext,

@@ -6,8 +6,8 @@ import {
   encodeClientState,
   GroupHandle,
   type GroupOptions,
-  readGroupAnchorExtension,
   RecoveryKnowledgeError,
+  readGroupAnchorExtension,
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'

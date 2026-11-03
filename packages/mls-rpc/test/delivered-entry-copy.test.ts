@@ -27,6 +27,7 @@ import { decodeStoredValue } from '../src/persistence-codec.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRealGroup } from './fixtures/real-group.js'
+import { requireValue } from './fixtures/require-value.js'
 import { restoreMemoryControlHandle, seedMemoryControlState } from './fixtures/sealed-memory-mls.js'
 import { createControlCrashHarness } from './fixtures/storage-persistence.js'
 import { makeStorageSeed } from './fixtures/storage-seed.js'
@@ -129,6 +130,67 @@ async function foreignHarness(mode: 'double' | 'real-mls', context = false, regi
 afterEach(() => vi.useRealTimers())
 
 for (const mode of ['double', 'real-mls'] as const) {
+  test(`same-page gap and valid competitor preserve the saved build without loss (${mode})`, async () => {
+    const { h, competitor, foreignDID } = await foreignHarness(mode, true, true)
+    try {
+      await h.peer.replay()
+      const built = await h.build()
+      await h.saveBuilt(built.intent, built.slot, built.expected, 'gap-competitor')
+      const before = await h.control.load()
+      const source = await requireValue(h.registryAccess).read((value) => value)
+      let commit: Uint8Array
+      let blob: Uint8Array
+      if (mode === 'double') {
+        const saved = decodeCommitFrame(decodeHandshakeFrame(built.slot.payload).payload)
+        const parsed = decodeMemoryCommit(saved.commit)
+        if (parsed === null || foreignDID === undefined) throw new Error('Missing competitor')
+        commit = tagMemoryCommit(
+          new TextEncoder().encode(
+            JSON.stringify({
+              ...parsed,
+              adds: [],
+              committerDID: foreignDID,
+              signerDID: foreignDID,
+            }),
+          ),
+          source.state.keySchedule.epochAuthenticator,
+        )
+        blob = saved.sealedEntries
+      } else {
+        if (competitor === undefined) throw new Error('Missing competitor')
+        const token = await signLedgerEntry(competitor.identity, {
+          type: 'note',
+          groupID: h.key.groupID,
+          subject: competitor.identity.id,
+          value: 'valid competitor',
+        })
+        commit = (await commitLedgerEntries(competitor.handle, [token])).commitMessage
+        const key = await deriveEntryKey(source)
+        blob = sealEntries(key, encodeLedgerEntries([token]))
+        key.fill(0)
+      }
+      const binding = requireValue(controlBatch(h.mls))
+      const bridge = vi.spyOn(binding, 'run')
+      h.setControlGap(true)
+      const payload = encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, blob))
+      await h.hub.publish({
+        topicID: await h.topic(),
+        payload,
+        senderDID: randomIdentity().id,
+        retain: 'log',
+      })
+      await vi.waitFor(() => expect(bridge).toHaveBeenCalled())
+      await Promise.all(bridge.mock.results.map((result) => result.value))
+      const after = await h.control.load()
+      expect(after.cursor?.incomplete).toBe(true)
+      expect(after.outcomes.some((row) => row.kind === 'lost')).toBe(false)
+      expect(after.commitOnce).toEqual(before.commitOnce)
+      expect(after.outcomes).toEqual(before.outcomes)
+    } finally {
+      await h.fixture.close()
+    }
+  })
+
   test.each(['outer', 'inner', 'tamper', 'withheld'] as const)(
     `registry bound failed own copies cannot strand saved retry or Welcome (${mode}, foreign %s)`,
     async (fault) => {
@@ -149,7 +211,7 @@ for (const mode of ['double', 'real-mls'] as const) {
         const before = await h.control.load()
         const row = await h.groups.loadState(h.key)
         if (row === null || row.deleted || row.state === null) throw new Error('Missing source')
-        const handle = await h.registryAccess!.read((value) => value)
+        const handle = await requireValue(h.registryAccess).read((value) => value)
         const key = await deriveEntryKey(handle)
         const saved = decodeCommitFrame(decodeHandshakeFrame(built.slot.payload).payload)
         let commit: Uint8Array
@@ -183,13 +245,13 @@ for (const mode of ['double', 'real-mls'] as const) {
         let blob: Uint8Array = validBlob.slice()
         if (fault === 'outer') blob[0] = 255
         if (fault === 'inner') blob = sealEntries(key, new Uint8Array([255, 0, 0]))
-        if (fault === 'tamper') blob[blob.length - 1]! ^= 1
+        if (fault === 'tamper') blob[blob.length - 1] = requireValue(blob[blob.length - 1]) ^ 1
         if (fault === 'withheld') blob = new Uint8Array()
         key.fill(0)
         const binding = controlBatch(h.mls)
         expect(binding).toBeDefined()
-        const originalRun = binding!.run.bind(binding)
-        const bridge = vi.spyOn(binding!, 'run')
+        const originalRun = requireValue(binding).run.bind(binding)
+        const bridge = vi.spyOn(requireValue(binding), 'run')
         const preparationErrors: Array<unknown> = []
         const preparationResults: Array<unknown> = []
         bridge.mockImplementation((input) =>

@@ -25,6 +25,7 @@ export type ApplyCommitParams = CommitContext & {
   entrySlot: LedgerEntrySlot
   /** This member's DID: its own authenticated commit is never applied as received. */
   ownDID: string
+  deferNotifications?: (notify: () => void) => void
   /** Runs before the handle adopts the new state. */
   persist?: ((handle: GroupHandle, ctx?: PersistContext) => Promise<void>) | undefined
 }
@@ -134,6 +135,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   )
   try {
     await handle.processMessage(commit, {
+      deferNotifications: params.deferNotifications,
       ...(persist != null && {
         persist: async (current: GroupHandle, ctx) => {
           try {

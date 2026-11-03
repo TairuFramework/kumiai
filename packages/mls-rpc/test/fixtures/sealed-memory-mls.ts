@@ -81,6 +81,7 @@ import {
 import { decodeControlJournal } from '../../src/control-journal.js'
 import { ENTRY_SEAL_LABEL, openEntries } from '../../src/crypto.js'
 import { decodeStoredValue, encodeStoredValue } from '../../src/persistence-codec.js'
+import { requireValue } from './require-value.js'
 
 type MemoryMLS = GroupMLS & {
   ledgerTokens(): Array<string>
@@ -992,7 +993,7 @@ class MemoryControlHandle extends GroupHandle {
             groupContextExtensions: {
               extensions: this.state.groupContext.extensions.map((extension) =>
                 extension.extensionType === LEDGER_HEAD_EXTENSION_TYPE
-                  ? buildLedgerHeadExtension(fromB64U(commit.head!))
+                  ? buildLedgerHeadExtension(fromB64U(requireValue(commit.head)))
                   : extension,
               ),
             },
@@ -1027,12 +1028,18 @@ class MemoryControlHandle extends GroupHandle {
         if (removedLeaves.has(this.#view.privatePath.leafIndex))
           this.#view.groupActiveState = { kind: 'removedFromGroup' }
         await opts?.persist?.(this, { holding })
-        return null
       } catch (error) {
         this.#mls.restoreState(previous)
         Object.assign(this.#view, view)
         throw error
       }
+      const surfaced = this.ledger.slice(-commit.entryIDs.length).map((entry) => entry.verified)
+      const notify = () => {
+        if (commit.entryIDs.length > 0) this.onLedgerEntries?.(surfaced)
+      }
+      if (opts?.deferNotifications !== undefined) opts.deferNotifications(notify)
+      else notify()
+      return null
     })
   }
 

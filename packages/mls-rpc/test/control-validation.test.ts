@@ -91,6 +91,7 @@ import {
   testHandleAccess,
 } from './fixtures/real-group.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
+import { requireValue } from './fixtures/require-value.js'
 import {
   buildSealedMemoryOperation,
   restoreMemoryControlSource,
@@ -103,8 +104,8 @@ for (const mode of ['real-mls', 'double'] as const) {
   test(`ready control refuses an injected source version conflict (${mode})`, async () => {
     const h = await createControlCrashHarness(mode, undefined, undefined, true, true)
     try {
-      const binding = controlBatch(h.mls)!
-      const capability = entryCapability(h.groups)!
+      const binding = requireValue(controlBatch(h.mls))
+      const capability = requireValue(entryCapability(h.groups))
       const run = capability.run.bind(capability)
       const before = await h.groups.loadState(h.key)
       const control = await h.control.load()
@@ -147,15 +148,15 @@ for (const mode of ['real-mls', 'double'] as const) {
       await h.saveBuilt(built.intent, built.slot, built.expected, 'bound-validation')
       const binding = controlBatch(h.mls)
       expect(binding).toBeDefined()
-      const result = await binding!.run({
+      const result = await requireValue(binding).run({
         source: 'bound-validation',
         prepare: async (scope) => {
           const validation = await scope.validation.restoreValidation(built.slot)
           expect(validation).not.toBeNull()
-          expect(await validation!.verifyOwn(built.slot)).toBe(true)
+          expect(await requireValue(validation).verifyOwn(built.slot)).toBe(true)
           const frame = decodeCommitFrame(decodeHandshakeFrame(built.slot.payload).payload)
           const commit = frame.commit.slice()
-          commit[commit.length - 1]! ^= 1
+          commit[commit.length - 1] = requireValue(commit[commit.length - 1]) ^ 1
           const payload = encodeHandshakeFrame(
             HANDSHAKE_KIND.commit,
             encodeCommitFrame(commit, frame.sealedEntries),
@@ -168,7 +169,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           }
           const invalid = await scope.validation.restoreValidation(damaged)
           expect(await invalid?.verifyOwn(damaged)).toBe(false)
-          return await validation!.validateFrame(
+          return await requireValue(validation).validateFrame(
             {
               position: asLogPosition('00001'),
               payload: built.slot.payload,

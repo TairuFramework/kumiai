@@ -26,6 +26,7 @@ import {
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
+import { requireValue } from './fixtures/require-value.js'
 
 type Fixture = Awaited<ReturnType<typeof createRegistryLeaseFixture>>
 const fixtures: Array<Fixture> = []
@@ -66,12 +67,15 @@ for (const mode of ['real-mls', 'double'] as const) {
     test('accounting ignores a superseded version before admission', async () => {
       const fixture = await setup(mode)
       const persistence = fixture.fixture().device.groups
-      const capability = entryCapability(persistence)!
-      const live = registryLiveSend.get(fixture.access())!
+      const capability = requireValue(entryCapability(persistence))
+      const live = requireValue(registryLiveSend.get(fixture.access()))
       await live.accounting()
       const copy = fixture.lease()?.copy
       const version = live.classifiedVersion
-      const scheduler = groupBatchFor(coordinatorBinding(persistence)!, fixture.key.groupID)
+      const scheduler = groupBatchFor(
+        requireValue(coordinatorBinding(persistence)),
+        fixture.key.groupID,
+      )
       const release = deferred<void>()
       const started = deferred<void>()
       const held = scheduler.schedule({
@@ -101,8 +105,8 @@ for (const mode of ['real-mls', 'double'] as const) {
     test('accounting cancellation releases drain before an active check can classify', async () => {
       const fixture = await setup(mode)
       const persistence = fixture.fixture().device.groups
-      const capability = entryCapability(persistence)!
-      const live = registryLiveSend.get(fixture.access())!
+      const capability = requireValue(entryCapability(persistence))
+      const live = requireValue(registryLiveSend.get(fixture.access()))
       await live.accounting()
       const release = deferred<void>()
       const entered = deferred<void>()
@@ -129,7 +133,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         await live.accounting()
         release.resolve()
         await disposing
-        await groupBatchFor(coordinatorBinding(persistence)!, fixture.key.groupID).schedule({
+        await groupBatchFor(
+          requireValue(coordinatorBinding(persistence)),
+          fixture.key.groupID,
+        ).schedule({
           source: 'cancelled-accounting-drained',
           kind: 'accounting',
           run: async () => {},
@@ -153,8 +160,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         const release = deferred<void>()
         try {
           const key = await base.registry.seed(await base.makeHandle(0), { packageUse: null })
-          const capability = entryCapability(base.device.groups)!
-          const scheduler = groupBatchFor(coordinatorBinding(base.device.groups)!, id)
+          const capability = requireValue(entryCapability(base.device.groups))
+          const scheduler = groupBatchFor(requireValue(coordinatorBinding(base.device.groups)), id)
           await scheduler.schedule({
             source: 'initial-drain',
             kind: 'accounting',

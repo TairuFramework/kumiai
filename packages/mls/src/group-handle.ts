@@ -1999,6 +1999,8 @@ export class GroupHandle {
     opts?: {
       commitPolicy?: IncomingMessageCallback
       persist?: (handle: GroupHandle, context: { holding: HoldingToken }) => Promise<void> | void
+      /** Stage host notifications until the enclosing transaction proves acceptance. */
+      deferNotifications?: (notify: () => void) => void
     },
   ): Promise<Uint8Array | null> {
     let decoded: unknown = message
@@ -2186,10 +2188,13 @@ export class GroupHandle {
           throw error
         }
         zeroAll(result.consumed)
-        notify()
+        if (opts.deferNotifications !== undefined) opts.deferNotifications(notify)
+        else notify()
       } else {
         zeroAll(result.consumed)
-        applyOnAccept()
+        const notify = applyOnAccept(false)
+        if (opts?.deferNotifications !== undefined) opts.deferNotifications(notify)
+        else notify()
       }
       return null
     })

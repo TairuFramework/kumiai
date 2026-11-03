@@ -32,6 +32,7 @@ import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createRealGroup, createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
+import { requireValue } from './fixtures/require-value.js'
 
 const { FakeHub } = (await import(
   new URL('../../rpc/test/fixtures/fake-hub.ts', import.meta.url).href
@@ -234,7 +235,7 @@ test.each([false, true])(
       })
       const binding = controlBatch(h.mls)
       expect(binding).toBeDefined()
-      const selected = vi.spyOn(binding!, 'run')
+      const selected = vi.spyOn(requireValue(binding), 'run')
       const occurrence = await h.hub.publish({
         senderDID: h.localDID,
         topicID: h.target.topicID,
@@ -272,7 +273,7 @@ test.each([false, true])(
   },
 )
 
-test('real walker settles a competitor after a hub gap and unreadable frame without repeating fetches', async () => {
+test('real walker preserves a build behind a hub gap and competitor without repeating fetches', async () => {
   const h = await fixture()
   try {
     await h.running.peer.replay()
@@ -298,15 +299,16 @@ test('real walker settles a competitor after a hub gap and unreadable frame with
     await h.running.controlWalk.walkCommits()
     expect(pages).toContainEqual([unreadable.sequenceID, winner.sequenceID])
     const after = await h.ports.control.load()
-    expect(after.commitOnce).toBeNull()
-    expect(after.outcomes).toMatchObject([{ opID: saved.opID, kind: 'unknown' }])
-    expect(after.cursor).toMatchObject({ position: winner.sequenceID, epoch: saved.epoch + 1 })
+    expect(after.commitOnce).toEqual({ ...before.commitOnce, skipped: true, retryForbidden: false })
+    expect(after.outcomes).toEqual(before.outcomes)
+    expect(after.cursor).toMatchObject({
+      position: unreadable.sequenceID,
+      epoch: saved.epoch,
+      incomplete: true,
+    })
     expect(after.cursor?.stranded).not.toBe(true)
-    expect(after.applied).toMatchObject([
-      ...before.applied,
-      { opID: null, sequenceID: winner.sequenceID },
-    ])
-    expect(await h.f.device.groups.loadState(h.key)).toMatchObject({ epoch: saved.epoch + 1 })
+    expect(after.applied).toEqual(before.applied)
+    expect(await h.f.device.groups.loadState(h.key)).toMatchObject({ epoch: saved.epoch })
     const count = fetched.mock.calls.length
     await expect(h.running.controlWalk.walkCommits()).resolves.toBe(false)
     expect(fetched.mock.calls.length - count).toBeLessThanOrEqual(1)

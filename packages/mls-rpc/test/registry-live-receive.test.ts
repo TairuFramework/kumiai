@@ -21,6 +21,7 @@ import {
   setReceiveCapacity,
 } from '../src/testing.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
+import { requireValue } from './fixtures/require-value.js'
 
 type Fixture = Awaited<ReturnType<typeof createRegistryLeaseFixture>>
 const fixtures: Array<Fixture> = []
@@ -80,7 +81,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const commit = await fixture.group.prepareCommit(0)
       const position = asLogPosition('0001')
       const attempt = () =>
-        binding!.run({
+        requireValue(binding).run({
           source: 'removal',
           prepare: async (scope) => {
             const epoch = await scope.readEpoch()

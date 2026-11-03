@@ -87,6 +87,7 @@ import {
 import { createDeterministicAtRestCodec } from './at-rest.js'
 import { openedDeliveryContext } from './ownership-context.js'
 import { createTestCompletion, testGroupMLSDependencies } from './real-group.js'
+import { requireValue } from './require-value.js'
 import { createSealedControlAccess } from './sealed-control-access.js'
 import {
   buildSealedMemoryOperation,
@@ -1140,7 +1141,7 @@ export async function createControlCrashHarness(
         const built = await buildSealedMemoryOperation(op, handle, namedEntries)
         if (!registryBound) return built
         const candidate = await restoreMemoryControlHandle({
-          state: decodeClientState(built.journal)!,
+          state: requireValue(decodeClientState(built.journal)),
           credential: stored.credential,
         })
         return {
