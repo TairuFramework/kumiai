@@ -5,7 +5,9 @@ import type {
   AppOutboxEntry,
   AppPublicationSnapshot,
   GroupCondition,
+  HandlerCompletion,
   LogPosition,
+  OpenedAppHandler,
   OpenedDeliveryContext,
   PreparedAppPublication,
   RecoverySource,
@@ -145,20 +147,29 @@ export type RetirementAttempt = {
   settle(outcome: 'committed' | 'rolled-back'): void
 }
 
+export type OpenedAppHandlerResolver<TTx extends GroupTransaction> = (params: {
+  key: GroupKey
+  completion: HandlerCompletion<TTx>
+  openedDeliveryContext: OpenedDeliveryContext
+}) => OpenedAppHandler<TTx>
+
+export type RegistryOpenedHandlerOptions<TTx extends GroupTransaction> =
+  | { openedHandler: OpenedAppHandlerResolver<TTx>; deliverOpened?: never }
+  | { openedHandler?: never; deliverOpened?: (record: PendingAppFrame) => Promise<void> }
+
 /** Providers must register entry capability and a shared coordinator token for every root wrapper.
  * Copied wrappers are unregistered; one live registry owns the shared token. */
 export type GroupHandleRegistryParams<TTx extends GroupTransaction> = {
   persistence: DevicePersistence<TTx>
   providerID: string
   batch?: GroupBatchOptions
-  /** Required when deliverOpened is configured; shared by every peer and drain. */
+  /** Required when either dispatcher is configured; shared by every peer and drain. */
   openedDeliveryContext?: OpenedDeliveryContext
-  deliverOpened?: (record: PendingAppFrame) => Promise<void>
   recovery: RecoveryEnvironment
   restore(record: ReadableGroupState): Promise<GroupHandle>
   /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */
   restoreCandidate(candidate: Uint8Array): Promise<GroupHandle>
-}
+} & RegistryOpenedHandlerOptions<TTx>
 
 export type RegistryRecoverySource = RecoverySource<GroupRecoveryTrust>
 export type { ResyncProof } from '@kumiai/rpc'

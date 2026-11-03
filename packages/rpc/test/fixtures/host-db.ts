@@ -168,7 +168,7 @@ export function createMemoryHostDatabase(
   const transact = async (
     groupID: string,
     point: WritePoint,
-    mutate: (next: GroupRecord) => void | false,
+    mutate: (next: GroupRecord) => undefined | false,
   ) => {
     await runSeam(`before-${point}`)
     const next = structuredClone(read(groupID))

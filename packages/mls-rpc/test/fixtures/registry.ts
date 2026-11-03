@@ -22,8 +22,11 @@ import {
   type ControlChanges,
   type ControlSlot,
   type ControlSnapshot,
+  type HandlerCompletion,
   type LogPosition,
   type ManualRecoveryRecord,
+  type OpenedAppHandler,
+  type OpenedDeliveryContext,
   type WelcomeObligation,
 } from '@kumiai/rpc'
 import type { ForkNoticeFixture } from '@kumiai/rpc-conformance'
@@ -206,6 +209,11 @@ type FixtureParams = {
   effects?: TransactionalGroupEffects<MemoryTransaction>
   openedDeliveryContext?: OwnershipContextPort | null
   deliverOpened?: (record: PendingAppFrame) => Promise<void>
+  openedHandler?: (params: {
+    key: GroupKey
+    completion: HandlerCompletion<MemoryTransaction>
+    openedDeliveryContext: OpenedDeliveryContext
+  }) => OpenedAppHandler<MemoryTransaction>
   ownershipContext?: OwnershipContextPort
   backgroundMaintenance?: 'gated'
   batch?: GroupBatchOptions
@@ -559,7 +567,9 @@ async function assemble(
           params.openedDeliveryContext === null
             ? undefined
             : (params.openedDeliveryContext ?? openedDeliveryContext),
-        deliverOpened: params.deliverOpened,
+        ...(params.openedHandler === undefined
+          ? { deliverOpened: params.deliverOpened }
+          : { openedHandler: params.openedHandler }),
         recovery: environment,
         restore: (record) => {
           coldCounts.set(record.groupID, (coldCounts.get(record.groupID) ?? 0) + 1)

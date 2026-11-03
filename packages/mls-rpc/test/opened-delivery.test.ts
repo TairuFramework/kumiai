@@ -9,6 +9,7 @@ import {
   type LogHub,
   type MailboxHub,
   normaliseOpenedAppHandler,
+  type OpenedAppHandler,
   OpenedDeliveryReentryError,
   openedDeliveryBinding,
   protocolTopic,
@@ -22,7 +23,7 @@ import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
 import { drainStoredOpened, registryOpenedDeliveryContext } from '../src/opened-delivery.js'
 import { GroupStateConflictError } from '../src/persistence-errors.js'
-import type { PendingAppFrame } from '../src/persistence-types.js'
+import type { GroupKey, MemoryTransaction, PendingAppFrame } from '../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { retireToSuccessor } from '../src/successor.js'
@@ -84,7 +85,9 @@ async function setup(
       },
     )
   const pending = () => capability.read(key.groupID, (reads) => reads.pendingFrames(1))
-  const drain = (deliver: (record: PendingAppFrame) => Promise<void>) =>
+  const drain = (
+    deliver: OpenedAppHandler<MemoryTransaction> | ((record: PendingAppFrame) => Promise<void>),
+  ) =>
     drainStoredOpened({
       persistence: fixture.device.groups,
       key,
@@ -118,6 +121,14 @@ test.each(['real-mls', 'double'] as const)(
     expect(() => createGroupHandleRegistry({ ...params, deliverOpened: async () => {} })).toThrow(
       TypeError,
     )
+    expect(() =>
+      createGroupHandleRegistry({
+        ...params,
+        openedHandler: () => {
+          throw new Error('Unexpected resolution')
+        },
+      }),
+    ).toThrow(TypeError)
     const registry = createGroupHandleRegistry(params)
     await expect(
       Promise.resolve().then(() => registry.drainOpened({ groupID, incarnation: 1 })),
@@ -408,11 +419,25 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       },
     )
 
-    test('effect before completion crash redelivers the same record', async () => {
+    test('default effect before completion crash preserves complete handler metadata', async () => {
       const env = await setup(mode, supplied)
       const saved = env.record('effect')
       await env.plant([saved])
-      const effects: Array<PendingAppFrame> = []
+      const effects: Array<unknown> = []
+      const handler = (persistence: typeof env.fixture.device.groups) =>
+        createOpenedAppHandler({
+          localDID: env.fixture.identity.id,
+          protocols,
+          completion: createHandlerCompletion({ persistence, key: env.key }),
+          openedDeliveryContext: env.context,
+          handlers: {
+            chat: {
+              posted: async (event) => {
+                effects.push(event)
+              },
+            },
+          },
+        })
       const stop = new AbortController()
       env.capability.failureSignal = stop.signal
       const run = env.capability.run.bind(env.capability)
@@ -429,11 +454,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           throw error
         }
       }
-      await expect(
-        env.drain(async (record) => {
-          effects.push(record)
-        }),
-      ).rejects.toThrow('process stopped')
+      await expect(env.drain(handler(env.fixture.device.groups))).rejects.toThrow('process stopped')
       env.capability.run = run
       expect(await env.pending()).toEqual([saved])
       const reopened = await env.fixture.reopen()
@@ -441,11 +462,17 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
         persistence: reopened.device.groups,
         key: env.key,
         openedDeliveryContext: env.context,
-        deliver: async (record) => {
-          effects.push(record)
-        },
+        deliver: handler(reopened.device.groups),
       })
-      expect(effects).toEqual([saved, saved])
+      const metadata = {
+        data: { text: 'effect' },
+        message: { payload: { iss: saved.senderDID } },
+        frame: saved.frame,
+        epoch: saved.epoch,
+        incarnation: saved.frame.incarnation,
+        idempotencyKey: saved.idempotencyKey,
+      }
+      expect(effects).toEqual([metadata, metadata])
       await reopened.close()
     })
 
@@ -814,59 +841,69 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
       await env.fixture.close()
     })
 
-    test('disposed peers leave unadmitted records to cold delivery and retain their opened waiter', async () => {
-      const env = await setup(mode, supplied)
-      const records = [env.record('first'), env.record('second', 'chat', 5)]
-      await env.plant(records)
-      const entered = Promise.withResolvers<void>()
-      const first = Promise.withResolvers<void>()
-      const second = Promise.withResolvers<void>()
-      let liveCalls = 0
-      const running = await startLeaseRotationPeer({
-        mode,
-        fixture: env.fixture,
-        key: env.key,
-        outbox: env.fixture.device.groups.ports(env.key).outbox,
-        handler: async () => {
-          liveCalls++
-          entered.resolve()
-          await (liveCalls === 1 ? first.promise : second.promise)
-        },
-      })
-      await entered.promise
-      const peer = running.owner.peer()
-      if (peer === null) throw new Error('Missing peer')
-      let opened = false
-      const drain = peer.drainOpened().then(() => {
-        opened = true
-      })
-      await peer.dispose()
-      const drained = peer.drained()
-      try {
-        expect(opened).toBe(false)
-        first.resolve()
-        await vi.waitFor(async () => expect(await env.pending()).toEqual(records.slice(1)))
-        await drained
-        expect(liveCalls).toBe(1)
-        expect(opened).toBe(false)
-        const cold: Array<PendingAppFrame> = []
-        await env.drain(async (record) => {
-          cold.push(record)
+    test.each(['at-least-once', 'transactional'] as const)(
+      'disposed fallback refuses unadmitted records but keeps admitted completion (%s)',
+      async (policy) => {
+        const env = await setup(mode, supplied)
+        const records = [env.record('first'), env.record('second', 'chat', 5)]
+        const entered = Promise.withResolvers<void>()
+        const first = Promise.withResolvers<void>()
+        const second = Promise.withResolvers<void>()
+        let liveCalls = 0
+        const running = await startLeaseRotationPeer({
+          mode,
+          fixture: env.fixture,
+          key: env.key,
+          outbox: env.fixture.device.groups.ports(env.key).outbox,
+          handler: {
+            mode: policy,
+            handle: async () => {
+              liveCalls++
+              entered.resolve()
+              await (liveCalls === 1 ? first.promise : second.promise)
+            },
+          },
         })
-        expect(cold).toEqual(records.slice(1))
-        expect(await env.pending()).toEqual([])
-        await vi.waitFor(() => expect(opened).toBe(true), { timeout: 500 })
-        await drain
-        expect(liveCalls).toBe(1)
-      } finally {
-        first.resolve()
-        second.resolve()
-        await drained
-        running.owner.dispose()
-        await running.owner.drained()
-        await env.fixture.close()
-      }
-    })
+        await running.owner.ready
+        await env.plant(records)
+        const peer = running.owner.peer()
+        if (peer === null) throw new Error('Missing peer')
+        let opened = false
+        const drain = peer.drainOpened().then(() => {
+          opened = true
+        })
+        await entered.promise
+        const disposing = peer.dispose()
+        const drained = peer.drained()
+        try {
+          expect(opened).toBe(false)
+          first.resolve()
+          await disposing
+          await vi.waitFor(async () => expect(await env.pending()).toEqual(records.slice(1)))
+          await drained
+          expect(liveCalls).toBe(1)
+          expect(opened).toBe(false)
+          const cold: Array<PendingAppFrame> = []
+          await env.drain(async (record) => {
+            cold.push(record)
+          })
+          expect(cold).toEqual(records.slice(1))
+          expect(await env.pending()).toEqual([])
+          await vi.waitFor(() => expect(opened).toBe(true), { timeout: 500 })
+          await drain
+          expect(liveCalls).toBe(1)
+        } finally {
+          first.resolve()
+          await disposing
+          second.resolve()
+          await disposing
+          await drained
+          running.owner.dispose()
+          await running.owner.drained()
+          await env.fixture.close()
+        }
+      },
+    )
 
     test.each(['dispose start', 'drained'] as const)(
       'disposed peers withdraw fallback while retaining their opened waiter: %s',
@@ -1287,3 +1324,481 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
     })
   })
 })
+
+for (const mode of ['real-mls', 'double'] as const) {
+  for (const supplied of [false, true]) {
+    describe(`handler lifecycle policies (${mode}, ownership ${supplied})`, () => {
+      test('cold drain retains claim until canonical completion settles', async () => {
+        const env = await setup(mode, supplied)
+        const stop = new AbortController()
+        env.capability.failureSignal = AbortSignal.any([
+          stop.signal,
+          ...(env.capability.failureSignal === undefined ? [] : [env.capability.failureSignal]),
+        ])
+        await env.plant([env.record('late-proof')])
+        const completion = createHandlerCompletion({
+          persistence: env.fixture.device.groups,
+          key: env.key,
+        })
+        const original = completion.complete.bind(completion)
+        const completing = Promise.withResolvers<void>()
+        const release = Promise.withResolvers<void>()
+        const complete = vi.spyOn(completion, 'complete').mockImplementation(async (ids) => {
+          await original(ids)
+          completing.resolve()
+          await release.promise
+        })
+        let settled = false
+        const drain = env
+          .drain(async () => {})
+          .then(() => {
+            settled = true
+          })
+        void drain.catch(() => {})
+        try {
+          await completing.promise
+          expect(await env.pending()).toEqual([])
+          expect(settled).toBe(false)
+          release.resolve()
+          await drain
+        } finally {
+          release.resolve()
+          stop.abort(new Error('Drain witness ended'))
+          await drain.catch(() => {})
+          complete.mockRestore()
+          await env.fixture.close()
+        }
+      })
+
+      test.each(['at-least-once', 'transactional'] as const)(
+        'cold handoff calls canonical completion once per record (%s)',
+        async (policy) => {
+          const env = await setup(mode, supplied, 'peer factory')
+          await env.plant([env.record('first'), env.record('second', 'chat', 5)])
+          const completion = createHandlerCompletion({
+            persistence: env.fixture.device.groups,
+            key: env.key,
+          })
+          const complete = vi.spyOn(completion, 'complete')
+          const transact = vi.spyOn(completion, 'transact')
+          const entered = Promise.withResolvers<void>()
+          const release = Promise.withResolvers<void>()
+          const effects: Array<unknown> = []
+          const running = await startLeaseRotationPeer({
+            mode,
+            fixture: env.fixture,
+            key: env.key,
+            outbox: env.fixture.device.groups.ports(env.key).outbox,
+            openedDeliveryContext: env.context,
+            handler: {
+              mode: policy,
+              handle: async (event: { data: unknown }) => {
+                effects.push(event.data)
+                if (effects.length === 1) {
+                  entered.resolve()
+                  await release.promise
+                }
+              },
+            },
+          })
+          let drain: Promise<void> | undefined
+          try {
+            await entered.promise
+            drain = env.fixture.registry.drainOpened(env.key)
+            await new Promise((resolve) => setTimeout(resolve, 30))
+            expect(effects).toEqual([{ text: 'first' }])
+            release.resolve()
+            await drain
+            expect(effects).toEqual([{ text: 'first' }, { text: 'second' }])
+            expect(complete.mock.calls).toEqual(
+              policy === 'at-least-once' ? [[['first']], [['second']]] : [],
+            )
+            expect(transact.mock.calls.map(([ids]) => ids)).toEqual(
+              policy === 'transactional' ? [['first'], ['second']] : [],
+            )
+            expect(await env.pending()).toEqual([])
+          } finally {
+            release.resolve()
+            await drain
+            running.owner.dispose()
+            await running.owner.drained()
+            complete.mockRestore()
+            transact.mockRestore()
+            await env.fixture.close()
+          }
+        },
+      )
+
+      test.each(['at-least-once', 'transactional'] as const)(
+        'registry resolves cold dispatchers independently for two groups (%s)',
+        async (policy) => {
+          const context = createAsyncLocalOwnershipContext()
+          const resolved: Array<ReturnType<typeof createHandlerCompletion>> = []
+          const effects: Array<string> = []
+          let fixture: Awaited<ReturnType<typeof createRegistryFixture>>
+          fixture = await createRegistryFixture({
+            mode,
+            groupID: crypto.randomUUID(),
+            setup: 'empty',
+            backgroundMaintenance: 'gated',
+            ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
+            openedDeliveryContext: context,
+            openedHandler: (binding) => {
+              expect(binding.openedDeliveryContext).toBe(context)
+              expect(binding.completion).toBe(
+                createHandlerCompletion({ persistence: fixture.device.groups, key: binding.key }),
+              )
+              expect(binding.completion.key).toEqual(binding.key)
+              resolved.push(binding.completion)
+              return createOpenedAppHandler({
+                ...binding,
+                localDID: fixture.identity.id,
+                protocols,
+                handlers: {
+                  chat: {
+                    posted: {
+                      mode: policy,
+                      handle: async (event: { frame: { groupID: string } }) => {
+                        effects.push(event.frame.groupID)
+                      },
+                    },
+                  },
+                },
+              })
+            },
+          })
+          try {
+            const keys = await Promise.all(
+              [crypto.randomUUID(), crypto.randomUUID()].map(async (groupID) =>
+                fixture.registry.seed(await fixture.makeHandle(0, groupID), { packageUse: null }),
+              ),
+            )
+            const capability = entryCapability(fixture.device.groups)
+            if (capability === null) throw new Error('Missing capability')
+            for (const key of keys) {
+              await capability.run(
+                { groupID: key.groupID, mutationID: crypto.randomUUID() },
+                async (reads) => ({ expected: await reads.lifetime(), value: undefined }),
+                async (stores) => {
+                  await stores.incarnation(key.incarnation).pending.put([
+                    {
+                      frame: {
+                        ...key,
+                        id: 'same-id',
+                        protocol: 'chat',
+                        procedure: 'posted',
+                        segment: 0,
+                        topicID: 'shared-topic',
+                        position: '2',
+                      },
+                      senderDID: randomIdentity().id,
+                      epoch: 0,
+                      payload: encodeEventFrame('posted', { text: key.groupID }),
+                      idempotencyKey: key.groupID,
+                    },
+                  ])
+                  await stores.incarnation(key.incarnation).cursor.save('shared-topic', '1')
+                },
+              )
+            }
+            const drains = await Promise.allSettled(
+              keys.map((key) => fixture.registry.drainOpened(key)),
+            )
+            expect(drains.map((drain) => drain.status)).toEqual(['fulfilled', 'fulfilled'])
+            expect(effects.sort()).toEqual(keys.map((key) => key.groupID).sort())
+            expect(resolved).toHaveLength(2)
+            expect(resolved[0]).not.toBe(resolved[1])
+            for (const key of keys) {
+              expect(
+                await capability.read(key.groupID, (reads) => reads.pendingFrames(key.incarnation)),
+              ).toEqual([])
+              expect(
+                await capability.read(key.groupID, (reads) =>
+                  reads.appCursor(key.incarnation, 'shared-topic'),
+                ),
+              ).toBe('1')
+            }
+          } finally {
+            await fixture.close()
+          }
+        },
+      )
+
+      test.each([
+        ['at-least-once', 'attached fallback'],
+        ['transactional', 'attached fallback'],
+        ['at-least-once', 'resolver'],
+        ['transactional', 'resolver'],
+        ['at-least-once', 'raw override'],
+      ] as const)(
+        'attached fallback and registry override retain context after await (%s, %s)',
+        async (policy, source) => {
+          const context = createAsyncLocalOwnershipContext()
+          const groupID = crypto.randomUUID()
+          const key = { groupID, incarnation: 1 }
+          const release = Promise.withResolvers<void>()
+          const entered = Promise.withResolvers<void>()
+          let diagnostic: unknown
+          let nested: Promise<void> | undefined
+          const invoke = vi.fn(async () => {
+            await Promise.resolve()
+            nested = fixture.registry.delete(key)
+            void nested.catch((error: unknown) => {
+              diagnostic = error
+            })
+            entered.resolve()
+            await release.promise
+          })
+          const resolve: NonNullable<
+            Parameters<typeof createRegistryFixture>[0]['openedHandler']
+          > = (binding) =>
+            createOpenedAppHandler({
+              ...binding,
+              localDID: fixture.identity.id,
+              protocols,
+              handlers: { chat: { posted: { mode: policy, handle: invoke } } },
+            })
+          const fixture = await createRegistryFixture({
+            mode,
+            groupID,
+            setup: 'seeded',
+            backgroundMaintenance: 'gated',
+            ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
+            openedDeliveryContext: context,
+            ...(source === 'resolver'
+              ? { openedHandler: resolve }
+              : source === 'raw override'
+                ? { deliverOpened: invoke }
+                : {}),
+          })
+          const access = await fixture.registry.access(groupID)
+          const completion = createHandlerCompletion({ persistence: fixture.device.groups, key })
+          const binding = openedDeliveryBinding(access.pending)
+          if (binding === undefined) throw new Error('Missing opened binding')
+          const fallback = resolve({ key, completion, openedDeliveryContext: context })
+          if (source !== 'attached fallback')
+            vi.spyOn(fallback, 'deliver').mockRejectedValue(new Error('Override lost precedence'))
+          const detach = binding.attach(context, {
+            handler: fallback,
+            handoff: async () => {},
+            completed: async () => {},
+          })
+          const capability = entryCapability(fixture.device.groups)
+          if (capability === null) throw new Error('Missing capability')
+          const other = await fixture.registry.seed(
+            await fixture.makeHandle(0, crypto.randomUUID()),
+            { packageUse: null },
+          )
+          await capability.run(
+            { groupID, mutationID: crypto.randomUUID() },
+            async (reads) => ({ expected: await reads.lifetime(), value: undefined }),
+            async (stores) =>
+              stores.incarnation(1).pending.put([
+                {
+                  frame: {
+                    ...key,
+                    id: 'context',
+                    protocol: 'chat',
+                    procedure: 'posted',
+                    segment: 0,
+                    topicID: 'chat',
+                    position: '1',
+                  },
+                  senderDID: randomIdentity().id,
+                  epoch: 0,
+                  payload: encodeEventFrame('posted', { text: 'context' }),
+                  idempotencyKey: 'context',
+                },
+              ]),
+          )
+          const drain = fixture.registry.drainOpened(key)
+          try {
+            await entered.promise
+            await vi.waitFor(() => expect(diagnostic).toBeInstanceOf(OpenedDeliveryReentryError))
+            expect(context.get()).toBeUndefined()
+            await fixture.registry.drainOpened(other)
+            release.resolve()
+            await drain
+            await nested?.catch(() => {})
+            expect(invoke).toHaveBeenCalledOnce()
+          } finally {
+            release.resolve()
+            await drain.catch(() => {})
+            await nested?.catch(() => {})
+            detach()
+            await fixture.close()
+          }
+        },
+      )
+
+      test.each(['at-least-once', 'transactional'] as const)(
+        'cold dispatcher after incarnation switch uses the requested key (%s)',
+        async (policy) => {
+          const context = createAsyncLocalOwnershipContext()
+          const groupID = crypto.randomUUID()
+          const resolved: Array<ReturnType<typeof createHandlerCompletion<MemoryTransaction>>> = []
+          const effects: Array<number> = []
+          let fixture: Awaited<ReturnType<typeof createRegistryFixture>>
+          fixture = await createRegistryFixture({
+            mode,
+            groupID,
+            setup: 'seeded',
+            backgroundMaintenance: 'gated',
+            openedDeliveryContext: context,
+            ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
+            openedHandler: (binding) => {
+              expect(binding.completion).toBe(
+                createHandlerCompletion({ persistence: fixture.device.groups, key: binding.key }),
+              )
+              expect(binding.completion.key).toEqual(binding.key)
+              resolved.push(binding.completion)
+              return createOpenedAppHandler({
+                ...binding,
+                localDID: fixture.identity.id,
+                protocols,
+                handlers: {
+                  chat: {
+                    posted: {
+                      mode: policy,
+                      handle: async (event: { incarnation: number }) => {
+                        effects.push(event.incarnation)
+                      },
+                    },
+                  },
+                },
+              })
+            },
+          })
+          const capability = entryCapability(fixture.device.groups)
+          if (capability === null) throw new Error('Missing capability')
+          const oldKey = { groupID, incarnation: 1 }
+          const plant = async (key: GroupKey) =>
+            capability.run(
+              { groupID, mutationID: crypto.randomUUID() },
+              async (reads) => ({ expected: await reads.lifetime(), value: undefined }),
+              async (stores) => {
+                await stores.incarnation(key.incarnation).pending.put([
+                  {
+                    frame: {
+                      ...key,
+                      id: 'reused-id',
+                      protocol: 'chat',
+                      procedure: 'posted',
+                      segment: 0,
+                      topicID: 'reused-topic',
+                      position: '2',
+                    },
+                    senderDID: randomIdentity().id,
+                    epoch: key.incarnation,
+                    payload: encodeEventFrame('posted', { text: 'switched' }),
+                    idempotencyKey: `key-${key.incarnation}`,
+                  },
+                ])
+                await stores.incarnation(key.incarnation).cursor.save('reused-topic', '1')
+              },
+            )
+          try {
+            await plant(oldKey)
+            await fixture.registry.drainOpened(oldKey)
+            const oldCompletion = createHandlerCompletion({
+              persistence: fixture.device.groups,
+              key: oldKey,
+            })
+            const recovery = await fixture.confirmedRecovery(oldKey, {
+              confirm: true,
+              format: 'legacy',
+            })
+            const newKey = await fixture.registry.switchIncarnation(recovery.candidate, {
+              source: await fixture.registry.recoverySource(groupID),
+              rejoinID: recovery.record.id,
+              proof: recovery.proof,
+              write: {
+                mutationID: crypto.randomUUID(),
+                source: { rejoinID: recovery.record.id },
+                destination: {
+                  control: {
+                    cursor: {
+                      position: recovery.proof.position,
+                      epoch: Number(recovery.candidate.epoch),
+                    },
+                  },
+                },
+              },
+            })
+            await plant(newKey)
+            const before = await fixture.inspectRows()
+            await oldCompletion.complete(['reused-id'])
+            expect(await fixture.inspectRows()).toEqual(before)
+            expect(
+              await capability.read(groupID, (reads) => reads.appCursor(1, 'reused-topic')),
+            ).toBe('1')
+            fixture = await fixture.reopen()
+            await fixture.registry.drainOpened(oldKey)
+            await fixture.registry.drainOpened(newKey)
+            const current = entryCapability(fixture.device.groups)
+            if (current === null) throw new Error('Missing reconstructed capability')
+            expect(
+              await current.read(groupID, (reads) => reads.pendingFrames(newKey.incarnation)),
+            ).toEqual([])
+            expect(
+              await current.read(groupID, (reads) =>
+                reads.appCursor(newKey.incarnation, 'reused-topic'),
+              ),
+            ).toBe('1')
+            expect(effects).toEqual([1, 2])
+            const services = [...new Set(resolved)]
+            expect([...new Set(services.map((service) => JSON.stringify(service.key)))]).toEqual([
+              JSON.stringify(oldKey),
+              JSON.stringify(newKey),
+            ])
+            const currentCompletion = services.at(-1)
+            expect(currentCompletion?.key).toEqual(newKey)
+            for (const service of services.filter((service) => service.key.incarnation === 1))
+              expect(service).not.toBe(currentCompletion)
+          } finally {
+            await fixture.close()
+          }
+        },
+      )
+
+      test.each(['wrong completion', 'wrong key', 'wrong context'] as const)(
+        'registry rejects a resolver binding before invocation (%s)',
+        async (invalid) => {
+          const context = createAsyncLocalOwnershipContext()
+          const deliver = vi.fn(async () => {})
+          const groupID = crypto.randomUUID()
+          const fixture = await createRegistryFixture({
+            mode,
+            groupID,
+            setup: 'seeded',
+            backgroundMaintenance: 'gated',
+            openedDeliveryContext: context,
+            ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
+            openedHandler: (binding) => ({
+              completion:
+                invalid === 'wrong completion'
+                  ? { ...binding.completion }
+                  : invalid === 'wrong key'
+                    ? { ...binding.completion, key: { ...binding.key, incarnation: 99 } }
+                    : binding.completion,
+              openedDeliveryContext:
+                invalid === 'wrong context' ? createAsyncLocalOwnershipContext() : context,
+              deliver,
+            }),
+          })
+          try {
+            const key = { groupID, incarnation: 1 }
+            const completion = createHandlerCompletion({ persistence: fixture.device.groups, key })
+            const complete = vi.spyOn(completion, 'complete')
+            await expect(fixture.registry.drainOpened(key)).rejects.toBeInstanceOf(TypeError)
+            expect(deliver).not.toHaveBeenCalled()
+            expect(complete).not.toHaveBeenCalled()
+            complete.mockRestore()
+          } finally {
+            await fixture.close()
+          }
+        },
+      )
+    })
+  }
+}

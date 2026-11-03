@@ -113,7 +113,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   params: GroupHandleRegistryParams<TTx>,
 ): GroupHandleRegistry {
   const { persistence } = params
-  if (params.deliverOpened !== undefined) requireOpenedDeliveryContext(params.openedDeliveryContext)
+  if (params.openedHandler !== undefined && params.deliverOpened !== undefined)
+    throw new TypeError('Opened handler and raw callback are mutually exclusive')
+  if (params.openedHandler !== undefined || params.deliverOpened !== undefined)
+    requireOpenedDeliveryContext(params.openedDeliveryContext)
   if (!params.providerID || params.providerID !== persistence.providerID)
     throw new GroupStateConflictError('Registry provider mismatch')
   if (normalizeDID(params.recovery.identity.id) !== normalizeDID(persistence.ownerDID))
@@ -641,6 +644,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       key,
       openedDeliveryContext: context,
       deliver: params.deliverOpened,
+      openedHandler: params.openedHandler,
     })
   }
   async function drainRetirementOpened(key: GroupKey): Promise<void> {

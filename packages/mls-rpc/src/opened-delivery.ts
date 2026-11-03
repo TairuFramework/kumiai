@@ -1,10 +1,11 @@
 import {
   assertOpenedDeliveryEntry,
   bindOpenedDelivery,
+  normaliseOpenedAppHandler,
+  type OpenedAppHandler,
   type OpenedDeliveryBinding,
   type OpenedDeliveryContext,
   requireOpenedDeliveryContext,
-  runOpenedDelivery,
   sortPendingAppFrames,
 } from '@kumiai/rpc'
 
@@ -19,6 +20,7 @@ import type {
   PendingAppFrame,
   PendingAppFrames,
 } from './persistence-types.js'
+import type { OpenedAppHandlerResolver } from './registry/types.js'
 
 type DeliveryState = {
   key: GroupKey
@@ -138,7 +140,7 @@ export function handoffStoredOpened(binding: object, key: GroupKey): Promise<voi
 export async function drainStoredOpened<TTx extends GroupTransaction>(params: {
   persistence: GroupPersistence<TTx>
   key: GroupKey
-  deliver(record: PendingAppFrame): Promise<void>
+  deliver: OpenedAppHandler<TTx> | ((record: PendingAppFrame) => Promise<void>)
   openedDeliveryContext: OpenedDeliveryContext
 }): Promise<void> {
   assertOpenedDeliveryEntry(params.openedDeliveryContext, { key: params.key })
@@ -148,7 +150,8 @@ export async function drainStoredOpened<TTx extends GroupTransaction>(params: {
 export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
   persistence: GroupPersistence<TTx>
   key: GroupKey
-  deliver?(record: PendingAppFrame): Promise<void>
+  deliver?: OpenedAppHandler<TTx> | ((record: PendingAppFrame) => Promise<void>)
+  openedHandler?: OpenedAppHandlerResolver<TTx>
   openedDeliveryContext: OpenedDeliveryContext
 }): Promise<void> {
   const key = { ...params.key }
@@ -161,6 +164,18 @@ export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
   const state = deliveryState(binding, key)
   bindContext(state, context)
   if (state.drain !== undefined) return await state.drain
+  const completion = handlerCompletionForEntry({ capability, binding, key })
+  const supplied =
+    params.openedHandler?.({ key: { ...key }, completion, openedDeliveryContext: context }) ??
+    params.deliver
+  const handler =
+    supplied === undefined
+      ? undefined
+      : normaliseOpenedAppHandler({
+          deliver: supplied,
+          completion,
+          openedDeliveryContext: context,
+        })
   const run = async () => {
     await Promise.all([...state.sources].map((source) => source.handoff()))
     const records = await capability.read(key.groupID, (reads) =>
@@ -185,20 +200,23 @@ export async function joinStoredOpened<TTx extends GroupTransaction>(params: {
                 (record) => record.frame.protocol === protocol,
               )
               if (record === undefined) return false
-              await runOpenedDelivery(context, { key }, async () => {
-                const deliver =
-                  params.deliver ??
-                  [...state.sources].find((source) => source.canDeliver?.() !== false)?.deliver
-                if (deliver === undefined) throw new Error('Missing opened delivery handler')
-                await deliver(copyStoredValue(record))
-              })
+              const source = [...state.sources].find((source) => source.canDeliver?.() !== false)
+              const fallback = source?.handler ?? source?.deliver
+              const dispatcher =
+                handler ??
+                (fallback === undefined
+                  ? undefined
+                  : normaliseOpenedAppHandler({
+                      deliver: fallback,
+                      completion,
+                      openedDeliveryContext: context,
+                    }))
+              if (dispatcher === undefined) throw new Error('Missing opened delivery handler')
+              await dispatcher.deliver(copyStoredValue(record))
               let completionDelay = 100
               for (;;) {
                 assertHealthy(capability)
                 try {
-                  await handlerCompletionForEntry({ capability, binding, key }).complete([
-                    record.frame.id,
-                  ])
                   await Promise.all(
                     [...state.sources].map((source) => source.completed(record.frame.id)),
                   )

@@ -689,16 +689,13 @@ export function createGroupPeerWithControlWalk<
   })
 
   const detachOpened =
-    openedContext === undefined
+    openedContext === undefined || openedHandler === undefined
       ? undefined
       : openedBinding?.attach(openedContext, {
           handoff: () => appLane.handoffOpened(),
           completed: (id) => appLane.acknowledgeOpened(id),
           canDeliver: () => !disposed,
-          deliver: (record) => {
-            if (openedHandler === undefined) throw new TypeError('Opened handler required')
-            return openedHandler.deliver(record)
-          },
+          handler: openedHandler,
         })
   let openedDrain: Promise<void> | undefined
   const drainOpened = (): Promise<void> => {

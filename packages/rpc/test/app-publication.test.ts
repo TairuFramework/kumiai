@@ -686,39 +686,36 @@ for (const path of ['no-new-head', 'covered-walk'] as const) {
   )
 }
 
-test(
-  'acknowledgement after walk cutoff cannot certify unchanged state (covered-walk)',
-  async () => {
-    const f = fixture()
-    const ack = Promise.withResolvers<{ sequenceID: string }>()
-    f.publish.mockReset().mockReturnValue(ack.promise)
-    const record = vi.spyOn(f.outbox, 'recordSettlement')
-    try {
-      await f.queue.accept(message('late'))
-      f.worker.trigger()
-      await f.tick()
-      expect(f.publish).toHaveBeenCalledTimes(1)
-      const snapshot = structuredClone(f.getSnapshot())
-      const entry = structuredClone(f.queue.entries())
-      const started = f.worker.beginWalk()
-      await f.worker.readyWalk(started)
-      ack.resolve({ sequenceID: 'late-position' })
-      await flush()
-      expect(f.getSnapshot()).toEqual(snapshot)
-      expect(f.queue.entries()).toEqual(entry)
-      await f.worker.certify(2, started)
-      expect(record).not.toHaveBeenCalled()
-      expect(await f.outbox.loadSettlement(0)).toBeNull()
-      await f.worker.certify(2, f.worker.beginWalk())
-      expect(record).toHaveBeenCalledTimes(1)
-      expect(record.mock.calls[0]?.[1].sequenceID).toBe('late-position')
-    } finally {
-      ack.resolve({ sequenceID: 'late-position' })
-      f.worker.close()
-      f.queue.close()
-    }
-  },
-)
+test('acknowledgement after walk cutoff cannot certify unchanged state (covered-walk)', async () => {
+  const f = fixture()
+  const ack = Promise.withResolvers<{ sequenceID: string }>()
+  f.publish.mockReset().mockReturnValue(ack.promise)
+  const record = vi.spyOn(f.outbox, 'recordSettlement')
+  try {
+    await f.queue.accept(message('late'))
+    f.worker.trigger()
+    await f.tick()
+    expect(f.publish).toHaveBeenCalledTimes(1)
+    const snapshot = structuredClone(f.getSnapshot())
+    const entry = structuredClone(f.queue.entries())
+    const started = f.worker.beginWalk()
+    await f.worker.readyWalk(started)
+    ack.resolve({ sequenceID: 'late-position' })
+    await flush()
+    expect(f.getSnapshot()).toEqual(snapshot)
+    expect(f.queue.entries()).toEqual(entry)
+    await f.worker.certify(2, started)
+    expect(record).not.toHaveBeenCalled()
+    expect(await f.outbox.loadSettlement(0)).toBeNull()
+    await f.worker.certify(2, f.worker.beginWalk())
+    expect(record).toHaveBeenCalledTimes(1)
+    expect(record.mock.calls[0]?.[1].sequenceID).toBe('late-position')
+  } finally {
+    ack.resolve({ sequenceID: 'late-position' })
+    f.worker.close()
+    f.queue.close()
+  }
+})
 
 test('no-new-head probe waits for acknowledgement before capturing its proof window', async () => {
   const f = fixture()

@@ -83,8 +83,10 @@ export type OpenedDeliveryBinding = {
       completed(id: string): Promise<void>
       /** Withdraw fallback admission independently of in-flight completion tracking. */
       canDeliver?(): boolean
-      deliver(record: PendingAppFrame): Promise<void>
-    },
+    } & (
+      | { handler: OpenedAppHandler<GroupTransaction>; deliver?: never }
+      | { handler?: never; deliver(record: PendingAppFrame): Promise<void> }
+    ),
   ): () => void
 }
 const bindings = new WeakMap<PendingAppFrames, OpenedDeliveryBinding>()

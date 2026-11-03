@@ -960,7 +960,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     return false
   }
 
-  const finishRecord = async (record: PendingAppFrame): Promise<void> => {
+  const finishRecord = async (record: PendingAppFrame, advance = true): Promise<void> => {
     // The supplied completion promise has already proved row removal.
     await runAppLane(async () => {
       const buffered = segment
@@ -977,7 +977,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       if (frames !== undefined) await advanceCursor(record.frame.topicID, frames)
       notifyOpened()
     })
-    await coverageBinding?.advance()
+    if (advance) await coverageBinding?.advance()
   }
 
   const deliverRecord = async (record: PendingAppFrame): Promise<void> => {
@@ -1704,7 +1704,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
           notifyOpened()
           return
         }
-        const finishing = finishRecord(record)
+        const finishing = finishRecord(record, false)
         finishingRecords.add(finishing)
         try {
           await finishing

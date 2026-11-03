@@ -3,6 +3,7 @@ import {
   type AppOutbox,
   createGroupPeer,
   decodeAppAAD,
+  type GroupProcedureHandlers,
   type LogHub,
   type OpenedDeliveryContext,
 } from '@kumiai/rpc'
@@ -10,7 +11,7 @@ import { expect } from 'vitest'
 
 import { decodeAutoRotationCandidate } from '../../src/auto-rotation.js'
 import * as api from '../../src/index.js'
-import type { GroupKey } from '../../src/persistence-types.js'
+import type { GroupKey, MemoryTransaction } from '../../src/persistence-types.js'
 import type { createRegistryFixture } from './registry.js'
 import {
   buildSealedMemoryOperation,
@@ -24,7 +25,12 @@ export async function startLeaseRotationPeer(params: {
   fixture: Awaited<ReturnType<typeof createRegistryFixture>>
   key: GroupKey
   outbox: AppOutbox
-  handler?: (event: { data: unknown }) => Promise<void>
+  handler?: GroupProcedureHandlers<
+    {
+      posted: { type: 'event'; retain: 'log'; data: { type: 'object' } }
+    },
+    MemoryTransaction
+  >['posted']
   openedDeliveryContext?: OpenedDeliveryContext
 }) {
   const { mode, fixture, key } = params
@@ -55,7 +61,7 @@ export async function startLeaseRotationPeer(params: {
   }
   const rawAccess = await fixture.registry.access(key.groupID)
   const groupCrypto = api.createGroupCrypto({ access: rawAccess })
-  const owner = await api.createRegistryPeer({
+  const owner = await api.createRegistryPeer<MemoryTransaction>({
     registry: fixture.registry,
     key,
     recovery: fixture.environment,

@@ -3,10 +3,13 @@ import { encodeEventFrame } from '@kumiai/broadcast'
 import { EventEmitter } from '@sozai/event'
 import { describe, expect, test, vi } from 'vitest'
 
+import { registerAppCompletionCoverage } from '../src/app-completion-coverage.js'
+import { createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import type { GroupTransaction, HandlerCompletion } from '../src/handler-completion.js'
 import { combineDurableHandlers } from '../src/handlers.js'
 import { createHostBoundary, wrapPeerHost } from '../src/host-boundary.js'
+import { createHubMux } from '../src/hub-mux.js'
 import {
   assertOpenedDeliveryEntry,
   createOpenedAppHandler,
@@ -372,6 +375,45 @@ function policyFixture() {
 }
 
 describe('opened completion policies', () => {
+  test('cold completion notifications update volatile state without cursor work', async () => {
+    const f = policyFixture()
+    const advance = vi.fn(async () => {})
+    registerAppCompletionCoverage(f.completion, () => ({ advance, unbind() {} }))
+    const mux = createHubMux({ hub: new FakeHub(), localDID: 'bob', onReceiveEnded() {} })
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    crypto.pending = {
+      list: async () => (f.pending() === undefined ? [] : [record]),
+      complete: async () => {},
+    }
+    const lane = createAppLane({
+      groupKey: f.completion.key,
+      mux,
+      crypto,
+      localDID: 'bob',
+      protocols,
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appliedEpoch: () => 1,
+      anchor: () => ({ epoch: 1, secret: new Uint8Array(32).fill(88) }),
+      groupID: () => f.completion.key.groupID,
+      completion: f.completion,
+      openedHandler: normaliseOpenedAppHandler({ ...f, deliver: async () => {} }),
+    })
+    try {
+      await lane.handoffOpened()
+      await lane.restore([record])
+      await f.completion.complete([record.frame.id])
+      await lane.acknowledgeOpened(record.frame.id)
+      expect(lane.pendingRecords()).toEqual([])
+      expect(advance).not.toHaveBeenCalled()
+      expect(f.complete).toHaveBeenCalledOnce()
+    } finally {
+      lane.dispose()
+      await lane.idle()
+      mux.dispose()
+    }
+  })
+
   test('legacy and omitted mode handlers complete after success outside ownership', async () => {
     for (const legacy of [true, false]) {
       const f = policyFixture()
