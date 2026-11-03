@@ -94,7 +94,7 @@ import {
 import { createRegistryWelcomeHistory, registryHandle } from './registry-welcome.js'
 import { memoryModel, restoreMemoryControlHandle } from './sealed-memory-mls.js'
 import { createStorageFixture, type RegistryStorageFixture } from './storage-persistence.js'
-import { nextChange, storageTranscript, writeInstallationCheckpoint } from './storage-seed.js'
+import { storageTranscript, writeInstallationCheckpoint } from './storage-seed.js'
 
 export type RegistryRowSetup = {
   key: GroupKey
@@ -679,62 +679,70 @@ async function assemble(
       }
     },
     async installRows(setup) {
-      const groups = fixture.device.groups
       const mutationID = crypto.randomUUID()
-      const change = await nextChange(groups, setup.key.groupID, mutationID)
-      await groups.transition(change, async (stores) => {
-        if (change.expected === null)
-          await stores.lifetime.save({
-            groupID: setup.key.groupID,
-            latestIncarnation: setup.key.incarnation,
-            activeIncarnation: setup.key.incarnation,
-            revision: 1,
-            mutationID,
-            restorePending: false,
-          })
-        const target = stores.incarnation(setup.key.incarnation)
-        if (setup.state !== undefined) await target.state.save(setup.state)
-        if (setup.trust !== undefined) await stores.trust.save(setup.trust)
-        if (setup.state !== undefined && !setup.state.deleted && setup.trust !== undefined)
-          await writeInstallationCheckpoint(stores, {
-            key: setup.key,
-            confirmedTranscriptHash: storageTranscript(setup.state.state),
-            mutationID,
-            stateVersion: setup.state.version,
-          })
-        if (setup.control !== undefined) {
-          const slot = setup.control.commitOnce
-          if (slot != null && (await target.control.load()).commitOnce === null) {
-            const state = await target.state.load()
-            if (state === null || state.deleted) throw new Error('Missing slot source')
-            controlBuildContexts.set(stores.tx, {
-              kind: 'build',
-              source: {
-                key: setup.key,
-                stateVersion: state.version,
-                identity: {
-                  ...setup.key,
-                  epoch: state.epoch,
-                  authenticator: state.epochAuthenticator,
-                },
-              },
-              queueHeadID: slot.opID,
-              checkpoint: slot.head,
+      if (capability === null) throw new Error('Missing registry capability')
+      // Fixture writes bypass production-call instrumentation.
+      await capability.run(
+        { groupID: setup.key.groupID, mutationID },
+        async (reads) => {
+          const lifetime = await reads.lifetime()
+          return { expected: lifetime, value: lifetime === null }
+        },
+        async (stores, missing) => {
+          if (missing)
+            await stores.lifetime.save({
+              groupID: setup.key.groupID,
+              latestIncarnation: setup.key.incarnation,
+              activeIncarnation: setup.key.incarnation,
+              revision: 1,
+              mutationID,
+              restorePending: false,
             })
+          const target = stores.incarnation(setup.key.incarnation)
+          if (setup.state !== undefined) await target.state.save(setup.state)
+          if (setup.trust !== undefined) await stores.trust.save(setup.trust)
+          if (setup.state !== undefined && !setup.state.deleted && setup.trust !== undefined)
+            await writeInstallationCheckpoint(stores, {
+              key: setup.key,
+              confirmedTranscriptHash: storageTranscript(setup.state.state),
+              mutationID,
+              stateVersion: setup.state.version,
+            })
+          if (setup.control !== undefined) {
+            const slot = setup.control.commitOnce
+            if (slot != null && (await target.control.load()).commitOnce === null) {
+              const state = await target.state.load()
+              if (state === null || state.deleted) throw new Error('Missing slot source')
+              controlBuildContexts.set(stores.tx, {
+                kind: 'build',
+                source: {
+                  key: setup.key,
+                  stateVersion: state.version,
+                  identity: {
+                    ...setup.key,
+                    epoch: state.epoch,
+                    authenticator: state.epochAuthenticator,
+                  },
+                },
+                queueHeadID: slot.opID,
+                checkpoint: slot.head,
+              })
+            }
+            try {
+              await target.control.apply(setup.control, mutationID)
+            } finally {
+              controlBuildContexts.delete(stores.tx)
+            }
           }
-          try {
-            await target.control.apply(setup.control, mutationID)
-          } finally {
-            controlBuildContexts.delete(stores.tx)
-          }
-        }
-        if (setup.anchor !== undefined) await target.anchor.save(setup.anchor)
-        if (setup.outbox !== undefined) await target.outbox.put(setup.outbox)
-        if (setup.events !== undefined) await target.meta.putEvents(setup.events)
-        for (const value of setup.settlements ?? [])
-          await target.meta.putSettlement(value.seq, value.value)
-        for (const record of setup.manualRecoveries ?? []) await saveManualRecovery(stores, record)
-      })
+          if (setup.anchor !== undefined) await target.anchor.save(setup.anchor)
+          if (setup.outbox !== undefined) await target.outbox.put(setup.outbox)
+          if (setup.events !== undefined) await target.meta.putEvents(setup.events)
+          for (const value of setup.settlements ?? [])
+            await target.meta.putSettlement(value.seq, value.value)
+          for (const record of setup.manualRecoveries ?? [])
+            await saveManualRecovery(stores, record)
+        },
+      )
     },
     inspectRows: storage.inspectRows,
     async corruptState(target, damage = 'unreadable') {

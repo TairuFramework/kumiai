@@ -8,6 +8,7 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import * as checkpoint from '../src/checkpoint.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { deleteIncarnations, retireIncarnation } from '../src/registry/retired.js'
 import { registryRetirement } from '../src/registry/retirement.js'
@@ -236,6 +237,131 @@ for (const mode of ['real-mls', 'double'] as const) {
           }
         },
       )
+
+      test('fixture recovery installation excludes checkpoint writes after its revision read', async () => {
+        const env = await setup(false)
+        const blocked = Promise.withResolvers<void>()
+        const release = Promise.withResolvers<void>()
+        const admitted = Promise.withResolvers<void>()
+        const finished = Promise.withResolvers<void>()
+        const groups = env.fixture.device.groups
+        const revisions = new Map<string, number>()
+        const initialLifetime = await groups.load(env.key.groupID)
+        if (initialLifetime === null) throw new Error('Missing fixture lifetime')
+        let latestRevision = initialLifetime.revision
+        let installing = false
+        let checkpointWriting = false
+        let held = false
+        let capturedRevision: number | undefined
+        let fixtureMutationID: string | null | undefined
+        let checkpointMutationID: string | null | undefined
+        let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
+        const observe = env.capability.observe(env.key.groupID, (proof) => {
+          if (proof.lifetime !== null) {
+            latestRevision = proof.lifetime.revision
+            revisions.set(proof.mutationID, latestRevision)
+            if (
+              installing &&
+              capturedRevision !== undefined &&
+              proof.mutationID !== checkpointMutationID
+            )
+              fixtureMutationID ??= proof.mutationID
+          }
+        })
+        const create = checkpoint.createRegistryCheckpointService
+        const serviceSpy = vi
+          .spyOn(checkpoint, 'createRegistryCheckpointService')
+          .mockImplementation((registry, key) => {
+            const service = create(registry, key)
+            const update = service.updateRecords.bind(service)
+            service.updateRecords = async (change) => {
+              if (held || !change.put?.some((row) => row.kind === 'cursor')) return update(change)
+              held = true
+              blocked.resolve()
+              await release.promise
+              checkpointWriting = true
+              const work = update(change)
+              checkpointWriting = false
+              try {
+                await work
+              } finally {
+                finished.resolve()
+              }
+            }
+            return service
+          })
+        const install = env.fixture.installRows.bind(env.fixture)
+        const installSpy = vi.spyOn(env.fixture, 'installRows').mockImplementation(async (rows) => {
+          installing = true
+          try {
+            await install(rows)
+          } finally {
+            installing = false
+          }
+        })
+        const load = groups.load.bind(groups)
+        const loadSpy = vi.spyOn(groups, 'load').mockImplementation(async (groupID) => {
+          const lifetime = await load(groupID)
+          if (installing && capturedRevision === undefined && lifetime !== null) {
+            capturedRevision = lifetime.revision
+            release.resolve()
+            // A root read has released ownership, so force the competing proof before transition.
+            await finished.promise
+          }
+          return lifetime
+        })
+        const run = env.capability.run.bind(env.capability)
+        const runSpy = vi
+          .spyOn(env.capability, 'run')
+          .mockImplementation((request, prepare, work, effects) => {
+            const result = run(request, prepare, work, effects)
+            if (checkpointWriting) {
+              checkpointMutationID = request.mutationID
+              admitted.resolve()
+            }
+            return result
+          })
+        try {
+          running = await startLeaseRotationPeer({
+            mode,
+            fixture: env.fixture,
+            key: env.key,
+            outbox: groups.ports(env.key).outbox,
+          })
+          await blocked.promise
+          env.fixture.onPhase('work', async () => {
+            if (!installing) throw new Error('Expected fixture installation entry')
+            // Prepare has captured the last proven revision; ownership excludes competing proofs.
+            capturedRevision = latestRevision
+            release.resolve()
+            await admitted.promise
+          })
+          const recovery = await env.fixture.confirmedRecovery(env.key, {
+            confirm: true,
+            format: 'legacy',
+          })
+          await finished.promise
+          if (
+            capturedRevision === undefined ||
+            fixtureMutationID == null ||
+            checkpointMutationID == null
+          )
+            throw new Error('Missing fixture/checkpoint revision evidence')
+          expect(revisions.get(fixtureMutationID)).toBe(capturedRevision + 1)
+          expect(revisions.get(checkpointMutationID)).toBe(capturedRevision + 2)
+          expect((await groups.ports(env.key).control.load()).rejoin).toEqual(recovery.record)
+        } finally {
+          release.resolve()
+          running?.owner.dispose()
+          await running?.owner.drained()
+          serviceSpy.mockRestore()
+          installSpy.mockRestore()
+          loadSpy.mockRestore()
+          runSpy.mockRestore()
+          observe()
+          await env.fixture.close()
+        }
+      })
 
       test.each(['resync', 'delete'] as const)(
         'live handler drains unadmitted backlog without registry delivery: %s',
