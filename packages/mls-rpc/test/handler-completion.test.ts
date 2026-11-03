@@ -882,6 +882,50 @@ for (const mode of ['real-mls', 'double'] as const)
           await f.fixture.close()
         }
       })
+      test('coalesced completions advance coverage across batch splits', async () => {
+        for (const ids of [['A'], ['A', 'missing']]) {
+          const f = await completionFixture(mode, supplied, 1)
+          const release = Promise.withResolvers<void>()
+          try {
+            const records = [f.record('A'), f.record('B')]
+            await f.plant(records.slice(0, 1))
+            const coverage = orderedCoverage(records, ['pending', 'dead'])
+            bind(f.completion, coverage)
+            const committed = vi.spyOn(coverage.source, 'committed')
+            const active = groupBatchFor(f.binding, f.key.groupID).schedule({
+              source: 'held',
+              kind: 'open',
+              run: () => release.promise,
+            })
+            const remainingAtResolution: Array<Array<string>> = []
+            const calls = [f.completion.complete(ids), f.completion.complete(['missing'])]
+            const completing = Promise.all(
+              calls.map((call) =>
+                call.then(() => {
+                  remainingAtResolution.push(coverage.remaining().map((row) => row.frame.id))
+                }),
+              ),
+            )
+            release.resolve()
+            await active
+            await completing
+            expect(await f.cursor()).toBe('B')
+            expect(remainingAtResolution).toEqual([[], []])
+            expect(await f.pending()).toEqual([])
+            expect(committed.mock.calls.flatMap(([ids]) => ids)).toEqual(['A'])
+            expect(
+              committed.mock.calls.flatMap(([, proofs]) => proofs.map((proof) => proof.through)),
+            ).toEqual(['A', 'B'])
+            const beforeMissing = await f.fixture.inspectRows()
+            await f.completion.complete(['missing'])
+            expect(await f.fixture.inspectRows()).toEqual(beforeMissing)
+            expect(committed).toHaveBeenCalledTimes(2)
+          } finally {
+            release.resolve()
+            await f.fixture.close()
+          }
+        }
+      })
       test('collected completion rollback preserves every row and eligible cursor', async () => {
         const f = await completionFixture(mode, supplied, 2)
         const release = Promise.withResolvers<void>()

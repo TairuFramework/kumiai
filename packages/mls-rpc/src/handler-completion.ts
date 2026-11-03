@@ -371,7 +371,12 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
       if (captures.length === 0 && remaining.length === 0) return
     }
   }
-  type CompletionRequest = { ids: Array<string>; resolve(): void; reject(error: unknown): void }
+  type CompletionRequest = {
+    ids: Array<string>
+    advanceCoverage: boolean
+    resolve(): void
+    reject(error: unknown): void
+  }
   const waiting: Array<CompletionRequest> = []
   let collecting = false
   function pumpCompletions(): void {
@@ -394,19 +399,17 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
         const suffix: Array<CompletionRequest> = []
         const completed: Array<CompletionRequest> = []
         for (const request of selected) {
+          // A saved ID may precede a missing-only suffix of the same request.
+          request.advanceCoverage ||= request.ids.some((id) => staged?.saved.has(id))
           request.ids = request.ids.filter((id) => remaining.has(id))
           if (request.ids.length === 0) completed.push(request)
           else suffix.push(request)
         }
-        waiting.unshift(...suffix)
-        if (
-          remaining.size === 0 &&
-          staged !== undefined &&
-          (staged.saved.size > 0 || staged.consumed.length > 0)
-        ) {
+        if (completed.some((request) => request.advanceCoverage)) {
           const captures = capture([])
           if (captures.length > 0) await run([], captures, undefined, undefined, true)
         }
+        waiting.unshift(...suffix)
         for (const request of completed) request.resolve()
       })
       .catch((error: unknown) => {
@@ -429,7 +432,7 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
       const owned = [...new Set(ids)]
       if (owned.length === 0) return Promise.resolve()
       return new Promise<void>((resolve, reject) => {
-        waiting.push({ ids: owned, resolve, reject })
+        waiting.push({ ids: owned, advanceCoverage: false, resolve, reject })
         pumpCompletions()
       })
     },
