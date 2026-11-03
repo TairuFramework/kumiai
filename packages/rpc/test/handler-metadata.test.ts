@@ -80,7 +80,11 @@ test('peer captures original coordination before host wrapping', async () => {
   const dispatcher = vi.mocked(openedModule.createOpenedAppHandler).mock.calls.at(-1)?.[0]
   const lane = vi.mocked(laneModule.createAppLane).mock.calls.at(-1)?.[0]
   expect(lane?.completion).toBe(input.completion)
-  expect(lane?.batch).toBe(batch)
+  expect(lane?.batch?.key).toBe(batch.key)
+  expect(lane?.batch?.scheduler).toBe(batch.scheduler)
+  const budget = { maxFrames: 64, maxWorkMs: 8, now: () => 0, begin() {}, take: () => true }
+  await lane?.batch?.openReady([], budget)
+  expect(batch.openReady).toHaveBeenCalledExactlyOnceWith([], budget)
   expect(lane?.openedHandler?.completion).toBe(input.completion)
   expect(dispatcher?.completion).toBe(input.completion)
   expect(dispatcher?.openedDeliveryContext).toBe(input.openedDeliveryContext)

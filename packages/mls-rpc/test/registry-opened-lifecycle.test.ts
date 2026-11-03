@@ -1,6 +1,7 @@
 import { randomIdentity } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
 import {
+  APP_TOPIC_LABEL,
   asLogPosition,
   commitTopic,
   controlBatch,
@@ -9,16 +10,29 @@ import {
   encodeAppAAD,
   encodeCommitFrame,
   encodeHandshakeFrame,
+  encodeLedgerReply,
+  encodeLedgerRequest,
+  encodeRecoveryConfirmRequest,
+  encodeRecoveryReply,
+  encodeRecoveryRequest,
+  encodeRecoveryVerdict,
   frameID,
+  type GroupPeerParams,
+  type GroupProtocolDefinition,
   HANDSHAKE_KIND,
   OpenedDeliveryReentryError,
   openedDeliveryBinding,
+  protocolTopic,
+  rendezvousTopic,
   runOpenedDelivery,
 } from '@kumiai/rpc'
 import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
+import type * as AppLaneModule from '../../rpc/lib/app-lane.js'
 import type * as BufferedControlModule from '../../rpc/lib/buffered-control.js'
+import type * as HostBoundaryModule from '../../rpc/lib/host-boundary.js'
+import type * as HubMuxModule from '../../rpc/lib/hub-mux.js'
 import * as checkpoint from '../src/checkpoint.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
@@ -340,6 +354,14 @@ for (const mode of ['real-mls', 'double'] as const) {
             [
               'replay-only',
               'separate-route',
+              'preparation-timer',
+              'control-continuation',
+              'startup-continuation',
+              'ledger-request',
+              'ledger-timer',
+              'ledger-continuation',
+              'ledger-seal-continuation',
+              'inbound-and-timers',
               'fetch-pending',
               'fetch-failure',
               'fetch-backoff',
@@ -354,7 +376,18 @@ for (const mode of ['real-mls', 'double'] as const) {
       )(
         'terminal self-removal drains saved plaintext without crypto or network ($policy, restart $restart, $interruption)',
         async ({ policy, restart, interruption }) => {
-          const interrupted = !['idle', 'replay-only', 'separate-route'].includes(interruption)
+          const separate = [
+            'separate-route',
+            'preparation-timer',
+            'control-continuation',
+            'startup-continuation',
+            'ledger-request',
+            'ledger-timer',
+            'ledger-continuation',
+            'ledger-seal-continuation',
+            'inbound-and-timers',
+          ].includes(interruption)
+          const interrupted = !['idle', 'replay-only'].includes(interruption) && !separate
           const context = createAsyncLocalOwnershipContext()
           const groupID = crypto.randomUUID()
           const group = await createRealGroup(1, groupID)
@@ -422,7 +455,25 @@ for (const mode of ['real-mls', 'double'] as const) {
           let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
           let restoreCompletion: (() => void) | undefined
           const releaseControl = Promise.withResolvers<void>()
+          const startupEntered = Promise.withResolvers<void>()
           const releaseFetch = Promise.withResolvers<void>()
+          const releaseLedger = Promise.withResolvers<void>()
+          let localMux: HubMuxModule.HubMux | undefined
+          const inbound = new Map<string, Parameters<HubMuxModule.HubMux['onInbound']>[1]>()
+          const muxModule = (await import(
+            new URL('../../rpc/lib/hub-mux.js', import.meta.url).href
+          )) as typeof HubMuxModule
+          const createMux = muxModule.createHubMux
+          const captureMux = vi.spyOn(muxModule, 'createHubMux').mockImplementation((params) => {
+            localMux = createMux(params)
+            const register = localMux.onInbound.bind(localMux)
+            localMux.onInbound = (...args) => {
+              inbound.set(args[0], args[1])
+              return register(...args)
+            }
+            return localMux
+          })
+          let ledgerRequest: (() => Promise<unknown>) | undefined
           let removalReplay: Promise<unknown> | undefined
           let restoreNetwork: (() => void) | undefined
           let restoreTimers: (() => void) | undefined
@@ -440,6 +491,38 @@ for (const mode of ['real-mls', 'double'] as const) {
               intake = createIntake(params)
               return intake
             })
+          const hostModule = (await import(
+            new URL('../../rpc/lib/host-boundary.js', import.meta.url).href
+          )) as typeof HostBoundaryModule
+          const wrapHost = hostModule.wrapPeerHost
+          let peerParams: GroupPeerParams<Record<string, GroupProtocolDefinition>> | undefined
+          const captureHost = vi
+            .spyOn(hostModule, 'wrapPeerHost')
+            .mockImplementation((boundary, input) => {
+              const params = wrapHost(boundary, input)
+              peerParams = params as typeof peerParams
+              if (
+                interruption === 'startup-continuation' &&
+                peerParams?.anchorStore !== undefined
+              ) {
+                const store = peerParams.anchorStore
+                vi.spyOn(store, 'load').mockResolvedValueOnce(null)
+                vi.spyOn(store, 'save').mockImplementationOnce(async () => {
+                  startupEntered.resolve()
+                  throw new Error('Retry anchor save')
+                })
+              }
+              return params
+            })
+          const laneModule = (await import(
+            new URL('../../rpc/lib/app-lane.js', import.meta.url).href
+          )) as typeof AppLaneModule
+          let lane: Pick<AppLaneModule.AppLaneParams, 'crypto' | 'batch'> | undefined
+          const createLane = laneModule.createAppLane
+          const captureLane = vi.spyOn(laneModule, 'createAppLane').mockImplementation((params) => {
+            lane = params
+            return createLane(params)
+          })
           const stop = new AbortController()
           let work: Promise<void> | undefined
           try {
@@ -458,7 +541,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                 resolveLedgerEntries: group.committer.slot.resolve,
               },
             })
-            if (!restart) {
+            if (!restart && interruption !== 'startup-continuation') {
               running = await startLeaseRotationPeer({
                 mode,
                 fixture,
@@ -466,6 +549,8 @@ for (const mode of ['real-mls', 'double'] as const) {
                 outbox: fixture.device.groups.ports(key).outbox,
                 openedDeliveryContext: context,
                 handler: { mode: policy, handle },
+                freezeHub: interruption === 'inbound-and-timers',
+                recovery: { getDelayMs: () => 20 },
               })
               await running.owner.ready
               await running.owner.peer()?.replay()
@@ -519,7 +604,34 @@ for (const mode of ['real-mls', 'double'] as const) {
               mode === 'real-mls'
                 ? await buildRealCommit(group, { removes: 0 })
                 : memoryModel(sender).buildCommit([], { removes: [local.identity.id] })
-            const topicID = commitTopic(await mls.exportRecoverySecret())
+            const recoverySecret = await mls.exportRecoverySecret()
+            const topicID = commitTopic(recoverySecret)
+            const rendezvous = rendezvousTopic(recoverySecret)
+            const liveAnchor = await peerParams?.crypto.exportSecret(APP_TOPIC_LABEL)
+            const appCiphertext =
+              liveAnchor === undefined
+                ? undefined
+                : await sender.encrypt(encodeEventFrame('posted', { text: 'must-not-open-live' }), {
+                    aad: encodeAppAAD({
+                      topicID: protocolTopic(liveAnchor.secret, liveAnchor.epoch, 'chat'),
+                      intent: 'log',
+                    }),
+                  })
+            const deliver = (topic: string, payload: Uint8Array) => {
+              const listener = inbound.get(topic)
+              if (listener === undefined) throw new Error('Missing inbound listener')
+              const ack = vi.fn()
+              listener(
+                {
+                  topicID: topic,
+                  senderDID: group.committer.identity.id,
+                  sequenceID: '000000000001',
+                  payload,
+                },
+                ack,
+              )
+              expect(ack).toHaveBeenCalledOnce()
+            }
             const remotePublish = running?.hub.publish.bind(running.hub)
             const wake = async () => {
               if (interruption === 'replay-only') return
@@ -531,7 +643,103 @@ for (const mode of ['real-mls', 'double'] as const) {
               })
             }
             const position = asLogPosition('0001')
-            if (running !== undefined && interruption !== 'separate-route') {
+            if (interruption === 'startup-continuation') {
+              vi.useFakeTimers()
+              running = await startLeaseRotationPeer({
+                mode,
+                fixture,
+                key,
+                outbox: fixture.device.groups.ports(key).outbox,
+                openedDeliveryContext: context,
+                handler: { mode: policy, handle },
+                recovery: { getDelayMs: () => 20 },
+              })
+              await startupEntered.promise
+              for (let turn = 0; turn < 100; turn++) await Promise.resolve()
+              expect(vi.getTimerCount()).toBeGreaterThan(0)
+            }
+            ledgerRequest = async () =>
+              remotePublish?.({
+                topicID: rendezvous,
+                senderDID: group.committer.identity.id,
+                payload: encodeHandshakeFrame(
+                  HANDSHAKE_KIND.ledgerRequest,
+                  encodeLedgerRequest('terminal-ledger', new Uint8Array([1])),
+                ),
+              })
+            if (running !== undefined && separate) {
+              if (!vi.isFakeTimers()) vi.useFakeTimers()
+              if (interruption === 'control-continuation') {
+                const binding = controlBatch(running.mls())
+                if (binding === undefined) throw new Error('Missing control binding')
+                const run = binding.run.bind(binding)
+                const queued = Promise.withResolvers<void>()
+                vi.spyOn(binding, 'run').mockImplementation(async (work) => {
+                  queued.resolve()
+                  await releaseControl.promise
+                  return await run(work)
+                })
+                await remotePublish?.({
+                  topicID,
+                  senderDID: group.committer.identity.id,
+                  payload: new Uint8Array([255]),
+                  retain: 'log',
+                })
+                removalReplay = running.owner.peer()?.replay()
+                await queued.promise
+              }
+              if (interruption === 'preparation-timer') {
+                if (intake === undefined) throw new Error('Missing intake')
+                const binding = controlBatch(running.mls())
+                if (binding === undefined) throw new Error('Missing control binding')
+                vi.spyOn(binding, 'run').mockRejectedValueOnce(new Error('Retry preparation'))
+                await remotePublish?.({
+                  topicID,
+                  senderDID: group.committer.identity.id,
+                  payload: new Uint8Array([255]),
+                  retain: 'log',
+                })
+                await running.owner.peer()?.replay()
+                expect(vi.getTimerCount()).toBeGreaterThan(0)
+              }
+              if (
+                interruption === 'ledger-timer' ||
+                interruption === 'ledger-continuation' ||
+                interruption === 'ledger-seal-continuation'
+              ) {
+                if (
+                  interruption === 'ledger-continuation' ||
+                  interruption === 'ledger-seal-continuation'
+                ) {
+                  const checked = Promise.withResolvers<void>()
+                  const liveMLS = peerParams?.mls
+                  if (liveMLS === undefined) throw new Error('Missing live MLS')
+                  if (interruption === 'ledger-seal-continuation') {
+                    vi.spyOn(liveMLS, 'isLedgerComplete').mockResolvedValueOnce(true)
+                    vi.spyOn(liveMLS, 'sealLedger').mockImplementationOnce(async () => {
+                      checked.resolve()
+                      await releaseLedger.promise
+                      return new Uint8Array([1])
+                    })
+                  } else
+                    vi.spyOn(liveMLS, 'isLedgerComplete').mockImplementationOnce(async () => {
+                      checked.resolve()
+                      await releaseLedger.promise
+                      return true
+                    })
+                  await ledgerRequest()
+                  await vi.advanceTimersByTimeAsync(300)
+                  expect(liveMLS.isLedgerComplete).toHaveBeenCalled()
+                  if (interruption === 'ledger-seal-continuation')
+                    expect(liveMLS.sealLedger).toHaveBeenCalled()
+                  await checked.promise
+                } else {
+                  await ledgerRequest()
+                  for (let turn = 0; turn < 100; turn++) await Promise.resolve()
+                }
+              }
+            }
+            if (running !== undefined && !separate) {
               if (interrupted) vi.useFakeTimers()
               if (interrupted) {
                 const schedule = globalThis.setTimeout
@@ -783,13 +991,197 @@ for (const mode of ['real-mls', 'double'] as const) {
             if (safety === null) throw new Error('Missing safety port')
             const unsubscribe = safety.onSwitchBlocked(key, (block) => blocks.push(block))
             if (running !== undefined) {
+              if (interruption === 'startup-continuation') {
+                releaseControl.resolve()
+                await vi.advanceTimersByTimeAsync(100)
+                await expect(running.owner.ready).resolves.toBeUndefined()
+              }
+              const selection = intake === undefined ? undefined : vi.spyOn(intake, 'next')
+              if (interruption === 'ledger-request' || interruption === 'inbound-and-timers') {
+                const schedule = globalThis.setTimeout
+                let responders = 0
+                globalThis.setTimeout = new Proxy(schedule, {
+                  apply(target, receiver: unknown, args: Array<unknown>) {
+                    if (args[1] === 20) responders++
+                    return Reflect.apply(target, receiver, args)
+                  },
+                })
+                try {
+                  deliver(
+                    rendezvous,
+                    encodeHandshakeFrame(
+                      HANDSHAKE_KIND.ledgerRequest,
+                      encodeLedgerRequest('terminal-ledger', new Uint8Array([1])),
+                    ),
+                  )
+                  for (let turn = 0; turn < 100; turn++) await Promise.resolve()
+                  expect(responders).toBe(0)
+                } finally {
+                  globalThis.setTimeout = schedule
+                }
+              }
+              if (peerParams?.mls === undefined || localMux === undefined)
+                throw new Error('Missing peer boundaries')
+              const ledgerCheck = vi.spyOn(peerParams.mls, 'isLedgerComplete')
+              const ledgerSeal = vi.spyOn(peerParams.mls, 'sealLedger')
+              const localPublish = vi.spyOn(localMux, 'publish')
+              ledgerCheck.mockClear()
+              ledgerSeal.mockClear()
+              releaseLedger.resolve()
+              if (interruption === 'control-continuation') {
+                releaseControl.resolve()
+                await expect(removalReplay).resolves.toEqual({})
+              }
+              if (interruption === 'inbound-and-timers') {
+                if (peerParams === undefined) throw new Error('Missing peer ports')
+                const refusals: Array<{ name: string; error: unknown }> = []
+                const refuse = async (port: object, name: string, args: Array<unknown> = []) => {
+                  const result = await Promise.resolve()
+                    .then(() => Reflect.apply(Reflect.get(port, name), port, args))
+                    .then(
+                      () => null,
+                      (error: unknown) => error,
+                    )
+                  refusals.push({ name, error: result })
+                }
+                for (const [port, allowed] of [
+                  [peerParams.crypto, ['epoch', 'frameEpoch', 'frameAAD']],
+                  [
+                    peerParams.mls,
+                    ['sendAdmission', 'isLedgerComplete', 'onSafetyHold', 'onSafetyChanged'],
+                  ],
+                  [peerParams.mls?.capturedRecovery, []],
+                  [peerParams.validation, []],
+                ] as const) {
+                  if (port === undefined) continue
+                  for (const name of Object.keys(port))
+                    if (
+                      typeof Reflect.get(port, name) === 'function' &&
+                      !(allowed as ReadonlyArray<string>).includes(name)
+                    )
+                      await refuse(port, name)
+                }
+                if (lane?.batch === undefined) throw new Error('Missing app batch')
+                await refuse(lane.batch, 'openReady')
+                await refuse(peerParams, 'prepareBuild')
+                await refuse(peerParams, 'adopt')
+                if (peerParams.appPublication !== undefined)
+                  await refuse(peerParams.appPublication, 'prepare')
+                await refuse(peerParams.hub, 'fetchTopic', [
+                  { subscriberDID: local.identity.id, topicID },
+                ])
+                await refuse(peerParams.hub, 'publish', [
+                  { senderDID: local.identity.id, topicID, payload: new Uint8Array([1]) },
+                ])
+                expect(refusals).toEqual(
+                  refusals.map(({ name }: { name: string }) => ({
+                    name,
+                    error: expect.objectContaining({ name: 'PeerRemovedError' }),
+                  })),
+                )
+                await expect(peerParams.mls?.isLedgerComplete()).resolves.toBe(false)
+                for (const payload of [
+                  encodeHandshakeFrame(
+                    HANDSHAKE_KIND.recoveryConfirmRequest,
+                    encodeRecoveryConfirmRequest({
+                      requestID: 'terminal-confirm',
+                      request: new Uint8Array([1]),
+                      position,
+                      commitDigest: digestAppliedCommit(commit),
+                      commit,
+                      signature: new Uint8Array([1]),
+                    }),
+                  ),
+                  encodeHandshakeFrame(
+                    HANDSHAKE_KIND.recoveryVerdict,
+                    encodeRecoveryVerdict('terminal-confirm', new Uint8Array([1])),
+                  ),
+                  encodeHandshakeFrame(
+                    HANDSHAKE_KIND.recoveryRequest,
+                    encodeRecoveryRequest('terminal-recovery', new Uint8Array([1])),
+                  ),
+                  encodeHandshakeFrame(
+                    HANDSHAKE_KIND.ledgerReply,
+                    encodeLedgerReply('terminal-ledger', new Uint8Array([1])),
+                  ),
+                  encodeHandshakeFrame(
+                    HANDSHAKE_KIND.recoveryReply,
+                    encodeRecoveryReply('terminal-recovery', new Uint8Array([1])),
+                  ),
+                ])
+                  deliver(rendezvous, payload)
+                deliver(
+                  topicID,
+                  encodeHandshakeFrame(
+                    HANDSHAKE_KIND.commit,
+                    encodeCommitFrame(commit, new Uint8Array()),
+                  ),
+                )
+                const peer = running.owner.peer()
+                if (peer == null || liveAnchor === undefined || appCiphertext === undefined)
+                  throw new Error('Missing live peer')
+                await remotePublish?.({
+                  topicID: protocolTopic(liveAnchor.secret, liveAnchor.epoch, 'chat'),
+                  senderDID: group.committer.identity.id,
+                  payload: appCiphertext,
+                  retain: 'log',
+                })
+                await expect(peer.resync()).rejects.toMatchObject({ name: 'PeerRemovedError' })
+                await expect(peer.recover()).rejects.toMatchObject({ name: 'PeerRemovedError' })
+                await expect(
+                  peer.enqueue({
+                    id: 'terminal-operation',
+                    kind: 'rotation',
+                    revokes: false,
+                    body: new Uint8Array(),
+                  }),
+                ).rejects.toMatchObject({ name: 'PeerRemovedError' })
+                const chat = peer.protocol('chat')
+                await expect(chat.to(group.committer.identity.id)).rejects.toMatchObject({
+                  name: 'PeerRemovedError',
+                })
+                await refuse(chat, 'request', ['posted'])
+                await refuse(chat, 'gather', ['posted'])
+                expect(refusals.slice(-2)).toEqual(
+                  expect.arrayContaining([
+                    expect.objectContaining({
+                      name: 'request',
+                      error: expect.objectContaining({ name: 'PeerRemovedError' }),
+                    }),
+                    expect.objectContaining({
+                      name: 'gather',
+                      error: expect.objectContaining({ name: 'PeerRemovedError' }),
+                    }),
+                  ]),
+                )
+                await peer.retryAppDelivery()
+                peer.reauthorize()
+              }
+              if (separate) await expect(vi.advanceTimersByTimeAsync(2000)).resolves.toBeDefined()
+              if (selection !== undefined) expect(selection).not.toHaveBeenCalled()
+              if (interruption.startsWith('ledger-')) {
+                expect(ledgerCheck).not.toHaveBeenCalled()
+                expect(ledgerSeal).not.toHaveBeenCalled()
+                expect(localPublish).not.toHaveBeenCalled()
+              }
+              ledgerCheck.mockRestore()
+              ledgerSeal.mockRestore()
+              localPublish.mockRestore()
+              expect(receive).not.toHaveBeenCalled()
+              expect(fetch).not.toHaveBeenCalled()
+              expect(publish).not.toHaveBeenCalled()
               const read = vi.spyOn(capability, 'read')
               await expect(running.owner.peer()?.replay()).resolves.toEqual({})
-              expect(read).not.toHaveBeenCalled()
+              if (interruption !== 'startup-continuation') expect(read).not.toHaveBeenCalled()
               expect(fetch).not.toHaveBeenCalled()
               read.mockRestore()
               await wake()
               expect(fetch).not.toHaveBeenCalled()
+            }
+            if (interruption === 'startup-continuation') {
+              await vi.advanceTimersByTimeAsync(0)
+              for (let turn = 0; turn < 100; turn++) await Promise.resolve()
+              expect(calls).toBeGreaterThan(0)
             }
             let settled = false
             work = fixture.registry.delete(key).then(() => {
@@ -850,7 +1242,11 @@ for (const mode of ['real-mls', 'double'] as const) {
           } finally {
             releaseControl.resolve()
             releaseFetch.resolve()
+            releaseLedger.resolve()
             capture.mockRestore()
+            captureHost.mockRestore()
+            captureLane.mockRestore()
+            captureMux.mockRestore()
             restoreTimers?.()
             restoreNetwork?.()
             vi.useRealTimers()

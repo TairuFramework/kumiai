@@ -4,6 +4,7 @@ import {
   createGroupPeer,
   decodeAppAAD,
   type GroupMLS,
+  type GroupPeerParams,
   type GroupProcedureHandlers,
   type LogHub,
   type OpenedDeliveryContext,
@@ -33,6 +34,8 @@ export async function startLeaseRotationPeer(params: {
     MemoryTransaction
   >['posted']
   openedDeliveryContext?: OpenedDeliveryContext
+  recovery?: GroupPeerParams<Record<string, never>>['recovery']
+  freezeHub?: boolean
 }) {
   const { mode, fixture, key } = params
   const { FakeHub } = (await import(
@@ -43,6 +46,15 @@ export async function startLeaseRotationPeer(params: {
     }
   }
   const hub = new FakeHub()
+  const wire = params.freezeHub
+    ? Object.freeze<LogHub>({
+        publish: (...args) => hub.publish(...args),
+        fetchTopic: (...args) => hub.fetchTopic(...args),
+        subscribe: (...args) => hub.subscribe?.(...args),
+        unsubscribe: (...args) => hub.unsubscribe?.(...args),
+        receive: (...args) => hub.receive(...args),
+      })
+    : hub
   const target = { targetID: 'lease-rotation-hub', topicID: 'lease-rotation-commits' }
   let mls: GroupMLS | undefined
   let receiver: GroupHandle | undefined
@@ -111,7 +123,8 @@ export async function startLeaseRotationPeer(params: {
       return createGroupPeer({
         ...options,
         openedDeliveryContext: options.openedDeliveryContext ?? params.openedDeliveryContext,
-        hub,
+        hub: wire,
+        recovery: params.recovery,
         crypto: groupCrypto,
         control: ports.control,
         anchorStore: ports.anchor,

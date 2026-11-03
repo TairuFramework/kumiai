@@ -72,7 +72,7 @@ import type {
 } from './control/types.js'
 import { executableOperations } from './control/types.js'
 import { deliverObligations } from './control/welcome.js'
-import { controlBatch } from './control-batch.js'
+import { type ControlBatchBinding, controlBatch } from './control-batch.js'
 import { prepareControlOccurrence } from './control-prepare.js'
 import {
   type AppliedRecovery,
@@ -380,8 +380,16 @@ export function createGroupPeerWithControlWalk<
   if (input.crypto.pending != null && input.mls == null)
     throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
   const completion = input.completion
-  const batch = appBatch(input.crypto)
-  const controlBinding = input.mls == null ? undefined : controlBatch(input.mls)
+  const originalBatch = appBatch(input.crypto)
+  const batch = originalBatch === undefined ? undefined : terminalPort(originalBatch)
+  const originalControlBinding = input.mls == null ? undefined : controlBatch(input.mls)
+  const controlBinding: ControlBatchBinding | undefined =
+    originalControlBinding === undefined
+      ? undefined
+      : {
+          key: originalControlBinding.key,
+          run: (work) => originalControlBinding.run({ ...work, signal: terminalControlSignal() }),
+        }
   const openedBinding = openedDeliveryBinding(input.crypto.pending)
   for (const key of [openedBinding?.key, batch?.key, controlBinding?.key, input.control?.key]) {
     if (
@@ -405,9 +413,88 @@ export function createGroupPeerWithControlWalk<
   const openedCursorStore =
     input.appCursorStore == null ? undefined : settlementBoundary.wrap(input.appCursorStore)
   const controlAbort = new AbortController()
+  const terminalWorkAbort = new AbortController()
+  function terminalControlSignal(): AbortSignal {
+    // The selected entry reads aborted before restoring, even if removal used another route.
+    return new Proxy(terminalWorkAbort.signal, {
+      get: (target, key) => {
+        if (key === 'aborted') removalCommitted()
+        const value: unknown = Reflect.get(target, key, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  }
   const applyResolved: typeof applyControlResolved = (store, changes, mutationID) =>
     applyControlResolved(store, changes, mutationID, undefined, controlAbort.signal)
-  const params = wrapPeerHost(boundary, input)
+  let locallyRemoved = false
+  // Refuse private-state work at the port, including continuations admitted before removal.
+  function terminalPort<TPort extends object>(
+    port: TPort,
+    allowed: Array<PropertyKey> = [],
+  ): TPort {
+    return new Proxy({} as TPort, {
+      get: (_target, key) => {
+        const value: unknown = Reflect.get(port, key, port)
+        if (typeof value !== 'function') return value
+        return (...args: Array<unknown>) => {
+          if (!allowed.includes(key) && removalCommitted())
+            throw new PeerRemovedError('Peer was removed')
+          const callback = Reflect.get(port, key, port) as (...args: Array<unknown>) => unknown
+          const result = Reflect.apply(callback, port, args)
+          if (key === 'restoreValidation' || key === 'restoreRecovery' || key === 'applyRecovery')
+            return Promise.resolve(result).then((restored) => {
+              return restored !== null && typeof restored === 'object'
+                ? terminalPort(restored)
+                : restored
+            })
+          return result
+        }
+      },
+      has: (_target, key) => Reflect.has(port, key),
+      ownKeys: () => Reflect.ownKeys(port),
+      getOwnPropertyDescriptor: (_target, key) => {
+        const descriptor = Reflect.getOwnPropertyDescriptor(port, key)
+        return descriptor === undefined ? undefined : { ...descriptor, configurable: true }
+      },
+    })
+  }
+  // The mux can wait for subscription readiness before reaching these final wire calls.
+  const network = input.hub
+  const guardedHub = new Proxy({} as typeof network, {
+    get: (_target, key) => {
+      const value: unknown = Reflect.get(network, key, network)
+      if (typeof value !== 'function') return value
+      return (...args: Array<unknown>) => {
+        if ((key === 'fetchTopic' || key === 'publish') && removalCommitted())
+          throw new PeerRemovedError('Peer was removed')
+        return Reflect.apply(value, network, args)
+      }
+    },
+  })
+  const params = wrapPeerHost(boundary, {
+    ...input,
+    hub: guardedHub,
+    prepareBuild:
+      input.prepareBuild === undefined
+        ? undefined
+        : terminalPort({ prepareBuild: input.prepareBuild }).prepareBuild,
+    adopt: input.adopt === undefined ? undefined : terminalPort({ adopt: input.adopt }).adopt,
+  })
+  params.crypto = terminalPort(params.crypto, ['epoch', 'frameEpoch', 'frameAAD'])
+  if (params.mls !== undefined) {
+    const port = params.mls
+    const guarded = terminalPort(port, ['sendAdmission', 'onSafetyHold', 'onSafetyChanged'])
+    params.mls = {
+      ...guarded,
+      isLedgerComplete: async () => !removalCommitted() && (await port.isLedgerComplete()),
+      ...(port.capturedRecovery === undefined
+        ? {}
+        : { capturedRecovery: terminalPort(port.capturedRecovery) }),
+    }
+  }
+  if (params.validation !== undefined) params.validation = terminalPort(params.validation)
+  if (params.appPublication !== undefined)
+    params.appPublication = terminalPort(params.appPublication, ['assertRoot', 'snapshot'])
   if (params.recoveryOnly && params.mls != null) params.mls = recoveryOnlyMLS(params.mls)
   const {
     hub,
@@ -538,7 +625,10 @@ export function createGroupPeerWithControlWalk<
     localDID,
     deferredStart: true,
     networkAllowed: () =>
-      !disposed && initialSafetyLoaded && (manualNetworkReady || safetyHold() === null),
+      !disposed &&
+      initialSafetyLoaded &&
+      !removalCommitted() &&
+      (manualNetworkReady || safetyHold() === null),
     ...(params.onSubscribeFailed != null ? { onSubscribeFailed: params.onSubscribeFailed } : {}),
     ...(params.onReceiveEnded != null ? { onReceiveEnded: params.onReceiveEnded } : {}),
   })
@@ -849,7 +939,7 @@ export function createGroupPeerWithControlWalk<
             appLane.kick()
           } else
             await runSerial(async () => {
-              if (safetyHold() !== null) return
+              if (removalCommitted() || safetyHold() !== null) return
               await settleOperations()
               await ensureLedger(Date.now() + recoveryTimeoutMs)
               await reconcileCommits()
@@ -889,22 +979,22 @@ export function createGroupPeerWithControlWalk<
   let ledgerRetryTimer: ReturnType<typeof setTimeout> | undefined
   let ledgerRetryBackoff = 1000
   const armLedgerRetry = (): void => {
-    if (disposed || ledgerRetryTimer != null) return
+    if (disposed || removalCommitted() || ledgerRetryTimer != null) return
     ledgerRetryTimer = setTimeout(() => {
       ledgerRetryTimer = undefined
-      if (disposed) return
+      if (disposed || removalCommitted()) return
       let ledgerReady = false
       void ready
         .then(() => {
-          if (disposed) return
+          if (disposed || removalCommitted()) return
           return runSerial(async () => {
-            if (disposed) return
+            if (disposed || removalCommitted()) return
             const replayed = await settleOperations()
             if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
               ledgerReady = true
               await finalizeBootstrap(mls)
             }
-            if (disposed) return
+            if (disposed || removalCommitted()) return
             const pulled = await pullCommits()
             if (!disposed && (replayed || pulled)) await rebuildEpoch()
           })
@@ -994,10 +1084,11 @@ export function createGroupPeerWithControlWalk<
     surfaceFor,
   } = epochRuntime
   const rebuildEpoch = async (): Promise<void> => {
-    if (safetyHold() !== null) return
+    if (removalCommitted() || safetyHold() !== null) return
     await rebuildEpochRuntime(() => {
       const reason = safetyHold()
       if (reason !== null) throw new GroupSafetyHeldError(reason)
+      if (removalCommitted()) throw new PeerRemovedError('Peer was removed')
     })
     epochNeedsBuild = anchorPending != null
   }
@@ -1018,7 +1109,6 @@ export function createGroupPeerWithControlWalk<
         })
 
   let floor: EpochFloor = { epoch: anchor.epoch, position: null, covered: true }
-  let locallyRemoved = false
   const logDelivery =
     appOutboxAcceptance == null || mls == null
       ? undefined
@@ -1038,7 +1128,7 @@ export function createGroupPeerWithControlWalk<
           held: () =>
             safetyHold() !== null ||
             logSendsHeld() ||
-            locallyRemoved ||
+            removalCommitted() ||
             stranded ||
             (!floor.covered && floor.position !== null) ||
             anchorRecoveryPending ||
@@ -1052,7 +1142,7 @@ export function createGroupPeerWithControlWalk<
             return (
               safetyHold() !== null ||
               logSendsHeld() ||
-              locallyRemoved ||
+              removalCommitted() ||
               stranded ||
               (!floor.covered && floor.position !== null) ||
               anchorRecoveryPending ||
@@ -1111,7 +1201,7 @@ export function createGroupPeerWithControlWalk<
             params.appOutbox.recordSettlement(seq, obligation, expected),
           publish: (frame) => {
             // No await between the hold check, registration and transport handoff.
-            if (safetyHold() !== null || logSendsHeld()) return null
+            if (removalCommitted() || safetyHold() !== null || logSendsHeld()) return null
             let settle = (): void => {}
             const completion = new Promise<void>((resolve) => {
               settle = resolve
@@ -1325,12 +1415,19 @@ export function createGroupPeerWithControlWalk<
     recoveryRetryTimer = undefined
   }
   const retryRecovery = (): void => {
-    if (disposed) return
+    if (disposed || removalCommitted()) return
     recoveryRetryPending = true
     if (recoveryLaneHeld() || recoveryRetryTimer != null || renewalHeld() || refusalHeld) return
     recoveryRetryTimer = setTimeout(() => {
       recoveryRetryTimer = undefined
-      if (disposed || recoveryLaneHeld() || renewalHeld() || refusalHeld || activeRecovery != null)
+      if (
+        disposed ||
+        removalCommitted() ||
+        recoveryLaneHeld() ||
+        renewalHeld() ||
+        refusalHeld ||
+        activeRecovery != null
+      )
         return
       healRequested = !recoveryLaneHeld()
       void healIfRequested()
@@ -1432,9 +1529,9 @@ export function createGroupPeerWithControlWalk<
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
     const op = commitTail.then(async () => {
       controlReplayed = false
-      if (safetyHold() === null && epochNeedsBuild && mls != null && !locallyRemoved)
+      if (safetyHold() === null && epochNeedsBuild && mls != null && !removalCommitted())
         await refreshControl()
-      if (safetyHold() === null && epochNeedsBuild && mls != null && !locallyRemoved) {
+      if (safetyHold() === null && epochNeedsBuild && mls != null && !removalCommitted()) {
         await resolveAnchorRotation({ port: mls })
         if (anchorPending == null && epochRuntime.hasInboxLane()) {
           await rebuildEpoch()
@@ -1507,7 +1604,7 @@ export function createGroupPeerWithControlWalk<
       disposed ||
       safetyHold() !== null ||
       stranded ||
-      locallyRemoved
+      removalCommitted()
     )
       return
     if (pendingConfirmations >= maxPendingConfirmations) return
@@ -1518,6 +1615,7 @@ export function createGroupPeerWithControlWalk<
       const verified = await port.verifyRecoveryRequest(request.request)
       if (
         disposed ||
+        removalCommitted() ||
         safetyHold() !== null ||
         verified == null ||
         verified.requestID !== request.requestID ||
@@ -1537,11 +1635,16 @@ export function createGroupPeerWithControlWalk<
         ))
       )
         return
-      if (disposed || digestAppliedCommit(request.commit) !== request.commitDigest) return
+      if (
+        disposed ||
+        removalCommitted() ||
+        digestAppliedCommit(request.commit) !== request.commitDigest
+      )
+        return
       const blocked = () =>
         safetyHold() !== null ||
         stranded ||
-        locallyRemoved ||
+        removalCommitted() ||
         (rejoinPosition != null && request.position >= rejoinPosition) ||
         (pendingRecovery != null && request.position >= pendingRecovery.position)
       if (blocked()) return
@@ -1562,9 +1665,11 @@ export function createGroupPeerWithControlWalk<
             evaluation = runSerial(async () => {
               if (
                 disposed ||
+                removalCommitted() ||
                 blocked() ||
                 !(await port.isLedgerComplete()) ||
                 disposed ||
+                removalCommitted() ||
                 blocked()
               )
                 return { epoch }
@@ -1573,9 +1678,11 @@ export function createGroupPeerWithControlWalk<
               await reconcileCommits()
               if (
                 disposed ||
+                removalCommitted() ||
                 blocked() ||
                 (await port.readEpoch()) !== epoch ||
                 disposed ||
+                removalCommitted() ||
                 blocked()
               )
                 return { epoch }
@@ -1602,7 +1709,15 @@ export function createGroupPeerWithControlWalk<
         }
         record = commitOutcomes.get(responseKey)
       }
-      if (disposed || blocked() || !(await port.isLedgerComplete()) || disposed || blocked()) return
+      if (
+        disposed ||
+        blocked() ||
+        !(await port.isLedgerComplete()) ||
+        disposed ||
+        removalCommitted() ||
+        blocked()
+      )
+        return
       let outcome: RecoveryCommitOutcome | undefined
       let refusedEpoch: number | undefined
       if (record?.kind === 'applied' && record.digest === request.commitDigest) {
@@ -1620,7 +1735,7 @@ export function createGroupPeerWithControlWalk<
           refusalAuthority: 'authenticated-commit',
         }
       }
-      if (disposed || outcome == null || blocked()) return
+      if (disposed || removalCommitted() || outcome == null || blocked()) return
       const cacheKey = JSON.stringify([
         verified.requesterDID,
         request.requestID,
@@ -1658,7 +1773,14 @@ export function createGroupPeerWithControlWalk<
       if (disposed || blocked() || expiresAt <= Date.now()) return
       const response = record
       const confirmable = async () => {
-        if (blocked() || !(await port.isLedgerComplete()) || disposed || blocked()) return false
+        if (
+          blocked() ||
+          !(await port.isLedgerComplete()) ||
+          disposed ||
+          removalCommitted() ||
+          blocked()
+        )
+          return false
         if (refusedEpoch !== undefined) return (await port.readEpoch()) === refusedEpoch
         const current = commitOutcomes.get(responseKey)
         return (
@@ -1668,13 +1790,22 @@ export function createGroupPeerWithControlWalk<
           (await port.readEpoch()) === current.epochAfter
         )
       }
-      if (disposed || !(await confirmable()) || disposed || blocked()) return
+      if (
+        disposed ||
+        removalCommitted() ||
+        !(await confirmable()) ||
+        disposed ||
+        removalCommitted() ||
+        blocked()
+      )
+        return
       if (verdictTimers.size >= maxPendingConfirmations) return
       const timer = setTimeout(
         () => {
           void (async () => {
             if (
               disposed ||
+              removalCommitted() ||
               blocked() ||
               expiresAt <= Date.now() ||
               !(await confirmable()) ||
@@ -1714,6 +1845,7 @@ export function createGroupPeerWithControlWalk<
       mls == null ||
       rendezvousTopicID == null ||
       disposed ||
+      removalCommitted() ||
       hardControlHeld() ||
       activeRecovery !== null ||
       pendingRecovery != null
@@ -1736,7 +1868,13 @@ export function createGroupPeerWithControlWalk<
         try {
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
-          if (disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null)
+          if (
+            disposed ||
+            removalCommitted() ||
+            hardControlHeld() ||
+            activeRecovery !== null ||
+            pendingRecovery != null
+          )
             return
           if (port.capturedRecovery !== undefined) {
             await replyWithCapturedGroupInfo(request)
@@ -1745,7 +1883,13 @@ export function createGroupPeerWithControlWalk<
           const groupInfo = await port.sealGroupInfo(request.request)
           await refreshControl()
           // Disposal can occur while a fired timer is still sealing.
-          if (disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null)
+          if (
+            disposed ||
+            removalCommitted() ||
+            hardControlHeld() ||
+            activeRecovery !== null ||
+            pendingRecovery != null
+          )
             return
           // Mailbox class, deliberately: a rendezvous frame must never move the commit topic's
           // head, and its reader — the requester — subscribed before it asked.
@@ -1814,15 +1958,28 @@ export function createGroupPeerWithControlWalk<
    */
   const handleLedgerRequest = (request: { requestID: string; request: Uint8Array }): void => {
     if (params.recoveryOnly) return
-    if (mls == null || rendezvousTopicID == null || disposed || safetyHold() !== null) return
+    if (
+      mls == null ||
+      rendezvousTopicID == null ||
+      disposed ||
+      removalCommitted() ||
+      safetyHold() !== null
+    )
+      return
     const port = mls
     const topicID = rendezvousTopicID
     const timer = setTimeout(() => {
       pendingLedgerReplies.delete(timer)
       void (async () => {
         try {
-          if (disposed || safetyHold() !== null) return
-          if (!(await port.isLedgerComplete()) || disposed || safetyHold() !== null) return
+          if (disposed || removalCommitted() || safetyHold() !== null) return
+          if (
+            !(await port.isLedgerComplete()) ||
+            disposed ||
+            removalCommitted() ||
+            safetyHold() !== null
+          )
+            return
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
           const sealed = await port.sealLedger(request.request)
@@ -1830,7 +1987,7 @@ export function createGroupPeerWithControlWalk<
           // from `pendingLedgerReplies` when the sweep walked it — too late by construction, not
           // by race. Silent, like `onCommitDelivery`: there is no caller to tell, and the catch
           // below would swallow a throw anyway.
-          if (disposed || safetyHold() !== null) return
+          if (disposed || removalCommitted() || safetyHold() !== null) return
           await mux.publish({
             topicID,
             payload: encodeHandshakeFrame(
@@ -1916,6 +2073,10 @@ export function createGroupPeerWithControlWalk<
       await refreshControl()
       if (safetyHold() !== null) return false
       await removalEffect()
+      if (removalCommitted()) {
+        await keepAnchor()
+        return false
+      }
       assertSafetyOpen()
       const epoch = await port.readEpoch()
       assertSafetyOpen()
@@ -2018,7 +2179,12 @@ export function createGroupPeerWithControlWalk<
       })
       return false
     }
-    if (safetyHold() !== null || anchorRecoveryPending || locallyRemoved || controlHold !== null)
+    if (
+      safetyHold() !== null ||
+      anchorRecoveryPending ||
+      removalCommitted() ||
+      controlHold !== null
+    )
       return false
     if (!(await port.isLedgerComplete())) return false
     let advancedEpoch = false
@@ -2073,7 +2239,7 @@ export function createGroupPeerWithControlWalk<
         covered &&
         (!requireCompletePrefix || reconciledHead === commitLogHead) &&
         !stranded &&
-        !locallyRemoved &&
+        !removalCommitted() &&
         floor.covered &&
         workVersion === commitWorkVersion &&
         !commitLaneCaughtUp
@@ -2559,7 +2725,7 @@ export function createGroupPeerWithControlWalk<
           if (!applied.applied) await saveCommitCursor(position, undefined, header?.epoch, true)
           if (applied.applied && (reconciledHead == null || reconciledHead < position))
             reconciledHead = position
-          if (locallyRemoved) return advancedEpoch
+          if (removalCommitted()) return advancedEpoch
           break
         }
       }
@@ -2584,7 +2750,7 @@ export function createGroupPeerWithControlWalk<
     try {
       advanced = await walkCommitLog(port, topicID, requireCompletePrefix)
     } catch (error) {
-      if (!disposed && safetyHold() === null) {
+      if (!disposed && !removalCommitted() && safetyHold() === null) {
         try {
           appliedEpoch = await port.readEpoch()
         } catch {
@@ -2593,14 +2759,15 @@ export function createGroupPeerWithControlWalk<
       }
       throw error
     }
-    if (!disposed && safetyHold() === null) appliedEpoch = await port.readEpoch()
+    if (!disposed && !removalCommitted() && safetyHold() === null)
+      appliedEpoch = await port.readEpoch()
     return advanced
   }
 
   /** Walk commits, then request app delivery without waiting for pulls or host handlers. */
   const pullCommits = async (requireCompletePrefix = false): Promise<boolean> => {
     commitLaneCaughtUp = mls == null
-    if (disposed || safetyHold() !== null || locallyRemoved) return false
+    if (disposed || safetyHold() !== null || removalCommitted()) return false
     if (!controlReplayed) {
       throw new Error(
         'pullCommits: saved operations must settle first in every lane operation, or a peer that crashed on its own commit heals from it instead of adopting it',
@@ -2678,7 +2845,7 @@ export function createGroupPeerWithControlWalk<
         disposed ||
         !commitLaneCaughtUp ||
         stranded ||
-        locallyRemoved ||
+        removalCommitted() ||
         rejoinHeld ||
         anchorRecoveryPending ||
         hardControlHeld()
@@ -2715,7 +2882,7 @@ export function createGroupPeerWithControlWalk<
     requestID: string
     request: Uint8Array
   }): Promise<boolean> => {
-    if (mls == null || rendezvousTopicID == null) return false
+    if (removalCommitted() || mls == null || rendezvousTopicID == null) return false
     const port = mls
     const topicID = rendezvousTopicID
     return await replyWithReconciledGroupInfo({
@@ -2738,10 +2905,20 @@ export function createGroupPeerWithControlWalk<
         }
       },
       blocked: () =>
-        disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null,
+        disposed ||
+        removalCommitted() ||
+        hardControlHeld() ||
+        activeRecovery !== null ||
+        pendingRecovery != null,
       publish: async (groupInfo) => {
         await refreshControl()
-        if (disposed || hardControlHeld() || activeRecovery !== null || pendingRecovery != null)
+        if (
+          disposed ||
+          removalCommitted() ||
+          hardControlHeld() ||
+          activeRecovery !== null ||
+          pendingRecovery != null
+        )
           return
         return await mux.publish({
           topicID,
@@ -2788,7 +2965,7 @@ export function createGroupPeerWithControlWalk<
       disposed ||
       !controlPreparationReady ||
       safetyHold() !== null ||
-      locallyRemoved ||
+      removalCommitted() ||
       rejoinHeld ||
       awaitingBootstrap !== null ||
       activeRecovery !== null ||
@@ -2808,7 +2985,7 @@ export function createGroupPeerWithControlWalk<
       source: JSON.stringify(['control', completion.key.incarnation, occurrence.page.topicID]),
       signal: controlAbort.signal,
       prepare: async (scope) => {
-        if (disposed || occurrence.page.generation !== controlGeneration)
+        if (disposed || removalCommitted() || occurrence.page.generation !== controlGeneration)
           throw new Error('Buffered control source moved')
         return await prepareControlOccurrence({
           scope,
@@ -2849,7 +3026,11 @@ export function createGroupPeerWithControlWalk<
           if (value.prerequisite === 'ledger' && mls != null) {
             const port = mls
             const prerequisite = runSerial(async () => {
-              if (!disposed && (await ensureLedger(Date.now() + recoveryTimeoutMs)))
+              if (
+                !disposed &&
+                !removalCommitted() &&
+                (await ensureLedger(Date.now() + recoveryTimeoutMs))
+              )
                 await finalizeBootstrap(port)
             })
             controlPrerequisite = prerequisite
@@ -2890,7 +3071,7 @@ export function createGroupPeerWithControlWalk<
           epochNeedsBuild = true
           // Publish runtime work after the selected entry releases the arbiter.
           setTimeout(() => {
-            if (!disposed) void rebuildEpoch().catch(() => {})
+            if (!disposed && !removalCommitted()) void rebuildEpoch().catch(() => {})
           }, 0)
         }
       })
@@ -3018,7 +3199,7 @@ export function createGroupPeerWithControlWalk<
    * never become the cursor.
    */
   const onCommitDelivery = (_message: StoredMessage, ack: () => void): void => {
-    if (params.recoveryOnly) {
+    if (params.recoveryOnly || removalCommitted()) {
       ack()
       return
     }
@@ -3066,7 +3247,7 @@ export function createGroupPeerWithControlWalk<
     // "a refused or failed reply" note in `handleRecoveryRequest` above), so losing this specific
     // delivery just means the requester's retry or another responder covers it.
     ack()
-    if (mls == null) return
+    if (mls == null || removalCommitted()) return
     let frame: ReturnType<typeof decodeHandshakeFrame>
     try {
       frame = decodeHandshakeFrame(message.payload)
@@ -3118,7 +3299,7 @@ export function createGroupPeerWithControlWalk<
         recoverySecret,
         checkpoints: params.checkpoints,
         networkAllowed: () =>
-          !disposed && initialSafetyLoaded && safetyHold() === null && !locallyRemoved,
+          !disposed && initialSafetyLoaded && safetyHold() === null && !removalCommitted(),
         now: Date.now,
         random: Math.random,
       })
@@ -3318,7 +3499,7 @@ export function createGroupPeerWithControlWalk<
       healRequested = false
     }
     const currentEpoch =
-      safetyHold() !== null || params.recoveryOnly
+      removalCommitted() || safetyHold() !== null || params.recoveryOnly
         ? undefined
         : (proven?.epoch ?? (await mls?.readEpoch()))
     if (params.recoveryOnly || snapshot.commitOnce === null || hardControlHeld()) {
@@ -3451,7 +3632,7 @@ export function createGroupPeerWithControlWalk<
 
   function removalCommitted(): boolean {
     if (!locallyRemoved) {
-      const admission = mls?.sendAdmission()
+      const admission = input.mls?.sendAdmission()
       if (admission?.admissible === false && admission.reason === 'terminal') commitRemoval()
     }
     return locallyRemoved
@@ -3459,6 +3640,31 @@ export function createGroupPeerWithControlWalk<
 
   function commitRemoval(): void {
     locallyRemoved = true
+    terminalWorkAbort.abort(new PeerRemovedError('Peer was removed'))
+    healRequested = false
+    clearRecoveryRetry()
+    clearTimeout(ledgerRetryTimer)
+    ledgerRetryTimer = undefined
+    cancelControlSlotRetry()
+    clearTimeout(operationTimer)
+    operationTimer = undefined
+    for (const timer of pendingLedgerReplies) clearTimeout(timer)
+    pendingLedgerReplies.clear()
+    for (const timer of pendingReplies.values()) {
+      if (timer !== null) {
+        clearTimeout(timer)
+        pendingConfirmations--
+      }
+    }
+    pendingReplies.clear()
+    for (const timer of verdictTimers) clearTimeout(timer)
+    verdictTimers.clear()
+    for (const finish of [...ledgerGatherFinishes]) finish()
+    for (const waiter of confirmationWaiters.values()) waiter.dispose()
+    for (const waiter of recoveryWaiters.values()) waiter({ kind: 'disposed' })
+    recoveryWaiters.clear()
+    for (const timer of recoveryTimers.values()) clearTimeout(timer)
+    recoveryTimers.clear()
     appLane.stopOpening()
     logDelivery?.removed()
     appPullNeeded = false
@@ -3474,10 +3680,10 @@ export function createGroupPeerWithControlWalk<
 
   const reportedEvidenceErrors = new Set<string>()
   const removalEffect = async (): Promise<void> => {
-    if (control == null || safetyHold() !== null) return
+    if (removalCommitted() || control == null || safetyHold() !== null) return
     const evidence = await params.readEvidence?.()
     if (safetyHold() !== null || !evidence?.terminal) return
-    if (!locallyRemoved) commitRemoval()
+    if (!removalCommitted()) commitRemoval()
   }
 
   const adoptionWrite = (input: {
@@ -3901,7 +4107,14 @@ export function createGroupPeerWithControlWalk<
     controlSlotBackoff = 1_000
   }
   function scheduleControlSlotRetry(delay = controlSlotBackoff): void {
-    if (disposed || params.recoveryOnly || hardControlHeld() || !unresolvedControlSlot) return
+    if (
+      disposed ||
+      removalCommitted() ||
+      params.recoveryOnly ||
+      hardControlHeld() ||
+      !unresolvedControlSlot
+    )
+      return
     if (delay === 0) {
       controlSlotBackoff = 1_000
       if (controlSlotTimer !== undefined) clearTimeout(controlSlotTimer)
@@ -3918,8 +4131,9 @@ export function createGroupPeerWithControlWalk<
       void (async () => {
         try {
           await ready
-          if (disposed) return
+          if (disposed || removalCommitted()) return
           await runSerial(async () => {
+            if (removalCommitted()) return
             await stepLiveBuild(operationDeps())
             if (epochNeedsBuild) await rebuildEpoch()
             await deliverPendingWelcomes()
@@ -3950,7 +4164,7 @@ export function createGroupPeerWithControlWalk<
       mls == null ||
       (commitTopicID == null && safetyHold() === null) ||
       (anchorRecoveryPending && !forRecovery && safetyHold() === null) ||
-      locallyRemoved ||
+      removalCommitted() ||
       (rejoinHeld && safetyHold() === null)
     )
       return false
@@ -3997,7 +4211,8 @@ export function createGroupPeerWithControlWalk<
   const scheduleOperations = (delay = 0): void => {
     if (
       disposed ||
-      locallyRemoved ||
+      removalCommitted() ||
+      removalCommitted() ||
       control == null ||
       params.recoveryOnly ||
       (!hasOperations && !storageServicePending) ||
@@ -4016,6 +4231,7 @@ export function createGroupPeerWithControlWalk<
       operationTimer = undefined
     }
     const start = (): void => {
+      if (disposed || removalCommitted()) return
       operationTimer = undefined
       operationTimerDue = Number.POSITIVE_INFINITY
       operationWakePending = false
@@ -4033,7 +4249,9 @@ export function createGroupPeerWithControlWalk<
           await ready
           assertLive()
           if (activeRecovery != null) await activeRecovery
+          if (removalCommitted()) return
           await runSerial(async () => {
+            if (removalCommitted()) return
             if (rejoinHeld && safetyHold() === null) return
             await stepLiveBuild(operationDeps())
             let op = executableOperations(await control.load())[0]
@@ -4069,7 +4287,7 @@ export function createGroupPeerWithControlWalk<
         } catch {
           retry = true
         } finally {
-          if (!disposed) {
+          if (!disposed && !removalCommitted()) {
             try {
               await runSerial(refreshControl)
             } catch {
@@ -4094,27 +4312,27 @@ export function createGroupPeerWithControlWalk<
   }
 
   const repairRejoin = async (): Promise<void> => {
-    if (disposed || safetyHold() !== null || awaitingBootstrap == null) return
+    if (disposed || removalCommitted() || safetyHold() !== null || awaitingBootstrap == null) return
     if (mls != null && !(await mls.isLedgerComplete())) return
-    if (disposed || safetyHold() !== null) return
+    if (disposed || removalCommitted() || safetyHold() !== null) return
     // Restore the subscription before gathering the ledger: responders may already have
     // rotated to the new app anchor. A failed repair remains pending for the next lane call.
     if (mls != null) await resolveAnchorRotation({ port: mls })
-    if (disposed || safetyHold() !== null) return
+    if (disposed || removalCommitted() || safetyHold() !== null) return
     if (anchorPending == null) anchorRecoveryPending = false
     if (rejoinRuntimeNeedsBuild) {
       await rebuildEpoch()
-      if (disposed || safetyHold() !== null) return
+      if (disposed || removalCommitted() || safetyHold() !== null) return
       rejoinRuntimeNeedsBuild = false
     }
   }
 
   const finalizeBootstrap = async (port: GroupMLS, announce = true): Promise<void> => {
     assertLive()
-    if (safetyHold() !== null || awaitingBootstrap == null) return
+    if (removalCommitted() || safetyHold() !== null || awaitingBootstrap == null) return
     if (activeRecovery !== null && capturedPending !== null && !capturedFinishing) return
     if (!(await port.isLedgerComplete())) return
-    if (disposed || safetyHold() !== null) return
+    if (disposed || removalCommitted() || safetyHold() !== null) return
     const { attemptID, trigger, entries } = awaitingBootstrap
     await repairRejoin()
     assertLive()
@@ -4183,14 +4401,14 @@ export function createGroupPeerWithControlWalk<
    * retryable, degraded state, not an error the host can act on.
    */
   const ensureLedger = async (deadline: number): Promise<boolean> => {
-    if (safetyHold() !== null) return false
+    if (removalCommitted() || safetyHold() !== null) return false
     if (mls == null || rendezvousTopicID == null) return true
     await repairRejoin()
-    if (disposed || safetyHold() !== null) return false
+    if (disposed || removalCommitted() || safetyHold() !== null) return false
     const port = mls
     const topicID = rendezvousTopicID
     const complete = await port.isLedgerComplete()
-    if (disposed || safetyHold() !== null) return false
+    if (disposed || removalCommitted() || safetyHold() !== null) return false
     if (complete) return true
 
     // Gather the WHOLE ordered ledger — not "the missing ids", which nothing enumerates: the
@@ -4208,7 +4426,7 @@ export function createGroupPeerWithControlWalk<
       Math.max(recoveryTimeoutMs, recoveryDeadlineMs),
       await comparisonEpoch(),
     )
-    if (disposed || safetyHold() !== null) return false
+    if (disposed || removalCommitted() || safetyHold() !== null) return false
     return await new Promise<boolean>((resolve) => {
       let settled = false
       const bootstraps = new Set<Promise<void>>()
@@ -4234,7 +4452,7 @@ export function createGroupPeerWithControlWalk<
       ledgerGatherFinishes.add(finishOnDispose)
       ledgerWaiters.set(requestID, (sealed) => {
         void (async () => {
-          if (settled || disposed || safetyHold() !== null) {
+          if (settled || disposed || removalCommitted() || safetyHold() !== null) {
             finish(false)
             return
           }
@@ -4245,7 +4463,7 @@ export function createGroupPeerWithControlWalk<
             const tokens = await port.openSealedLedger(sealed, requestID, requestKey)
             if (tokens == null) return
             // Timeout or disposal can settle the gather while opening the reply.
-            if (settled || disposed || safetyHold() !== null) {
+            if (settled || disposed || removalCommitted() || safetyHold() !== null) {
               finish(false)
               return
             }
@@ -4290,7 +4508,7 @@ export function createGroupPeerWithControlWalk<
         assertLive()
         const reason = safetyHold()
         if (reason !== null) throw new GroupSafetyHeldError(reason)
-        if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
+        if (removalCommitted()) throw new PeerRemovedError('Peer was removed')
         // A host write may persist the intent before its promise settles.
         if (request.revokes) revokeHold = true
         try {
@@ -4415,7 +4633,7 @@ export function createGroupPeerWithControlWalk<
     assertLive()
     if (removalCommitted()) return {}
     if (controlBinding !== undefined) await reconcileBufferedControl()
-    if (locallyRemoved) return {}
+    if (removalCommitted()) return {}
     const savedRejoin = (await control?.load())?.rejoin
     if (
       savedRejoin !== null &&
@@ -5683,7 +5901,7 @@ export function createGroupPeerWithControlWalk<
       await ready
       assertLive()
       await assertRecoveryOpen()
-      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
+      if (removalCommitted()) throw new PeerRemovedError('Peer was removed')
       if (mls == null || commitTopicID == null || rendezvousTopicID == null) {
         return { advanced: false }
       }
@@ -5771,7 +5989,7 @@ export function createGroupPeerWithControlWalk<
   const healIfRequested = async (): Promise<void> => {
     if (
       disposed ||
-      locallyRemoved ||
+      removalCommitted() ||
       recoveryLaneHeld() ||
       (params.recoveryOnly && params.onConfirmedRecovery === undefined) ||
       !healRequested ||
@@ -5841,7 +6059,7 @@ export function createGroupPeerWithControlWalk<
   const unsubscribeSafety =
     mls?.onSafetyChanged !== undefined
       ? mls.onSafetyChanged((reason) => {
-          if (disposed) return
+          if (disposed || removalCommitted()) return
           safetyGeneration++
           if (reason !== null) {
             latchSafetyHold(reason)
@@ -5853,20 +6071,20 @@ export function createGroupPeerWithControlWalk<
           safetyResume = safetyResume
             .then(() => ready)
             .then(async () => {
-              if (disposed || safetyHold() !== null) return
+              if (disposed || removalCommitted() || safetyHold() !== null) return
               await refreshControl()
-              if (disposed || safetyHold() !== null) return
+              if (disposed || removalCommitted() || safetyHold() !== null) return
               mux.resume()
               if (!startupComplete) await initialise()
               await runSerial(async () => {
-                if (disposed || safetyHold() !== null) return
+                if (disposed || removalCommitted() || safetyHold() !== null) return
                 if (await settleOperations()) await rebuildEpoch()
-                if (disposed || safetyHold() !== null) return
+                if (disposed || removalCommitted() || safetyHold() !== null) return
                 await ensureLedger(Date.now() + recoveryTimeoutMs)
-                if (disposed || safetyHold() !== null) return
+                if (disposed || removalCommitted() || safetyHold() !== null) return
                 await reconcileCommits()
               })
-              if (disposed || safetyHold() !== null) return
+              if (disposed || removalCommitted() || safetyHold() !== null) return
               void checkpointWorker?.resume()
               appLane.retryDelivery()
               logDelivery?.trigger()
@@ -5885,7 +6103,8 @@ export function createGroupPeerWithControlWalk<
   const initialise = async (): Promise<void> => {
     await safetyReady
     initialSafetyLoaded = true
-    const stopped = () => disposed || (manual === undefined && safetyHold() !== null)
+    const stopped = () =>
+      disposed || removalCommitted() || (manual === undefined && safetyHold() !== null)
     try {
       if (stopped()) return
       if (params.recoveryOnly) {
@@ -5899,7 +6118,7 @@ export function createGroupPeerWithControlWalk<
           })
         return
       }
-      if (mls != null) appliedEpoch = await mls.readEpoch()
+      if (mls != null && !removalCommitted()) appliedEpoch = await mls.readEpoch()
       if (continuation !== null) {
         const source = await mls?.readRecoverySource()
         if (
@@ -5942,7 +6161,7 @@ export function createGroupPeerWithControlWalk<
         }
       }
       if (stopped()) return
-      if (locallyRemoved) {
+      if (removalCommitted()) {
         await restorePending()
         pendingRestored = true
         appLane.retryDelivery()
@@ -6002,7 +6221,7 @@ export function createGroupPeerWithControlWalk<
       if (controlBinding !== undefined) {
         controlPreparationReady = true
         await reconcileBufferedControl()
-        if (stopped() || locallyRemoved) return
+        if (stopped() || removalCommitted()) return
       }
       // Saved acceptances settle before the walker can meet our own unmerged commit.
       await runSerial(async () => {
@@ -6012,7 +6231,7 @@ export function createGroupPeerWithControlWalk<
         await settleRejoinPublication()
         if (stopped()) return
         await settleOperations()
-        if (stopped() || locallyRemoved || anchorRecoveryPending) return
+        if (stopped() || removalCommitted() || anchorRecoveryPending) return
         const ledgerReady = await ensureLedger(Date.now() + recoveryTimeoutMs)
         if (stopped()) return
         if (ledgerReady && mls != null) await finalizeBootstrap(mls)
@@ -6029,7 +6248,7 @@ export function createGroupPeerWithControlWalk<
         )
           retryRecovery()
       }).catch(() => {})
-      if (stopped() || locallyRemoved) return
+      if (stopped() || removalCommitted()) return
       await buildEpoch()
       if (stopped()) return
       epochNeedsBuild = anchorPending != null
@@ -6055,10 +6274,15 @@ export function createGroupPeerWithControlWalk<
       advertiseBufferedControl()
       if (startupComplete && controlBinding !== undefined) appLane.kick()
     } catch (error) {
-      if (!safetyRefusal(error)) throw error
+      if (!(error instanceof PeerRemovedError && removalCommitted()) && !safetyRefusal(error))
+        throw error
     } finally {
       // Owed storage work survives every early safety exit, without control topics or a drain.
-      if (!disposed && safetyHold() !== null) {
+      if (!disposed && removalCommitted()) {
+        await restorePending()
+        pendingRestored = true
+        appLane.retryDelivery()
+      } else if (!disposed && safetyHold() !== null) {
         try {
           await runSerial(serviceStorageOnly)
         } catch {
@@ -6086,7 +6310,7 @@ export function createGroupPeerWithControlWalk<
     .then(
       async () => {
         await runSerial(deliverPendingWelcomes)
-        if (disposed || locallyRemoved) return
+        if (disposed || removalCommitted()) return
         logDelivery?.trigger()
         const recoverySnapshot = await control?.load()
         if (
@@ -6115,7 +6339,7 @@ export function createGroupPeerWithControlWalk<
       assertLive()
       const safety = safetyHold()
       if (safety !== null) throw new SendNotAdmissibleError(safety)
-      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
+      if (removalCommitted()) throw new PeerRemovedError('Peer was removed')
       if (controlHoldPresent()) throw new RecoveryRequiredError('Control is held')
       return fn()
     })
@@ -6184,6 +6408,7 @@ export function createGroupPeerWithControlWalk<
         if (outcome === 'aborted') return []
         const safety = safetyHold()
         if (safety !== null) throw new SendNotAdmissibleError(safety)
+        if (removalCommitted()) throw new PeerRemovedError('Peer was removed')
         return surfaceFor(key).gather(prc, config)
       }),
       to: rootEntry((memberDID) => withEpoch(() => surfaceFor(key).to(memberDID))),
@@ -6237,7 +6462,7 @@ export function createGroupPeerWithControlWalk<
       // resync interleaves with an inbound-commit rebuild and runs two teardown/build cycles over
       // one set of runtimes. Safe to wrap only because `rebuildEpoch` takes no lock itself and
       // this is a top-level entry — `runSerial` is not reentrant.
-      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
+      if (removalCommitted()) throw new PeerRemovedError('Peer was removed')
       await runSerial(async () => {
         const reason = safetyHold()
         if (reason !== null) throw new GroupSafetyHeldError(reason)
@@ -6253,6 +6478,7 @@ export function createGroupPeerWithControlWalk<
       // hint the mux applies against its own state, safe on a peer that is still initializing and a
       // no-op on a disposed one (the mux guards `disposed`). It touches only topics the hub already
       // refused, so it cannot subscribe anything a normal retain would not have.
+      if (removalCommitted()) return
       mux.rearmRefusedTopics()
       void checkpointWorker?.resume()
       scheduleControlSlotRetry(0)
@@ -6310,6 +6536,7 @@ export function createGroupPeerWithControlWalk<
       if (controlFetchTimer !== undefined) clearTimeout(controlFetchTimer)
       controlFetchTimer = undefined
       controlAbort.abort(new PeerDisposedError('Peer is disposed'))
+      terminalWorkAbort.abort(controlAbort.signal.reason)
       if (reportTimer !== undefined) clearTimeout(reportTimer)
       if (operationTimer != null) clearTimeout(operationTimer)
       cancelControlSlotRetry()
@@ -6450,14 +6677,14 @@ export function createGroupPeerWithControlWalk<
             throw new Error('Stale operation: not the durable FIFO head')
           if (snapshot.outcomes.some((row) => row.opID === op.id && row.kind !== 'unknown'))
             throw new Error('Operation already settled')
-          if (rejoinHeld || activeRecovery != null || anchorRecoveryPending || locallyRemoved)
+          if (rejoinHeld || activeRecovery != null || anchorRecoveryPending || removalCommitted())
             return op
           // One deterministic step is bounded below the scheduler's attempt ceiling.
           controlReplayed = true
           const next = await stepOperation(operationDeps(), op)
           await deliverPendingWelcomes()
           await refreshControl()
-          if (safetyHold() === null && epochNeedsBuild && mls != null && !locallyRemoved) {
+          if (safetyHold() === null && epochNeedsBuild && mls != null && !removalCommitted()) {
             await resolveAnchorRotation({ port: mls })
             if (anchorPending == null && epochRuntime.hasInboxLane()) {
               await rebuildEpoch()
