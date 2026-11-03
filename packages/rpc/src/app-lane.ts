@@ -182,7 +182,7 @@ export type AppLane = {
   /** Await all retained handlers and durable record completions. */
   idle: () => Promise<void>
   /** Await all restored plaintext handlers and their durable completions. */
-  completeOpened: () => Promise<void>
+  completeOpened: (options?: { keepOpening?: boolean }) => Promise<void>
   /** Permanently stop network pulls and new opens after terminal removal. */
   stopOpening: () => void
   handoffOpened: () => Promise<void>
@@ -684,8 +684,12 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
   }
 
   const bufferBlockedTopics = new Set<string>()
+  const pageDrains = new Set<Promise<unknown>>()
   /** Snapshot and merge under the app mutex. Hub I/O holds no lane reservation. */
-  const pull = async (onlyTopics?: Set<string>): Promise<boolean> => {
+  const pull = async (
+    onlyTopics?: Set<string>,
+    onReady?: (opening: Promise<boolean>) => void,
+  ): Promise<boolean> => {
     if (disposed || openedOnly || safetyHold() !== null) return false
     const controller = new AbortController()
     const { signal } = controller
@@ -703,6 +707,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       return disposed || openedOnly || signal.aborted || safetyHold() !== null
     }
     let bytes = 0
+    const readyDrains: Array<Promise<unknown>> = []
     try {
       const topics = await runAppLane(async () => {
         expireTopics()
@@ -861,6 +866,24 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
               limit: Math.min(APP_FETCH_LIMIT, APP_BUFFER_MAX_FRAMES - frames.length),
             }
           })
+          if (params.batch !== undefined && next !== undefined && result.messages.length !== 0) {
+            // A sibling fetch may remain unresolved after this source is locally ready.
+            const opening = drain()
+            onReady?.(opening)
+            readyDrains.push(opening)
+            pageDrains.add(opening)
+            void opening.then(
+              () => pageDrains.delete(opening),
+              () => {
+                pageDrains.delete(opening)
+                if (!disposed && retryTimer == null)
+                  retryTimer = setTimeout(() => {
+                    retryTimer = undefined
+                    retryDelivery()
+                  }, retryBackoff)
+              },
+            )
+          }
           if (
             next != null &&
             result.messages.length >= topic.limit &&
@@ -880,6 +903,9 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       )
       const failure = results.find((result) => result.status === 'rejected')
       if (failure?.status === 'rejected') throw failure.reason
+      const opened = await Promise.allSettled(readyDrains)
+      const openFailure = opened.find((result) => result.status === 'rejected')
+      if (openFailure?.status === 'rejected') throw openFailure.reason
       return continuation || timedOut
     } finally {
       clearTimeout(timer)
@@ -1488,12 +1514,14 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     onlyTopics?: Set<string>,
   ): Promise<void> => {
     try {
-      const continuation = await pull(onlyTopics)
+      const earlyDrains: Array<Promise<boolean>> = []
+      const continuation = await pull(onlyTopics, (opening) => earlyDrains.push(opening))
       if (generation !== segmentGeneration || disposed || openedOnly) return
       drainingEpoch = anchor().epoch
       let progress: boolean
       try {
-        if (crypto.pending != null) progress = await drain()
+        if (earlyDrains.length !== 0) progress = (await Promise.all(earlyDrains)).some(Boolean)
+        else if (crypto.pending != null) progress = await drain()
         else {
           const work = legacyDrain.then(drain)
           legacyDrain = work.catch(() => {})
@@ -1689,13 +1717,15 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     handoffOpened: async () => {
       deliveryHandedOff = true
       stopOpening()
+      await Promise.allSettled([...pageDrains])
       while (openingTurns.size > 0) await Promise.allSettled([...openingTurns])
       await runAppLane(async () => {})
       // Live claims already hold their protocol serialisation through completion.
       if (openedFailure !== undefined) throw openedFailure
     },
-    completeOpened: async () => {
-      stopOpening()
+    completeOpened: async (options) => {
+      if (options?.keepOpening !== true) stopOpening()
+      await Promise.allSettled([...pageDrains])
       // An open can have committed plaintext before returning its record to the lane.
       while (openingTurns.size > 0) await Promise.allSettled([...openingTurns])
       await runAppLane(async () => {})
@@ -1732,6 +1762,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       await new Promise<void>((resolve, reject) => openedWaiters.add({ resolve, reject }))
     },
     idle: async () => {
+      await Promise.allSettled([...pageDrains])
       if (openedFailure !== undefined) throw openedFailure
       while (deliveringRecords.size !== 0 || finishingRecords.size !== 0)
         await Promise.allSettled([...deliveringRecords, ...finishingRecords])

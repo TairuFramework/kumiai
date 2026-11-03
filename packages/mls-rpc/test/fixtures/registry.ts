@@ -229,6 +229,14 @@ const stagedDecryptObservers = new WeakMap<
   RegistryFixtureBase,
   (ciphertext: Uint8Array) => void | Promise<void>
 >()
+const restoredControlObservers = new WeakMap<RegistryFixtureBase, (handle: GroupHandle) => void>()
+
+export function registryFixtureObserveRestoredControl(
+  fixture: RegistryFixtureBase,
+  observe: (handle: GroupHandle) => void,
+): void {
+  restoredControlObservers.set(fixture, observe)
+}
 export function registryFixtureObserveStagedDecrypts(
   fixture: RegistryFixtureBase,
   observe: (ciphertext: Uint8Array) => void | Promise<void>,
@@ -527,6 +535,7 @@ async function assemble(
         return result
       }
     }
+    restoredControlObservers.get(fixture)?.(handle)
     return handle
   }
   function hold(map: Map<string, Hold>, id: string) {

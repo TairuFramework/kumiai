@@ -1,16 +1,21 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   appBatch,
+  asLogPosition,
   bindControlBatch,
   type ControlBatchBinding,
   commitTopic,
-  createGroupPeer,
+  controlBatch,
   encodeAppAAD,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
   frameID,
   type GroupProcedureHandlers,
+  HANDSHAKE_KIND,
   type LogHub,
   protocolTopic,
 } from '@kumiai/rpc'
+import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import { describe, expect, test, vi } from 'vitest'
 
 import type * as bufferedControlTypes from '../../rpc/lib/buffered-control.js'
@@ -21,8 +26,13 @@ import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
 import { createLedgerEntrySlot } from '../src/mls.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
+import { registryLiveSend } from '../src/registry/live-send.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
-import { openedDeliveryContext } from './fixtures/ownership-context.js'
+import {
+  createAsyncLocalOwnershipContext,
+  openedDeliveryContext,
+} from './fixtures/ownership-context.js'
+import { registryFixtureObserveRestoredControl } from './fixtures/registry.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
 import { writeSideRow } from './fixtures/storage-persistence.js'
 
@@ -95,13 +105,17 @@ async function setup(
       })
     },
   }
-  const controlReady = vi.spyOn(recording, 'run')
-  if (recordControl) bindControlBatch(mls, recording)
+  const actual = controlBatch(mls)
+  const controlReady = vi.spyOn(actual ?? recording, 'run')
+  if (recordControl) {
+    if (actual === undefined) bindControlBatch(mls, recording)
+    else controlReady.mockImplementation(recording.run)
+  }
   if (startupControl)
     messages.set(commitTopic(await mls.exportRecoverySecret()), [
       { sequenceID: '10', payload: new Uint8Array([255]) },
     ])
-  const peer = createGroupPeer({
+  const { peer, controlWalk } = createGroupPeerWithControlWalk({
     hub,
     crypto: groupCrypto,
     completion,
@@ -135,6 +149,19 @@ async function setup(
   await peer.replay()
   const anchor = await ports.anchor.load()
   if (anchor === null) throw new Error('Missing anchor')
+  peer.retryAppDelivery()
+  await vi.waitFor(() => {
+    for (const name of names) {
+      const topic = protocolTopic(anchor.anchor.secret, anchor.anchor.epoch, name)
+      expect(fetch.mock.calls.some(([request]) => request.topicID === topic)).toBe(true)
+    }
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await scheduler?.schedule({
+    source: 'startup-app-pull-settled',
+    kind: 'accounting',
+    run: async () => {},
+  })
   const topicID = protocolTopic(anchor.anchor.secret, anchor.anchor.epoch, 'chat')
   const seal = async (position: string, data = {}) => {
     const payload = await group.sender.handle.encrypt(encodeEventFrame('posted', data), {
@@ -151,6 +178,7 @@ async function setup(
     f,
     key,
     peer,
+    controlWalk,
     ports,
     completion,
     completed,
@@ -170,6 +198,385 @@ async function setup(
 
 for (const mode of ['real-mls', 'double'] as const)
   describe(`retained batches / ${mode}`, () => {
+    test('explicit buffered prefix reconciliation waits for selected proof', async () => {
+      const s = await setup(mode, async () => {})
+      try {
+        expect((await s.controlWalk.reconcileCommitPrefix()).kind).toBe('complete')
+        const topicID = commitTopic(await s.mls.exportRecoverySecret())
+        const epoch = s.group.access().epoch()
+        const commit = await s.group.prepareCommit()
+        s.messages.set(topicID, [
+          {
+            sequenceID: '10',
+            payload: encodeHandshakeFrame(
+              HANDSHAKE_KIND.commit,
+              encodeCommitFrame(commit, new Uint8Array()),
+            ),
+          },
+        ])
+        const prefix = await s.controlWalk.reconcileCommitPrefix()
+        expect(prefix.kind).toBe('complete')
+        expect(s.group.access().epoch()).toBe(epoch + 1)
+        expect(s.controlWalk.head()).toBe('10')
+        expect((await s.ports.control.load()).cursor?.position).toBe('10')
+      } finally {
+        await s.close()
+      }
+    })
+    test.each([false, true])(
+      'withheld topic fetch cannot block already-ready peer sources (damaged=%s)',
+      async (damaged) => {
+        const handlerRelease = Promise.withResolvers<void>()
+        const s = await setup(mode, async () => handlerRelease.promise, ['A', 'B'])
+        const fetchRelease = Promise.withResolvers<void>()
+        let withheld = false
+        try {
+          const anchor = (await s.ports.anchor.load())!.anchor
+          const [a, b] = ['A', 'B'].map((name) => protocolTopic(anchor.secret, anchor.epoch, name))
+          if (a === undefined || b === undefined) throw new Error('Missing topics')
+          s.messages.set(b, [
+            {
+              sequenceID: '01',
+              payload: await s.group.sender.handle.encrypt(encodeEventFrame('posted'), {
+                aad: encodeAppAAD({ topicID: b, intent: 'log' }),
+              }),
+            },
+          ])
+          s.messages.set(a, [
+            {
+              sequenceID: '01',
+              payload: damaged
+                ? new Uint8Array([255])
+                : await s.group.sender.handle.encrypt(encodeEventFrame('posted'), {
+                    aad: encodeAppAAD({ topicID: a, intent: 'log' }),
+                  }),
+            },
+          ])
+          const fetch = s.fetch.getMockImplementation()!
+          s.fetch.mockImplementation(async (input) => {
+            if (input.topicID === a) {
+              withheld = true
+              await fetchRelease.promise
+            }
+            return fetch(input)
+          })
+          const topic = commitTopic(await s.mls.exportRecoverySecret())
+          const before = s.group.access().epoch()
+          const commit = await s.group.prepareCommit()
+          s.peer.retryAppDelivery()
+          s.messages.set(topic, [
+            {
+              sequenceID: '10',
+              payload: encodeHandshakeFrame(
+                HANDSHAKE_KIND.commit,
+                encodeCommitFrame(commit, new Uint8Array()),
+              ),
+            },
+          ])
+          await s.hub.publish({
+            topicID: topic,
+            senderDID: s.group.sender.identity.id,
+            payload: new Uint8Array([255]),
+            retain: 'log',
+          })
+          await vi.waitFor(() => expect(withheld).toBe(true))
+          await vi.waitFor(() => expect(s.group.access().epoch()).toBe(before + 1))
+          await vi.waitFor(async () =>
+            expect(
+              (await s.group.access().pending.list()).some((row) => row.frame.topicID === b),
+            ).toBe(true),
+          )
+          expect((await s.ports.control.load()).controlHold).toBeNull()
+        } finally {
+          fetchRelease.resolve()
+          handlerRelease.resolve()
+          await s.close()
+        }
+      },
+    )
+    test('control prerequisites never hold a selected turn across network work', async () => {
+      const s = await setup(mode, async () => {}, ['B'])
+      const held = Promise.withResolvers<void>()
+      const network = Promise.withResolvers<void>()
+      const networkEntered = Promise.withResolvers<void>()
+      let networkStarted = false
+      let bProven = false
+      try {
+        const scheduler = appBatch(s.groupCrypto)!.scheduler
+        const binding = appBatch(s.groupCrypto)!
+        const openReady = binding.openReady.bind(binding)
+        vi.spyOn(binding, 'openReady').mockImplementation(async (...args) => {
+          const result = await openReady(...args)
+          bProven = true
+          return result
+        })
+        const started = Promise.withResolvers<void>()
+        const turn = scheduler.schedule({
+          source: 'held',
+          kind: 'open',
+          run: async () => {
+            started.resolve()
+            await held.promise
+          },
+        })
+        await started.promise
+        const anchor = (await s.ports.anchor.load())!.anchor
+        const topicID = protocolTopic(anchor.secret, anchor.epoch, 'B')
+        s.messages.set(topicID, [
+          {
+            sequenceID: '01',
+            payload: await s.group.sender.handle.encrypt(encodeEventFrame('posted'), {
+              aad: encodeAppAAD({ topicID, intent: 'log' }),
+            }),
+          },
+        ])
+        registryFixtureObserveRestoredControl(s.f, (handle) => {
+          vi.spyOn(handle, 'isLedgerComplete').mockResolvedValue(false)
+        })
+        const publish = s.hub.publish.bind(s.hub)
+        vi.spyOn(s.hub, 'publish').mockImplementation(async (input) => {
+          if (input.payload[3] === HANDSHAKE_KIND.ledgerRequest) {
+            networkStarted = true
+            networkEntered.resolve()
+            await network.promise
+          }
+          return publish(input)
+        })
+        const controlTopic = commitTopic(await s.mls.exportRecoverySecret())
+        s.messages.set(controlTopic, [{ sequenceID: '10', payload: new Uint8Array([255]) }])
+        await s.hub.publish({
+          topicID: controlTopic,
+          payload: new Uint8Array([0]),
+          senderDID: s.group.sender.identity.id,
+          retain: 'log',
+        })
+        s.peer.retryAppDelivery()
+        for (let i = 0; i < 80; i++) await Promise.resolve()
+        const before = await s.ports.control.load()
+        held.resolve()
+        await turn
+        await networkEntered.promise
+        for (let index = 0; index < 100; index++) await Promise.resolve()
+        expect(networkStarted).toBe(true)
+        expect(bProven).toBe(true)
+        expect(await s.ports.control.load()).toEqual(before)
+        expect(s.controlReady).toHaveBeenCalledOnce()
+      } finally {
+        held.resolve()
+        network.resolve()
+        await s.close()
+      }
+    })
+    for (const accounting of ['ordinary', 'own', 'fallback-supplied', 'fallback-absent'] as const)
+      test(
+        accounting === 'ordinary'
+          ? 'one peer advertises buffered B before replenishing A'
+          : accounting === 'own'
+            ? 'own accounting cannot bypass buffered control and B'
+            : `accounting fallback retains arbitration and cancellation (${accounting})`,
+        async () => {
+          const releases: Array<() => void> = []
+          let proofObserved: (() => void) | undefined
+          const fallback = accounting.startsWith('fallback')
+          const group = await createRegistryCryptoGroup(mode, crypto.randomUUID(), 2, {
+            backgroundMaintenance: 'gated',
+            ownershipContext:
+              accounting !== 'fallback-absent' ? createAsyncLocalOwnershipContext() : undefined,
+            beforeRegistry: fallback
+              ? (capability) => {
+                  const observe = capability.observe.bind(capability)
+                  vi.spyOn(capability, 'observe').mockImplementation(
+                    (groupID, onProof, afterRelease) =>
+                      observe(groupID, (observation) => {
+                        onProof(observation)
+                        proofObserved?.()
+                        releases.push(() => afterRelease?.(observation))
+                      }),
+                  )
+                }
+              : undefined,
+          })
+          const s = await setup(mode, async () => {}, ['A', 'B'], group)
+          const release = Promise.withResolvers<void>()
+          const entered = Promise.withResolvers<void>()
+          const postRelease = Promise.withResolvers<void>()
+          const aProof = Promise.withResolvers<void>()
+          let proofReturned = false
+          try {
+            const binding = controlBatch(s.mls)
+            expect(binding).toBeDefined()
+            const batch = appBatch(s.groupCrypto)
+            if (batch === undefined) throw new Error('Missing app batch')
+            const selected: Array<string> = []
+            const entries: Array<string> = []
+            let selectedSource = ''
+            const schedule = batch.scheduler.schedule.bind(batch.scheduler)
+            const anchor = (await s.ports.anchor.load())!.anchor
+            const topics = ['A', 'B'].map((name) =>
+              protocolTopic(anchor.secret, anchor.epoch, name),
+            )
+            // Source IDs use topic IDs, which are opaque hashes.
+            const names = new Map(topics.map((topic, index) => [topic, index === 0 ? 'A' : 'B']))
+            selected.length = 0
+            vi.spyOn(batch.scheduler, 'schedule').mockImplementation((work) =>
+              schedule({
+                ...work,
+                run: async (budget) => {
+                  selectedSource =
+                    work.kind === 'control'
+                      ? 'control'
+                      : work.kind === 'accounting'
+                        ? 'Read'
+                        : ([...names].find(([topic]) => work.source.includes(topic))?.[1] ??
+                          work.kind)
+                  selected.push(selectedSource)
+                  const source = selectedSource
+                  const value = await work.run(budget)
+                  if (source === 'A' && fallback) {
+                    proofReturned = true
+                    await postRelease.promise
+                  }
+                  return value
+                },
+              }),
+            )
+            for (const topicID of topics) {
+              const payload = await s.group.sender.handle.encrypt(encodeEventFrame('posted'), {
+                aad: encodeAppAAD({ topicID, intent: 'log' }),
+              })
+              s.messages.set(topicID, [{ sequenceID: '01', payload }])
+            }
+            let stages = 0
+            s.group.observeStage(async () => {
+              if (++stages === 1) {
+                entered.resolve()
+                await release.promise
+              }
+            })
+            const before = s.group.access().epoch()
+            const topic = commitTopic(await s.mls.exportRecoverySecret())
+            const commit = await s.group.prepareCommit()
+            proofObserved = aProof.resolve
+            const cap = entryCapability(s.f.device.groups)!
+            const originalRun = cap.run.bind(cap)
+            vi.spyOn(cap, 'run').mockImplementation((...args) => {
+              entries.push(selectedSource)
+              return originalRun(...args)
+            })
+            const originalRead = cap.read.bind(cap)
+            const reads = vi.spyOn(cap, 'read').mockImplementation((...args) => {
+              entries.push('Read')
+              return originalRead(...args)
+            })
+            s.peer.retryAppDelivery()
+            await entered.promise
+            s.messages.set(topic, [
+              {
+                sequenceID: '10',
+                payload: encodeHandshakeFrame(
+                  HANDSHAKE_KIND.commit,
+                  encodeCommitFrame(commit, new Uint8Array()),
+                ),
+              },
+            ])
+            await s.hub.publish({
+              topicID: topic,
+              payload: new Uint8Array([255]),
+              senderDID: s.group.sender.identity.id,
+              retain: 'log',
+            })
+            for (let i = 0; i < 80; i++) await Promise.resolve()
+            expect(s.controlReady).toHaveBeenCalledOnce()
+            expect(reads).not.toHaveBeenCalled()
+            release.resolve()
+            if (fallback) {
+              await aProof.promise
+              for (let index = 0; index < 300; index++) await Promise.resolve()
+              expect(proofReturned).toBe(true)
+              await new Promise((resolve) => setTimeout(resolve, 0))
+              expect(reads).not.toHaveBeenCalled()
+              expect(entries).toEqual(['A'])
+              postRelease.resolve()
+            }
+            await Promise.all(s.controlReady.mock.results.map((result) => result.value))
+            await vi.waitFor(() => expect(s.group.access().epoch()).toBe(before + 1))
+            await vi.waitFor(() => expect(stages).toBe(2))
+            expect(selected.slice(0, 3)).toEqual(['A', 'control', 'B'])
+            expect(entries.slice(0, 3)).toEqual(['A', 'control', 'B'])
+            await registryLiveSend.get(s.group.access())!.accounting()
+            const beforeLate = selected.filter((source) => source === 'Read').length
+            for (const start of releases.splice(0)) start()
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            expect(selected.filter((source) => source === 'Read').length).toBe(beforeLate)
+            expect((await s.ports.control.load()).cursor).toMatchObject({
+              epoch: before + 1,
+              position: '10',
+            })
+          } finally {
+            release.resolve()
+            postRelease.resolve()
+            for (const start of releases) start()
+            registryLiveSend.get(s.group.access())?.cancel(new Error('Witness finished'))
+            await s.close()
+          }
+        },
+      )
+    test('selected control performs all local prerequisites in its entry', async () => {
+      const s = await setup(mode, () => {})
+      const roots = [
+        vi.spyOn(s.mls, 'readEpoch'),
+        vi.spyOn(s.mls, 'readCommitHeader'),
+        vi.spyOn(s.mls, 'isLedgerComplete'),
+        vi.spyOn(s.mls, 'rosterEntries'),
+        vi.spyOn(s.groupCrypto, 'openEntries'),
+        vi.spyOn(s.ports.control, 'load'),
+        vi.spyOn(s.ports.anchor, 'load'),
+      ]
+      for (const root of roots)
+        root.mockImplementation(() => {
+          throw new Error('Root prerequisite admission during selected control')
+        })
+      try {
+        const binding = controlBatch(s.mls)
+        expect(binding).toBeDefined()
+        if (binding === undefined) throw new Error('Missing selected control binding')
+        const cap = entryCapability(s.f.device.groups)
+        if (cap === null) throw new Error('Missing entry capability')
+        const run = vi.spyOn(cap, 'run')
+        const read = vi.spyOn(cap, 'read')
+        let expired: (() => Promise<number>) | undefined
+        let expiredControl: (() => unknown) | undefined
+        const before = s.group.access().epoch()
+        const result = await binding.run({
+          source: 'local-control',
+          prepare: async (scope) => {
+            expired = scope.readEpoch
+            expiredControl = scope.control
+            expect(await scope.readEpoch()).toBe(before)
+            expect(await scope.isLedgerComplete()).toBe(true)
+            expect(await scope.rosterEntries()).toHaveLength(3)
+            expect(scope.source.key).toEqual(s.key)
+            expect(scope.control().cursor).toBeNull()
+            scope.stageControl(
+              { cursor: { position: asLogPosition('01'), epoch: before } },
+              'local-control',
+            )
+            if (scope.anchor() !== null) scope.stageAnchor(scope.anchor()!)
+            expect(read).not.toHaveBeenCalled()
+            return 'prepared'
+          },
+        })
+        expect(result.value).toBe('prepared')
+        expect(result.control.cursor?.position).toBe('01')
+        expect(run).toHaveBeenCalledTimes(1)
+        for (const root of roots) expect(root).not.toHaveBeenCalled()
+        await expect(expired?.()).rejects.toThrow('scope has ended')
+        expect(() => expiredControl?.()).toThrow('scope has ended')
+      } finally {
+        for (const root of roots) root.mockRestore()
+        await s.close()
+      }
+    })
     test('bound startup buffers checked control without legacy walking', async () => {
       const s = await setup(mode, async () => {}, ['chat'], undefined, undefined, true, true)
       try {

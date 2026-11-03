@@ -1,6 +1,7 @@
 import { randomIdentity } from '@kokuin/token'
 import {
   commitLedgerEntries,
+  createKeyPackageBundle,
   decodeClientState,
   encodeClientState,
   encodeGroupAnchor,
@@ -11,6 +12,7 @@ import {
 import {
   asLogPosition,
   type ControlSnapshot,
+  controlBatch,
   decodeCommitFrame,
   decodeHandshakeFrame,
   encodeCommitFrame,
@@ -22,9 +24,10 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { deriveEntryKey, sealEntries } from '../src/crypto.js'
 import { decodeStoredValue } from '../src/persistence-codec.js'
+import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRealGroup } from './fixtures/real-group.js'
-import { restoreMemoryControlHandle } from './fixtures/sealed-memory-mls.js'
+import { restoreMemoryControlHandle, seedMemoryControlState } from './fixtures/sealed-memory-mls.js'
 import { createControlCrashHarness } from './fixtures/storage-persistence.js'
 import { makeStorageSeed } from './fixtures/storage-seed.js'
 
@@ -35,10 +38,51 @@ const { tagMemoryCommit, decodeMemoryCommit } = (await import(
   tagMemoryCommit(commit: Uint8Array, authenticator: Uint8Array): Uint8Array
 }
 
-async function foreignHarness(mode: 'double' | 'real-mls', context = false) {
+async function foreignHarness(mode: 'double' | 'real-mls', context = false, registryBound = false) {
   const ownership = context ? createAsyncLocalOwnershipContext() : undefined
-  if (mode === 'double')
-    return { h: await createControlCrashHarness(mode, undefined, ownership, true) }
+  if (mode === 'double' && !registryBound)
+    return { h: await createControlCrashHarness(mode, undefined, ownership, true, registryBound) }
+  if (mode === 'double') {
+    const identity = randomIdentity()
+    const foreign = randomIdentity()
+    const seed = await makeStorageSeed({
+      mode,
+      id: 'control-crash',
+      incarnation: 1,
+      epoch: 3,
+      identity,
+    })
+    if (seed.state.state === null) throw new Error('Missing source')
+    const state = decodeClientState(seed.state.state)
+    if (state === undefined) throw new Error('Invalid source')
+    const bundle = await createKeyPackageBundle(foreign)
+    state.ratchetTree.push(undefined, { nodeType: 1, leaf: bundle.publicPackage.leafNode })
+    const ledger = [
+      ...seed.state.ledger,
+      await signLedgerEntry(identity, {
+        type: 'kumiai.role',
+        groupID: seed.key.groupID,
+        subject: foreign.id,
+        value: 'admin',
+      }),
+    ]
+    const source = await restoreMemoryControlHandle({
+      state: seedMemoryControlState(state, seed.state.credential, ledger),
+      credential: seed.state.credential,
+      ledgerEntries: ledger,
+    })
+    seed.state = {
+      ...seed.state,
+      state: encodeClientState(source.state),
+      ledger,
+      epochAuthenticator: source.state.keySchedule.epochAuthenticator,
+    }
+    seed.trust = recoveryTrustFor(source, seed.key, null)
+    return {
+      h: await createControlCrashHarness(mode, seed, ownership, true, true),
+      foreignDID: foreign.id,
+    }
+  }
   const real = await createRealGroup(3, 'control-crash')
   const competitor = real.members[0]
   if (competitor === undefined) throw new Error('Missing competitor')
@@ -75,12 +119,141 @@ async function foreignHarness(mode: 'double' | 'real-mls', context = false) {
     ledger: handle.ledgerTokens,
     spentEpochAuthenticators: [handle.state.keySchedule.epochAuthenticator],
   }
-  return { h: await createControlCrashHarness(mode, seed, ownership, true), competitor }
+  if (registryBound) seed.trust = recoveryTrustFor(handle, seed.key, null)
+  return {
+    h: await createControlCrashHarness(mode, seed, ownership, true, registryBound),
+    competitor,
+  }
 }
 
 afterEach(() => vi.useRealTimers())
 
 for (const mode of ['double', 'real-mls'] as const) {
+  test.each(['outer', 'inner', 'tamper', 'withheld'] as const)(
+    `registry bound failed own copies cannot strand saved retry or Welcome (${mode}, foreign %s)`,
+    async (fault) => {
+      const { h, competitor, foreignDID } = await foreignHarness(mode, true, true)
+      try {
+        h.hooks.beforeWelcome = async () => {
+          throw new Error('Recipient offline')
+        }
+        await h.peer.replay()
+        const built = await h.build()
+        await h.saveBuilt(built.intent, built.slot, built.expected, 'bound-copy')
+        const owed = {
+          opID: 'owed-independent',
+          welcome: new Uint8Array([4, 2]),
+          recipients: ['owed-recipient'],
+        }
+        await h.control.apply({ putWelcomes: [owed] }, 'owed-copy')
+        const before = await h.control.load()
+        const row = await h.groups.loadState(h.key)
+        if (row === null || row.deleted || row.state === null) throw new Error('Missing source')
+        const handle = await h.registryAccess!.read((value) => value)
+        const key = await deriveEntryKey(handle)
+        const saved = decodeCommitFrame(decodeHandshakeFrame(built.slot.payload).payload)
+        let commit: Uint8Array
+        let validBlob: Uint8Array = saved.sealedEntries
+        if (mode === 'double') {
+          if (foreignDID === undefined) throw new Error('Missing foreign member')
+          const parsed = decodeMemoryCommit(saved.commit)
+          if (parsed === null) throw new Error('Missing model commit')
+          commit = tagMemoryCommit(
+            new TextEncoder().encode(
+              JSON.stringify({
+                ...parsed,
+                adds: [],
+                committerDID: foreignDID,
+                signerDID: foreignDID,
+              }),
+            ),
+            row.epochAuthenticator,
+          )
+        } else {
+          if (competitor === undefined) throw new Error('Missing foreign member')
+          const token = await signLedgerEntry(competitor.identity, {
+            type: 'note',
+            groupID: h.key.groupID,
+            subject: competitor.identity.id,
+            value: 'foreign entry',
+          })
+          commit = (await commitLedgerEntries(competitor.handle, [token])).commitMessage
+          validBlob = sealEntries(key, encodeLedgerEntries([token]))
+        }
+        let blob: Uint8Array = validBlob.slice()
+        if (fault === 'outer') blob[0] = 255
+        if (fault === 'inner') blob = sealEntries(key, new Uint8Array([255, 0, 0]))
+        if (fault === 'tamper') blob[blob.length - 1]! ^= 1
+        if (fault === 'withheld') blob = new Uint8Array()
+        key.fill(0)
+        const binding = controlBatch(h.mls)
+        expect(binding).toBeDefined()
+        const originalRun = binding!.run.bind(binding)
+        const bridge = vi.spyOn(binding!, 'run')
+        const preparationErrors: Array<unknown> = []
+        const preparationResults: Array<unknown> = []
+        bridge.mockImplementation((input) =>
+          originalRun({
+            ...input,
+            prepare: async (scope) => {
+              const prepare = scope.prepareCommit
+              scope.prepareCommit = async (...args) => {
+                try {
+                  const result = await prepare(...args)
+                  preparationResults.push(result)
+                  return result
+                } catch (error) {
+                  preparationErrors.push(error)
+                  throw error
+                }
+              }
+              return input.prepare(scope)
+            },
+          }),
+        )
+        expect(await h.mls.readCommitHeader(commit)).toMatchObject({
+          committerDID: foreignDID ?? competitor?.identity.id,
+        })
+        const topicID = await h.topic()
+        const publish = (sealed: Uint8Array) =>
+          h.hub.publish({
+            topicID,
+            senderDID: randomIdentity().id,
+            payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealed)),
+            retain: 'log',
+          })
+        const bad = await publish(blob)
+        await vi.waitFor(() => expect(bridge).toHaveBeenCalled())
+        await Promise.all(bridge.mock.results.map((result) => result.value))
+        const after = await h.control.load()
+        expect(after.controlHold).toEqual(before.controlHold)
+        expect(after.commitOnce).toEqual({
+          ...before.commitOnce,
+          skipped: true,
+          retryForbidden: false,
+        })
+        expect(after.cursor?.position).toBe(bad.sequenceID)
+        expect(after.welcomes).toEqual(before.welcomes)
+        expect(after.outcomes).toEqual(before.outcomes)
+        expect(await h.groups.loadState(h.key)).toMatchObject({
+          state: row.state,
+          epoch: row.epoch,
+          epochAuthenticator: row.epochAuthenticator,
+        })
+        bridge.mockClear()
+        preparationErrors.length = 0
+        await publish(validBlob)
+        await vi.waitFor(() => expect(bridge).toHaveBeenCalled())
+        await Promise.all(bridge.mock.results.map((result) => result.value))
+        expect(preparationErrors).toEqual([])
+        expect(preparationResults.at(-1)).toMatchObject({ applied: true })
+        expect(await h.groups.loadState(h.key)).toMatchObject({ epoch: row.epoch + 1 })
+        expect((await h.control.load()).welcomes).toContainEqual(owed)
+      } finally {
+        await h.fixture.close()
+      }
+    },
+  )
   test.each([false, true])(
     `valid consumption after a copy skip closes unknown and preserves owed obligations (${mode}, context=%s)`,
     async (context) => {

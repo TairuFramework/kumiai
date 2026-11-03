@@ -571,7 +571,12 @@ export async function createRosterAbsenceRealFixture(
 
 export async function createForkRecoveryRealFixture(
   transactional = false,
-  params: { holes?: Array<number>; ownership?: 'supplied' | 'absent'; noticeEpoch?: number } = {},
+  params: {
+    holes?: Array<number>
+    ownership?: 'supplied' | 'absent'
+    noticeEpoch?: number
+    backgroundMaintenance?: 'gated'
+  } = {},
 ) {
   const real = await boundCapturedGroup()
   const own = real.members[0]
@@ -600,6 +605,7 @@ export async function createForkRecoveryRealFixture(
   const makeRegistry = (identity: OwnIdentity) =>
     createRegistryFixture({
       mode: 'real-mls',
+      backgroundMaintenance: params.backgroundMaintenance,
       setup: 'empty',
       groupID,
       identity,

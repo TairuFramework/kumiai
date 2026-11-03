@@ -58,6 +58,8 @@ import type {
   SafetyHold,
 } from '@kumiai/rpc'
 import {
+  applyChanges,
+  bindControlBatch,
   ControlWriteNotCommittedError,
   controlSafetyHeld,
   GroupSafetyHeldError,
@@ -69,8 +71,11 @@ import { ciphersuites, decode, mlsMessageDecoder, wireformats } from 'ts-mls'
 
 import { type ControlHandleAccess, guardedReplace } from './access.js'
 import { applyCommit } from './apply-commit.js'
-import { validateRecoveryCommit } from './control-validation.js'
+import { createControlAdoptionPort } from './control-adoption.js'
+import { createControlValidationPort, validateRecoveryCommit } from './control-validation.js'
+import { createGroupCryptoBase, registryControlEntryLabels } from './crypto.js'
 import { inboundCommitContext } from './inbound-commit.js'
+import { copyStoredValue } from './memory-incarnation-stores.js'
 import { GroupUnavailableError } from './persistence-errors.js'
 import type { GroupRecoveryTrust } from './persistence-types.js'
 import {
@@ -95,6 +100,11 @@ import {
   decodeRecoveryCandidate,
   encodeRecoveryCandidate,
 } from './recovery-codec.js'
+import {
+  controlCandidateRestore,
+  controlSourceRestore,
+  registryControlBatch,
+} from './registry/control-batch.js'
 import type { RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
 
@@ -706,8 +716,9 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         }
       }
       const frameEpoch = eligible.frameEpoch
+      const local = controlSourceRestore(access) !== undefined
       const ids = readCommitEntryIDs(commit)
-      const tokens = ids.length === 0 ? [] : await context.resolveLedgerEntries?.(ids)
+      const tokens = local || ids.length === 0 ? [] : await context.resolveLedgerEntries?.(ids)
       const resolved = new Map<string, string>()
       for (const token of tokens ?? []) resolved.set(ledgerEntryDigest(token), token)
       const ignored = Symbol('ignored commit')
@@ -729,11 +740,13 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             ...context,
             handle: group,
             commit,
-            resolveLedgerEntries: async (requested) =>
-              requested.flatMap((id) => {
-                const token = resolved.get(id)
-                return token == null ? [] : [token]
-              }),
+            resolveLedgerEntries: local
+              ? context.resolveLedgerEntries
+              : async (requested) =>
+                  requested.flatMap((id) => {
+                    const token = resolved.get(id)
+                    return token == null ? [] : [token]
+                  }),
             entrySlot,
             ownDID: identity.id,
             persist: (candidate, ctx) =>
@@ -1055,6 +1068,118 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     },
   }
   groupHandleAccess.set(port, access)
+  const batch = registryControlBatch(access)
+  if (batch !== undefined)
+    bindControlBatch(port, {
+      key: batch.key,
+      run: (input) =>
+        batch.run({
+          ...input,
+          prepare: async (local) => {
+            let active = true
+            const assertActive = () => {
+              if (!active) throw new Error('Control prepare scope has ended')
+            }
+            const source = await local.access.readControl(async (scope) => scope.source)
+            let snapshot = await local.control.load()
+            let anchor = await local.anchor.load()
+            const writes: Array<Promise<void>> = []
+            const isolated = createGroupMLS({
+              ...params,
+              access: local.access,
+              control: local.control,
+              readRecoverySource: async () => source,
+              recoveryAdoption: undefined,
+            })
+            const entryLabel = registryControlEntryLabels.get(batch)
+            const crypto = createGroupCryptoBase({ access: local.access, entryLabel })
+            const restoreCandidate = controlCandidateRestore(local.access)
+            const adoption = createControlAdoptionPort({
+              access: local.access,
+              control: local.control,
+              restoreCandidate,
+            })
+            const call =
+              <TArgs extends Array<unknown>, TResult>(
+                fn: (...args: TArgs) => TResult | Promise<TResult>,
+              ) =>
+              async (...args: TArgs): Promise<TResult> => {
+                assertActive()
+                const result = await fn(...args)
+                assertActive()
+                snapshot = await local.control.load()
+                anchor = await local.anchor.load()
+                return result
+              }
+            const validation = createControlValidationPort({
+              identity,
+              options: params.recoveryAdoption?.environment.options ?? {},
+              entryLabel,
+              restoreCandidate,
+              restoreSource: controlSourceRestore(local.access),
+            })
+            try {
+              const result = await input.prepare({
+                source,
+                control: () => {
+                  assertActive()
+                  return copyStoredValue(snapshot)
+                },
+                anchor: () => {
+                  assertActive()
+                  return copyStoredValue(anchor)
+                },
+                readEpoch: call(isolated.readEpoch),
+                readCommitHeader: call(isolated.readCommitHeader),
+                rosterEntries: call(isolated.rosterEntries),
+                isLedgerComplete: call(isolated.isLedgerComplete),
+                openEntries: call(crypto.openEntries),
+                exportSecret: call(crypto.exportSecret),
+                validation: {
+                  restoreValidation: async (built) => {
+                    assertActive()
+                    const restored = await validation.restoreValidation(built)
+                    assertActive()
+                    return restored === null
+                      ? null
+                      : {
+                          ...restored,
+                          readCommitHeader: call(restored.readCommitHeader),
+                          validateFrame: call(restored.validateFrame),
+                          verifyOwn: call(restored.verifyOwn),
+                        }
+                  },
+                },
+                prepareCommit: call(isolated.processCommit),
+                prepareOwn: call(adoption.adopt),
+                stageControl: (changes, mutationID) => {
+                  assertActive()
+                  snapshot = applyChanges(
+                    snapshot,
+                    changes,
+                    source.identity === null ? null : { kind: 'cursor', source: source.identity },
+                    source.key,
+                  )
+                  writes.push(
+                    local.control.apply(changes, mutationID).then(async () => {
+                      snapshot = await local.control.load()
+                    }),
+                  )
+                },
+                stageAnchor: (slot) => {
+                  assertActive()
+                  anchor = copyStoredValue(slot)
+                  writes.push(local.anchor.save(slot))
+                },
+              })
+              await Promise.all(writes)
+              return result
+            } finally {
+              active = false
+            }
+          },
+        }),
+    })
   return port
 }
 

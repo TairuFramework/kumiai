@@ -59,6 +59,8 @@ const ENTRY_NONCE_BYTES = 24
  */
 const ENTRY_VERSION = 1
 
+export const registryControlEntryLabels = new WeakMap<object, string>()
+
 export function assertOpenableEpoch(group: GroupHandle, bytes: Uint8Array): void {
   const frameEpoch = readMessageEpoch(bytes)
   const epoch = Number(group.epoch)

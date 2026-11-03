@@ -73,6 +73,7 @@ import type {
 import { executableOperations } from './control/types.js'
 import { deliverObligations } from './control/welcome.js'
 import { controlBatch } from './control-batch.js'
+import { prepareControlOccurrence } from './control-prepare.js'
 import {
   type AppliedRecovery,
   type GroupCrypto,
@@ -2569,8 +2570,7 @@ export function createGroupPeerWithControlWalk<
     requireCompletePrefix = false,
   ): Promise<boolean> => {
     if (controlBinding !== undefined && port === mls) {
-      requestBufferedControl()
-      return false
+      return await reconcileBufferedControl()
     }
     let advanced: boolean
     try {
@@ -2599,10 +2599,7 @@ export function createGroupPeerWithControlWalk<
       )
     }
     if (mls == null || commitTopicID == null) return false
-    if (controlBinding !== undefined) {
-      requestBufferedControl()
-      return false
-    }
+    if (controlBinding !== undefined) return await reconcileBufferedControl()
     const savedRecovery = (await control?.load())?.rejoin
     if (savedRecovery != null && !('format' in savedRecovery) && mls.capturedRecovery !== undefined)
       return false
@@ -2756,6 +2753,18 @@ export function createGroupPeerWithControlWalk<
   let controlFetchTimer: ReturnType<typeof setTimeout> | undefined
   let controlFetchBackoff = 1000
   let controlAttempt: Promise<unknown> | undefined
+  const controlChecks = new Set<Promise<unknown>>()
+  let controlPrepareTimer: ReturnType<typeof setTimeout> | undefined
+  let controlPrepareBackoff = 1000
+  let controlPrerequisite: Promise<void> | undefined
+  function retryBufferedPreparation(): void {
+    if (disposed || controlPrepareTimer !== undefined) return
+    controlPrepareTimer = setTimeout(() => {
+      controlPrepareTimer = undefined
+      advertiseBufferedControl()
+    }, controlPrepareBackoff)
+    controlPrepareBackoff = Math.min(controlPrepareBackoff * 2, 60_000)
+  }
   const bufferedControl = createBufferedControlIntake({
     key: completion.key,
     ready: () => advertiseBufferedControl(),
@@ -2769,29 +2778,151 @@ export function createGroupPeerWithControlWalk<
     if (
       controlBinding === undefined ||
       disposed ||
-      !startupComplete ||
+      !controlPreparationReady ||
       safetyHold() !== null ||
       locallyRemoved ||
       rejoinHeld ||
       awaitingBootstrap !== null ||
       activeRecovery !== null ||
+      controlPrepareTimer !== undefined ||
+      controlPrerequisite !== undefined ||
       controlAttempt !== undefined
     )
       return
     const occurrence = bufferedControl.next()
     if (occurrence === undefined) return
+    const message = occurrence.page.result.messages[occurrence.index]
+    if (message === undefined) return
+    let consumed = false
+    const workVersion = commitWorkVersion
     // Readiness alone grants no authority to consume or classify the fetched occurrence.
     const attempt = controlBinding.run({
       source: JSON.stringify(['control', completion.key.incarnation, occurrence.page.topicID]),
       signal: controlAbort.signal,
-      prepare: async () => {},
+      prepare: async (scope) => {
+        if (disposed || occurrence.page.generation !== controlGeneration)
+          throw new Error('Buffered control source moved')
+        return await prepareControlOccurrence({
+          scope,
+          ...occurrence,
+          localDID,
+          ownCommitDigest: (commit) => mls?.ownCommitDigest(commit) ?? null,
+          adoption: adoptionWrite,
+          newID: newPublishID,
+        })
+      },
     })
     controlAttempt = attempt
-    void attempt
-      .catch(() => {})
+    const check = attempt
+      .then(async (proven) => {
+        if (disposed || occurrence.page.generation !== controlGeneration) return
+        const { value } = proven
+        if (!value.consumed) {
+          if (value.prerequisite === 'ledger' && mls != null) {
+            const port = mls
+            const prerequisite = runSerial(async () => {
+              if (!disposed && (await ensureLedger(Date.now() + recoveryTimeoutMs)))
+                await finalizeBootstrap(port)
+            })
+            controlPrerequisite = prerequisite
+            void prerequisite
+              .catch(() => {})
+              .finally(() => {
+                if (controlPrerequisite === prerequisite) controlPrerequisite = undefined
+                retryBufferedPreparation()
+              })
+          } else retryBufferedPreparation()
+          return
+        }
+        consumed = true
+        controlPrepareBackoff = 1000
+        appliedEpoch = proven.epoch
+        if (proven.anchor !== null) {
+          anchor = proven.anchor.anchor
+          departing = proven.anchor.departing ?? []
+          anchorPending = proven.anchor.pending
+        }
+        await refreshControl(undefined, { control: proven.control, epoch: proven.epoch })
+        if (value.diagnostic !== undefined && commitTopicID !== undefined)
+          emitStrand({ ...value.diagnostic, groupID: commitTopicID })
+        if (value.removed) {
+          locallyRemoved = true
+          appLane.stopOpening()
+          logDelivery?.removed()
+        }
+        bufferedControl.consumed({
+          generation: occurrence.page.generation,
+          topicID: occurrence.page.topicID,
+          position: message.sequenceID,
+        })
+        if (
+          occurrence.index + 1 === occurrence.page.result.messages.length &&
+          occurrence.page.result.messages.length < COMMIT_FETCH_LIMIT &&
+          workVersion === commitWorkVersion
+        ) {
+          commitLogHead =
+            occurrence.page.result.head === null ? null : asLogPosition(occurrence.page.result.head)
+          if (
+            !occurrence.page.result.gap &&
+            proven.control.cursor?.incomplete !== true &&
+            proven.control.cursor?.position === commitLogHead
+          ) {
+            commitLaneCaughtUp = true
+            appLane.retryDelivery()
+          }
+        }
+        if (value.advanced && !value.removed) {
+          epochNeedsBuild = true
+          // Publish runtime work after the selected entry releases the arbiter.
+          setTimeout(() => {
+            if (!disposed) void rebuildEpoch().catch(() => {})
+          }, 0)
+        }
+      })
+      .catch((error: unknown) => {
+        if (disposed) return
+        if (error instanceof Error && error.name === 'ControlDrainRequiredError') {
+          const prerequisite = (async () => {
+            const records = await (openedBinding?.list() ?? openedPending?.list())
+            if (records !== undefined) await appLane.restore(records)
+            await appLane.completeOpened({ keepOpening: true })
+          })()
+          controlPrerequisite = prerequisite
+          void prerequisite
+            .catch(() => {})
+            .finally(() => {
+              if (controlPrerequisite === prerequisite) controlPrerequisite = undefined
+              retryBufferedPreparation()
+            })
+        } else retryBufferedPreparation()
+      })
       .finally(() => {
         if (controlAttempt === attempt) controlAttempt = undefined
+        if (consumed && !disposed) advertiseBufferedControl()
+        controlChecks.delete(check)
       })
+    controlChecks.add(check)
+  }
+  async function reconcileBufferedControl(): Promise<boolean> {
+    if (!controlPreparationReady) {
+      requestBufferedControl()
+      return false
+    }
+    const epochBefore = appliedEpoch
+    const generation = controlGeneration
+    // Explicit reconciliation waits outside ownership; ingress only advertises readiness.
+    await fetchBufferedControl()
+    while (!disposed && generation === controlGeneration) {
+      advertiseBufferedControl()
+      const checks = [...controlChecks]
+      if (checks.length === 0) break
+      await Promise.all(checks)
+      // Prerequisites may need this caller's serial lane. A fresh turn follows their release.
+      if (controlPrerequisite !== undefined || controlPrepareTimer !== undefined) break
+      if (controlFetch !== undefined) await controlFetch
+      else if (controlFetchNeeded) await fetchBufferedControl()
+    }
+    return appliedEpoch !== epochBefore
   }
   function requestBufferedControl(): void {
     advertiseBufferedControl()
@@ -3129,10 +3260,13 @@ export function createGroupPeerWithControlWalk<
       Math.max(0, deadline - Date.now()),
     )
   }
-  const refreshControl = async (freshEvidence?: ControlEvidenceSnapshot): Promise<void> => {
+  const refreshControl = async (
+    freshEvidence?: ControlEvidenceSnapshot,
+    proven?: { control: ControlSnapshot; epoch: number },
+  ): Promise<void> => {
     if (control == null) return
     const generation = safetyGeneration
-    let snapshot = await control.load()
+    let snapshot = proven?.control ?? (await control.load())
     if (
       snapshot.cursor?.stranded === true &&
       (snapshot.strand?.reason === 'ahead' || snapshot.strand?.reason === 'retention-gap') &&
@@ -3170,12 +3304,14 @@ export function createGroupPeerWithControlWalk<
       healRequested = false
     }
     const currentEpoch =
-      safetyHold() !== null || params.recoveryOnly ? undefined : await mls?.readEpoch()
+      safetyHold() !== null || params.recoveryOnly
+        ? undefined
+        : (proven?.epoch ?? (await mls?.readEpoch()))
     if (params.recoveryOnly || snapshot.commitOnce === null || hardControlHeld()) {
       unresolvedControlSlot = false
       slotEvidenceStamp = null
       cancelControlSlotRetry()
-    } else if (params.readEvidence !== undefined) {
+    } else if (params.readEvidence !== undefined && proven === undefined) {
       const slot = snapshot.commitOnce
       const row = snapshot.applied.find((row) => row.epoch === slot.epoch)
       const stamp = JSON.stringify([
@@ -4244,6 +4380,7 @@ export function createGroupPeerWithControlWalk<
     }
     await ready
     assertLive()
+    if (controlBinding !== undefined) await reconcileBufferedControl()
     if (locallyRemoved) return {}
     const savedRejoin = (await control?.load())?.rejoin
     if (
@@ -5664,6 +5801,7 @@ export function createGroupPeerWithControlWalk<
   }
 
   // Core sinks latch synchronously, including holds already present at subscription.
+  let controlPreparationReady = false
   let startupComplete = false
   let safetyResume: Promise<void> = Promise.resolve()
   const unsubscribeSafety =
@@ -5827,6 +5965,11 @@ export function createGroupPeerWithControlWalk<
         }
       }
       if (stopped()) return
+      if (controlBinding !== undefined) {
+        controlPreparationReady = true
+        await reconcileBufferedControl()
+        if (stopped() || locallyRemoved) return
+      }
       // Saved acceptances settle before the walker can meet our own unmerged commit.
       await runSerial(async () => {
         if (stopped()) return
@@ -5876,6 +6019,7 @@ export function createGroupPeerWithControlWalk<
       }
       startupComplete = !stopped()
       advertiseBufferedControl()
+      if (startupComplete && controlBinding !== undefined) appLane.kick()
     } catch (error) {
       if (!safetyRefusal(error)) throw error
     } finally {
@@ -6094,6 +6238,10 @@ export function createGroupPeerWithControlWalk<
         .then(() => commitTail)
         .then(async () => {
           await internalDrain
+          await Promise.allSettled([
+            ...controlChecks,
+            ...(controlPrerequisite === undefined ? [] : [controlPrerequisite]),
+          ])
           try {
             await logDelivery?.drained()
           } finally {
@@ -6122,6 +6270,8 @@ export function createGroupPeerWithControlWalk<
       const checkpointDrain = checkpointWorker?.dispose()
       unsubscribeSafety?.()
       bufferedControl.reset(++controlGeneration)
+      clearTimeout(controlPrepareTimer)
+      controlPrepareTimer = undefined
       controlFetchNeeded = false
       if (controlFetchTimer !== undefined) clearTimeout(controlFetchTimer)
       controlFetchTimer = undefined

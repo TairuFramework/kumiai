@@ -37,6 +37,7 @@ import {
   type ControlLogFrame,
   type ControlValidationPort,
   commitTopic,
+  controlBatch,
   createGroupPeer,
   decodeCommitFrame,
   decodeHandshakeFrame,
@@ -74,6 +75,7 @@ import { expect, test, vi } from 'vitest'
 import { decodeControlJournal, encodeControlJournal } from '../src/control-journal.js'
 import { createControlValidationPort } from '../src/control-validation.js'
 import { createGroupCrypto, deriveEntryKey, sealEntries } from '../src/crypto.js'
+import { entryCapability } from '../src/entry-capability.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
@@ -94,7 +96,95 @@ import {
   restoreMemoryControlSource,
   sealedMemoryValidation,
 } from './fixtures/sealed-memory-mls.js'
+import { createControlCrashHarness } from './fixtures/storage-persistence.js'
 import { installSeed, makeStorageSeed } from './fixtures/storage-seed.js'
+
+for (const mode of ['real-mls', 'double'] as const) {
+  test(`ready control refuses an injected source version conflict (${mode})`, async () => {
+    const h = await createControlCrashHarness(mode, undefined, undefined, true, true)
+    try {
+      const binding = controlBatch(h.mls)!
+      const capability = entryCapability(h.groups)!
+      const run = capability.run.bind(capability)
+      const before = await h.groups.loadState(h.key)
+      const control = await h.control.load()
+      vi.spyOn(capability, 'run').mockImplementationOnce((request, prepare, work, effects) =>
+        run(
+          request,
+          prepare,
+          async (stores, prepared) => {
+            const state = await stores.incarnation(h.key.incarnation).state.load()
+            if (state === null) throw new Error('Missing source')
+            await stores
+              .incarnation(h.key.incarnation)
+              .state.save({ ...state, version: state.version + 1 })
+            return work(stores, prepared)
+          },
+          effects,
+        ),
+      )
+      await expect(
+        binding.run({
+          source: 'conflict',
+          prepare: async (scope) => {
+            scope.stageControl(
+              { cursor: { epoch: await scope.readEpoch(), position: asLogPosition('0001') } },
+              'conflict',
+            )
+          },
+        }),
+      ).rejects.toMatchObject({ name: 'ControlAdoptionMovedError' })
+      expect(await h.groups.loadState(h.key)).toEqual(before)
+      expect(await h.control.load()).toEqual(control)
+    } finally {
+      await h.fixture.close()
+    }
+  })
+  test(`ready control revalidates source and preserves authentication (${mode})`, async () => {
+    const h = await createControlCrashHarness(mode, undefined, undefined, true, true)
+    try {
+      const built = await h.build()
+      await h.saveBuilt(built.intent, built.slot, built.expected, 'bound-validation')
+      const binding = controlBatch(h.mls)
+      expect(binding).toBeDefined()
+      const result = await binding!.run({
+        source: 'bound-validation',
+        prepare: async (scope) => {
+          const validation = await scope.validation.restoreValidation(built.slot)
+          expect(validation).not.toBeNull()
+          expect(await validation!.verifyOwn(built.slot)).toBe(true)
+          const frame = decodeCommitFrame(decodeHandshakeFrame(built.slot.payload).payload)
+          const commit = frame.commit.slice()
+          commit[commit.length - 1]! ^= 1
+          const payload = encodeHandshakeFrame(
+            HANDSHAKE_KIND.commit,
+            encodeCommitFrame(commit, frame.sealedEntries),
+          )
+          const damaged = {
+            ...built.slot,
+            payload,
+            payloadDigest: toB64U(sha256(payload)),
+            digest: digestAppliedCommit(commit),
+          }
+          const invalid = await scope.validation.restoreValidation(damaged)
+          expect(await invalid?.verifyOwn(damaged)).toBe(false)
+          return await validation!.validateFrame(
+            {
+              position: asLogPosition('00001'),
+              payload: built.slot.payload,
+              senderDID: randomIdentity().id,
+            },
+            built.slot,
+          )
+        },
+      })
+      expect(result.value).toMatchObject({ kind: 'valid', own: true })
+    } finally {
+      await h.fixture.close()
+    }
+  })
+}
+
 import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 const verifierFault = vi.hoisted((): { token: string; error: Error } => ({

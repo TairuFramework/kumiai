@@ -1,9 +1,18 @@
-import { encodeAppAAD, GroupSafetyHeldError } from '@kumiai/rpc'
+import {
+  asLogPosition,
+  controlBatch,
+  digestAppliedCommit,
+  encodeAppAAD,
+  GroupSafetyHeldError,
+} from '@kumiai/rpc'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
+import { createHandlerCompletion } from '../src/handler-completion.js'
+import { createLedgerEntrySlot } from '../src/mls.js'
 import { registryReceiveSlots, setReceiveBase } from '../src/registry/live-receive.js'
 import { registryRetirement } from '../src/registry/retirement.js'
+import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { deferred } from '../src/runtime.js'
 import {
   dropRegistryOwner,
@@ -53,6 +62,61 @@ async function foreignWithoutRefresh(fixture: Fixture, kind: 'receive' | 'propos
 }
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`live receive (${mode})`, () => {
+    test('selected removal drains opened plaintext before clearing control', async () => {
+      const fixture = await setup(mode)
+      if (fixture.group === null) throw new Error('Missing group')
+      await fixture.openDurable()
+      const f = fixture.fixture()
+      const mls = await createRegistryGroupMLS({
+        registry: f.registry,
+        key: fixture.key,
+        recovery: f.environment,
+        identity: f.identity,
+        entrySlot: createLedgerEntrySlot(),
+        target: { targetID: 'removal-hub', topicID: 'removal-log' },
+      })
+      const binding = controlBatch(mls)
+      expect(binding).toBeDefined()
+      const commit = await fixture.group.prepareCommit(0)
+      const position = asLogPosition('0001')
+      const attempt = () =>
+        binding!.run({
+          source: 'removal',
+          prepare: async (scope) => {
+            const epoch = await scope.readEpoch()
+            return scope.prepareCommit(commit, {
+              adoption: (staged) => ({
+                mutationID: crypto.randomUUID(),
+                changes: {
+                  commitOnce: null,
+                  cursor: { position, epoch: staged.epochAfter },
+                  putApplied: [
+                    {
+                      epoch,
+                      digest: digestAppliedCommit(commit),
+                      payloadDigest: 'removal-payload',
+                      sequenceID: position,
+                      opID: null,
+                      removed: staged.removed,
+                    },
+                  ],
+                },
+              }),
+            })
+          },
+        })
+      const before = await f.device.groups.loadState(fixture.key)
+      await expect(attempt()).rejects.toMatchObject({ name: 'ControlDrainRequiredError' })
+      expect(await f.device.groups.loadState(fixture.key)).toEqual(before)
+      const pending = await fixture.access().pending.list()
+      expect(pending).toHaveLength(1)
+      await createHandlerCompletion({ persistence: f.device.groups, key: fixture.key }).complete(
+        pending.map((record) => record.frame.id),
+      )
+      expect(await fixture.access().pending.list()).toEqual([])
+      expect((await attempt()).value).toMatchObject({ applied: true })
+      expect(await f.device.groups.loadState(fixture.key)).toMatchObject({ terminal: true })
+    })
     test('reservation keeps the receive handle; durable open rebuilds it', async () => {
       const fixture = await setup(mode)
       await warm(fixture)

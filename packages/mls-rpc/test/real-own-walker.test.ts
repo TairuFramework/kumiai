@@ -6,6 +6,7 @@ import {
   restoreGroup,
 } from '@kumiai/mls'
 import {
+  controlBatch,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
@@ -231,6 +232,9 @@ test.each([false, true])(
         const page = await fetch(params)
         return params.topicID === h.target.topicID ? { ...page, gap } : page
       })
+      const binding = controlBatch(h.mls)
+      expect(binding).toBeDefined()
+      const selected = vi.spyOn(binding!, 'run')
       const occurrence = await h.hub.publish({
         senderDID: h.localDID,
         topicID: h.target.topicID,
@@ -238,6 +242,8 @@ test.each([false, true])(
         payload: saved.payload,
       })
       await h.running.controlWalk.walkCommits()
+      const proven = await Promise.all(selected.mock.results.map((result) => result.value))
+      expect(proven.some((result) => result.epoch === saved.epoch + 1)).toBe(true)
       expect(receive).not.toHaveBeenCalled()
       expect(processMessage).not.toHaveBeenCalled()
       const control = await h.ports.control.load()

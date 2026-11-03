@@ -26,6 +26,7 @@ import {
 } from '../persistence-errors.js'
 import type { EpochIdentity, GroupStores, GroupTransaction } from '../persistence-types.js'
 import type { RegistryOwner } from './access.js'
+import { scheduleRegistryAccounting } from './accounting.js'
 import { type ColdEnvironment, copyRecord } from './cold.js'
 import { setReceiveBase } from './live-receive.js'
 import {
@@ -178,6 +179,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   initialEligibility: Uint8Array
   slot: LiveSlot
   capability: EntryCapability<TTx>
+  binding: object
   environment: ColdEnvironment
   resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
   assertAvailable(): void
@@ -580,8 +582,14 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     const check = () => {
       if (started || signal.aborted) return
       started = true
-      void capability
-        .read(owner.key.groupID, async (reads) => {
+      void scheduleRegistryAccounting({
+        capability,
+        binding: params.binding,
+        key: owner.key,
+        source: 'live',
+        signal,
+        current,
+        read: async (reads) => {
           if (!current()) return
           const record = await reads.state(owner.key.incarnation)
           const nextControl = await reads.control(owner.key.incarnation)
@@ -606,11 +614,11 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
               current,
             },
           )
-        })
-        .then(finish, () => {
-          if (current()) foreign(version)
-          finish()
-        })
+        },
+      }).then(finish, () => {
+        if (current()) foreign(version)
+        finish()
+      })
     }
     checks.add(pending)
     accountingStarts.add(check)
@@ -678,6 +686,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     request: { groupID: string; mutationID: string | null },
     prepare: (reads: EntryReads) => Promise<Prepared<P>>,
     work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
+    effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
   ): Promise<T> {
     let proof: OwnProof | undefined
     let mutationID = request.mutationID
@@ -691,6 +700,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
           return prepared
         },
         work,
+        effects,
       )
       if (proof !== undefined) await settle(proof, 'committed')
       return result

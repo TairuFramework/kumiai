@@ -17,6 +17,7 @@ import {
   type ControlChanges,
   type ControlSlot,
   type ControlSnapshot,
+  controlBatch,
   createGroupPeer,
   digestAppliedCommit,
   encodeCommitFrame,
@@ -265,15 +266,18 @@ async function setup(
     const registryAccess = await fixture.registry.access(key.groupID)
     const controlAccess = createRegistryHandleAccess({ access: registryAccess })
     const mls = await makeMLS()
-    const process = mls.processCommit.bind(mls)
-    mls.processCommit = async (commit, context) => {
-      const result = await process(commit, context)
-      if (result.applied) {
+    const binding = controlBatch(mls)
+    expect(binding).toBeDefined()
+    if (binding === undefined) throw new Error('Missing selected control binding')
+    const run = binding.run.bind(binding)
+    vi.spyOn(binding, 'run').mockImplementation(async (input) => {
+      const result = await run(input)
+      if (result.control.applied.length > 0 && appliedControl === undefined) {
         appliedControl = await current.control.load()
         await afterApply?.()
       }
       return result
-    }
+    })
     peer = createGroupPeer({
       completion: createTestCompletion(key, registryAccess.pending),
       openedDeliveryContext,

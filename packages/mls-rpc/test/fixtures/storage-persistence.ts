@@ -19,10 +19,12 @@ import {
   asLogPosition,
   type ControlSlot,
   commitTopic,
+  controlBatch,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
+  type GroupMLS,
   HANDSHAKE_KIND,
   type Operation,
   type OwnOccurrence,
@@ -69,12 +71,17 @@ import type {
   RawStoredRecord,
   TransactionalGroupEffects,
 } from '../../src/persistence-types.js'
+import { createGroupHandleRegistry } from '../../src/registry/registry.js'
+import { registryOptions } from '../../src/registry/validation.js'
+import { createRegistryGroupMLS } from '../../src/registry-group-mls.js'
+import { createRegistryHandleAccess } from '../../src/registry-handle-access.js'
 import { deferred } from '../../src/runtime.js'
 import {
   createIncarnationStores,
   createMemoryDevicePersistence,
   createMemoryPackageStores,
   createMemoryTransaction,
+  gateRegistryMaintenance,
   memoryFaults,
 } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
@@ -930,8 +937,39 @@ export async function createControlCrashHarness(
   seed?: StorageSeed,
   ownershipContext?: OwnershipContextPort,
   namedEntries = false,
+  registryBound = false,
 ) {
-  const fixture = await createStorageFixture({ id: 'control-crash', mode, seed, ownershipContext })
+  const boundSeed = registryBound
+    ? (seed ??
+      (await makeStorageSeed({
+        id: 'control-crash',
+        incarnation: 1,
+        epoch: 0,
+        mode,
+        options: registryOptions({}),
+      })))
+    : seed
+  const boundState =
+    boundSeed?.state.state === null || boundSeed?.state.state === undefined
+      ? undefined
+      : decodeClientState(boundSeed.state.state)
+  const boundIdentity =
+    !registryBound || boundState === undefined
+      ? undefined
+      : {
+          ...createFullIdentity(boundState.signaturePrivateKey),
+          privateKey: boundState.signaturePrivateKey,
+        }
+  const fixture = await createStorageFixture({
+    id: 'control-crash',
+    mode,
+    seed: boundSeed,
+    ownershipContext,
+    identity: boundIdentity,
+    setup: registryBound ? 'empty' : undefined,
+  })
+  if (registryBound && boundSeed !== undefined)
+    await installSeed(fixture.ports.device.groups, boundSeed, 'bound-seed')
   const key = { groupID: 'control-crash', incarnation: 1 }
   const closers: Array<() => Promise<void>> = []
   const fixtureClose = fixture.close.bind(fixture)
@@ -959,6 +997,7 @@ export async function createControlCrashHarness(
     }
   }
   const hub = new FakeHub()
+  let controlGap = false
   const publications: Array<{
     payload: Uint8Array
     publishID: string | undefined
@@ -968,7 +1007,10 @@ export async function createControlCrashHarness(
     subscribe: hub.subscribe.bind(hub),
     unsubscribe: hub.unsubscribe?.bind(hub),
     receive: hub.receive.bind(hub),
-    fetchTopic: hub.fetchTopic.bind(hub),
+    fetchTopic: async (input: Parameters<typeof hub.fetchTopic>[0]) => {
+      const result = await hub.fetchTopic(input)
+      return controlGap ? { ...result, gap: true } : result
+    },
     publish: async (params: Parameters<typeof hub.publish>[0]) => {
       publications.push({
         payload: params.payload.slice(),
@@ -985,6 +1027,7 @@ export async function createControlCrashHarness(
       beforeSave?: (slot: ControlSlot) => void
       beforeAccept?: () => void
       beforeAdopt?: () => void
+      beforeWelcome?: () => void | Promise<void>
     } = {}
     const persistBuild = createPersistenceBuildSaver({ persistence: groups, key })
     const saveBuilt: typeof persistBuild = async (intent, built, expected, mutationID) => {
@@ -1011,10 +1054,15 @@ export async function createControlCrashHarness(
       privateKey: initial.signaturePrivateKey,
     }
     const restoreHandle = mode === 'double' ? restoreMemoryControlHandle : restoreGroup
+    const entrySlot = createLedgerEntrySlot()
+    const options = registryBound
+      ? registryOptions({ resolveLedgerEntries: entrySlot.resolve })
+      : {}
     const initialHandle = await restoreHandle({
       state: initial,
       credential: stored.credential,
       ledgerEntries: stored.ledger,
+      options,
     })
     const host = await createSealedControlAccess(
       groups,
@@ -1025,6 +1073,17 @@ export async function createControlCrashHarness(
       restoreHandle,
     )
     const restoreCandidate = async (bytes: Uint8Array) => {
+      if (registryBound) {
+        const candidate = decodeStoredValue(bytes) as { state: Uint8Array; ledger: Array<string> }
+        const state = decodeClientState(candidate.state)
+        if (state === undefined) throw new InvalidCandidateError('Invalid candidate')
+        return restoreHandle({
+          state,
+          credential: stored.credential,
+          ledgerEntries: candidate.ledger,
+          options,
+        })
+      }
       let candidateBytes = bytes
       try {
         candidateBytes = decodeAutoRotationCandidate(bytes).state
@@ -1040,7 +1099,33 @@ export async function createControlCrashHarness(
         ledgerEntries: mode === 'double' ? undefined : (slot?.bodies ?? stored.ledger),
       })
     }
-    const adoption = createControlAdoptionPort({ access: host.access, control, restoreCandidate })
+    const registry = registryBound
+      ? createGroupHandleRegistry({
+          persistence: fixture.ports.device,
+          providerID: fixture.ports.device.providerID,
+          openedDeliveryContext,
+          recovery: { identity, options },
+          restore: async (record) => {
+            const state = decodeClientState(record.state)
+            if (state === undefined) throw new InvalidCandidateError('Invalid source')
+            return restoreHandle({
+              state,
+              credential: record.credential,
+              ledgerEntries: record.ledger,
+              options,
+            })
+          },
+          restoreCandidate,
+        })
+      : undefined
+    if (registry !== undefined) closers.push(() => registry.dispose())
+    if (registry !== undefined) gateRegistryMaintenance(registry)
+    const registryAccess = await registry?.access(key.groupID)
+    const access =
+      registryAccess === undefined
+        ? host.access
+        : createRegistryHandleAccess({ access: registryAccess })
+    const adoption = createControlAdoptionPort({ access, control, restoreCandidate })
     const adoptControl: typeof adoption.adopt = async (bytes, expected, write) => {
       const result = await adoption.adopt(bytes, expected, write)
       if (result === 'installed') observations.ownAdoptions++
@@ -1051,7 +1136,18 @@ export async function createControlCrashHarness(
       handle: Awaited<ReturnType<typeof restoreCandidate>>,
     ) => {
       observations.builds++
-      if (mode === 'double') return buildSealedMemoryOperation(op, handle, namedEntries)
+      if (mode === 'double') {
+        const built = await buildSealedMemoryOperation(op, handle, namedEntries)
+        if (!registryBound) return built
+        const candidate = await restoreMemoryControlHandle({
+          state: decodeClientState(built.journal)!,
+          credential: stored.credential,
+        })
+        return {
+          ...built,
+          journal: encodeStoredValue({ state: built.journal, ledger: candidate.ledgerTokens }),
+        }
+      }
       const { invite, publicPackage } = decodeStoredValue(op.body) as {
         invite: Parameters<typeof commitInvite>[2]
         publicPackage: Parameters<typeof commitInvite>[1]
@@ -1060,7 +1156,12 @@ export async function createControlCrashHarness(
       return {
         commit: built.commitMessage,
         bodies: invite.ledgerEntries,
-        journal: encodeClientState(built.newGroup.state),
+        journal: registryBound
+          ? encodeStoredValue({
+              state: encodeClientState(built.newGroup.state),
+              ledger: built.newGroup.ledgerTokens,
+            })
+          : encodeClientState(built.newGroup.state),
         welcome: { bytes: built.welcomeMessage, recipients: [invite.recipientDID] },
         incarnation: key.incarnation,
         epoch: Number(handle.epoch),
@@ -1069,7 +1170,7 @@ export async function createControlCrashHarness(
       }
     }
     const buildPort = createControlBuildPort({
-      access: host.access,
+      access,
       control,
       build: buildHost,
       rotate: mode === 'double' ? buildSealedMemoryOperation : undefined,
@@ -1087,23 +1188,38 @@ export async function createControlCrashHarness(
       now: Date.now,
       newID: () => crypto.randomUUID(),
     })
-    const entrySlot = createLedgerEntrySlot()
-    const cryptoPort = createGroupCrypto({ access: host.access })
-    const mls =
-      mode === 'double'
-        ? new Proxy(memoryModel(initialHandle), {
-            get(_target, property) {
-              if (property === 'readRecoverySource')
-                return async () => {
-                  const value = await source()
-                  return value
-                }
-              const current = memoryModel(host.live())
-              const value = Reflect.get(current, property)
-              return typeof value === 'function' ? value.bind(current) : value
-            },
+    const cryptoPort =
+      registryAccess === undefined
+        ? createGroupCrypto({ access: host.access })
+        : createGroupCrypto({ access: registryAccess })
+    const mls: GroupMLS =
+      registry !== undefined
+        ? await createRegistryGroupMLS({
+            registry,
+            key,
+            recovery: { identity, options },
+            target: { targetID: 'control-hub', topicID: 'control-log' },
+            identity,
+            entrySlot,
           })
-        : createGroupMLS({ ...testGroupMLSDependencies(host.access, control), identity, entrySlot })
+        : mode === 'double'
+          ? new Proxy(memoryModel(initialHandle), {
+              get(_target, property) {
+                if (property === 'readRecoverySource')
+                  return async () => {
+                    const value = await source()
+                    return value
+                  }
+                const current = memoryModel(host.live())
+                const value = Reflect.get(current, property)
+                return typeof value === 'function' ? value.bind(current) : value
+              },
+            })
+          : createGroupMLS({
+              ...testGroupMLSDependencies(host.access, control),
+              identity,
+              entrySlot,
+            })
     const validation =
       mode === 'double'
         ? sealedMemoryValidation()
@@ -1137,11 +1253,13 @@ export async function createControlCrashHarness(
           appCursorStore: groups.ports(key).cursor,
           readEvidence: () => groups.readEvidence(key),
           // Anchor staging has its own durable owner; it must not move the guarded MLS row.
-          anchorStore: groups.ports({ groupID: 'group-B', incarnation: 1 }).anchor,
+          anchorStore: groups.ports(registryBound ? key : { groupID: 'group-B', incarnation: 1 })
+            .anchor,
           localDID: identity.id,
           protocols: {},
           handlers: {},
           deliverWelcome: async () => {
+            await hooks.beforeWelcome?.()
             observations.welcomeDeliveries++
           },
         })
@@ -1154,6 +1272,7 @@ export async function createControlCrashHarness(
         await running.peer.dispose()
         await running.peer.drained()
       }
+      await registry?.dispose()
     }
     const intent = async () => {
       const retained = (await control.load()).operations.find((row) => row.stage === 'intent')
@@ -1191,7 +1310,7 @@ export async function createControlCrashHarness(
       let slot: ControlSlot | undefined
       let expected: AdoptionExpected | undefined
       const preparation = createControlBuildPort({
-        access: host.access,
+        access,
         control,
         build: buildHost,
         rotate: mode === 'double' ? buildSealedMemoryOperation : undefined,
@@ -1270,6 +1389,13 @@ export async function createControlCrashHarness(
     }
     return {
       groups,
+      setControlGap: (value: boolean) => {
+        controlGap = value
+      },
+      mls,
+      registry,
+      registryAccess,
+      controlBinding: controlBatch(mls),
       control,
       key,
       validation,

@@ -14,7 +14,9 @@ import {
   assertCryptoSafety,
   assertDurableCryptoSafety,
   createGroupCryptoBase,
+  ENTRY_SEAL_LABEL,
   type RegistryGroupCryptoParams,
+  registryControlEntryLabels,
 } from './crypto.js'
 import {
   MAX_OPEN_BATCH_FRAMES,
@@ -23,6 +25,7 @@ import {
   type PendingAppFrames,
 } from './persistence-types.js'
 import { registryStreamingOpen } from './registry/app-open-binding.js'
+import { registryControlBatch } from './registry/control-batch.js'
 
 /** Registry crypto uses byte-level seal/receive and owns durable pending frames. */
 export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): GroupCrypto & {
@@ -31,6 +34,9 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
 } {
   const { access } = params
   const base = createGroupCryptoBase(params)
+  const control = registryControlBatch(access)
+  if (control !== undefined)
+    registryControlEntryLabels.set(control, params.entryLabel ?? ENTRY_SEAL_LABEL)
 
   async function unwrapBatch(frames: Array<OpenAppInput>): Promise<Array<OpenAppResult>> {
     assertDurableCryptoSafety(access)

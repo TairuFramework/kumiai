@@ -97,9 +97,9 @@ export async function createRegistryLeaseFixture(
       readTransactions++
       return read(groupID, fn)
     }
-    capability.run = (request, prepare, work) => {
+    capability.run = (request, prepare, work, effects) => {
       transactions++
-      return original(request, prepare, work)
+      return original(request, prepare, work, effects)
     }
     return () => {
       capability.run = original

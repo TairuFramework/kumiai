@@ -164,6 +164,7 @@ export function createControlValidationPort(params: {
   entryLabel?: string
   /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */
   restoreCandidate: (candidate: Uint8Array) => Promise<GroupHandle>
+  restoreSource?: typeof restoreGroup
 }): ControlValidationPort {
   return {
     async restoreValidation(built) {
@@ -202,7 +203,7 @@ export function createControlValidationPort(params: {
           slot,
           group: denyApplicationSend(
             restrictCommitAuthoring(
-              await restoreGroup({
+              await (params.restoreSource ?? restoreGroup)({
                 state,
                 credential,
                 ledgerEntries: [...journal.sourceLedger],
@@ -348,9 +349,10 @@ export function createControlValidationPort(params: {
             const savedRecognition = ownCommitDigest(savedCommit)
             const deliveredRecognition = ownCommitDigest(commit)
             if (
-              savedRecognition === null ||
-              deliveredRecognition === null ||
-              savedRecognition !== deliveredRecognition
+              !(params.restoreSource !== undefined && sameBytes(savedCommit, commit)) &&
+              (savedRecognition === null ||
+                deliveredRecognition === null ||
+                savedRecognition !== deliveredRecognition)
             ) {
               try {
                 if (!(await working.verifyCommitSignature(commit)))

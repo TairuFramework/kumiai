@@ -26,6 +26,7 @@ import {
   LeafLapsedError,
   ledgerEntryDigest,
   type MemberCredential,
+  MissingLedgerEntriesError,
   parseMLSCredentialIdentity,
   readLedgerHead,
   restoreGroup,
@@ -65,6 +66,7 @@ import {
   mlsMessageDecoder,
   mlsMessageEncoder,
   type PrivateMessage,
+  type ProposalWithSender,
   protocolVersions,
   type SecretTree,
   wireformats,
@@ -916,8 +918,9 @@ class MemoryControlHandle extends GroupHandle {
         this.anchor.controller != null ||
         commit.external ||
         commit.adds?.length ||
-        commit.entryIDs.length ||
-        (commit.head !== undefined && commit.head !== this.#mls.authenticatedLedgerHead()) ||
+        (commit.entryIDs.length === 0 &&
+          commit.head !== undefined &&
+          commit.head !== this.#mls.authenticatedLedgerHead()) ||
         commit.invalidContent !== undefined ||
         commit.missingProposal !== undefined ||
         Object.keys(commit).some(
@@ -951,8 +954,24 @@ class MemoryControlHandle extends GroupHandle {
         ))
       )
         throw new Error('Unauthenticated memory committer')
+      const entries =
+        commit.entryIDs.length === 0 ? [] : await this.resolveLedgerEntries?.(commit.entryIDs)
+      if (entries === undefined) throw new MissingLedgerEntriesError(commit.entryIDs)
+      const resolved = new Map<string, string>()
+      for (const token of entries) {
+        const verified = await verifyLedgerEntry(token)
+        if (
+          verified === null ||
+          verified.entry.type !== 'note' ||
+          verified.entry.groupID !== this.groupID
+        )
+          throw new Error('Unsupported memory ledger effect')
+        resolved.set(ledgerEntryDigest(token), token)
+      }
+      if (commit.entryIDs.some((id) => !resolved.has(id)))
+        throw new MissingLedgerEntriesError(commit.entryIDs)
       const removedLeaves = new Set<number>()
-      const proposals = (commit.removes ?? []).map((did) => {
+      const proposals: Array<ProposalWithSender> = (commit.removes ?? []).map((did) => {
         const removed = this.findMemberLeafIndex(did)
         if (removed === undefined) throw new Error('Unknown memory removal target')
         // ts-mls validates the complete proposal set before policy or tree mutations.
@@ -964,13 +983,29 @@ class MemoryControlHandle extends GroupHandle {
           proposal: { proposalType: defaultProposalTypes.remove, remove: { removed } },
         }
       })
+      if (commit.entryIDs.length !== 0) {
+        if (commit.head === undefined) throw new Error('Missing memory ledger head')
+        proposals.push({
+          senderLeafIndex: sender.leafIndex,
+          proposal: {
+            proposalType: defaultProposalTypes.group_context_extensions,
+            groupContextExtensions: {
+              extensions: this.state.groupContext.extensions.map((extension) =>
+                extension.extensionType === LEDGER_HEAD_EXTENSION_TYPE
+                  ? buildLedgerHeadExtension(fromB64U(commit.head!))
+                  : extension,
+              ),
+            },
+          },
+        })
+      }
       if (
         defaultCommitPolicy(
           { kind: 'commit', senderLeafIndex: sender.leafIndex, proposals },
           buildCommitPolicyContext(this, {
             baseRoster: this.roster,
             candidateRoster: this.roster,
-            entryIDs: [],
+            entryIDs: commit.entryIDs,
             enactedDeviceEntries: [],
           }),
         ) !== 'accept'
@@ -981,7 +1016,11 @@ class MemoryControlHandle extends GroupHandle {
       try {
         const result = await this.#mls.processCommit(message, {
           senderDID: header.committerDID,
-          resolveLedgerEntries: this.resolveLedgerEntries,
+          resolveLedgerEntries: async (ids) =>
+            ids.flatMap((id) => {
+              const token = resolved.get(id)
+              return token === undefined ? [] : [token]
+            }),
         })
         if (!result.applied) throw new Error('Memory commit refused')
         Object.assign(this.#view, envelope(this.#view, this.#mls))

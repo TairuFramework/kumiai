@@ -142,8 +142,8 @@ for (const damage of ['client-state', 'identity'] as const) {
       await f.corruptState(key, damage)
       await f.device.groups.ports(key).control.apply({ strand: null }, 'observe-damage')
       expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: false, reason: 'stranded' })
-      expect(f.restoreCount(groupID)).toBe(restores)
-      expect(access).not.toHaveBeenCalled()
+      expect(f.restoreCount(groupID)).toBe(restores + 1)
+      expect(access).toHaveBeenCalledExactlyOnceWith(groupID)
     } finally {
       await f.close()
     }
@@ -214,7 +214,7 @@ for (const fault of ['provider', 'trusted-reader'] as const) {
       await expect(
         mls.openRecoveryVerdict(new Uint8Array([0]), 'errors', held.requestKey),
       ).rejects.toBe(failure)
-      expect(f.restoreCount(groupID)).toBe(0)
+      expect(f.restoreCount(groupID)).toBe(1)
       expect(await f.inspectRows()).toEqual(before)
     } finally {
       await f.close()
@@ -238,7 +238,7 @@ test('registry sealing binds the actual cursor and safety subscriptions use the 
       entrySlot: api.createLedgerEntrySlot(),
     })
     expect(mls.sendAdmission()).toEqual({ epoch: 0, admissible: true })
-    expect(f.restoreCount(groupID)).toBe(restores)
+    expect(f.restoreCount(groupID)).toBe(restores + 1)
     const { request, requestKey } = await mls.createRecoveryRequest('capture')
     await control.apply({ cursor: { position: asLogPosition('actual'), epoch: 0 } }, 'cursor')
     await expect(mls.sealGroupInfo(request, asLogPosition('invented'))).rejects.toThrow()
@@ -404,7 +404,7 @@ test('registry admission follows cold control changes, access opening and extern
       entrySlot: api.createLedgerEntrySlot(),
     })
     expect(mls.sendAdmission()).toEqual({ epoch: 2, admissible: true })
-    expect(f.restoreCount(groupID)).toBe(restores)
+    expect(f.restoreCount(groupID)).toBe(restores + 1)
     const control = f.device.groups.ports(key).control
     await control.apply({ strand: { reason: 'lost-state' } }, 'strand')
     expect(mls.sendAdmission()).toEqual({ epoch: 2, admissible: false, reason: 'stranded' })

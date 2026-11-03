@@ -13,7 +13,8 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { AppOutboxAcceptance, AppOutboxAcceptanceParams } from '../../rpc/lib/app-outbox.js'
 import type { LogDeliveryParams } from '../../rpc/lib/log-delivery.js'
 import { createRegistryAppPublication } from '../src/app-publication.js'
-import { entryCapability } from '../src/entry-capability.js'
+import { coordinatorBinding, entryCapability } from '../src/entry-capability.js'
+import { groupBatchFor } from '../src/group-batch-binding.js'
 import { createLedgerEntrySlot } from '../src/index.js'
 import { registryReceiveSlots } from '../src/registry/live-receive.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
@@ -1009,6 +1010,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       await fixture.reopen(false)
       const base = fixture.fixture()
       const mls = await groupMLS(fixture, false)
+      dropRegistryOwner(await base.registry.access(fixture.key.groupID))
       const safety = registrySafety(base.registry)
       if (safety === null) throw new Error('Missing safety capability')
       const updates = vi.fn()
@@ -1021,7 +1023,11 @@ for (const mode of ['real-mls', 'double'] as const) {
           key: fixture.key,
           state: { ...record, senderHWM, version: record.version + 1 },
         })
-        await safety.entry.read(fixture.key.groupID, async () => {})
+        await groupBatchFor(coordinatorBinding(base.device.groups)!, fixture.key.groupID).schedule({
+          source: 'ownerless-observations-settled',
+          kind: 'accounting',
+          run: async () => {},
+        })
         expect(base.registry.effectiveNext(fixture.key)).toBeNull()
         expect(mls.sendAdmission()).toMatchObject(
           senderHWM === 500

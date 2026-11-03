@@ -10,7 +10,8 @@ import type { PendingCryptoFixture, RegistryCryptoFixture } from '@kumiai/rpc-co
 import { onTestFinished } from 'vitest'
 
 import { createGroupCrypto } from '../../src/crypto.js'
-import type { OwnershipContextPort } from '../../src/persistence-types.js'
+import { type EntryCapability, entryCapability } from '../../src/entry-capability.js'
+import type { MemoryTransaction, OwnershipContextPort } from '../../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../../src/registry/registry.js'
 import { createRealGroup, testHandleAccess } from './real-group.js'
 import { createRegistryFixture, registryFixtureObserveStagedDecrypts } from './registry.js'
@@ -28,6 +29,7 @@ export async function createRegistryCryptoGroup(
     backgroundMaintenance?: 'gated'
     options?: GroupOptions
     ownershipContext?: OwnershipContextPort
+    beforeRegistry?(capability: EntryCapability<MemoryTransaction>): void
   } = {},
 ) {
   const group = await createRealGroup(size, `registry-crypto-conformance-${mode}-${id}`)
@@ -42,6 +44,9 @@ export async function createRegistryCryptoGroup(
     identity: local.identity,
     options: { ...config.options, resolveLedgerEntries: local.slot.resolve },
   })
+  const capability = entryCapability(fixture.device.groups)
+  if (capability === null) throw new Error('Missing entry capability')
+  config.beforeRegistry?.(capability)
   for (const member of [group.committer, ...group.members]) {
     const options = { ...fixture.environment.options, resolveLedgerEntries: member.slot.resolve }
     member.handle =
@@ -132,6 +137,7 @@ export async function createRegistryCryptoGroup(
       outstanding = await rotate()
       return sender.handle.encrypt(plaintext)
     },
+    prepareCommit: (removed?: number) => rotate(removed),
     async advance(removed?: number, applied?: (commit: Uint8Array) => Promise<void>) {
       const commit = outstanding ?? (await rotate(removed))
       await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))

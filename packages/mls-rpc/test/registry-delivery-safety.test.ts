@@ -1,9 +1,19 @@
-import { randomIdentity } from '@kokuin/token'
-import { commitKeyRotation, computeHead, encodeClientState, ledgerEntryDigest } from '@kumiai/mls'
+import { createFullIdentity, randomIdentity } from '@kokuin/token'
+import {
+  commitKeyRotation,
+  computeHead,
+  decodeClientState,
+  encodeClientState,
+  ledgerEntryDigest,
+  restoreGroup,
+} from '@kumiai/mls'
 import {
   asLogPosition,
   type ControlSlot,
   commitTopic,
+  controlBatch,
+  decodeCommitFrame,
+  decodeHandshakeFrame,
   digestAppliedCommit,
   encodeCommitFrame,
   encodeHandshakeFrame,
@@ -14,12 +24,13 @@ import {
 import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
+import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
 import { createRegistryAppPublication } from '../src/app-publication.js'
 import { encodeControlJournal } from '../src/control-journal.js'
 import { createControlValidationPort } from '../src/control-validation.js'
-import { createGroupCrypto } from '../src/crypto.js'
+import { createGroupCrypto, deriveEntryKey, sealEntries } from '../src/crypto.js'
 import { createLedgerEntrySlot } from '../src/mls.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
@@ -27,11 +38,14 @@ import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
+import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 import {
   memoryModel,
   restoreMemoryControlHandle,
   sealedMemoryValidation,
 } from './fixtures/sealed-memory-mls.js'
+import { createControlCrashHarness } from './fixtures/storage-persistence.js'
+import { makeStorageSeed } from './fixtures/storage-seed.js'
 
 const { FakeHub } = (await import(
   new URL('../../rpc/test/fixtures/fake-hub.ts', import.meta.url).href
@@ -53,6 +67,304 @@ const { createMemoryGroupMLS } = (await import(
 
 const frame = (commit: Uint8Array) =>
   encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, new Uint8Array()))
+const { decodeMemoryCommit, tagMemoryCommit } = (await import(
+  new URL('../../rpc/test/fixtures/memory-group-mls.ts', import.meta.url).href
+)) as {
+  decodeMemoryCommit(bytes: Uint8Array): Record<string, unknown> | null
+  tagMemoryCommit(bytes: Uint8Array, authenticator: Uint8Array): Uint8Array
+}
+
+for (const mode of ['real-mls', 'double'] as const) {
+  test(`registry bound signed past divergence preserves the current saved build (${mode})`, async () => {
+    const seed = await makeStorageSeed({ mode, id: 'control-crash', incarnation: 1, epoch: 0 })
+    if (seed.state.state === null) throw new Error('Missing source')
+    const state = decodeClientState(seed.state.state)
+    if (state === undefined) throw new Error('Invalid source')
+    const restore = mode === 'double' ? restoreMemoryControlHandle : restoreGroup
+    const source = await restore({
+      state,
+      credential: seed.state.credential,
+      ledgerEntries: seed.state.ledger,
+    })
+    const copy = await restore({
+      state,
+      credential: seed.state.credential,
+      ledgerEntries: seed.state.ledger,
+    })
+    let winner: Uint8Array
+    let loser: Uint8Array
+    let candidate = source
+    if (mode === 'double') {
+      winner = memoryModel(source).buildCommit([])
+      loser = memoryModel(copy).buildCommit([], { adds: [randomIdentity().id] })
+      await memoryModel(source).adopt(winner)
+    } else {
+      const result = await commitKeyRotation(source)
+      winner = result.commitMessage
+      candidate = result.newGroup
+      loser = (await commitKeyRotation(copy)).commitMessage
+    }
+    seed.state = {
+      ...seed.state,
+      state: encodeClientState(candidate.state),
+      epoch: Number(candidate.epoch),
+      epochAuthenticator: candidate.state.keySchedule.epochAuthenticator,
+    }
+    seed.confirmedTranscriptHash = candidate.state.groupContext.confirmedTranscriptHash.slice()
+    seed.trust = recoveryTrustFor(candidate, seed.key, null)
+    const h = await createControlCrashHarness(mode, seed, undefined, true, true)
+    try {
+      await h.peer.replay()
+      const built = await h.build()
+      await h.saveBuilt(built.intent, built.slot, built.expected, 'current-build')
+      await h.control.apply(
+        {
+          putApplied: [
+            {
+              epoch: 0,
+              digest: digestAppliedCommit(winner),
+              payloadDigest: toB64U(sha256(frame(winner))),
+              sequenceID: '000000000000',
+              removed: false,
+              opID: null,
+            },
+          ],
+        },
+        'past-winner',
+      )
+      const before = await h.control.load()
+      const bridge = vi.spyOn(controlBatch(h.mls)!, 'run')
+      await h.hub.publish({
+        topicID: await h.topic(),
+        payload: frame(loser),
+        senderDID: randomIdentity().id,
+        retain: 'log',
+      })
+      await vi.waitFor(() => expect(bridge).toHaveBeenCalled())
+      await Promise.all(bridge.mock.results.map((result) => result.value))
+      const after = await h.control.load()
+      expect(after.controlHold).toEqual(before.controlHold)
+      expect(after.commitOnce).toEqual(before.commitOnce)
+      expect(after.outcomes).toEqual(before.outcomes)
+      expect(after.applied).toEqual(before.applied)
+      expect(after.forkHalt).toEqual(before.forkHalt)
+      expect(after.strand).toEqual(before.strand)
+    } finally {
+      await h.fixture.close()
+    }
+  })
+  test.each(['pending-rejoin', 'authenticated-hold'] as const)(
+    `registry bound faults preserve a pre-existing gate without admission (${mode}, %s)`,
+    async (gate) => {
+      const h = await createControlCrashHarness(mode, undefined, undefined, true, true)
+      try {
+        h.hooks.beforeWelcome = async () => {
+          throw new Error('Recipient offline')
+        }
+        const built = await h.build()
+        await h.saveBuilt(built.intent, built.slot, built.expected, 'gated-copy')
+        const registry = h.registry
+        if (registry === undefined) throw new Error('Missing registry')
+        if (gate === 'authenticated-hold') registrySafety(registry)!.latch(h.key, 'fork-halted')
+        else {
+          const source = await h.registryAccess!.read((value) => value)
+          const recovery = await createRegistryRecovery({
+            format: 'captured',
+            mode,
+            source,
+            sourceKey: h.key,
+            recoverySource: await registry.recoverySource(h.key.groupID),
+            options: {},
+            identity: {
+              ...createFullIdentity(source.state.signaturePrivateKey),
+              privateKey: source.state.signaturePrivateKey,
+            },
+          })
+          await h.control.apply(
+            { putRejoin: { ...recovery.record, stage: 'published' } },
+            'pending-rejoin-gate',
+          )
+        }
+        const before = await h.control.load()
+        const bridge = vi.spyOn(controlBatch(h.mls)!, 'run')
+        await h.peer.replay()
+        const topicID = await h.topic()
+        for (const byte of [0, 1, 255])
+          await h.hub.publish({
+            topicID,
+            senderDID: randomIdentity().id,
+            payload: new Uint8Array([byte]),
+            retain: 'log',
+          })
+        for (let index = 0; index < 100; index++) await Promise.resolve()
+        expect(bridge).not.toHaveBeenCalled()
+        expect(await h.control.load()).toEqual(before)
+      } finally {
+        await h.fixture.close()
+      }
+    },
+  )
+  test.each([
+    'handshake',
+    'commit',
+    'sealed-outer',
+    'sealed-inner',
+    'tamper',
+    'signature',
+    'unrecognised',
+    'gap',
+    'ahead',
+  ] as const)(
+    `registry bound delivery faults preserve saved work and future progress (${mode}, %s)`,
+    async (fault) => {
+      const h = await createControlCrashHarness(mode, undefined, undefined, true, true)
+      try {
+        h.hooks.beforeWelcome = async () => {
+          throw new Error('Recipient offline')
+        }
+        await h.peer.replay()
+        const binding = controlBatch(h.mls)
+        expect(binding).toBeDefined()
+        if (binding === undefined) throw new Error('Missing original MLS binding')
+        const bridge = vi.spyOn(binding, 'run')
+        const built = await h.build()
+        await h.saveBuilt(built.intent, built.slot, built.expected, 'saved-bound')
+        const owed = {
+          opID: 'independent-welcome',
+          welcome: new Uint8Array([1, 3, 5]),
+          recipients: ['independent-recipient'],
+        }
+        await h.control.apply(
+          {
+            putWelcomes: [owed],
+            putOutcomes: [{ id: 'independent-outcome', opID: null, at: 1, kind: 'unknown' }],
+          },
+          'owed-bound',
+        )
+        const before = await h.control.load()
+        const state = await h.groups.loadState(h.key)
+        let payload: Uint8Array = built.slot.payload.slice()
+        const decoded = decodeCommitFrame(decodeHandshakeFrame(payload).payload)
+        if (fault === 'handshake') payload[2] = 255
+        if (fault === 'commit') payload[4] = 255
+        if (fault === 'sealed-outer' || fault === 'tamper' || fault === 'sealed-inner') {
+          let sealed: Uint8Array = decoded.sealedEntries.slice()
+          if (fault === 'sealed-outer') sealed[0] = 255
+          if (fault === 'tamper') sealed[sealed.length - 1]! ^= 1
+          if (fault === 'sealed-inner') {
+            const handle = await h.registryAccess!.read((value) => value)
+            const key = await deriveEntryKey(handle)
+            try {
+              sealed = sealEntries(key, new Uint8Array([255, 0, 0]))
+            } finally {
+              key.fill(0)
+            }
+          }
+          payload = encodeHandshakeFrame(
+            HANDSHAKE_KIND.commit,
+            encodeCommitFrame(decoded.commit, sealed),
+          )
+        }
+        if (fault === 'signature') {
+          const commit = decoded.commit.slice()
+          commit[commit.length - 1]! ^= 1
+          payload = frame(commit)
+        }
+        if (fault === 'gap') {
+          h.setControlGap(true)
+          payload[2] = 255
+        }
+        if (fault === 'unrecognised') {
+          const source = await h.registryAccess!.read((value) => value)
+          const state = decodeClientState(encodeClientState(source.state))
+          if (state === undefined) throw new Error('Missing source')
+          const commit =
+            mode === 'double'
+              ? memoryModel(source).buildCommit([], { adds: [randomIdentity().id] })
+              : (
+                  await commitKeyRotation(
+                    await restoreGroup({
+                      state,
+                      credential: source.credential,
+                      ledgerEntries: source.ledgerTokens,
+                    }),
+                  )
+                ).commitMessage
+          payload = frame(commit)
+        }
+        if (fault === 'ahead') {
+          if (mode === 'double') {
+            const parsed = decodeMemoryCommit(decoded.commit)
+            if (parsed === null) throw new Error('Missing model commit')
+            payload = frame(
+              tagMemoryCommit(
+                new TextEncoder().encode(
+                  JSON.stringify({ ...parsed, epoch: built.slot.epoch + 3 }),
+                ),
+                built.slot.authenticatorBefore,
+              ),
+            )
+          } else {
+            const parsed = decode(mlsMessageDecoder, decoded.commit)
+            if (parsed?.wireformat !== wireformats.mls_private_message)
+              throw new Error('Missing private commit')
+            parsed.privateMessage.epoch += 3n
+            payload = frame(encode(mlsMessageEncoder, parsed))
+          }
+        }
+        const delivered = await h.hub.publish({
+          topicID: await h.topic(),
+          senderDID: randomIdentity().id,
+          payload,
+          retain: 'log',
+        })
+        await vi.waitFor(() => expect(bridge).toHaveBeenCalled())
+        await Promise.all(bridge.mock.results.map((result) => result.value))
+        const after = await h.control.load()
+        expect(after.controlHold).toEqual(before.controlHold)
+        expect(after.forkHalt).toEqual(before.forkHalt)
+        expect(after.recoveryUnavailable).toEqual(before.recoveryUnavailable)
+        expect(after.strand).toEqual(before.strand)
+        expect(after.welcomes).toEqual(before.welcomes)
+        expect(after.operations).toEqual(before.operations)
+        expect(after.outcomes).toEqual(before.outcomes)
+        expect(after.commitOnce).toEqual({
+          ...before.commitOnce,
+          skipped: true,
+          retryForbidden: false,
+        })
+        const afterState = await h.groups.loadState(h.key)
+        expect(afterState).toEqual({ ...state, version: afterState?.version })
+        expect(after.cursor?.position).toBe(delivered.sequenceID)
+        h.setControlGap(false)
+        const reopened = await h.reopen()
+        reopened.hooks.beforeWelcome = async () => {
+          throw new Error('Recipient offline')
+        }
+        expect((await reopened.control.load()).commitOnce).toEqual(after.commitOnce)
+        expect((await reopened.control.load()).welcomes).toEqual(before.welcomes)
+        expect(controlBatch(reopened.mls)).toBeDefined()
+        const resumed = vi.spyOn(controlBatch(reopened.mls)!, 'run')
+        await reopened.peer.replay()
+        await h.hub.publish({
+          topicID: await reopened.topic(),
+          senderDID: randomIdentity().id,
+          payload: built.slot.payload,
+          retain: 'log',
+        })
+        await vi.waitFor(() => expect(resumed).toHaveBeenCalled())
+        const proven = await Promise.all(resumed.mock.results.map((result) => result.value))
+        expect(proven.at(-1)?.value).toMatchObject({ consumed: true, advanced: true })
+        expect(await reopened.groups.loadState(h.key)).toMatchObject({
+          epoch: built.slot.epoch + 1,
+        })
+        expect((await reopened.control.load()).welcomes).toContainEqual(owed)
+      } finally {
+        await h.fixture.close()
+      }
+    },
+  )
+}
 
 for (const mode of ['real-mls', 'double'] as const) {
   for (const failsPersistence of [false, true]) {
@@ -135,14 +447,17 @@ for (const mode of ['real-mls', 'double'] as const) {
           const crypto = createGroupCrypto({ access: await f.registry.access(key.groupID) })
           const mls =
             mode === 'real-mls'
-              ? await createRegistryGroupMLS({
-                  registry: f.registry,
-                  key,
-                  recovery: f.environment,
-                  target: { targetID: 'hub', topicID: 'commits' },
-                  identity: f.identity,
-                  entrySlot: createLedgerEntrySlot(),
-                })
+              ? new Proxy(
+                  await createRegistryGroupMLS({
+                    registry: f.registry,
+                    key,
+                    recovery: f.environment,
+                    target: { targetID: 'hub', topicID: 'commits' },
+                    identity: f.identity,
+                    entrySlot: createLedgerEntrySlot(),
+                  }),
+                  {},
+                )
               : createMemoryGroupMLS({
                   groupID,
                   epoch: Number(handle.epoch),

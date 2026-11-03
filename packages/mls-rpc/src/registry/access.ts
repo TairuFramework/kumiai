@@ -2,6 +2,7 @@ import {
   assertRetainsKnownEffects,
   decodeClientState,
   denyApplicationSend,
+  encodeClientState,
   type GroupHandle,
   type Relinquished,
   relinquishSend,
@@ -10,7 +11,10 @@ import {
 import {
   type AdoptionExpected,
   type AdoptionWrite,
+  type AnchorSlot,
+  applyChanges,
   type CheckpointFactRecord,
+  type CommitOnceWriteContext,
   type ControlSnapshot,
   type ControlStore,
   controlOccurrenceCoverage,
@@ -22,7 +26,14 @@ import {
   type SendAdmission,
 } from '@kumiai/rpc'
 
-import type { ControlRead, ControlReadScope, HandleAccess, PersistContext } from '../access.js'
+import {
+  type ControlHandleAccess,
+  type ControlRead,
+  type ControlReadScope,
+  type HandleAccess,
+  type PersistContext,
+  retainsKnownEffects,
+} from '../access.js'
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
 import { controlCompatible } from '../control-compat.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
@@ -30,7 +41,7 @@ import { controlBuildContexts } from '../control-write-context.js'
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
 import { groupBatchFor } from '../group-batch-binding.js'
 import { consumesInboundCommit } from '../inbound-commit.js'
-import { sameStoredValue } from '../memory-incarnation-stores.js'
+import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import { decodeStoredValue, encodeStoredValue } from '../persistence-codec.js'
 import {
   DisplacedGroupHandleError,
@@ -49,6 +60,13 @@ import { createRegistryAppOpen } from './app-open.js'
 import { bindRegistryStreamingOpen } from './app-open-binding.js'
 import { createPublicationPreparation } from './app-publication.js'
 import { type ColdEnvironment, restoreValidated, type ValidatedGroupState } from './cold.js'
+import {
+  bindControlCandidateRestore,
+  bindControlSourceRestore,
+  bindRegistryControlBatch,
+  ControlDrainRequiredError,
+  type RegistryControlBatchEntry,
+} from './control-batch.js'
 import { createLiveReceive, registryReceiveSlots } from './live-receive.js'
 import { createLiveSend, type LiveSlot, leaseReaders, registryLiveSend } from './live-send.js'
 import {
@@ -291,6 +309,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     trust: ValidatedGroupState['trust'],
     write?: AdoptionWrite,
     checkpoint?: CheckpointFactRecord,
+    deferControl = false,
   ) {
     params.assertCurrent()
     await assertWorkSafety(stores)
@@ -312,7 +331,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           nextHeartbeatAt: null,
         })
     }
-    if (write !== undefined) {
+    if (write !== undefined && !deferControl) {
       await target.control.apply(write.changes, write.mutationID)
       if (write.anchorLanded !== undefined) {
         const anchor = await target.anchor.load()
@@ -392,6 +411,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     write: AdoptionWrite,
     committed: boolean,
     prepare?: () => Promise<boolean>,
+    preparedControl?: ControlSnapshot,
   ): Promise<GroupHandle | null> {
     const journal = journalFor(write)
     if (!ordinaryProof(write, journal)) throw moved()
@@ -399,7 +419,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     const destination = await destinationFor(next, write)
     if (committed) return null
     assertSafety()
-    const control = await reads.control(owner.key.incarnation)
+    const control = preparedControl ?? (await reads.control(owner.key.incarnation))
     const proof = write.expected?.occurrence
     if (proof === undefined) throw moved()
     if (
@@ -872,6 +892,365 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     scheduler: groupBatchFor(params.binding, owner.key.groupID),
     openReady: appOpen.openReady,
   })
+  const controlBatch: RegistryControlBatchEntry = {
+    key: { ...owner.key },
+    run(input) {
+      capability.assertRoot()
+      params.assertAvailable()
+      assertSafety()
+      return groupBatchFor(params.binding, owner.key.groupID).schedule({
+        source: input.source,
+        kind: 'control',
+        signal: input.signal,
+        run: async (budget) => {
+          try {
+            return await live.run(
+              { groupID: owner.key.groupID, mutationID: null },
+              async (reads) => {
+                params.assertAvailable()
+                assertSafety()
+                if (input.signal?.aborted) throw input.signal.reason
+                const initial = await isolated(reads, assertSafety)
+                const source = copyStoredValue(initial.source)
+                const value = owner.value
+                const lifetime = await reads.lifetime()
+                const originalControl = await reads.control(owner.key.incarnation)
+                const originalAnchor = await reads.anchor(owner.key.incarnation)
+                let snapshot = copyStoredValue(originalControl)
+                let anchor = copyStoredValue(originalAnchor)
+                let lastMutation = await reads.controlMutation(owner.key.incarnation)
+                let handle = initial.handle
+                let active = true
+                let saved: Awaited<ReturnType<typeof recordFor>> | undefined
+                let trust = value.trust
+                let checkpoint: CheckpointFactRecord | undefined
+                let write: AdoptionWrite | undefined
+                let context: CommitOnceWriteContext | null =
+                  source.identity === null ? null : { kind: 'cursor', source: source.identity }
+                let mutationID: string = crypto.randomUUID()
+                const changes: Array<{
+                  changes: Parameters<ControlStore['apply']>[0]
+                  mutationID: string
+                  context: CommitOnceWriteContext | null
+                }> = []
+                let anchorChanged = false
+                const assertActive = () => {
+                  if (!active) throw new Error('Control prepare scope has ended')
+                  params.assertCurrent()
+                  assertSafety()
+                  if (input.signal?.aborted) throw input.signal.reason
+                }
+                const stageControl: ControlStore['apply'] = async (next, id) => {
+                  assertActive()
+                  snapshot = applyChanges(snapshot, copyStoredValue(next), context, owner.key)
+                  changes.push({
+                    changes: copyStoredValue(next),
+                    mutationID: id,
+                    context: copyStoredValue(context),
+                  })
+                  lastMutation = id
+                  mutationID = id
+                }
+                const stage = async (
+                  next: GroupHandle,
+                  proposed?: AdoptionWrite,
+                  ctx?: PersistContext,
+                ) => {
+                  assertActive()
+                  assertMutationID(proposed)
+                  const captured = await relinquishSend(next, ctx)
+                  const candidate = await restoreCaptured(
+                    environment,
+                    capturedRecord(captured, value.key, value.record.version + 1),
+                  )
+                  assertActive()
+                  let destination = candidate
+                  if (
+                    staged(candidate).removed &&
+                    (await reads.pendingFrames(owner.key.incarnation)).length !== 0
+                  )
+                    throw new ControlDrainRequiredError()
+                  if (proposed?.expected?.journal !== undefined) {
+                    const result = await ordinaryDestination(
+                      reads,
+                      source,
+                      candidate,
+                      proposed.expected,
+                      proposed,
+                      lifetime?.mutationID === proposed.mutationID,
+                      undefined,
+                      snapshot,
+                    )
+                    if (result === null) return
+                    destination = result
+                    retainsKnownEffects(destination)(handle)
+                    await handle.carryReceiveProgress(destination)
+                  }
+                  assertActive()
+                  if (
+                    proposed?.expected?.journal === undefined &&
+                    (snapshot.commitOnce !== null || staged(destination).removed) &&
+                    (Number(destination.epoch) !== value.record.epoch ||
+                      staged(destination).removed) &&
+                    !consumesInboundCommit({
+                      context: ctx,
+                      source: initial.handle,
+                      result: next,
+                      capturedState: captured.state,
+                      cursorBefore: originalControl.cursor,
+                      record: value.record,
+                      write: proposed,
+                    })
+                  )
+                    throw moved()
+                  saved = await recordFor(await relinquishSend(destination), value, destination)
+                  assertActive()
+                  handle = saved.handle
+                  trust = recoveryTrustFor(handle, value.key, value.trust)
+                  mutationID = proposed?.mutationID ?? mutationID
+                  write = proposed
+                  if (source.identity !== null)
+                    context = {
+                      kind: 'adoption',
+                      before: source.identity,
+                      after: trust.installed,
+                      ...(staged(handle).removed ? { removed: true as const } : {}),
+                    }
+                  if (proposed !== undefined) {
+                    await stageControl(proposed.changes, proposed.mutationID)
+                    if (
+                      proposed.anchorLanded !== undefined &&
+                      anchor?.pending?.advance === proposed.anchorLanded
+                    ) {
+                      anchor = { ...anchor, pending: { ...anchor.pending, landed: true } }
+                      anchorChanged = true
+                    }
+                  }
+                  if (
+                    saved.record.epoch !== value.record.epoch ||
+                    !sameStoredValue(
+                      saved.record.epochAuthenticator,
+                      value.record.epochAuthenticator,
+                    )
+                  )
+                    checkpoint = await prepareCheckpointInstallation({
+                      key: owner.key,
+                      handle,
+                      mutationID,
+                      stateVersion: saved.record.version,
+                      previousFact:
+                        currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+                    })
+                  assertActive()
+                }
+                const local: ControlHandleAccess = {
+                  epoch: () => {
+                    assertActive()
+                    return Number(handle.epoch)
+                  },
+                  admission: () => {
+                    assertActive()
+                    return handle.sendAdmission()
+                  },
+                  read: async (fn) => {
+                    assertActive()
+                    const result = await fn(handle)
+                    assertActive()
+                    return result
+                  },
+                  readControl: async (fn) => {
+                    assertActive()
+                    const refresh = async () => {
+                      assertActive()
+                      return { handle, source: copyStoredValue(source) }
+                    }
+                    const result = await fn({
+                      handle,
+                      source: copyStoredValue(source),
+                      refresh,
+                      loadControl: async (store) => {
+                        assertActive()
+                        if (store !== undefined && !sameStoredValue(store.key, owner.key))
+                          throw moved()
+                        return copyStoredValue(snapshot)
+                      },
+                      loadCheckpoints: async () => {
+                        assertActive()
+                        return reads.checkpoints()
+                      },
+                    })
+                    assertActive()
+                    return result
+                  },
+                  mutate: async (fn, adoption) => {
+                    assertActive()
+                    let persisted = false
+                    const persist = async (next: GroupHandle, ctx?: PersistContext) => {
+                      await stage(next, adoption?.(staged(next)), ctx)
+                      persisted = true
+                    }
+                    const result = await fn(handle, persist)
+                    assertActive()
+                    if (!persisted) await persist(handle)
+                    return result
+                  },
+                  replace: async (next, adoption, prepare) => {
+                    assertActive()
+                    if (prepare !== undefined && !(await prepare(handle, copyStoredValue(source))))
+                      return
+                    const proposed = adoption?.(staged(next))
+                    if (proposed?.expected?.journal === undefined) throw moved()
+                    await stage(next, proposed)
+                  },
+                }
+                bindControlCandidateRestore(local, async (bytes) => {
+                  assertActive()
+                  const candidate = restrictCommitAuthoring(await params.restoreCandidate(bytes))
+                  assertActive()
+                  return candidate
+                })
+                bindControlSourceRestore(local, async (input) => {
+                  assertActive()
+                  const restored = restrictCommitAuthoring(
+                    await environment.restore({
+                      ...value.record,
+                      state: encodeClientState(input.state),
+                      credential: input.credential,
+                      ledger: input.ledgerEntries ?? [],
+                      epoch: Number(input.state.groupContext.epoch),
+                      epochAuthenticator: input.state.keySchedule.epochAuthenticator.slice(),
+                    }),
+                  )
+                  assertActive()
+                  return restored
+                })
+                const control: ControlStore = {
+                  key: { ...owner.key },
+                  load: async () => {
+                    assertActive()
+                    return copyStoredValue(snapshot)
+                  },
+                  lastMutation: async () => {
+                    assertActive()
+                    return lastMutation
+                  },
+                  apply: stageControl,
+                }
+                let result: Awaited<ReturnType<typeof input.prepare>>
+                try {
+                  budget.begin()
+                  if (!budget.take()) throw new RangeError('Control budget exhausted')
+                  result = await input.prepare({
+                    access: local,
+                    control,
+                    anchor: {
+                      load: async () => {
+                        assertActive()
+                        return copyStoredValue(anchor)
+                      },
+                      save: async (slot) => {
+                        assertActive()
+                        anchor = copyStoredValue(slot)
+                        anchorChanged = true
+                      },
+                    },
+                  })
+                  assertActive()
+                } finally {
+                  active = false
+                }
+                return {
+                  expected: lifetime,
+                  mutationID,
+                  value: {
+                    result,
+                    source,
+                    originalControl,
+                    originalAnchor,
+                    snapshot,
+                    anchor,
+                    anchorChanged,
+                    stateChanged: saved !== undefined,
+                    record: saved?.record ?? value.record,
+                    eligibility:
+                      saved?.eligibility ?? eligibilityOf(handle.state, handle.ownLeafLapsed()),
+                    reservation: saved?.reservation ?? null,
+                    trust,
+                    checkpoint,
+                    write,
+                    context,
+                    changes,
+                  },
+                }
+              },
+              async (stores, prepared) => {
+                params.assertCurrent()
+                if (input.signal?.aborted) throw input.signal.reason
+                await assertWorkSafety(stores)
+                const target = stores.incarnation(owner.key.incarnation)
+                const record = await target.state.load()
+                const trust = await readRetainedTrust({ trust: stores.trust.load }, owner.key)
+                if (
+                  record?.version !== prepared.source.stateVersion ||
+                  !sameStoredValue(trust.installed, prepared.source.identity) ||
+                  !sameStoredValue(await target.control.load(), prepared.originalControl) ||
+                  !sameStoredValue(await target.anchor.load(), prepared.originalAnchor)
+                )
+                  throw moved()
+                const applyControl = async (change: (typeof prepared.changes)[number]) => {
+                  if (change.context !== null) controlBuildContexts.set(stores.tx, change.context)
+                  else controlBuildContexts.delete(stores.tx)
+                  await target.control.apply(
+                    change.changes,
+                    prepared.changes.at(-1)?.mutationID ?? change.mutationID,
+                  )
+                }
+                try {
+                  let prefix = 0
+                  // Own-consumption proof reads the coverage cursor in this same transaction.
+                  if (prepared.stateChanged) {
+                    for (const change of prepared.changes) {
+                      if (change.context?.kind !== 'cursor') break
+                      await applyControl(change)
+                      prefix++
+                    }
+                  }
+                  if (prepared.context !== null)
+                    controlBuildContexts.set(stores.tx, prepared.context)
+                  if (prepared.stateChanged)
+                    await writeState(
+                      stores,
+                      prepared.record,
+                      prepared.trust,
+                      prepared.write,
+                      prepared.checkpoint,
+                      true,
+                    )
+                  for (const change of prepared.changes.slice(prefix)) await applyControl(change)
+                  if (prepared.anchorChanged && prepared.anchor !== null)
+                    await target.anchor.save(prepared.anchor)
+                } finally {
+                  controlBuildContexts.delete(stores.tx)
+                }
+                return {
+                  value: prepared.result,
+                  epoch: prepared.record.epoch,
+                  control: copyStoredValue(prepared.snapshot),
+                  anchor: copyStoredValue(prepared.anchor),
+                }
+              },
+            )
+          } catch (error) {
+            await params.diagnoseFailure(error)
+            throw error
+          } finally {
+            params.publish()
+          }
+        },
+      })
+    },
+  }
+  bindRegistryControlBatch(access, controlBatch)
   registryLiveSend.set(access, live)
   registryReceiveSlots.set(access, params.live)
   leaseReaders.set(access, live.snapshot)

@@ -2,13 +2,14 @@ import { relinquishSend } from '@kumiai/mls'
 
 import type { ControlHandleAccess } from './access.js'
 import { registryCapturedReplacements } from './registry/access.js'
+import { bindRegistryControlBatch, registryControlBatch } from './registry/control-batch.js'
 import type { RegistryHandleAccess } from './registry/types.js'
 
 export function createRegistryHandleAccess(params: {
   access: RegistryHandleAccess
 }): ControlHandleAccess {
   const { access } = params
-  return {
+  const result: ControlHandleAccess = {
     epoch: () => access.epoch(),
     admission: () => access.admission(),
     read: (fn) => access.read(fn),
@@ -21,4 +22,7 @@ export function createRegistryHandleAccess(params: {
       if (await replace(captured, adoption, prepare)) next.confirmAdopted()
     },
   }
+  const batch = registryControlBatch(access)
+  if (batch !== undefined) bindRegistryControlBatch(result, batch)
+  return result
 }

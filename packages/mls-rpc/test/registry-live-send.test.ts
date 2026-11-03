@@ -10,7 +10,8 @@ import {
 import { encodeAppAAD, GroupSafetyHeldError } from '@kumiai/rpc'
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 
-import { entryCapability } from '../src/entry-capability.js'
+import { coordinatorBinding, entryCapability } from '../src/entry-capability.js'
+import { groupBatchFor } from '../src/group-batch-binding.js'
 import { StorageOutcomeUnknownError } from '../src/persistence-errors.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import * as reservations from '../src/registry/reserve.js'
@@ -62,6 +63,172 @@ async function promptly<T>(pending: Promise<T>): Promise<T> {
 }
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`live send (${mode})`, () => {
+    test('accounting ignores a superseded version before admission', async () => {
+      const fixture = await setup(mode)
+      const persistence = fixture.fixture().device.groups
+      const capability = entryCapability(persistence)!
+      const live = registryLiveSend.get(fixture.access())!
+      await live.accounting()
+      const copy = fixture.lease()?.copy
+      const version = live.classifiedVersion
+      const scheduler = groupBatchFor(coordinatorBinding(persistence)!, fixture.key.groupID)
+      const release = deferred<void>()
+      const started = deferred<void>()
+      const held = scheduler.schedule({
+        source: 'held',
+        kind: 'open',
+        run: async () => {
+          started.resolve()
+          await release.promise
+        },
+      })
+      await started.promise
+      try {
+        await persistence.ports(fixture.key).control.apply({}, 'old-observation')
+        await persistence.ports(fixture.key).control.apply({}, 'new-observation')
+        const reads = vi.spyOn(capability, 'read')
+        release.resolve()
+        await held
+        await live.accounting()
+        expect(reads).toHaveBeenCalledTimes(1)
+        expect(live.classifiedVersion).toBe(version + 2)
+        expect(fixture.lease()?.copy).toBe(copy)
+      } finally {
+        release.resolve()
+        await held
+      }
+    })
+    test('accounting cancellation releases drain before an active check can classify', async () => {
+      const fixture = await setup(mode)
+      const persistence = fixture.fixture().device.groups
+      const capability = entryCapability(persistence)!
+      const live = registryLiveSend.get(fixture.access())!
+      await live.accounting()
+      const release = deferred<void>()
+      const entered = deferred<void>()
+      const read = capability.read.bind(capability)
+      vi.spyOn(capability, 'read').mockImplementationOnce(async (...args) => {
+        entered.resolve()
+        await release.promise
+        return await read(...args)
+      })
+      let disposed = false
+      let disposing: Promise<void> | undefined
+      try {
+        await fixture.access().mutate(async () => {})
+        await entered.promise
+        const version = live.classifiedVersion
+        disposing = fixture
+          .fixture()
+          .registry.dispose()
+          .then(() => {
+            disposed = true
+          })
+        for (let index = 0; index < 200; index++) await Promise.resolve()
+        expect(disposed).toBe(true)
+        await live.accounting()
+        release.resolve()
+        await disposing
+        await groupBatchFor(coordinatorBinding(persistence)!, fixture.key.groupID).schedule({
+          source: 'cancelled-accounting-drained',
+          kind: 'accounting',
+          run: async () => {},
+        })
+        expect(live.classifiedVersion).toBe(version)
+      } finally {
+        release.resolve()
+        await disposing
+      }
+    })
+    test.each(['handoff', 'trust'] as const)(
+      'ownerless and trust observation reads wait for selection (%s)',
+      async (source) => {
+        const id = `selected-observation-${mode}-${source}-${crypto.randomUUID()}`
+        const base = await createRegistryFixture({
+          mode,
+          setup: 'empty',
+          groupID: id,
+          backgroundMaintenance: 'gated',
+        })
+        const release = deferred<void>()
+        try {
+          const key = await base.registry.seed(await base.makeHandle(0), { packageUse: null })
+          const capability = entryCapability(base.device.groups)!
+          const scheduler = groupBatchFor(coordinatorBinding(base.device.groups)!, id)
+          await scheduler.schedule({
+            source: 'initial-drain',
+            kind: 'accounting',
+            run: async () => {},
+          })
+          const entered = deferred<void>()
+          const held = scheduler.schedule({
+            source: 'held-without-owner',
+            kind: 'open',
+            run: async () => {
+              entered.resolve()
+              await release.promise
+            },
+          })
+          await entered.promise
+          if (source === 'trust') await base.corruptTrust(id)
+          const schedule = vi.spyOn(scheduler, 'schedule')
+          const read = vi.spyOn(capability, 'read')
+          await base.device.groups.ports(key).control.apply({}, 'selected-observation')
+          expect(read).not.toHaveBeenCalled()
+          expect(
+            schedule.mock.calls.some(
+              ([work]) => work.source === JSON.stringify(['registry-accounting', 1, source]),
+            ),
+          ).toBe(true)
+          release.resolve()
+          await held
+          await scheduler.schedule({
+            source: 'observations-drained',
+            kind: 'accounting',
+            run: async () => {},
+          })
+          expect(read).toHaveBeenCalled()
+        } finally {
+          release.resolve()
+          await base.close()
+        }
+      },
+    )
+    test('own accounting cannot bypass buffered control and B', async () => {
+      const fixture = await setup(mode)
+      const persistence = fixture.fixture().device.groups
+      const capability = entryCapability(persistence)
+      const binding = coordinatorBinding(persistence)
+      const live = registryLiveSend.get(fixture.access())
+      if (capability === null || binding === null || live === undefined)
+        throw new Error('Missing registry binding')
+      await live.accounting()
+      const scheduler = groupBatchFor(binding, fixture.key.groupID)
+      const gate = deferred<void>()
+      const entered = deferred<void>()
+      const a = scheduler.schedule({
+        source: 'A',
+        kind: 'open',
+        run: async () => {
+          entered.resolve()
+          await gate.promise
+        },
+      })
+      await entered.promise
+      const version = (await fixture.record()).version
+      const read = vi.spyOn(capability, 'read')
+      const start = live.observed(version, () => true)
+      start()
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect(read).not.toHaveBeenCalled()
+      } finally {
+        gate.resolve()
+        await a
+        await live.accounting()
+      }
+      expect(read).toHaveBeenCalledTimes(1)
+    })
     test('foreign save at an unknown own version is classified by content', async () => {
       const fixture = await setup(mode)
       const gate = gateRegistryMaintenance(fixture.fixture().registry)

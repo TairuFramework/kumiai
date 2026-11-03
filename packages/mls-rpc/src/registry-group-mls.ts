@@ -31,6 +31,7 @@ import {
 import { DisplacedGroupHandleError, GroupUnavailableError } from './persistence-errors.js'
 import type { GroupKey, GroupTransaction } from './persistence-types.js'
 import { inspectRecoveryCapture, reconcileRecoveryCapture } from './recovery.js'
+import { bindRegistryControlBatch, registryControlBatch } from './registry/control-batch.js'
 import { committedNext } from './registry/live-send.js'
 import {
   checkForkRecoveryCaptureInReads,
@@ -120,6 +121,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
   let admission: SendAdmission
   let baseAdmission: SendAdmission
   let storedNext = 0
+  let readableSource = false
   let initialised = false
   let pendingObservation: AccountedGroupObservation | undefined
   function recompute(): SendAdmission {
@@ -190,6 +192,7 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
         return { epoch, admissible: false, reason: 'terminal' } as const
       // Private state loss strands ordinary sends, while retained trust still permits recovery.
       if (status !== 'readable') return { epoch, admissible: false, reason: 'stranded' } as const
+      readableSource = true
       if (control.strand !== null) return { epoch, admissible: false, reason: 'stranded' } as const
       if (facts.lapsed) return { epoch, admissible: false, reason: 'lapsed' } as const
       return { epoch, admissible: true } as const
@@ -315,6 +318,10 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
           await stores.incarnation(key.incarnation).control.apply(changes, mutationID)
         },
       ),
+  }
+  if (readableSource && manualRecovery === undefined) {
+    const selected = registryControlBatch(await access())
+    if (selected !== undefined) bindRegistryControlBatch(lazy, selected)
   }
   const control =
     manualRecovery === undefined

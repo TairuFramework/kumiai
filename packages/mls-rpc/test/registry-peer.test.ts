@@ -101,7 +101,7 @@ function peerDouble(onDrain: () => Promise<void> = async () => {}): Peer {
 async function setup(
   confirmed = true,
   deliverOpened?: (record: PendingAppFrame) => Promise<void>,
-  gated = false,
+  gated = true,
 ) {
   const f = await createRegistryFixture({
     mode: 'real-mls',
@@ -215,7 +215,7 @@ test('an ordinary registry peer receives a private rotation producer that stops 
     })
     f.created[0]?.options.internalOperations?.bind({ enqueue: async () => {} })
     await new Promise<void>((resolve) => setTimeout(resolve, 10))
-    expect(access).not.toHaveBeenCalled()
+    expect(access).toHaveBeenCalledExactlyOnceWith(groupID)
   } finally {
     owner.dispose()
     await owner.drained()
@@ -937,7 +937,7 @@ describe('registry peer recovery coordination', () => {
   })
 
   test('moved identity preserves accepted bytes and obligations while offering authenticated settlement', async () => {
-    const s = await setup()
+    const s = await setup(true, undefined, false)
     let owner: api.RegistryPeer | undefined
     try {
       const access = await s.f.registry.access(groupID)
@@ -1315,7 +1315,7 @@ describe('registry peer recovery coordination', () => {
   })
 
   test('local switch rollback and source movement recapture accepted X through the shared settlement callback', async () => {
-    const s = await setup()
+    const s = await setup(true, undefined, false)
     let owner: api.RegistryPeer | undefined
     try {
       const record = { ...s.recovery.record, ledgerBefore: ['owed-X'] }

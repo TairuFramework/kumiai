@@ -41,8 +41,10 @@ import type {
 } from '../persistence-types.js'
 import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
 import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements } from './access.js'
+import { scheduleRegistryAccounting } from './accounting.js'
 import { bindRegistryStreamingOpen, registryStreamingOpen } from './app-open-binding.js'
 import { admissionFor, type ColdEnvironment, loadValidatedGroup } from './cold.js'
+import { bindRegistryControlBatch, registryControlBatch } from './control-batch.js'
 import { registryReceiveSlots, setReceiveBase } from './live-receive.js'
 import {
   committedNext,
@@ -213,10 +215,20 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     diagnosing.add(id)
     const pending = (async () => {
       try {
-        await capability.read(key.groupID, async (reads) => {
-          const lifetime = await reads.lifetime()
-          if (lifetime?.groupID === key.groupID && lifetime.activeIncarnation === key.incarnation)
-            await readRetainedTrust(reads, key)
+        const slot = slots.get(key.groupID)
+        const generation = slot?.generation
+        await scheduleRegistryAccounting({
+          capability,
+          binding: registryBinding,
+          key,
+          source: 'trust',
+          signal: finaliserStop.signal,
+          current: () => !closing && slots.get(key.groupID)?.generation === generation,
+          read: async (reads) => {
+            const lifetime = await reads.lifetime()
+            if (lifetime?.groupID === key.groupID && lifetime.activeIncarnation === key.incarnation)
+              await readRetainedTrust(reads, key)
+          },
         })
       } catch (error) {
         await diagnoseFailure(error)
@@ -410,8 +422,19 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
             if (key !== null) {
               // Read only after lane release, just as owner-version accounting does.
               accountingChecks.set(observation, () => {
-                const check = capability
-                  .read(groupID, async (reads) => {
+                const current = () =>
+                  !closing &&
+                  observedSlot.retirement === null &&
+                  observedSlot.owner === null &&
+                  observedSlot.generation === generation
+                const check = scheduleRegistryAccounting({
+                  capability,
+                  binding: registryBinding,
+                  key,
+                  source: 'handoff',
+                  signal: finaliserStop.signal,
+                  current,
+                  read: async (reads) => {
                     const record = await reads.state(key.incarnation)
                     if (
                       closing ||
@@ -460,10 +483,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
                     }
                     if (!keep && observedSlot.pendingHandoff === handoff)
                       observedSlot.pendingHandoff = null
-                  })
-                  .catch(() => {
-                    if (observedSlot.pendingHandoff === handoff) observedSlot.pendingHandoff = null
-                  })
+                  },
+                }).catch(() => {
+                  if (current() && observedSlot.pendingHandoff === handoff)
+                    observedSlot.pendingHandoff = null
+                })
                 observedSlot.live.inflight.add(check)
                 void check.then(() => observedSlot.live.inflight.delete(check))
               })
@@ -810,6 +834,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       }
       const batch = registryStreamingOpen(access)
       if (batch !== undefined) bindRegistryStreamingOpen(owner.access, batch)
+      const controlBatch = registryControlBatch(access)
+      if (controlBatch !== undefined) bindRegistryControlBatch(owner.access, controlBatch)
       const live = registryLiveSend.get(access)
       if (live === undefined) throw new Error('Missing live sender')
       registryLiveSend.set(owner.access, live)

@@ -1043,7 +1043,9 @@ for (const expiry of ['age', 'restart', 'count'] as const) {
   test(
     `heal after evidence expiry stays target-behind; manual resync exits / ${expiry}`,
     async () => {
-      const fixture = await createForkRecoveryRealFixture(true)
+      const fixture = await createForkRecoveryRealFixture(true, {
+        backgroundMaintenance: expiry === 'count' ? 'gated' : undefined,
+      })
       const hub = new FakeHub()
       const owners: Array<api.RegistryPeer> = []
       try {
