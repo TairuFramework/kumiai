@@ -77,12 +77,12 @@ a place.
 
 ## The receive channel is paced by acks
 
-`hub/v1/receive` writes a frame only while the frames written and not yet acked on that channel
-stay under a window: `receiveWindow` frames (`DEFAULT_RECEIVE_WINDOW`, 256) and
-`receiveWindowBytes` bytes (`DEFAULT_RECEIVE_WINDOW_BYTES`, 512 KiB, counting the base64 payload
-plus an envelope estimate; one frame always goes through when nothing else is in flight). The
-backlog drain and live pushes share the window, and acks are read from the moment the channel
-opens, so the drain advances as the client acks it.
+`hub/v1/receive` writes a frame only while the frames in flight on that channel stay under a window:
+`receiveWindow` frames (`DEFAULT_RECEIVE_WINDOW`, 256) and `receiveWindowBytes` bytes
+(`DEFAULT_RECEIVE_WINDOW_BYTES`, 512 KiB, counting the base64 payload plus an envelope estimate; one
+frame always goes through when nothing else is in flight). The backlog drain and live pushes share
+the window, and acks are read from the moment the channel opens, so the drain advances as the client
+acks it.
 
 The transport cannot do this pacing: `writer.ready` on a channel says nothing about the HTTP
 bridge's per-session buffer, which `@enkaku/http-serve` drops whole once it passes
@@ -90,10 +90,18 @@ bridge's per-session buffer, which `@enkaku/http-serve` drops whole once it pass
 the session on every connect before any ack reached the hub, and the next connect redelivered the
 same backlog. Keep the byte window well below the transport's session buffer.
 
-A full window that sees no ack for `receiveAckTimeout` ms (`DEFAULT_RECEIVE_ACK_TIMEOUT`, 60 s;
-each ack restarts it) tears the channel down; its frames stay pending and redeliver on the next
-connect. A client must therefore ack every frame it is handed, including one it drops, or the
-frames it leaves unacked fill the window and stall the channel.
+The channel is ordered, so an ack for a frame proves the client has read every frame written before
+it: for the window, an ack releases that frame and all earlier ones. The store still frees only the
+deliveries actually acked. A client can leave frames unacked for good — a topic it subscribed to but
+reads with `hub/v1/topic/fetch`, or one no consumer on the device claims — and those frames must not
+hold the window, or they would come back first on every connect and stall it.
+
+A full window that sees no ack at all for `receiveAckTimeout` ms (`DEFAULT_RECEIVE_ACK_TIMEOUT`,
+15 s; each ack restarts it) is released whole and the drain goes on; the channel is not ended,
+because a window made only of never-acked frames would come back first on the next connect too. A
+client that has stopped reading cannot grow a buffer without bound: the HTTP bridge drops its
+session, and a transport with real backpressure stalls the write until `receiveBufferLimit` tears
+the channel down.
 
 ## Retention: the store refuses, the hub schedules
 

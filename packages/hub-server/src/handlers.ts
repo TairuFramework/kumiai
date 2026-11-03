@@ -228,8 +228,9 @@ export const DEFAULT_RECEIVE_BUFFER_LIMIT = 256
 export const DEFAULT_RECEIVE_AUTH_CACHE_TTL = 5000
 
 /**
- * Max frames written to a receive channel but not yet acked. The hub writes the next frame only
- * once the client has acked enough to bring the count back under this window.
+ * Max frames in flight on a receive channel: written, and not yet followed by an ack for that frame
+ * or a later one. The hub writes the next frame only once acks bring the count back under this
+ * window.
  *
  * Without it the drain writes a whole backlog at once, and a transport that buffers per session
  * (the SSE bridge drops a session whose unread buffer passes `maxSessionBufferBytes`) ends the
@@ -240,21 +241,22 @@ export const DEFAULT_RECEIVE_AUTH_CACHE_TTL = 5000
 export const DEFAULT_RECEIVE_WINDOW = 256
 
 /**
- * Max bytes (base64 payload plus an estimate of the frame's envelope) written to a receive
- * channel but not yet acked. Kept well
- * below the HTTP transport's per-session buffer (1 MiB by default in `@enkaku/http-serve`, 8 MiB
+ * Max bytes (base64 payload plus an estimate of the frame's envelope) in flight on a receive
+ * channel. Kept well below the HTTP transport's per-session buffer (1 MiB by default in `@enkaku/http-serve`, 8 MiB
  * on Kubun's relay) so a window of large frames cannot overflow it. A single frame is always let
  * through when nothing else is in flight, whatever its size.
  */
 export const DEFAULT_RECEIVE_WINDOW_BYTES = 512 * 1024
 
 /**
- * How long (ms) a receive channel with a full window waits without any ack before it is torn
- * down. Each ack restarts the wait. Generous enough for a busy phone to open a full window of MLS
- * frames and flush its batched acks; short enough that a client that never acks, or a session the
- * transport already dropped, does not hold the channel open.
+ * How long (ms) a receive channel with a full window waits without any ack before it releases the
+ * whole window and writes on. Each ack restarts the wait. The channel is NOT ended: a window full
+ * of frames the client will never ack (topics no sink on the device claims) would come back first
+ * on every reconnect and livelock it. Long enough for a busy phone to open the first frames of a
+ * window and flush an ack batch (10 frames or 500 ms on Kubun's device client); short, because it
+ * is the delay a window of never-acked frames costs per connect.
  */
-export const DEFAULT_RECEIVE_ACK_TIMEOUT = 60_000
+export const DEFAULT_RECEIVE_ACK_TIMEOUT = 15_000
 
 export type CreateHandlersParams = {
   registry: HubClientRegistry
@@ -265,15 +267,16 @@ export type CreateHandlersParams = {
   /** Max frames queued-but-unflushed on a receive channel. See {@link DEFAULT_RECEIVE_BUFFER_LIMIT}
    * for the >= 50-frame-page floor this should respect. Default: 256 */
   receiveBufferLimit?: number
-  /** Max frames written but not yet acked on a receive channel. Default: {@link DEFAULT_RECEIVE_WINDOW} */
+  /** Max frames in flight on a receive channel. Default: {@link DEFAULT_RECEIVE_WINDOW} */
   receiveWindow?: number
   /**
-   * Max bytes (payload plus envelope estimate) written but not yet acked on a receive channel. Default:
+   * Max bytes (payload plus envelope estimate) in flight on a receive channel. Default:
    * {@link DEFAULT_RECEIVE_WINDOW_BYTES}
    */
   receiveWindowBytes?: number
   /**
-   * How long (ms) a receive channel with a full window waits for an ack before it is torn down.
+   * How long (ms) a receive channel with a full window waits for an ack before it releases the
+   * window and writes on.
    * Default: {@link DEFAULT_RECEIVE_ACK_TIMEOUT}
    */
   receiveAckTimeout?: number
@@ -683,23 +686,40 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // Ack window (flow control). `writer.ready` says nothing about the transport's per-session
       // buffer (the HTTP bridge's writable is shared by every session and resolves at once), so the
       // hub paces itself on acks instead: at most `receiveWindow` frames and `receiveWindowBytes`
-      // bytes are written and not yet acked. Denied frames are never written, so never
-      // counted.
-      const unacked = new Map<string, number>() // sequenceID -> counted bytes
-      let unackedBytes = 0
+      // bytes are in flight, i.e. written and not yet known to have reached the client. Denied frames
+      // are never written, so never counted.
+      //
+      // The channel is ordered, so an ack for one frame proves the client has read every frame
+      // written before it: an ack releases that frame and all earlier ones from the window. A
+      // client may leave some frames unacked for good (a topic no sink on the device claims, a sink
+      // torn down mid-session); they stay pending in the store but cannot hold the window. This is
+      // window accounting only — the store still frees exactly the deliveries acked.
+      const inFlight = new Map<string, number>() // sequenceID -> counted bytes, in write order
+      let inFlightBytes = 0
       let onWindowChange: (() => void) | null = null
       const hasRoom = (bytes: number): boolean =>
-        unacked.size === 0 ||
-        (unacked.size < receiveWindow && unackedBytes + bytes <= receiveWindowBytes)
+        inFlight.size === 0 ||
+        (inFlight.size < receiveWindow && inFlightBytes + bytes <= receiveWindowBytes)
+      function releaseAll(): void {
+        inFlight.clear()
+        inFlightBytes = 0
+      }
       // Resolves once the frame fits or the channel is torn down. A full window that sees no ack for
-      // `receiveAckTimeout` ms tears the channel down; every ack restarts that wait.
+      // `receiveAckTimeout` ms is released whole and the drain goes on: the frames in it may be ones
+      // the client will never ack, and ending the channel would only redeliver them first on the
+      // next connect. A client that has stopped reading is not left to grow a buffer: the HTTP
+      // bridge drops a session that falls `maxSessionBufferBytes` behind, and a transport with real
+      // backpressure stalls `writer.write` until `receiveBufferLimit` tears the channel down.
       function waitForRoom(bytes: number): Promise<void> {
         if (tornDown || hasRoom(bytes)) return Promise.resolve()
         return new Promise<void>((resolve) => {
           let timer: ReturnType<typeof setTimeout> | undefined
           const arm = (): void => {
             clearTimeout(timer)
-            timer = setTimeout(finish, receiveAckTimeout)
+            timer = setTimeout(() => {
+              releaseAll()
+              notifyWindow()
+            }, receiveAckTimeout)
           }
           onWindowChange = () => {
             if (tornDown || hasRoom(bytes)) {
@@ -717,11 +737,17 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         onWindowChange?.()
       }
       function release(sequenceIDs: Array<string>): void {
-        for (const id of sequenceIDs) {
-          const bytes = unacked.get(id)
-          if (bytes === undefined) continue
-          unacked.delete(id)
-          unackedBytes -= bytes
+        const acked = new Set(sequenceIDs)
+        // The acked frame written last, in write order (an ack batch need not be sorted).
+        let last: string | undefined
+        for (const id of inFlight.keys()) {
+          if (acked.has(id)) last = id
+        }
+        if (last === undefined) return
+        for (const [id, bytes] of inFlight) {
+          inFlight.delete(id)
+          inFlightBytes -= bytes
+          if (id === last) break
         }
         notifyWindow()
       }
@@ -762,8 +788,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
             await waitForRoom(bytes)
             if (tornDown) return
             await writer.ready
-            unacked.set(frame.sequenceID, bytes)
-            unackedBytes += bytes
+            inFlight.set(frame.sequenceID, bytes)
+            inFlightBytes += bytes
             await writer.write(frame)
             if (frame.sequenceID > lastServed) lastServed = frame.sequenceID
           } catch {
