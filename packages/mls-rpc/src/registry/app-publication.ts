@@ -9,6 +9,7 @@ import {
 } from '@kumiai/rpc'
 
 import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import { groupBatchFor } from '../group-batch-binding.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   DisplacedGroupHandleError,
@@ -25,6 +26,7 @@ import type { RegistryHandleAccess } from './types.js'
 
 export function createPublicationPreparation<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
+  binding: object
   capability: EntryCapability<TTx>
   live: ReturnType<typeof createLiveSend<TTx>>
   assertAvailable(): void
@@ -104,102 +106,114 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
       },
       stateVersion: source.version,
     }
-    return await live.publication(async () => {
-      const mutationID = crypto.randomUUID()
-      let result: PreparedAppPublication | undefined
-      try {
-        await live.run(
-          { groupID: owner.key.groupID, mutationID },
-          async (reads) => {
-            const captured = await snapshot(reads, entry.protocol)
-            if (
-              captured === null ||
-              !sameStoredValue(captured.identity, expected.identity) ||
-              captured.stateVersion !== expected.stateVersion
-            )
-              throw new GroupStateConflictError('Publication source moved')
-            const current = (await reads.outbox(n)).find((row) => row.seq === entry.seq)
-            if (!sameStoredValue(current, entry) || entry.status !== 'accepted')
-              throw new GroupStateConflictError('Publication entry moved')
-            if ((await reads.settlement(n, entry.seq)) !== null)
-              throw new GroupStateConflictError('Publication entry is obligated')
-            const record = await reads.state(n)
-            if (record === null || record.deleted || record.state === null)
-              throw new GroupStateConflictError('Publication state unavailable')
-            const sealed = await live.prepareSeal(
-              { ...record, state: record.state },
-              entry.data,
-              encodeAppAAD({ topicID: captured.topicID, intent: 'log' }),
-            )
-            assertFrameFits(sealed.sealed.ciphertext)
-            const updated: AppOutboxEntry = {
-              ...entry,
-              lastAttempt: {
-                incarnation: n,
-                epoch: captured.identity.epoch,
-                floor,
-                attempts: (entry.lastAttempt?.attempts ?? 0) + 1,
-                publishID: crypto.randomUUID(),
-                segment: captured.segment,
-                topicID: captured.topicID,
+    return await live.publication(() =>
+      groupBatchFor(params.binding, owner.key.groupID).schedule({
+        source: JSON.stringify(['publication', n]),
+        kind: 'enqueue',
+        signal: capability.failureSignal,
+        run: async () => {
+          const mutationID = crypto.randomUUID()
+          let result: PreparedAppPublication | undefined
+          try {
+            await live.run(
+              { groupID: owner.key.groupID, mutationID },
+              async (reads) => {
+                const captured = await snapshot(reads, entry.protocol)
+                if (
+                  captured === null ||
+                  !sameStoredValue(captured.identity, expected.identity) ||
+                  captured.stateVersion !== expected.stateVersion
+                )
+                  throw new GroupStateConflictError('Publication source moved')
+                const current = (await reads.outbox(n)).find((row) => row.seq === entry.seq)
+                if (!sameStoredValue(current, entry) || entry.status !== 'accepted')
+                  throw new GroupStateConflictError('Publication entry moved')
+                if ((await reads.settlement(n, entry.seq)) !== null)
+                  throw new GroupStateConflictError('Publication entry is obligated')
+                const record = await reads.state(n)
+                if (record === null || record.deleted || record.state === null)
+                  throw new GroupStateConflictError('Publication state unavailable')
+                const sealed = await live.prepareSeal(
+                  { ...record, state: record.state },
+                  entry.data,
+                  encodeAppAAD({ topicID: captured.topicID, intent: 'log' }),
+                )
+                assertFrameFits(sealed.sealed.ciphertext)
+                const updated: AppOutboxEntry = {
+                  ...entry,
+                  lastAttempt: {
+                    incarnation: n,
+                    epoch: captured.identity.epoch,
+                    floor,
+                    attempts: (entry.lastAttempt?.attempts ?? 0) + 1,
+                    publishID: crypto.randomUUID(),
+                    segment: captured.segment,
+                    topicID: captured.topicID,
+                  },
+                }
+                result = {
+                  entry: updated,
+                  payload: Uint8Array.from(sealed.sealed.ciphertext),
+                  snapshot: {
+                    ...captured,
+                    stateVersion: sealed.record.version,
+                    sealVersion: live.frontier(),
+                  },
+                }
+                return {
+                  expected: await reads.lifetime(),
+                  value: { ...sealed, source: captured, entry: updated },
+                }
               },
-            }
-            result = {
-              entry: updated,
-              payload: Uint8Array.from(sealed.sealed.ciphertext),
-              snapshot: {
-                ...captured,
-                stateVersion: sealed.record.version,
-                sealVersion: live.frontier(),
+              async (stores, prepared) => {
+                params.assertAvailable()
+                params.assertCurrent()
+                await params.assertWorkSafety(stores)
+                const rows = stores.incarnation(n)
+                const record = await rows.state.load()
+                const anchor = await rows.anchor.load()
+                const current = (await rows.outbox.list()).find((row) => row.seq === entry.seq)
+                if (
+                  record === null ||
+                  record.deleted ||
+                  record.version !== prepared.source.stateVersion ||
+                  record.epoch !== prepared.source.identity.epoch ||
+                  !sameStoredValue(
+                    record.epochAuthenticator,
+                    prepared.source.identity.authenticator,
+                  ) ||
+                  anchor === null ||
+                  anchor.pending !== undefined ||
+                  protocolTopic(anchor.anchor.secret, anchor.anchor.epoch, entry.protocol) !==
+                    prepared.source.topicID ||
+                  !sameStoredValue(current, entry) ||
+                  (await rows.meta.loadSettlement(entry.seq)) !== null
+                )
+                  throw new GroupStateConflictError('Publication source moved before commit')
+                if (committedNext(prepared.record) < prepared.publicationCopy.limit)
+                  throw new GroupStateConflictError('Publication lease is not committed')
+                if (prepared.record.version !== record.version)
+                  await rows.state.save(prepared.record)
+                await rows.outbox.put([prepared.entry])
               },
-            }
-            return {
-              expected: await reads.lifetime(),
-              value: { ...sealed, source: captured, entry: updated },
-            }
-          },
-          async (stores, prepared) => {
-            params.assertAvailable()
-            params.assertCurrent()
-            await params.assertWorkSafety(stores)
-            const rows = stores.incarnation(n)
-            const record = await rows.state.load()
-            const anchor = await rows.anchor.load()
-            const current = (await rows.outbox.list()).find((row) => row.seq === entry.seq)
-            if (
-              record === null ||
-              record.deleted ||
-              record.version !== prepared.source.stateVersion ||
-              record.epoch !== prepared.source.identity.epoch ||
-              !sameStoredValue(record.epochAuthenticator, prepared.source.identity.authenticator) ||
-              anchor === null ||
-              anchor.pending !== undefined ||
-              protocolTopic(anchor.anchor.secret, anchor.anchor.epoch, entry.protocol) !==
-                prepared.source.topicID ||
-              !sameStoredValue(current, entry) ||
-              (await rows.meta.loadSettlement(entry.seq)) !== null
             )
-              throw new GroupStateConflictError('Publication source moved before commit')
-            if (committedNext(prepared.record) < prepared.publicationCopy.limit)
-              throw new GroupStateConflictError('Publication lease is not committed')
-            if (prepared.record.version !== record.version) await rows.state.save(prepared.record)
-            await rows.outbox.put([prepared.entry])
-          },
-        )
-      } catch (error) {
-        if (
-          !(error instanceof StorageOutcomeUnknownError) ||
-          (await params.resolve(mutationID)) !== 'committed'
-        ) {
-          await params.diagnoseFailure(error)
-          throw error
-        }
-      } finally {
-        params.publish()
-      }
-      if (result === undefined) throw new GroupStateConflictError('Publication was not prepared')
-      return copyStoredValue(result)
-    })
+          } catch (error) {
+            if (
+              !(error instanceof StorageOutcomeUnknownError) ||
+              (await params.resolve(mutationID)) !== 'committed'
+            ) {
+              await params.diagnoseFailure(error)
+              throw error
+            }
+          } finally {
+            params.publish()
+          }
+          if (result === undefined)
+            throw new GroupStateConflictError('Publication was not prepared')
+          return copyStoredValue(result)
+        },
+      }),
+    )
   }
   return {
     assertPublicationEntry: () => capability.assertRoot(),

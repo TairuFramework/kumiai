@@ -1,6 +1,7 @@
 import type { ControlChanges } from '@kumiai/rpc'
 
-import { entryCapability } from './entry-capability.js'
+import { coordinatorBinding, entryCapability } from './entry-capability.js'
+import { groupBatchFor } from './group-batch-binding.js'
 import {
   copyControlChanges,
   copyStoredValue,
@@ -65,10 +66,22 @@ export function createMemoryGroupPorts(params: {
   groups: GroupPersistence<MemoryTransaction>
   key: GroupKey
 }): GroupPersistencePorts {
-  const access = accesses.get(params.groups)
-  if (access === undefined)
+  const registeredAccess = accesses.get(params.groups)
+  if (registeredAccess === undefined)
     throw new NonRootProviderError('Memory group ports require a root persistence factory')
+  const access: MemoryGroupAccess = registeredAccess
   const key = { ...params.key }
+  const capability = entryCapability(params.groups)
+  const binding = coordinatorBinding(params.groups)
+  if (capability === null || binding === null)
+    throw new NonRootProviderError('Missing entry capability')
+  const schedule = <T>(kind: 'enqueue' | 'settlement', run: () => Promise<T>): Promise<T> =>
+    groupBatchFor(binding, key.groupID).schedule({
+      source: JSON.stringify(['outbox', key.incarnation, kind]),
+      kind,
+      signal: capability.failureSignal,
+      run,
+    })
   return {
     get key() {
       return { ...key }
@@ -112,143 +125,98 @@ export function createMemoryGroupPorts(params: {
     outbox: {
       failureSignal: entryCapability(params.groups)?.failureSignal,
       async put(entry) {
+        capability.assertRoot()
         const owned = copyStoredValue(entry)
-        let isNew = false
-        await access.write(
-          key,
-          async (stores, mutationID) => {
-            const rows = stores.incarnation(key.incarnation)
-            await rows.outbox.put([owned])
-            if (isNew)
-              await rows.meta.putEvents([
-                {
-                  ...key,
-                  id: statusEventID(mutationID, owned.seq, 'accepted'),
-                  kind: 'accepted',
-                  entry: owned,
-                },
-              ])
-          },
-          {
-            active: true,
-            async check(stores) {
-              const previous = (await stores.incarnation(key.incarnation).outbox.list()).find(
-                (value) => value.seq === owned.seq,
-              )
-              if (sameStoredValue(previous, owned)) unchangedGroupResult(undefined)
-              isNew = previous === undefined
+        return schedule('enqueue', async () => {
+          let isNew = false
+          await access.write(
+            key,
+            async (stores, mutationID) => {
+              const rows = stores.incarnation(key.incarnation)
+              await rows.outbox.put([owned])
+              if (isNew)
+                await rows.meta.putEvents([
+                  {
+                    ...key,
+                    id: statusEventID(mutationID, owned.seq, 'accepted'),
+                    kind: 'accepted',
+                    entry: owned,
+                  },
+                ])
             },
-          },
-        )
+            {
+              active: true,
+              async check(stores) {
+                const previous = (await stores.incarnation(key.incarnation).outbox.list()).find(
+                  (value) => value.seq === owned.seq,
+                )
+                if (sameStoredValue(previous, owned)) unchangedGroupResult(undefined)
+                isNew = previous === undefined
+              },
+            },
+          )
+        })
       },
       list: () => access.read(key, (stores) => stores.incarnation(key.incarnation).outbox.list()),
       loadSettlement: (seq) =>
         access.read(key, (stores) => stores.incarnation(key.incarnation).meta.loadSettlement(seq)),
       async recordSettlement(seq, obligation, expected) {
+        capability.assertRoot()
         const owned = copyStoredValue({ obligation, expected })
-        return await access.write(
-          key,
-          async (stores): Promise<AppSettlementResult> => {
-            await stores.incarnation(key.incarnation).meta.putSettlement(seq, owned.obligation)
-            return { recorded: true }
-          },
-          {
-            retryOnRollback: true,
-            async check(stores) {
-              const rows = stores.incarnation(key.incarnation)
-              const previous = await rows.meta.loadSettlement(seq)
-              if (previous !== null) {
-                if (!sameStoredValue(previous, owned.obligation))
-                  throw new GroupStateConflictError('Conflicting settlement')
-                unchangedGroupResult({ recorded: true })
-              }
-              const life = await stores.lifetime.load()
-              const state = await rows.state.load()
-              const identity = owned.expected.identity
-              if (
-                life?.activeIncarnation !== key.incarnation ||
-                state === null ||
-                state.deleted ||
-                identity.groupID !== key.groupID ||
-                identity.incarnation !== key.incarnation ||
-                state.epoch !== identity.epoch ||
-                !sameStoredValue(state.epochAuthenticator, identity.authenticator)
-              )
-                unchangedGroupResult({ recorded: false, reason: 'identity-changed' })
-              if (state.version !== owned.expected.stateVersion)
-                unchangedGroupResult({ recorded: false, reason: 'state-version-changed' })
-              const entry = (await rows.outbox.list()).find((value) => value.seq === seq)
-              if (entry === undefined)
-                unchangedGroupResult({ recorded: false, reason: 'entry-missing' })
-              if (
-                entry.lastAttempt?.publishID !== owned.expected.attemptID ||
-                owned.obligation.attemptID !== owned.expected.attemptID ||
-                entry.lastAttempt.topicID !== owned.obligation.topicID ||
-                entry.lastAttempt.incarnation !== identity.incarnation ||
-                entry.lastAttempt.epoch !== identity.epoch
-              )
-                unchangedGroupResult({ recorded: false, reason: 'attempt-changed' })
+        return schedule('settlement', () =>
+          access.write(
+            key,
+            async (stores): Promise<AppSettlementResult> => {
+              await stores.incarnation(key.incarnation).meta.putSettlement(seq, owned.obligation)
+              return { recorded: true }
             },
-          },
+            {
+              retryOnRollback: true,
+              async check(stores) {
+                const rows = stores.incarnation(key.incarnation)
+                const previous = await rows.meta.loadSettlement(seq)
+                if (previous !== null) {
+                  if (!sameStoredValue(previous, owned.obligation))
+                    throw new GroupStateConflictError('Conflicting settlement')
+                  unchangedGroupResult({ recorded: true })
+                }
+                const life = await stores.lifetime.load()
+                const state = await rows.state.load()
+                const identity = owned.expected.identity
+                if (
+                  life?.activeIncarnation !== key.incarnation ||
+                  state === null ||
+                  state.deleted ||
+                  identity.groupID !== key.groupID ||
+                  identity.incarnation !== key.incarnation ||
+                  state.epoch !== identity.epoch ||
+                  !sameStoredValue(state.epochAuthenticator, identity.authenticator)
+                )
+                  unchangedGroupResult({ recorded: false, reason: 'identity-changed' })
+                if (state.version !== owned.expected.stateVersion)
+                  unchangedGroupResult({ recorded: false, reason: 'state-version-changed' })
+                const entry = (await rows.outbox.list()).find((value) => value.seq === seq)
+                if (entry === undefined)
+                  unchangedGroupResult({ recorded: false, reason: 'entry-missing' })
+                if (
+                  entry.lastAttempt?.publishID !== owned.expected.attemptID ||
+                  owned.obligation.attemptID !== owned.expected.attemptID ||
+                  entry.lastAttempt.topicID !== owned.obligation.topicID ||
+                  entry.lastAttempt.incarnation !== identity.incarnation ||
+                  entry.lastAttempt.epoch !== identity.epoch
+                )
+                  unchangedGroupResult({ recorded: false, reason: 'attempt-changed' })
+              },
+            },
+          ),
         )
       },
       async remove(seq, outcome) {
-        const owned = copyStoredValue(outcome)
-        const obligation = await access.read(key, (stores) =>
-          stores.incarnation(key.incarnation).meta.loadSettlement(seq),
-        )
-        if (obligation !== null) {
-          if (owned === undefined || owned.position !== obligation.sequenceID)
-            throw new GroupStateConflictError('Certified entry requires its original occurrence')
-          if (owned.incarnation !== key.incarnation || owned.topicID !== obligation.topicID)
-            throw new GroupStateConflictError('Publication occurrence mismatch')
-          const saved = await access.read(key, async (stores) =>
-            (await stores.incarnation(key.incarnation).outbox.list()).find(
-              (entry) => entry.seq === seq,
-            ),
-          )
-          if (saved !== undefined && saved.lastAttempt?.segment !== owned.segment)
-            throw new GroupStateConflictError('Publication occurrence mismatch')
-          const capability = entryCapability(params.groups)
-          if (capability === null) throw new GroupStateConflictError('Missing entry capability')
-          return await capability.finaliseCertifiedApp(key, seq)
-        }
-        let entry!: AppOutboxEntry
-        await access.write(
-          key,
-          async (stores, mutationID) => {
-            const rows = stores.incarnation(key.incarnation)
-            if (owned !== undefined) {
-              if (
-                owned.incarnation !== key.incarnation ||
-                entry.lastAttempt === null ||
-                entry.lastAttempt.segment !== owned.segment ||
-                entry.lastAttempt.topicID !== owned.topicID
-              )
-                throw new GroupStateConflictError('Publication occurrence mismatch')
-              const status: AppStatusEvent = {
-                ...key,
-                id: statusEventID(mutationID, seq, 'published'),
-                entry,
-                kind: 'published',
-                occurrence: owned,
-              }
-              await rows.meta.putEvents([status])
-            }
-            await rows.outbox.remove([seq])
-          },
-          {
-            async check(stores) {
-              const stored = (await stores.incarnation(key.incarnation).outbox.list()).find(
-                (value) => value.seq === seq,
-              )
-              if (stored === undefined) unchangedGroupResult(undefined)
-              entry = stored
-            },
-          },
-        )
+        capability.assertRoot()
+        return remove(seq, outcome)
       },
       async clear() {
+        capability.assertRoot()
         await access.write(key, (stores) => stores.incarnation(key.incarnation).outbox.clear(), {
           async check(stores) {
             if ((await stores.incarnation(key.incarnation).outbox.list()).length === 0)
@@ -257,6 +225,7 @@ export function createMemoryGroupPorts(params: {
         })
       },
       async events() {
+        capability.assertRoot()
         return await access.read(key, async (stores) =>
           (await stores.incarnation(key.incarnation).meta.events()).filter(
             (event): event is AppStatusEvent =>
@@ -265,6 +234,7 @@ export function createMemoryGroupPorts(params: {
         )
       },
       async ackEvent(id) {
+        capability.assertRoot()
         await access.write(key, (stores) => stores.incarnation(key.incarnation).meta.ackEvent(id), {
           async check(stores) {
             const event = (await stores.incarnation(key.incarnation).meta.events()).find(
@@ -277,5 +247,65 @@ export function createMemoryGroupPorts(params: {
         })
       },
     },
+  }
+  async function remove(
+    seq: number,
+    outcome?: Parameters<GroupPersistencePorts['outbox']['remove']>[1],
+  ): Promise<void> {
+    const owned = copyStoredValue(outcome)
+    const obligation = await access.read(key, (stores) =>
+      stores.incarnation(key.incarnation).meta.loadSettlement(seq),
+    )
+    if (obligation !== null) {
+      if (owned === undefined || owned.position !== obligation.sequenceID)
+        throw new GroupStateConflictError('Certified entry requires its original occurrence')
+      if (owned.incarnation !== key.incarnation || owned.topicID !== obligation.topicID)
+        throw new GroupStateConflictError('Publication occurrence mismatch')
+      const saved = await access.read(key, async (stores) =>
+        (await stores.incarnation(key.incarnation).outbox.list()).find(
+          (entry) => entry.seq === seq,
+        ),
+      )
+      if (saved !== undefined && saved.lastAttempt?.segment !== owned.segment)
+        throw new GroupStateConflictError('Publication occurrence mismatch')
+      const capability = entryCapability(params.groups)
+      if (capability === null) throw new GroupStateConflictError('Missing entry capability')
+      return await capability.finaliseCertifiedApp(key, seq)
+    }
+    let entry: AppOutboxEntry | undefined
+    await access.write(
+      key,
+      async (stores, mutationID) => {
+        const rows = stores.incarnation(key.incarnation)
+        if (entry === undefined) throw new GroupStateConflictError('Missing publication entry')
+        if (owned !== undefined) {
+          if (
+            owned.incarnation !== key.incarnation ||
+            entry.lastAttempt === null ||
+            entry.lastAttempt.segment !== owned.segment ||
+            entry.lastAttempt.topicID !== owned.topicID
+          )
+            throw new GroupStateConflictError('Publication occurrence mismatch')
+          const status: AppStatusEvent = {
+            ...key,
+            id: statusEventID(mutationID, seq, 'published'),
+            entry,
+            kind: 'published',
+            occurrence: owned,
+          }
+          await rows.meta.putEvents([status])
+        }
+        await rows.outbox.remove([seq])
+      },
+      {
+        async check(stores) {
+          const stored = (await stores.incarnation(key.incarnation).outbox.list()).find(
+            (value) => value.seq === seq,
+          )
+          if (stored === undefined) unchangedGroupResult(undefined)
+          entry = stored
+        },
+      },
+    )
   }
 }

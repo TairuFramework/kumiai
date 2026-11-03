@@ -777,6 +777,164 @@ for (const mode of ['real-mls', 'double'] as const)
           }
         }
       })
+      test('ordinary failed batches release before caller retry', async () => {
+        for (const kind of ['completion', 'transact', 'enqueue'] as const) {
+          const f = await completionFixture(mode, supplied)
+          const started = Promise.withResolvers<void>()
+          const release = Promise.withResolvers<void>()
+          const outcome = Promise.withResolvers<void>()
+          try {
+            await f.plant([f.record('ordinary')])
+            const before = await f.fixture.inspectRows()
+            const log: Array<string> = []
+            const scheduler = groupBatchFor(f.binding, f.key.groupID)
+            f.fixture.onPhase('work', async () => {
+              started.resolve()
+              await release.promise
+            })
+            f.fixture.onPhase('outcome', () => {
+              outcome.resolve()
+            })
+            f.fixture.armNextWorkFault('before-commit')
+            const invoke = () =>
+              kind === 'completion'
+                ? f.completion.complete(['ordinary'])
+                : kind === 'transact'
+                  ? f.completion.transact(['ordinary'], async (tx) =>
+                      writeSideRow(tx, 'ordinary', new Uint8Array([1])),
+                    )
+                  : f.groups.ports(f.key).outbox.put({
+                      seq: 99,
+                      protocol: 'chat',
+                      prc: 'posted',
+                      data: new TextEncoder().encode(
+                        '{"v":2,"payload":{"typ":"event","prc":"posted","data":{}}}',
+                      ),
+                      status: 'accepted',
+                      lastAttempt: null,
+                    })
+            let failed: unknown
+            const first = invoke().catch((error: unknown) => {
+              failed = error
+            })
+            await started.promise
+            const b = scheduler.schedule({
+              source: 'B',
+              kind: 'completion',
+              run: async () => {
+                log.push('B')
+              },
+            })
+            release.resolve()
+            await outcome.promise
+            for (let i = 0; i < 1000; i++) await Promise.resolve()
+            expect(log).toEqual(['B'])
+            await first
+            expect(failed).toBeInstanceOf(Error)
+            expect(await f.fixture.inspectRows()).toEqual(before)
+            expect(log).toEqual(['B'])
+            log.push('retry-advertised')
+            await Promise.all([b, invoke()])
+            expect(log).toEqual(['B', 'retry-advertised'])
+            if (kind === 'transact')
+              expect(await f.fixture.inspectSideRow('ordinary')).toEqual(new Uint8Array([1]))
+          } finally {
+            release.resolve()
+            await f.fixture.close()
+          }
+        }
+      })
+      test('collected completion waits for its bounded coverage suffix', async () => {
+        const f = await completionFixture(mode, supplied, 1)
+        const entered = Promise.withResolvers<void>()
+        const release = Promise.withResolvers<void>()
+        try {
+          const records = [f.record('A'), f.record('B')]
+          await f.plant(records.slice(0, 1))
+          bind(f.completion, orderedCoverage(records, ['pending', 'dead']))
+          let finished = false
+          const scheduler = groupBatchFor(f.binding, f.key.groupID)
+          const schedule = scheduler.schedule.bind(scheduler)
+          let turns = 0
+          vi.spyOn(scheduler, 'schedule').mockImplementation((work) =>
+            schedule({
+              ...work,
+              run: async (budget) => {
+                if (++turns === 2) {
+                  entered.resolve()
+                  await release.promise
+                }
+                return work.run(budget)
+              },
+            }),
+          )
+          const completing = f.completion.complete(['A']).then(() => {
+            finished = true
+          })
+          await entered.promise
+          for (let i = 0; i < 50; i++) await Promise.resolve()
+          expect(finished).toBe(false)
+          release.resolve()
+          await completing
+          expect(await f.cursor()).toBe('B')
+        } finally {
+          release.resolve()
+          await f.fixture.close()
+        }
+      })
+      test('collected completion rollback preserves every row and eligible cursor', async () => {
+        const f = await completionFixture(mode, supplied, 2)
+        const release = Promise.withResolvers<void>()
+        try {
+          const records = [f.record('A'), f.record('B')]
+          await f.plant(records)
+          bind(f.completion, orderedCoverage(records))
+          const before = await f.fixture.inspectRows()
+          const scheduler = groupBatchFor(f.binding, f.key.groupID)
+          const active = scheduler.schedule({
+            source: 'held',
+            kind: 'open',
+            run: () => release.promise,
+          })
+          f.fixture.armNextWorkFault('before-commit')
+          const calls = records.map((record) => f.completion.complete([record.frame.id]))
+          const settled = Promise.allSettled(calls)
+          release.resolve()
+          await active
+          expect((await settled).map((result) => result.status)).toEqual(['rejected', 'rejected'])
+          expect(await f.fixture.inspectRows()).toEqual(before)
+          expect(await f.cursor()).toBeNull()
+          await Promise.all(records.map((record) => f.completion.complete([record.frame.id])))
+          expect(await f.pending()).toEqual([])
+          expect(await f.cursor()).toBe('B')
+        } finally {
+          release.resolve()
+          await f.fixture.close()
+        }
+      })
+      test('compatible completions and settlements share bounded transactions', async () => {
+        const f = await completionFixture(mode, supplied, 2)
+        const gate = Promise.withResolvers<void>()
+        try {
+          await f.plant([f.record('A'), f.record('B'), f.record('C')])
+          const scheduler = groupBatchFor(f.binding, f.key.groupID)
+          const active = scheduler.schedule({
+            source: 'held',
+            kind: 'open',
+            run: () => gate.promise,
+          })
+          const run = vi.spyOn(f.capability, 'run')
+          const calls = ['A', 'B', 'C'].map((id) => f.completion.complete([id]))
+          gate.resolve()
+          await active
+          await Promise.all(calls)
+          expect(run).toHaveBeenCalledTimes(2)
+          expect(await f.pending()).toEqual([])
+        } finally {
+          gate.resolve()
+          await f.fixture.close()
+        }
+      })
       test('transactional root reentry obeys ownership diagnostics', async () => {
         const f = await completionFixture(mode, supplied)
         try {

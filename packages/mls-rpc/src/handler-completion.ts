@@ -371,6 +371,55 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
       if (captures.length === 0 && remaining.length === 0) return
     }
   }
+  type CompletionRequest = { ids: Array<string>; resolve(): void; reject(error: unknown): void }
+  const waiting: Array<CompletionRequest> = []
+  let collecting = false
+  function pumpCompletions(): void {
+    if (collecting || waiting.length === 0) return
+    collecting = true
+    let selected: Array<CompletionRequest> = []
+    void scheduler
+      .schedule({
+        source: sourceID,
+        kind: 'completion',
+        signal: capability.failureSignal,
+        run: (budget) => {
+          selected = waiting.splice(0)
+          const ids = [...new Set(selected.flatMap((request) => request.ids))]
+          return turn(ids, capture(ids), budget, undefined, false)
+        },
+      })
+      .then(async (staged) => {
+        const remaining = new Set(staged?.remaining ?? [])
+        const suffix: Array<CompletionRequest> = []
+        const completed: Array<CompletionRequest> = []
+        for (const request of selected) {
+          request.ids = request.ids.filter((id) => remaining.has(id))
+          if (request.ids.length === 0) completed.push(request)
+          else suffix.push(request)
+        }
+        waiting.unshift(...suffix)
+        if (
+          remaining.size === 0 &&
+          staged !== undefined &&
+          (staged.saved.size > 0 || staged.consumed.length > 0)
+        ) {
+          const captures = capture([])
+          if (captures.length > 0) await run([], captures, undefined, undefined, true)
+        }
+        for (const request of completed) request.resolve()
+      })
+      .catch((error: unknown) => {
+        if (error instanceof CoverageMoved) waiting.unshift(...selected)
+        else
+          for (const request of selected.length === 0 ? waiting.splice(0) : selected)
+            request.reject(error)
+      })
+      .finally(() => {
+        collecting = false
+        pumpCompletions()
+      })
+  }
   const completion: HandlerCompletion<TTx> = {
     get key() {
       return { ...key }
@@ -379,7 +428,10 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
       capability.assertRoot()
       const owned = [...new Set(ids)]
       if (owned.length === 0) return Promise.resolve()
-      return run(owned, capture(owned))
+      return new Promise<void>((resolve, reject) => {
+        waiting.push({ ids: owned, resolve, reject })
+        pumpCompletions()
+      })
     },
     transact(ids, handle) {
       capability.assertRoot()

@@ -3,6 +3,7 @@ import { decodeClientState, decodeEpochRosterFact } from '@kumiai/mls'
 import { type CheckpointFactRecord, controlAdoptionAllowed, controlSafetyHeld } from '@kumiai/rpc'
 import { fromB64U } from '@sozai/codec'
 
+import { collectCertifiedApps, finaliseCertifiedAppInTransaction } from './app-settlement.js'
 import { prepareCheckpointInstallationFromTrust } from './checkpoint-capture.js'
 import {
   assertCheckpointUpdates,
@@ -51,7 +52,6 @@ import {
   groupOwnerKey,
   memoryRecordTable,
   sameStoredValue,
-  statusEventID,
 } from './memory-incarnation-stores.js'
 import { deviceNamespaces, groupNamespaces } from './memory-rows.js'
 import type { OwnerEntry, OwnerQueues } from './owner-queue.js'
@@ -1512,8 +1512,15 @@ export function createMemoryGroupCoordinator(params: {
     resolve,
   }
   const capability: EntryCapability<MemoryTransaction> = {
-    finaliseCertifiedApp(requestedKey, seq) {
+    finaliseCertifiedApp(key, seq) {
+      capability.assertRoot()
+      return collectCertifiedApps({ capability, binding, key, seqs: [seq] })
+    },
+    finaliseCertifiedAppBatch(requestedKey, inputs, budget) {
+      capability.assertRoot()
       const key = { ...requestedKey }
+      const seqs = [...inputs]
+      let prefix: Array<number> | undefined
       const mutationID = crypto.randomUUID()
       return owners.run(
         'transition',
@@ -1527,40 +1534,20 @@ export function createMemoryGroupCoordinator(params: {
               return await transitionOwned(
                 { groupID: key.groupID, key, active: false, mutationID },
                 async (stores) => {
-                  const rows = stores.incarnation(key.incarnation)
-                  const obligation = await rows.meta.loadSettlement(seq)
-                  const saved = (await rows.outbox.list()).find((value) => value.seq === seq)
-                  if (saved === undefined && obligation === null)
-                    throw new UnchangedGroupResult(undefined)
-                  const attempt = saved?.lastAttempt
-                  if (
-                    saved === undefined ||
-                    saved.status !== 'accepted' ||
-                    obligation === null ||
-                    obligation.outcome !== 'published' ||
-                    attempt == null ||
-                    attempt.incarnation !== key.incarnation ||
-                    attempt.publishID !== obligation.attemptID ||
-                    attempt.topicID !== obligation.topicID
-                  )
-                    throw new GroupStateConflictError(
-                      'Certified finalisation requires the original obligation and attempt',
+                  const selected: Array<number> = []
+                  const results = []
+                  for (const seq of prefix ?? seqs) {
+                    if (prefix === undefined && !budget.take()) break
+                    selected.push(seq)
+                    results.push(
+                      await finaliseCertifiedAppInTransaction({ stores, key, seq, mutationID }),
                     )
-                  await rows.meta.putEvents([
-                    {
-                      ...key,
-                      id: statusEventID(mutationID, seq, 'published'),
-                      kind: 'published',
-                      entry: saved,
-                      occurrence: {
-                        incarnation: attempt.incarnation,
-                        segment: attempt.segment,
-                        topicID: attempt.topicID,
-                        position: obligation.sequenceID,
-                      },
-                    },
-                  ])
-                  await rows.outbox.remove([seq])
+                  }
+                  prefix ??= selected
+                  const result = { consumed: prefix.length, results }
+                  if (results.every((result) => result.status === 'already-complete'))
+                    throw new UnchangedGroupResult(result)
+                  return result
                 },
                 entry,
                 undefined,

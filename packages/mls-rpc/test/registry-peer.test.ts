@@ -229,7 +229,7 @@ describe('registry peer recovery coordination', () => {
     const release = deferred<void>()
     const capability = registrySafety(s.f.registry)?.entry
     if (capability === undefined) throw new Error('Missing capability')
-    const finalise = capability.finaliseCertifiedApp
+    const finalise = capability.finaliseCertifiedAppBatch
     let owner: api.RegistryPeer | undefined
     try {
       const state = await s.f.device.groups.loadState(source)
@@ -269,9 +269,9 @@ describe('registry peer recovery coordination', () => {
           },
         ),
       ).toEqual({ recorded: true })
-      capability.finaliseCertifiedApp = async (...args) => {
+      capability.finaliseCertifiedAppBatch = async (...args) => {
         await release.promise
-        await finalise(...args)
+        return await finalise(...args)
       }
       owner = await s.start()
       await vi.waitFor(() =>
@@ -296,7 +296,7 @@ describe('registry peer recovery coordination', () => {
       )
     } finally {
       release.resolve()
-      capability.finaliseCertifiedApp = finalise
+      capability.finaliseCertifiedAppBatch = finalise
       owner?.dispose()
       await owner?.drained()
       await s.f.close()

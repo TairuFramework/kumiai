@@ -1,4 +1,10 @@
-import type { AnchorSlot, CheckpointRecord, ControlSnapshot, GroupCondition } from '@kumiai/rpc'
+import type {
+  AnchorSlot,
+  BatchBudget,
+  CheckpointRecord,
+  ControlSnapshot,
+  GroupCondition,
+} from '@kumiai/rpc'
 
 import type {
   AppOutboxEntry,
@@ -66,10 +72,18 @@ export type Prepared<T> = {
   mutationID?: string
   value: T
 }
+export type CertifiedFinalisationResult = { seq: number; status: 'published' | 'already-complete' }
+export type FinaliseBatchResult = { consumed: number; results: Array<CertifiedFinalisationResult> }
+
 export type EntryCapability<TTx extends GroupTransaction> = {
   assertRoot(): void
   activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
   failureSignal?: AbortSignal
+  finaliseCertifiedAppBatch(
+    key: GroupKey,
+    seqs: Array<number>,
+    budget: BatchBudget,
+  ): Promise<FinaliseBatchResult>
   finaliseCertifiedApp(key: GroupKey, seq: number): Promise<void>
   observe(
     groupID: string,

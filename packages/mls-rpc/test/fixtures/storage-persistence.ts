@@ -170,7 +170,7 @@ export type RegistryStorageFixture = Omit<
   'entry' | 'onPhase'
 > & {
   onPhase(
-    phase: Parameters<PersistenceFixture<RegistryStoragePorts>['onPhase']>[0] | 'retry',
+    phase: Parameters<PersistenceFixture<RegistryStoragePorts>['onPhase']>[0] | 'retry' | 'outcome',
     fn: () => Promise<void> | void,
   ): void
   entry(): EntryCapability<MemoryTransaction>
@@ -208,6 +208,7 @@ export async function createStorageFixture(params: {
   type Phase =
     | Parameters<PersistenceFixture<StorageTestPorts<MemoryTransaction>>['onPhase']>[0]
     | 'retry'
+    | 'outcome'
   type Latch = { reached(): void; wait: Promise<void>; release(): void }
   let sealLatch: Latch | undefined
   let openLatch: Latch | undefined

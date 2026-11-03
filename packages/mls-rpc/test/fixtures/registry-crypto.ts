@@ -11,7 +11,11 @@ import { onTestFinished } from 'vitest'
 
 import { createGroupCrypto } from '../../src/crypto.js'
 import { type EntryCapability, entryCapability } from '../../src/entry-capability.js'
-import type { MemoryTransaction, OwnershipContextPort } from '../../src/persistence-types.js'
+import type {
+  GroupBatchOptions,
+  MemoryTransaction,
+  OwnershipContextPort,
+} from '../../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../../src/registry/registry.js'
 import { createRealGroup, testHandleAccess } from './real-group.js'
 import { createRegistryFixture, registryFixtureObserveStagedDecrypts } from './registry.js'
@@ -26,6 +30,7 @@ export async function createRegistryCryptoGroup(
   id: string,
   size: number,
   config: {
+    batch?: GroupBatchOptions
     backgroundMaintenance?: 'gated'
     options?: GroupOptions
     ownershipContext?: OwnershipContextPort
@@ -37,6 +42,7 @@ export async function createRegistryCryptoGroup(
   if (local === undefined) throw new Error('Missing registry crypto member')
   let fixture = await createRegistryFixture({
     mode,
+    batch: config.batch,
     backgroundMaintenance: config.backgroundMaintenance,
     ownershipContext: config.ownershipContext,
     setup: 'empty',

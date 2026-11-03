@@ -57,6 +57,7 @@ import type {
   AppOutboxEntry,
   AppSettlementObligation,
   DevicePersistence,
+  GroupBatchOptions,
   GroupKey,
   GroupRecoveryTrust,
   GroupStateRecord,
@@ -166,6 +167,7 @@ export type RegistryFixtureBase = {
   onPhase(
     phase:
       | 'before-work'
+      | 'outcome'
       | 'retry'
       | 'prepare'
       | 'work'
@@ -206,6 +208,7 @@ type FixtureParams = {
   deliverOpened?: (record: PendingAppFrame) => Promise<void>
   ownershipContext?: OwnershipContextPort
   backgroundMaintenance?: 'gated'
+  batch?: GroupBatchOptions
 }
 type Hold = {
   started: ReturnType<typeof deferred<void>>
@@ -550,6 +553,7 @@ async function assemble(
       if (owner !== undefined) return owner
       owner = createGroupHandleRegistry({
         persistence: fixture.device,
+        batch: params.batch,
         providerID: fixture.device.providerID,
         openedDeliveryContext:
           params.openedDeliveryContext === null

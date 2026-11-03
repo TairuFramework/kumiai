@@ -1120,8 +1120,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       if (coordinator === null) throw new Error('Missing coordinator')
       const completions = Array.from({ length: 3 }, () => Promise.withResolvers<void>())
       let completed = 0
-      const finalise = coordinator.finaliseCertifiedApp.bind(coordinator)
-      vi.spyOn(coordinator, 'finaliseCertifiedApp').mockImplementation(async (...args) => {
+      const finalise = coordinator.finaliseCertifiedAppBatch.bind(coordinator)
+      vi.spyOn(coordinator, 'finaliseCertifiedAppBatch').mockImplementation(async (...args) => {
         try {
           return await finalise(...args)
         } finally {

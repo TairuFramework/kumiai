@@ -1,7 +1,10 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   appBatch,
+  appFrameIdempotencyKey,
   asLogPosition,
+  type BatchKind,
+  bindAppCompletionCoverage,
   bindControlBatch,
   type ControlBatchBinding,
   commitTopic,
@@ -23,13 +26,17 @@ import { describe, expect, test, vi } from 'vitest'
 import type * as bufferedControlTypes from '../../rpc/lib/buffered-control.js'
 import type { BufferedControlIntake } from '../../rpc/lib/buffered-control.js'
 import { createRegistryAppPublication } from '../src/app-publication.js'
+import { finaliseAppSettlements } from '../src/app-settlement.js'
 import { createControlValidationPort } from '../src/control-validation.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
 import { createLedgerEntrySlot } from '../src/mls.js'
+import { physicalRecordKey } from '../src/persistence-codec.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
+import { registryControlBatch } from '../src/registry/control-batch.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
+import { orderedCoverage } from './fixtures/handler-completion.js'
 import {
   createAsyncLocalOwnershipContext,
   openedDeliveryContext,
@@ -966,6 +973,482 @@ for (const mode of ['real-mls', 'double'] as const)
         await s.close()
       }
     })
+
+    test('ordinary failed open releases before caller retry', async () => {
+      const s = await setup(mode, async () => {})
+      const started = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const outcome = Promise.withResolvers<void>()
+      try {
+        const binding = appBatch(s.groupCrypto)
+        if (binding === undefined) throw new Error('Missing app batch')
+        const sealed = await s.seal('1')
+        const input = {
+          frame: {
+            ...s.key,
+            id: frameID(s.topicID, sealed.payload),
+            topicID: s.topicID,
+            position: '1',
+            segment: 0,
+            protocol: 'chat',
+          },
+          ciphertext: sealed.payload,
+          expectedAAD: encodeAppAAD({ topicID: s.topicID, intent: 'log' }),
+        }
+        const before = await s.f.inspectRows()
+        s.f.onPhase('work', async () => {
+          started.resolve()
+          await release.promise
+        })
+        s.f.onPhase('outcome', () => {
+          outcome.resolve()
+        })
+        s.f.armNextWorkFault('before-commit')
+        const log: Array<string> = []
+        const invoke = () =>
+          binding.scheduler.schedule({
+            source: 'ordinary-open',
+            kind: 'open',
+            run: (budget) => binding.openReady([input], budget),
+          })
+        let error: unknown
+        const first = invoke().catch((failure: unknown) => {
+          error = failure
+        })
+        await started.promise
+        const b = binding.scheduler.schedule({
+          source: 'B',
+          kind: 'completion',
+          run: async () => {
+            log.push('B')
+          },
+        })
+        release.resolve()
+        await outcome.promise
+        for (let i = 0; i < 1000; i++) await Promise.resolve()
+        expect(log).toEqual(['B'])
+        await first
+        expect(error).toBeInstanceOf(Error)
+        expect(await s.f.inspectRows()).toEqual(before)
+        log.push('retry-advertised')
+        await Promise.all([b, invoke()])
+        expect(log).toEqual(['B', 'retry-advertised'])
+      } finally {
+        release.resolve()
+        await s.close()
+      }
+    })
+
+    for (const supplied of [false, true])
+      test(`scheduled completion roots reject reentry before admission (${supplied})`, async () => {
+        const group = await createRegistryCryptoGroup(mode, crypto.randomUUID(), 2, {
+          backgroundMaintenance: 'gated',
+          ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
+        })
+        let check: () => Promise<void> = async () => {}
+        const inspected = Promise.withResolvers<void>()
+        const release = Promise.withResolvers<void>()
+        let failure: unknown
+        const s = await setup(
+          mode,
+          {
+            mode: 'transactional',
+            handle: async ({ tx }) => {
+              try {
+                await check()
+              } catch (error) {
+                failure = error
+              }
+              inspected.resolve()
+              await release.promise
+              await writeSideRow(tx, 'guarded-handler', new Uint8Array([1]))
+            },
+          },
+          ['chat'],
+          group,
+        )
+        const capability = entryCapability(s.f.device.groups)
+        const binding = appBatch(s.groupCrypto)
+        if (capability === null || binding === undefined)
+          throw new Error('Missing registered entry')
+        const target = {
+          frame: {
+            ...s.key,
+            id: 'guard-target',
+            topicID: 'guard-topic',
+            position: '1',
+            segment: 0,
+            protocol: 'chat',
+            procedure: 'posted',
+          },
+          payload: encodeEventFrame('posted', {}),
+          senderDID: s.f.identity.id,
+          epoch: s.group.access().epoch(),
+          idempotencyKey: appFrameIdempotencyKey({
+            ...s.key,
+            topicID: 'guard-topic',
+            position: '1',
+            protocol: 'chat',
+            procedure: 'posted',
+          }),
+        }
+        const entry = {
+          seq: 99,
+          protocol: 'chat',
+          prc: 'posted',
+          data: encodeEventFrame('posted', {}),
+          status: 'accepted' as const,
+          lastAttempt: {
+            incarnation: s.key.incarnation,
+            epoch: s.group.access().epoch(),
+            segment: 0,
+            floor: null,
+            attempts: 1,
+            publishID: 'guard-attempt',
+            topicID: 'guard-topic',
+          },
+        }
+        const obligation = {
+          sequenceID: '1',
+          attemptID: 'guard-attempt',
+          topicID: 'guard-topic',
+          outcome: 'published' as const,
+        }
+        await capability.run(
+          { groupID: s.key.groupID, mutationID: crypto.randomUUID() },
+          async (reads) => ({ expected: await reads.lifetime(), value: undefined }),
+          async (stores) => {
+            const rows = stores.incarnation(s.key.incarnation)
+            await rows.pending.put([target])
+            await rows.outbox.put([entry])
+            await rows.meta.putSettlement(99, obligation)
+          },
+        )
+        const targetBefore = await s.f.inspectRows()
+        const pendingTargetKey = physicalRecordKey({
+          ...s.key,
+          namespace: 'pending',
+          recordID: target.frame.id,
+        })
+        const settlementTargetKey = physicalRecordKey({
+          ...s.key,
+          namespace: 'meta',
+          recordID: JSON.stringify(['settlement', 99]),
+        })
+        const coverage = bindAppCompletionCoverage(s.completion, orderedCoverage([target]).source)
+        if (coverage === undefined) throw new Error('Missing coverage')
+        const state = await s.f.device.groups.loadState(s.key)
+        if (state === null || state.deleted) throw new Error('Missing state')
+        const publication = createRegistryAppPublication(group.access())
+        const control = registryControlBatch(group.access())
+        if (control === undefined) throw new Error('Missing control binding')
+        let collections = 0
+        const guardedKey = {
+          get groupID() {
+            collections++
+            return s.key.groupID
+          },
+          incarnation: s.key.incarnation,
+        }
+        const guardedOccurrence = {
+          incarnation: s.key.incarnation,
+          segment: 0,
+          get topicID() {
+            collections++
+            return 'guard-topic'
+          },
+          position: '1',
+        }
+        const rootReads = vi.spyOn(capability, 'read')
+        const calls = [
+          () => s.completion.complete([target.frame.id]),
+          () => s.completion.transact([target.frame.id], async () => {}),
+          () => group.access().pending.complete(target.frame.id),
+          () => coverage.advance(),
+          () => s.ports.outbox.put(entry),
+          () =>
+            s.ports.outbox.recordSettlement(99, obligation, {
+              identity: { ...s.key, epoch: state.epoch, authenticator: state.epochAuthenticator },
+              stateVersion: state.version,
+              attemptID: 'guard-attempt',
+            }),
+          () => s.ports.outbox.remove(99, guardedOccurrence),
+          () => finaliseAppSettlements({ persistence: s.f.device.groups, key: guardedKey }),
+          () => capability.finaliseCertifiedApp(s.key, 99),
+          () => publication.prepare(entry, null),
+          () => publication.snapshot('chat'),
+          () => control.run({ source: 'guard-control', prepare: async () => {} }),
+        ]
+        const scheduled = vi.spyOn(binding.scheduler, 'schedule')
+        check = async () => {
+          const probe = async () => {
+            const outcomes: Array<unknown> = Array.from({ length: calls.length })
+            const count = scheduled.mock.calls.length
+            const readCount = rootReads.mock.calls.length
+            const collectionCount = collections
+            calls.forEach((call, index) => {
+              try {
+                void Promise.resolve(call()).then(
+                  () => {
+                    outcomes[index] = 'admitted'
+                  },
+                  (error: unknown) => {
+                    outcomes[index] = error
+                  },
+                )
+              } catch (error) {
+                outcomes[index] = error
+              }
+            })
+            for (let i = 0; i < 50; i++) await Promise.resolve()
+            for (const outcome of outcomes)
+              expect(outcome).toMatchObject({ name: 'ReentrantOwnershipError' })
+            expect(scheduled.mock.calls).toHaveLength(count)
+            expect(rootReads.mock.calls).toHaveLength(readCount)
+            expect(collections).toBe(collectionCount)
+          }
+          await probe()
+          if (supplied) {
+            await Promise.resolve()
+            await probe()
+          }
+        }
+        try {
+          s.messages.set(s.topicID, [await s.seal('0001')])
+          s.peer.retryAppDelivery()
+          await inspected.promise
+          expect(failure).toBeUndefined()
+          const rows = await s.f.inspectRows()
+          expect(rows['host-side']?.get('guarded-handler')).toBeUndefined()
+          expect(rows.pending?.get(pendingTargetKey)).toEqual(
+            targetBefore.pending?.get(pendingTargetKey),
+          )
+          expect(rows.meta?.get(settlementTargetKey)).toEqual(
+            targetBefore.meta?.get(settlementTargetKey),
+          )
+          expect(rows.outbox).toEqual(targetBefore.outbox)
+          expect(rows.cursor).toEqual(targetBefore.cursor)
+          release.resolve()
+          await vi.waitFor(async () =>
+            expect((await s.f.inspectRows())['host-side']?.get('guarded-handler')).toEqual(
+              new Uint8Array([1]),
+            ),
+          )
+        } finally {
+          release.resolve()
+          await s.close()
+        }
+      })
+
+    test('enqueue progresses before burst exhaustion', async () => {
+      const s = await setup(mode, async () => {})
+      const started = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const binding = appBatch(s.groupCrypto)
+      if (binding === undefined) throw new Error('Missing batch binding')
+      const dispatches: Array<{ kind: BatchKind; source: string }> = []
+      const schedule = binding.scheduler.schedule.bind(binding.scheduler)
+      vi.spyOn(binding.scheduler, 'schedule').mockImplementation((work) =>
+        schedule({
+          ...work,
+          run: (budget) => {
+            dispatches.push({ kind: work.kind, source: work.source })
+            return work.run(budget)
+          },
+        }),
+      )
+      let stages = 0
+      s.group.observeStage(async () => {
+        if (++stages === 1) {
+          started.resolve()
+          await release.promise
+        }
+      })
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now())
+      try {
+        const messages = []
+        for (let i = 1; i <= 260; i++) messages.push(await s.seal(String(i).padStart(4, '0')))
+        s.messages.set(s.topicID, messages)
+        s.peer.retryAppDelivery()
+        await started.promise
+        const first = messages[0]
+        if (first === undefined) throw new Error('Missing burst frame')
+        const completed = s.completion.complete([frameID(s.topicID, first.payload)])
+        const enqueue = s.peer.protocol('chat').dispatch('posted', { data: {} })
+        await vi.waitFor(() =>
+          expect(binding.scheduler.schedule).toHaveBeenCalledWith(
+            expect.objectContaining({ kind: 'enqueue' }),
+          ),
+        )
+        release.resolve()
+        await enqueue
+        await completed
+        const enqueuedAt = dispatches.findIndex((work) => work.kind === 'enqueue')
+        expect(enqueuedAt).toBeGreaterThanOrEqual(0)
+        expect(
+          dispatches.slice(0, enqueuedAt).filter((work) => work.kind === 'open').length,
+        ).toBeLessThanOrEqual(2)
+        expect(stages).toBeLessThan(260)
+        await vi.waitFor(() =>
+          expect(dispatches.some((work) => work.kind === 'completion')).toBe(true),
+        )
+        const completionAt = dispatches.findIndex((work) => work.kind === 'completion')
+        expect(
+          dispatches.slice(0, completionAt).filter((work) => work.kind === 'open').length,
+        ).toBeLessThanOrEqual(2)
+      } finally {
+        release.resolve()
+        clock.mockRestore()
+        await s.close()
+      }
+    })
+
+    test('queued transactional A failures cannot roll back transactional B', async () => {
+      const callbacks: Array<string> = []
+      const transactions = new Map<MemoryTransaction, Array<string>>()
+      const s = await setup(
+        mode,
+        {
+          mode: 'transactional',
+          handle: async ({ frame, tx }) => {
+            callbacks.push(frame.protocol)
+            const transaction = transactions.get(tx) ?? []
+            transaction.push(frame.protocol)
+            transactions.set(tx, transaction)
+            await writeSideRow(tx, frame.protocol, new Uint8Array([7]))
+            if (frame.protocol === 'A') throw new Error('A always rejects')
+          },
+        },
+        ['A', 'B'],
+      )
+      const started = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let stages = 0
+      s.group.observeStage(async () => {
+        if (++stages === 1) {
+          started.resolve()
+          await release.promise
+        }
+      })
+      try {
+        const anchor = (await s.ports.anchor.load())?.anchor
+        if (anchor === undefined) throw new Error('Missing anchor')
+        for (const name of ['A', 'B']) {
+          const topicID = protocolTopic(anchor.secret, anchor.epoch, name)
+          const payload = await s.group.sender.handle.encrypt(encodeEventFrame('posted'), {
+            aad: encodeAppAAD({ topicID, intent: 'log' }),
+          })
+          s.messages.set(topicID, [{ sequenceID: '1', payload }])
+        }
+        s.peer.retryAppDelivery()
+        await started.promise
+        release.resolve()
+        await vi.waitFor(async () =>
+          expect((await s.f.inspectRows())['host-side']?.get('B')).toEqual(new Uint8Array([7])),
+        )
+        expect(callbacks.filter((name) => name === 'B')).toHaveLength(1)
+        expect(callbacks.indexOf('B')).toBeLessThanOrEqual(1)
+        await vi.waitFor(
+          () => expect(callbacks.filter((name) => name === 'A').length).toBeGreaterThanOrEqual(3),
+          { timeout: 5000 },
+        )
+        expect((await s.f.inspectRows())['host-side']?.get('A')).toBeUndefined()
+        expect(
+          (await s.group.access().pending.list()).map((record) => record.frame.protocol),
+        ).toEqual(['A'])
+        expect(callbacks.filter((name) => name === 'B')).toHaveLength(1)
+        for (const protocols of transactions.values()) expect(new Set(protocols).size).toBe(1)
+      } finally {
+        release.resolve()
+        await s.close()
+      }
+    })
+
+    for (const cap of [64, 32])
+      test(`assembled host preserves oversized completion prefixes and atomic refusal (${cap})`, async () => {
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now())
+        const group = await createRegistryCryptoGroup(mode, crypto.randomUUID(), 2, {
+          backgroundMaintenance: 'gated',
+          batch: { maxBatchFrames: cap },
+        })
+        const release = Promise.withResolvers<void>()
+        const s = await setup(mode, async () => release.promise, ['chat'], group)
+        try {
+          const messages = []
+          for (let i = 1; i <= 130; i++) messages.push(await s.seal(String(i).padStart(4, '0')))
+          s.messages.set(s.topicID, messages)
+          s.peer.retryAppDelivery()
+          await vi.waitFor(async () =>
+            expect(await group.access().pending.list()).toHaveLength(130),
+          )
+          const records = await group.access().pending.list()
+          const first = records[0]
+          if (first === undefined) throw new Error('Missing oversized completion frame')
+          const before = await s.f.inspectRows()
+          const callback = vi.fn(async () => {})
+          await expect(
+            s.completion.transact(
+              (cap === 64 ? records : records.slice(0, 33)).map((r) => r.frame.id),
+              callback,
+            ),
+          ).rejects.toBeInstanceOf(RangeError)
+          expect(callback).not.toHaveBeenCalled()
+          expect(await s.f.inspectRows()).toEqual(before)
+          const capability = entryCapability(s.f.device.groups)
+          if (capability === null) throw new Error('Missing entry capability')
+          const sizes: Array<number> = []
+          let previous = 130
+          const unobserve = capability.observe(
+            s.key.groupID,
+            () => {},
+            async () => {
+              const count = (await group.access().pending.list()).length
+              if (count !== previous) sizes.push(previous - count)
+              previous = count
+            },
+          )
+          await s.completion.complete([
+            ...records.map((r) => r.frame.id),
+            first.frame.id,
+            'missing',
+          ])
+          await vi.waitFor(() =>
+            expect(sizes).toEqual(cap === 64 ? [64, 64, 2] : [32, 32, 32, 32, 2]),
+          )
+          unobserve()
+          expect(await group.access().pending.list()).toEqual([])
+          const atomicRecords = records.map((record) => {
+            const frame = {
+              ...record.frame,
+              id: `atomic-${record.frame.id}`,
+              topicID: `${record.frame.topicID}-atomic`,
+            }
+            return { ...record, frame, idempotencyKey: appFrameIdempotencyKey(frame) }
+          })
+          await capability.run(
+            { groupID: s.key.groupID, mutationID: crypto.randomUUID() },
+            async (reads) => ({ expected: await reads.lifetime(), value: undefined }),
+            async (stores) => {
+              await stores.incarnation(s.key.incarnation).pending.put(atomicRecords)
+            },
+          )
+          expect(await group.access().pending.list()).toHaveLength(130)
+          await s.completion.transact(
+            atomicRecords
+              .slice(0, cap)
+              .reverse()
+              .map((r) => r.frame.id),
+            async (_tx, saved) => {
+              expect(saved).toEqual(atomicRecords.slice(0, cap))
+            },
+          )
+          expect(await group.access().pending.list()).toHaveLength(130 - cap)
+        } finally {
+          release.resolve()
+          clock.mockRestore()
+          await s.close()
+        }
+      })
 
     test('real peer keeps registry batching and completion through host wrapping', async () => {
       const release = Promise.withResolvers<void>()

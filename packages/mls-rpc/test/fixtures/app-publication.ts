@@ -10,7 +10,8 @@ import { vi } from 'vitest'
 
 import { createRegistryAppPublication } from '../../src/app-publication.js'
 import { finaliseAppSettlements } from '../../src/app-settlement.js'
-import { entryCapability } from '../../src/entry-capability.js'
+import { coordinatorBinding, entryCapability } from '../../src/entry-capability.js'
+import { groupBatchFor } from '../../src/group-batch-binding.js'
 import { encodeStoredValue } from '../../src/persistence-codec.js'
 import { DisplacedGroupHandleError } from '../../src/persistence-errors.js'
 import type { OwnershipContextPort } from '../../src/persistence-types.js'
@@ -82,15 +83,23 @@ export async function createAppPublicationFixture(
       counts.seals++
       return await seal(...args)
     })
-    const run = capability.run.bind(capability)
-    capability.run = async (request, prepare, work) => {
-      counts.transactions++
-      const gate = prepareGate
-      prepareGate = null
+    const binding = coordinatorBinding(fixture.device.groups)
+    if (binding === null) throw new Error('Missing coordinator binding')
+    const scheduler = groupBatchFor(binding, key.groupID)
+    const schedule = scheduler.schedule.bind(scheduler)
+    vi.spyOn(scheduler, 'schedule').mockImplementation(async (work) => {
+      const gate =
+        work.source === JSON.stringify(['publication', key.incarnation]) ? prepareGate : null
       if (gate !== null) {
+        prepareGate = null
         gate.entered.resolve()
         await gate.released.promise
       }
+      return schedule(work)
+    })
+    const run = capability.run.bind(capability)
+    capability.run = async (request, prepare, work) => {
+      counts.transactions++
       return await run(request, prepare, async (stores, value) => {
         const incarnation = stores.incarnation.bind(stores)
         stores.incarnation = (number) => {
