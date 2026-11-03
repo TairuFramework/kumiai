@@ -17,6 +17,7 @@ export {
   DuplicateFrameError,
   EncryptError,
   EnvelopeDecodeError,
+  ExpiredFrameError,
   FrameDecodeError,
   HubReconnectingError,
   SessionNotEstablishedError,
@@ -34,6 +35,7 @@ export {
   type HubFrameMessageBody,
   hubFrameSchema,
 } from './frame.js'
+export { precedesSequenceID } from './sequence.js'
 export {
   createHubTunnelTransport,
   type HubBase,

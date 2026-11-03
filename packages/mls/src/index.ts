@@ -145,6 +145,7 @@ export {
   revokeDevice,
   type SendAdmission,
 } from './group.js'
+export { KUMIAI_KEY_RETENTION_CONFIG } from './group-context.js'
 export { registryAt } from './group-handle.js'
 export {
   attestTreeTime,

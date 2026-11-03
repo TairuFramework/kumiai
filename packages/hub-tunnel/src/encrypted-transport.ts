@@ -4,8 +4,15 @@ import { fromB64, toB64 } from '@sozai/codec'
 
 import type { Encryptor } from './encryptor.js'
 import { decodeEnvelope, encodeEnvelope, type TunnelEnvelope } from './envelope.js'
-import { DecryptError, DuplicateFrameError, EncryptError, EnvelopeDecodeError } from './errors.js'
+import {
+  DecryptError,
+  DuplicateFrameError,
+  EncryptError,
+  EnvelopeDecodeError,
+  ExpiredFrameError,
+} from './errors.js'
 import type { ObservabilityEventListener } from './events.js'
+import { precedesSequenceID } from './sequence.js'
 import {
   createHubTunnelTransport,
   type HubReceiveOptions,
@@ -28,6 +35,8 @@ type WrapHubParams = {
   groupID: string
   onEvent?: ObservabilityEventListener
   onEncryptError: (error: EncryptError) => void
+  /** A frame owed to this session can never be opened: fail the session now. */
+  onExpired: (error: ExpiredFrameError) => void
   drainTimeoutMs: number
   drains: Set<Promise<void>>
 }
@@ -38,9 +47,16 @@ function wrapHub({
   groupID,
   onEvent,
   onEncryptError,
+  onExpired,
   drainTimeoutMs,
   drains,
 }: WrapHubParams): MailboxHub {
+  // The earliest hub sequence ID this session is known by: its first publish or first delivered
+  // frame. An expired frame the hub sequenced before it belongs to an earlier session.
+  let anchor: string | undefined
+  const remember = (sequenceID: string): void => {
+    if (anchor == null || precedesSequenceID(sequenceID, anchor)) anchor = sequenceID
+  }
   const wrapped: MailboxHub = {
     async publish(params: MailboxPublishParams): Promise<{ sequenceID: string }> {
       let ciphertextBytes: Uint8Array
@@ -56,11 +72,13 @@ function wrapHub({
         groupID,
         ciphertext: toB64(ciphertextBytes),
       }
-      return await hub.publish({
+      const result = await hub.publish({
         senderDID: params.senderDID,
         topicID: params.topicID,
         payload: encodeEnvelope(envelope),
       })
+      remember(result.sequenceID)
+      return result
     },
     subscribe(
       subscriberDID: string,
@@ -155,6 +173,16 @@ function wrapHub({
                 ackHandled(message.sequenceID)
                 continue
               }
+              if (cause instanceof ExpiredFrameError) {
+                // Meant for this reader, but its key is gone: no later key opens it either.
+                onEvent?.({ type: 'frame-expired', error: cause })
+                onEvent?.({ type: 'frame-dropped', reason: 'expired' })
+                ackHandled(message.sequenceID)
+                if (anchor != null && precedesSequenceID(anchor, message.sequenceID)) {
+                  onExpired(cause)
+                }
+                continue
+              }
               const err = new DecryptError('decrypt failed', { cause })
               onEvent?.({ type: 'decrypt-failed', error: err })
               onEvent?.({ type: 'frame-dropped', reason: 'decrypt' })
@@ -171,6 +199,7 @@ function wrapHub({
               ackedOnDecrypt.delete(message.sequenceID)
               return { value: undefined, done: true }
             }
+            remember(message.sequenceID)
             const decrypted: StoredMessage = {
               sequenceID: message.sequenceID,
               senderDID: message.senderDID,
@@ -277,6 +306,10 @@ export function createEncryptedHubTunnelTransport<R, W>(
     drainTimeoutMs,
     drains,
     onEncryptError: (err) => {
+      internalController.abort(err)
+    },
+    // Aborting tears the session down with a session-end, so the peer fails promptly too.
+    onExpired: (err) => {
       internalController.abort(err)
     },
   })
