@@ -35,23 +35,29 @@ const EMPTY_DENY: ReadonlySet<string> = new Set()
  *
  * - `retainKeysForGenerations: 256` — a sender that restores a persisted state advances
  *   past a lease of up to 64 generations it may have spent, which leaves that many skipped
- *   keys no frame will ever claim; the remaining 192 cover a cross-lane backlog. Each
- *   retained key is one 32-byte secret (about 37 bytes encoded with its generation), so a
- *   full window costs about 9.5 KiB per sender per retained epoch in persisted state; an
- *   in-order receiver holds none.
+ *   keys no frame will ever claim; the remaining 192 generations cover a cross-lane backlog.
+ *   The window counts generations, not frames: in a group of three or more, a sender's
+ *   frames to the other peers are generations this receiver skips and never claims, so they
+ *   both fill the window and shorten the backlog it covers (one frame in `members - 1` is
+ *   this receiver's). Each retained key is one 32-byte secret, about 37 bytes encoded.
+ * - `retainKeysForEpochs: 1` — the current epoch's tree and one past epoch's. A backlog
+ *   sealed before the last commit is rare, and in a group of three or more every retained
+ *   tree holds a full window per sender at steady state. Measured persisted receiver state
+ *   at steady state: 2 members 2.6 KB, 3 members 42 KB, 5 members 82 KB, 10 members 181 KB
+ *   (with ts-mls's four past epochs: 5.8, 103, 202 and 449 KB). That state is persisted on
+ *   each receive advance, and ts-mls re-sorts a full window on every ratchet step.
  * - `maximumForwardRatchetSteps: 512` — at least the retention, so the single newer frame
  *   that jumps past a full backlog still opens rather than being refused as too far ahead.
  *   A step is one KDF expansion, so the bound on a forged generation stays cheap.
- * - `retainKeysForEpochs` keeps the ts-mls default.
  */
 export const KUMIAI_KEY_RETENTION_CONFIG: Readonly<KeyRetentionConfig> = Object.freeze({
   retainKeysForGenerations: 256,
-  retainKeysForEpochs: 4,
+  retainKeysForEpochs: 1,
   maximumForwardRatchetSteps: 512,
 })
 
 /** A context's client config, with kumiai's key retention when none is given. */
-function kumiaiClientConfig(): ClientConfig {
+export function kumiaiClientConfig(): ClientConfig {
   return {
     keyRetentionConfig: { ...KUMIAI_KEY_RETENTION_CONFIG },
     lifetimeConfig: { ...defaultLifetimeConfig },

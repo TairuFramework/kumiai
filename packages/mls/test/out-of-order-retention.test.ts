@@ -7,7 +7,7 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
-  type GroupHandle,
+  GroupHandle,
   processWelcome,
   restoreGroup,
 } from '../src/group.js'
@@ -128,5 +128,18 @@ describe('out-of-order receive within an epoch', () => {
     await sealMany(aliceGroup, 300)
     const newest = await aliceGroup.encrypt(utf8.encode('newest'))
     expect(text.decode((await bobGroup.decrypt(newest)).payload)).toBe('newest')
+  })
+
+  test('a handle built on a caller context without a client config gets the kumiai retention', async () => {
+    const { bobGroup } = await twoMemberGroup('out-of-order-caller-context')
+    const { clientConfig: _omitted, ...context } = bobGroup.context
+    const handle = new GroupHandle({
+      state: bobGroup.state,
+      credential: bobGroup.credential,
+      context,
+      ledger: bobGroup.ledger,
+    })
+    // The same retention before and after a commit, which rebuilds the context.
+    expect(handle.context.clientConfig?.keyRetentionConfig).toEqual(KUMIAI_KEY_RETENTION_CONFIG)
   })
 })

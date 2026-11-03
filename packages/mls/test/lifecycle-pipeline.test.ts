@@ -1223,6 +1223,10 @@ test('delayed application frame gets the same verdict before and after a later r
     peer.author,
     await timedBinding({ identity, iat: 1500, exp: 2500 }),
   )
+  // The frame must stay openable three commits later, past kumiai's one retained past epoch.
+  const config = advanced.newGroup.context.clientConfig
+  if (config == null) throw new Error('Missing client config')
+  config.keyRetentionConfig.retainKeysForEpochs = 4
   for (const held of advanced.newGroup.ledger) tokens.set(held.entryID, held.token)
   await peer.joined.processMessage(advanced.commitMessage)
   const delayed = await rawApplication(peer.joined)

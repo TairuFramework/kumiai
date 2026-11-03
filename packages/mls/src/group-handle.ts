@@ -53,7 +53,12 @@ import {
   RevokeProofError,
 } from './errors.js'
 import type { FoldInput } from './fold.js'
-import { copyClientConfig, createMlsContext, deviceDenyHolderFor } from './group-context.js'
+import {
+  copyClientConfig,
+  createMlsContext,
+  deviceDenyHolderFor,
+  kumiaiClientConfig,
+} from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
 import {
   assertHeadMatches,
@@ -569,6 +574,9 @@ export class GroupHandle {
     this.#state = params.state
     this.#credential = params.credential
     this.#context = params.context
+    // A caller-built context without a client config gets kumiai's, as the context a commit
+    // rebuilds would: in place, since the context is the key of its deny holder.
+    this.#context.clientConfig ??= kumiaiClientConfig()
     this.#commitPolicy = params.commitPolicy
     this.#resolveLedgerEntries = params.resolveLedgerEntries
     this.#onLedgerEntries = params.onLedgerEntries
