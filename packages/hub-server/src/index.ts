@@ -12,7 +12,10 @@ export {
   createHandlers,
   DEFAULT_KEYPACKAGE_FETCH_LIMITS,
   DEFAULT_RATE_LIMITS,
+  DEFAULT_RECEIVE_ACK_TIMEOUT,
   DEFAULT_RECEIVE_BUFFER_LIMIT,
+  DEFAULT_RECEIVE_WINDOW,
+  DEFAULT_RECEIVE_WINDOW_BYTES,
 } from './handlers.js'
 export type { CreateHubParams, HubInstance, HubPurgeOptions, HubReplayOptions } from './hub.js'
 export { createHub, DEFAULT_HUB_ACCESS_RULES } from './hub.js'
