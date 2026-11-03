@@ -63,7 +63,7 @@ async function foreignWithoutRefresh(fixture: Fixture, kind: 'receive' | 'propos
 }
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`live receive (${mode})`, () => {
-    test('selected removal drains opened plaintext before clearing control', async () => {
+    test('selected removal commits terminal control while preserving opened plaintext', async () => {
       const fixture = await setup(mode)
       if (fixture.group === null) throw new Error('Missing group')
       await fixture.openDurable()
@@ -107,15 +107,21 @@ for (const mode of ['real-mls', 'double'] as const) {
           },
         })
       const before = await f.device.groups.loadState(fixture.key)
-      await expect(attempt()).rejects.toMatchObject({ name: 'ControlDrainRequiredError' })
-      expect(await f.device.groups.loadState(fixture.key)).toEqual(before)
+      expect((await attempt()).value).toMatchObject({ applied: true })
+      expect(await f.device.groups.loadState(fixture.key)).toMatchObject({
+        terminal: true,
+        version: requireValue(before).version + 1,
+      })
+      expect(await f.device.groups.ports(fixture.key).control.load()).toMatchObject({
+        cursor: { position },
+        applied: [expect.objectContaining({ removed: true, sequenceID: position })],
+      })
       const pending = await fixture.access().pending.list()
       expect(pending).toHaveLength(1)
       await createHandlerCompletion({ persistence: f.device.groups, key: fixture.key }).complete(
         pending.map((record) => record.frame.id),
       )
       expect(await fixture.access().pending.list()).toEqual([])
-      expect((await attempt()).value).toMatchObject({ applied: true })
       expect(await f.device.groups.loadState(fixture.key)).toMatchObject({ terminal: true })
     })
     test('reservation keeps the receive handle; durable open rebuilds it', async () => {

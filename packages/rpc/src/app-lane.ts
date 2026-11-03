@@ -182,7 +182,7 @@ export type AppLane = {
   /** Await all retained handlers and durable record completions. */
   idle: () => Promise<void>
   /** Await all restored plaintext handlers and their durable completions. */
-  completeOpened: (options?: { keepOpening?: boolean }) => Promise<void>
+  completeOpened: () => Promise<void>
   /** Permanently stop network pulls and new opens after terminal removal. */
   stopOpening: () => void
   handoffOpened: () => Promise<void>
@@ -1723,8 +1723,8 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       // Live claims already hold their protocol serialisation through completion.
       if (openedFailure !== undefined) throw openedFailure
     },
-    completeOpened: async (options) => {
-      if (options?.keepOpening !== true) stopOpening()
+    completeOpened: async () => {
+      stopOpening()
       await Promise.allSettled([...pageDrains])
       // An open can have committed plaintext before returning its record to the lane.
       while (openingTurns.size > 0) await Promise.allSettled([...openingTurns])

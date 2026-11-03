@@ -2891,22 +2891,9 @@ export function createGroupPeerWithControlWalk<
           }, 0)
         }
       })
-      .catch((error: unknown) => {
+      .catch(() => {
         if (disposed) return
-        if (error instanceof Error && error.name === 'ControlDrainRequiredError') {
-          const prerequisite = (async () => {
-            const records = await (openedBinding?.list() ?? openedPending?.list())
-            if (records !== undefined) await appLane.restore(records)
-            await appLane.completeOpened({ keepOpening: true })
-          })()
-          controlPrerequisite = prerequisite
-          void prerequisite
-            .catch(() => {})
-            .finally(() => {
-              if (controlPrerequisite === prerequisite) controlPrerequisite = undefined
-              retryBufferedPreparation()
-            })
-        } else retryBufferedPreparation()
+        retryBufferedPreparation()
       })
       .finally(() => {
         if (controlAttempt === attempt) controlAttempt = undefined

@@ -28,13 +28,6 @@ const sources = new WeakMap<
   NonNullable<Parameters<typeof createControlValidationPort>[0]['restoreSource']>
 >()
 
-export class ControlDrainRequiredError extends Error {
-  constructor() {
-    super('Opened plaintext must drain before control removal')
-    this.name = 'ControlDrainRequiredError'
-  }
-}
-
 export function bindControlSourceRestore(
   access: ControlHandleAccess,
   restore: NonNullable<Parameters<typeof createControlValidationPort>[0]['restoreSource']>,

@@ -2,7 +2,9 @@ import { randomIdentity } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   asLogPosition,
+  controlBatch,
   createOpenedAppHandler,
+  digestAppliedCommit,
   encodeAppAAD,
   frameID,
   OpenedDeliveryReentryError,
@@ -17,12 +19,20 @@ import { createHandlerCompletion } from '../src/handler-completion.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
 import { deleteIncarnations, retireIncarnation } from '../src/registry/retired.js'
 import { registryRetirement } from '../src/registry/retirement.js'
+import { registrySafety } from '../src/registry/safety.js'
+import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { retireToSuccessor } from '../src/successor.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
-import { createRealGroup } from './fixtures/real-group.js'
-import { createRegistryFixture, type PendingFault } from './fixtures/registry.js'
+import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import {
+  createRegistryFixture,
+  type PendingFault,
+  registryFixtureObserveDecrypts,
+  registryFixtureObserveStagedDecrypts,
+} from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
+import { memoryModel } from './fixtures/sealed-memory-mls.js'
 import { writeSideRow } from './fixtures/storage-persistence.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
@@ -315,9 +325,13 @@ for (const mode of ['real-mls', 'double'] as const) {
         },
       )
 
-      test.each(['at-least-once', 'transactional'] as const)(
-        'terminal restart drains both policies without crypto or network (%s)',
-        async (policy) => {
+      test.each(
+        (['at-least-once', 'transactional'] as const).flatMap((policy) =>
+          [true, false].map((restart) => ({ policy, restart })),
+        ),
+      )(
+        'terminal self-removal drains saved plaintext without crypto or network ($policy, restart $restart)',
+        async ({ policy, restart }) => {
           const context = createAsyncLocalOwnershipContext()
           const groupID = crypto.randomUUID()
           const group = await createRealGroup(1, groupID)
@@ -329,6 +343,17 @@ for (const mode of ['real-mls', 'double'] as const) {
           let failing = true
           let calls = 0
           const dispatcher = vi.fn()
+          const handle = async (event: { epoch: number; tx?: MemoryTransaction }) => {
+            calls++
+            dispatcher(event)
+            entered.resolve()
+            await release.promise
+            if (event.tx === undefined)
+              expect(await fixture.device.groups.loadState(key)).toMatchObject({ terminal: true })
+            if (failing) throw new Error('Handler remains blocked')
+            if (event.tx !== undefined)
+              await writeSideRow(event.tx, 'terminal', new Uint8Array([1]))
+          }
           let fixture: Awaited<ReturnType<typeof createRegistryFixture>>
           fixture = await createRegistryFixture({
             mode,
@@ -339,33 +364,41 @@ for (const mode of ['real-mls', 'double'] as const) {
             options: { resolveLedgerEntries: local.slot.resolve },
             ownershipContext: supplied ? createAsyncLocalOwnershipContext() : undefined,
             openedDeliveryContext: context,
-            openedHandler: (binding) => {
-              const handler = createOpenedAppHandler({
-                ...binding,
-                localDID: fixture.identity.id,
-                protocols: {
-                  chat: { posted: { type: 'event', retain: 'log', data: { type: 'object' } } },
-                },
-                handlers: {
-                  chat: {
-                    posted: {
-                      mode: policy,
-                      handle: async (event: { epoch: number; tx?: MemoryTransaction }) => {
-                        calls++
-                        dispatcher(event)
-                        entered.resolve()
-                        await release.promise
-                        if (failing) throw new Error('Handler remains blocked')
-                        if (event.tx !== undefined)
-                          await writeSideRow(event.tx, 'terminal', new Uint8Array([1]))
+            openedHandler: !restart
+              ? undefined
+              : (binding) => {
+                  const handler = createOpenedAppHandler({
+                    ...binding,
+                    localDID: fixture.identity.id,
+                    protocols: {
+                      chat: { posted: { type: 'event', retain: 'log', data: { type: 'object' } } },
+                    },
+                    handlers: {
+                      chat: {
+                        posted: {
+                          mode: policy,
+                          handle,
+                        },
                       },
                     },
-                  },
+                  })
+                  return handler
                 },
-              })
-              return handler
-            },
           })
+          const completions = [0, 1].map(() => ({
+            entered: Promise.withResolvers<void>(),
+            release: Promise.withResolvers<void>(),
+          }))
+          let completionIndex = 0
+          const holdCompletion = async () => {
+            const completion = completions[completionIndex++]
+            if (completion === undefined) throw new Error('Unexpected completion')
+            completion.entered.resolve()
+            await completion.release.promise
+          }
+          let running: Awaited<ReturnType<typeof startLeaseRotationPeer>> | undefined
+          let restoreCompletion: (() => void) | undefined
+          const stop = new AbortController()
           let work: Promise<void> | undefined
           try {
             const options = fixture.environment.options ?? {}
@@ -383,36 +416,144 @@ for (const mode of ['real-mls', 'double'] as const) {
                 resolveLedgerEntries: group.committer.slot.resolve,
               },
             })
+            if (!restart) {
+              running = await startLeaseRotationPeer({
+                mode,
+                fixture,
+                key,
+                outbox: fixture.device.groups.ports(key).outbox,
+                openedDeliveryContext: context,
+                handler: { mode: policy, handle },
+              })
+              await running.owner.ready
+              await running.owner.peer()?.replay()
+            }
             const openedAccess = await fixture.registry.access(groupID)
             const expectedAAD = encodeAppAAD({ topicID: 'chat', intent: 'log' })
-            const ciphertext = await sender.encrypt(
-              encodeEventFrame('posted', { text: 'terminal' }),
+            const inputs = []
+            for (const position of ['2', '3']) {
+              const ciphertext = await sender.encrypt(
+                encodeEventFrame('posted', { text: `terminal-${position}` }),
+                { aad: expectedAAD },
+              )
+              inputs.push({
+                frame: {
+                  ...key,
+                  id: frameID('chat', ciphertext),
+                  protocol: 'chat',
+                  topicID: 'chat',
+                  segment: openedAccess.epoch(),
+                  position,
+                },
+                ciphertext,
+                expectedAAD,
+              })
+            }
+            expect(await openedAccess.openBatch(inputs)).toMatchObject([
+              { kind: 'opened' },
+              { kind: 'opened' },
+            ])
+            const pending = await openedAccess.pending.list()
+            const savedPending = pending[0]
+            if (savedPending === undefined) throw new Error('Missing opened record')
+            const newCiphertext = await sender.encrypt(
+              encodeEventFrame('posted', { text: 'must-not-open' }),
               { aad: expectedAAD },
             )
-            expect(
-              await openedAccess.openBatch([
+            const mls = await createRegistryGroupMLS({
+              registry: fixture.registry,
+              key,
+              recovery: fixture.environment,
+              identity: fixture.identity,
+              entrySlot: local.slot,
+              target: { targetID: 'terminal-hub', topicID: 'terminal-commits' },
+            })
+            const route = controlBatch(mls)
+            if (route === undefined) throw new Error('Missing control route')
+            const commit =
+              mode === 'real-mls'
+                ? await buildRealCommit(group, { removes: 0 })
+                : memoryModel(sender).buildCommit([], { removes: [local.identity.id] })
+            const position = asLogPosition('0001')
+            const fetch = running === undefined ? vi.fn() : vi.spyOn(running.hub, 'fetchTopic')
+            const publish = running === undefined ? vi.fn() : vi.spyOn(running.hub, 'publish')
+            const result = await route.run({
+              source: 'terminal-removal',
+              prepare: async (scope) => {
+                const epoch = await scope.readEpoch()
+                return scope.prepareCommit(commit, {
+                  adoption: (staged) => ({
+                    mutationID: crypto.randomUUID(),
+                    changes: {
+                      commitOnce: null,
+                      cursor: { position, epoch: staged.epochAfter },
+                      putApplied: [
+                        {
+                          epoch,
+                          digest: digestAppliedCommit(commit),
+                          payloadDigest: 'terminal-removal',
+                          sequenceID: position,
+                          opID: null,
+                          removed: staged.removed,
+                        },
+                      ],
+                    },
+                  }),
+                })
+              },
+            })
+            expect(result.value).toMatchObject({ applied: true })
+            expect(await fixture.device.groups.loadState(key)).toMatchObject({ terminal: true })
+            expect(await openedAccess.pending.list()).toEqual(pending)
+            expect(calls).toBe(0)
+            const decrypt = vi.fn()
+            registryFixtureObserveDecrypts(fixture, decrypt)
+            registryFixtureObserveStagedDecrypts(fixture, decrypt)
+            const refused = await openedAccess
+              .openBatch([
                 {
                   frame: {
-                    ...key,
-                    id: frameID('chat', ciphertext),
-                    protocol: 'chat',
-                    topicID: 'chat',
-                    segment: openedAccess.epoch(),
-                    position: '2',
+                    ...savedPending.frame,
+                    id: frameID('chat', newCiphertext),
+                    position: '4',
                   },
-                  ciphertext,
+                  ciphertext: newCiphertext,
                   expectedAAD,
                 },
-              ]),
-            ).toMatchObject([{ kind: 'opened' }])
+              ])
+              .then(
+                () => null,
+                (error: unknown) => error,
+              )
+            expect(decrypt).not.toHaveBeenCalled()
+            expect(refused).toMatchObject({ name: 'GroupUnavailableError' })
+            expect(await openedAccess.pending.list()).toEqual(pending)
             const open = vi.spyOn(openedAccess, 'openBatch')
-            const state = await fixture.device.groups.loadState(key)
-            if (state === null || state.deleted) throw new Error('Missing state')
-            await fixture.installRows({
-              key,
-              state: { ...state, version: state.version + 1, terminal: true, state: null },
-            })
-            fixture = await fixture.reopen()
+            if (restart) fixture = await fixture.reopen()
+            const capability = entryCapability(fixture.device.groups)
+            if (capability === null) throw new Error('Missing entry capability')
+            capability.failureSignal = AbortSignal.any([
+              stop.signal,
+              ...(capability.failureSignal === undefined ? [] : [capability.failureSignal]),
+            ])
+            const completion = createHandlerCompletion({ persistence: fixture.device.groups, key })
+            if (policy === 'at-least-once') {
+              const complete = completion.complete.bind(completion)
+              const spy = vi.spyOn(completion, 'complete').mockImplementation(async (ids) => {
+                await complete(ids)
+                await holdCompletion()
+              })
+              restoreCompletion = () => spy.mockRestore()
+            } else {
+              const transact = completion.transact.bind(completion)
+              const spy = vi
+                .spyOn(completion, 'transact')
+                .mockImplementation(async (ids, handle) => {
+                  await transact(ids, handle)
+                  await holdCompletion()
+                })
+              restoreCompletion = () => spy.mockRestore()
+            }
             const restores = fixture.restores()
             const access = vi.spyOn(fixture.registry, 'access')
             const receive = vi.fn()
@@ -420,6 +561,10 @@ for (const mode of ['real-mls', 'double'] as const) {
               receive()
               throw new Error('Terminal drain attempted crypto')
             })
+            const blocks: Array<unknown> = []
+            const safety = registrySafety(fixture.registry)
+            if (safety === null) throw new Error('Missing safety port')
+            const unsubscribe = safety.onSwitchBlocked(key, (block) => blocks.push(block))
             let settled = false
             work = fixture.registry.delete(key).then(() => {
               settled = true
@@ -427,30 +572,56 @@ for (const mode of ['real-mls', 'double'] as const) {
             void work.catch(() => {})
             await Promise.race([entered.promise, work])
             expect(settled).toBe(false)
+            vi.useFakeTimers()
             release.resolve()
             await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
+            await vi.advanceTimersByTimeAsync(60_000)
             expect(settled).toBe(false)
-            expect((await fixture.inspectRows()).pending?.size).toBe(1)
+            expect((await fixture.inspectRows()).pending?.size).toBe(2)
+            expect(await fixture.device.groups.loadState(key)).toMatchObject({ terminal: true })
+            expect(blocks).toContainEqual({ key, reason: 'opened-records', pending: 2 })
             expect((await fixture.inspectRows())['host-side']?.get('terminal') ?? null).toBeNull()
             expect(open).not.toHaveBeenCalled()
             expect(receive).not.toHaveBeenCalled()
             expect(access).not.toHaveBeenCalled()
+            expect(fetch).not.toHaveBeenCalled()
+            expect(publish).not.toHaveBeenCalled()
             expect(fixture.restores()).toBe(restores)
             failing = false
+            await vi.advanceTimersByTimeAsync(15_000)
+            for (const [index, completion] of completions.entries()) {
+              await Promise.race([completion.entered.promise, work])
+              await vi.advanceTimersByTimeAsync(200)
+              expect(settled).toBe(false)
+              expect((await fixture.inspectRows()).pending?.size ?? 0).toBe(1 - index)
+              expect((await fixture.device.groups.load(groupID))?.activeIncarnation).toBe(1)
+              expect(await fixture.device.groups.loadState(key)).toMatchObject({ terminal: true })
+              completion.release.resolve()
+            }
+            vi.useRealTimers()
             await work
+            unsubscribe()
             expect((await fixture.device.groups.load(groupID))?.activeIncarnation).toBeNull()
             expect((await fixture.inspectRows()).pending?.size ?? 0).toBe(0)
             expect(open).not.toHaveBeenCalled()
             expect(receive).not.toHaveBeenCalled()
             expect(access).not.toHaveBeenCalled()
+            expect(fetch).not.toHaveBeenCalled()
+            expect(publish).not.toHaveBeenCalled()
             if (policy === 'transactional')
               expect((await fixture.inspectRows())['host-side']?.get('terminal') ?? null).toEqual(
                 new Uint8Array([1]),
               )
           } finally {
+            vi.useRealTimers()
             failing = false
             release.resolve()
+            for (const completion of completions) completion.release.resolve()
+            stop.abort(new Error('Terminal witness ended'))
             await work?.catch(() => {})
+            restoreCompletion?.()
+            running?.owner.dispose()
+            await running?.owner.drained()
             await fixture.close()
           }
         },

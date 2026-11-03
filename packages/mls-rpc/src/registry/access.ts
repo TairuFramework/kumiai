@@ -63,7 +63,6 @@ import {
   bindControlCandidateRestore,
   bindControlSourceRestore,
   bindRegistryControlBatch,
-  ControlDrainRequiredError,
   type RegistryControlBatchEntry,
 } from './control-batch.js'
 import { createLiveReceive, registryReceiveSlots } from './live-receive.js'
@@ -831,7 +830,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     run: live.run,
     isolated,
     recordFor,
-    assertSafety,
+    assertSafety: assertReceiveAvailable,
     assertWorkSafety,
   })
   const access: RegistryHandleAccess = {
@@ -964,11 +963,6 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
                   )
                   assertActive()
                   let destination = candidate
-                  if (
-                    staged(candidate).removed &&
-                    (await reads.pendingFrames(owner.key.incarnation)).length !== 0
-                  )
-                    throw new ControlDrainRequiredError()
                   if (proposed?.expected?.journal !== undefined) {
                     const result = await ordinaryDestination(
                       reads,

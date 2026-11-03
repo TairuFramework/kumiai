@@ -139,6 +139,7 @@ export async function startLeaseRotationPeer(params: {
   })
   return {
     owner,
+    hub,
     frames() {
       return hub.published.filter((frame) => {
         const aad = groupCrypto.frameAAD(frame.payload)

@@ -1065,6 +1065,12 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           }): GroupCrypto
         }
         const env = await setup(mode, supplied)
+        const stop = new AbortController()
+        const failureSignal = env.capability.failureSignal
+        env.capability.failureSignal = AbortSignal.any([
+          stop.signal,
+          ...(failureSignal === undefined ? [] : [failureSignal]),
+        ])
         const access = await env.fixture.registry.access(env.key.groupID)
         const binding = openedDeliveryBinding(access.pending)
         if (binding === undefined) throw new Error('Missing opened binding')
@@ -1114,6 +1120,7 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           groupID: () => env.key.groupID,
           appCursorStore: cursor,
           claimOpened: (record, fn) => binding.claim(record, fn),
+          openedFailureSignal: binding.failureSignal,
           completion,
           openedHandler: normaliseOpenedAppHandler({
             completion,
@@ -1192,9 +1199,12 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
                   coldCalls++
                 })
               : lifecycle().then(() => {})
-          void drain.then(() => {
-            settled = true
-          })
+          void drain.then(
+            () => {
+              settled = true
+            },
+            () => {},
+          )
           await reading.promise
           releaseHandler.resolve()
           await completing.promise
@@ -1222,12 +1232,16 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           releaseCompletion.resolve()
           env.capability.read = read
           lateCompletion.mockRestore()
-          if (drain !== undefined) await drain
+          if (!settled) stop.abort(new Error('Lifecycle witness ended'))
+          await drain?.catch(() => {})
           lane.dispose()
-          await lane.idle()
+          await lane.idle().catch(() => {})
           detach()
           mux.dispose()
-          await env.fixture.close()
+          env.capability.failureSignal = failureSignal
+          await env.fixture.close().catch((error: unknown) => {
+            if (error !== stop.signal.reason) throw error
+          })
         }
       },
     )
