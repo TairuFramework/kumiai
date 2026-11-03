@@ -588,6 +588,10 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
   test('the pinned receiver accepts its exact forward window and rejects the next generation', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('receiver-forward-window')
     const otherReceiver = await reload(aliceGroup)
+    // Pinned to ts-mls's defaults: a peer on a release before kumiai widened the window.
+    const config = otherReceiver.context.clientConfig
+    if (config == null) throw new Error('missing client config')
+    config.keyRetentionConfig = { ...defaultKeyRetentionConfig }
     const window = defaultKeyRetentionConfig.maximumForwardRatchetSteps
     expect(window).toBe(200)
     let state = bobGroup.state

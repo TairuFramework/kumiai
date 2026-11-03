@@ -19,6 +19,16 @@ export class DuplicateFrameError extends Error {
   override name = 'DuplicateFrameError'
 }
 
+/**
+ * Thrown by an `Encryptor.decrypt` for a ciphertext this reader can never open: its key was
+ * spent or discarded (a ratchet that moved past the frame's generation without retaining its
+ * key). Unlike a plain decrypt failure the frame is not corrupt or foreign: it was meant for
+ * this reader and is lost, so whatever depended on it should fail now rather than wait.
+ */
+export class ExpiredFrameError extends Error {
+  override name = 'ExpiredFrameError'
+}
+
 export class EncryptError extends Error {
   override name = 'EncryptError'
 }

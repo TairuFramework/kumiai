@@ -4,7 +4,13 @@ import { fromB64, toB64 } from '@sozai/codec'
 
 import type { Encryptor } from './encryptor.js'
 import { decodeEnvelope, encodeEnvelope, type TunnelEnvelope } from './envelope.js'
-import { DecryptError, DuplicateFrameError, EncryptError, EnvelopeDecodeError } from './errors.js'
+import {
+  DecryptError,
+  DuplicateFrameError,
+  EncryptError,
+  EnvelopeDecodeError,
+  ExpiredFrameError,
+} from './errors.js'
 import type { ObservabilityEventListener } from './events.js'
 import {
   createHubTunnelTransport,
@@ -152,6 +158,13 @@ function wrapHub({
                 // Opened once already: the redelivery of a frame whose ack was lost. Acked so the
                 // hub stops redelivering it.
                 onEvent?.({ type: 'frame-dropped', reason: 'dedup' })
+                ackHandled(message.sequenceID)
+                continue
+              }
+              if (cause instanceof ExpiredFrameError) {
+                // Meant for this reader, but its key is gone: no later key opens it either.
+                onEvent?.({ type: 'frame-expired', error: cause })
+                onEvent?.({ type: 'frame-dropped', reason: 'expired' })
                 ackHandled(message.sequenceID)
                 continue
               }

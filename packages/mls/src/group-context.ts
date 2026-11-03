@@ -1,9 +1,14 @@
 import {
   type Capabilities,
   type CiphersuiteName,
+  type ClientConfig,
   defaultCapabilities,
+  defaultKeyPackageEqualityConfig,
+  defaultLifetimeConfig,
+  defaultPaddingConfig,
   type GroupContextExtension,
   getCiphersuiteImpl,
+  type KeyRetentionConfig,
   type MlsContext,
 } from 'ts-mls'
 
@@ -16,6 +21,58 @@ import type { GroupOptions } from './types.js'
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
 
 const EMPTY_DENY: ReadonlySet<string> = new Set()
+
+/**
+ * The receive-side key retention every kumiai context carries, in place of ts-mls's
+ * defaults (10 skipped keys, a 200-generation forward window).
+ *
+ * A member has ONE application sender ratchet per epoch, and a host can spend it across
+ * several lanes a receiver drains independently (tunnel topics, a service lane, an app
+ * log). After a reconnect one lane can hold a backlog of hundreds of frames while a single
+ * newer frame on another lane opens first and moves the receiver's ratchet past them. Every
+ * backlog frame whose skipped key was not retained can then never be opened: ts-mls throws
+ * `Desired gen in the past`.
+ *
+ * - `retainKeysForGenerations: 256` — a sender that restores a persisted state advances
+ *   past a lease of up to 64 generations it may have spent, which leaves that many skipped
+ *   keys no frame will ever claim; the remaining 192 cover a cross-lane backlog. Each
+ *   retained key is one 32-byte secret (about 37 bytes encoded with its generation), so a
+ *   full window costs about 9.5 KiB per sender per retained epoch in persisted state; an
+ *   in-order receiver holds none.
+ * - `maximumForwardRatchetSteps: 512` — at least the retention, so the single newer frame
+ *   that jumps past a full backlog still opens rather than being refused as too far ahead.
+ *   A step is one KDF expansion, so the bound on a forged generation stays cheap.
+ * - `retainKeysForEpochs` keeps the ts-mls default.
+ */
+export const KUMIAI_KEY_RETENTION_CONFIG: Readonly<KeyRetentionConfig> = Object.freeze({
+  retainKeysForGenerations: 256,
+  retainKeysForEpochs: 4,
+  maximumForwardRatchetSteps: 512,
+})
+
+/** A context's client config, with kumiai's key retention when none is given. */
+function kumiaiClientConfig(): ClientConfig {
+  return {
+    keyRetentionConfig: { ...KUMIAI_KEY_RETENTION_CONFIG },
+    lifetimeConfig: { ...defaultLifetimeConfig },
+    paddingConfig: structuredClone(defaultPaddingConfig),
+    keyPackageEqualityConfig: defaultKeyPackageEqualityConfig,
+  }
+}
+
+/** Copy a client config without sharing its mutable parts with the source context. */
+export function copyClientConfig(config: ClientConfig): ClientConfig {
+  const equality = config.keyPackageEqualityConfig
+  return {
+    keyRetentionConfig: structuredClone(config.keyRetentionConfig),
+    lifetimeConfig: structuredClone(config.lifetimeConfig),
+    paddingConfig: structuredClone(config.paddingConfig),
+    keyPackageEqualityConfig: {
+      compareKeyPackages: equality.compareKeyPackages.bind(equality),
+      compareKeyPackageToLeafNode: equality.compareKeyPackageToLeafNode.bind(equality),
+    },
+  }
+}
 
 /** Late-bound provider of a context's device deny set, pointed at the live handle after construction. */
 export type DeviceDenyHolder = {
@@ -73,6 +130,7 @@ export async function resolveMlsContext(
 export function createMlsContext(
   cipherSuite: MlsContext['cipherSuite'],
   anchor?: GroupAnchor,
+  clientConfig?: ClientConfig,
 ): MlsContext {
   // The deny set cannot be known here — the handle that folds it does not exist yet. Bind a mutable
   // holder the auth service reads; the GroupHandle constructor points it at its own currentDenySet().
@@ -83,7 +141,11 @@ export function createMlsContext(
       anchor?.controller == null ? undefined : (anchor.trustedGrantLifetime ?? 2_592_000),
   }
   const authService = authenticationFor(holder)
-  const context: MlsContext = { cipherSuite, authService }
+  const context: MlsContext = {
+    cipherSuite,
+    authService,
+    clientConfig: clientConfig == null ? kumiaiClientConfig() : copyClientConfig(clientConfig),
+  }
   DENY_HOLDERS.set(context, holder)
   return context
 }

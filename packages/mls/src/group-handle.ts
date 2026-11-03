@@ -53,7 +53,7 @@ import {
   RevokeProofError,
 } from './errors.js'
 import type { FoldInput } from './fold.js'
-import { createMlsContext, deviceDenyHolderFor } from './group-context.js'
+import { copyClientConfig, createMlsContext, deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
 import {
   assertHeadMatches,
@@ -657,18 +657,7 @@ export class GroupHandle {
           }
         : createMlsContext(this.#context.cipherSuite, this.#anchor)
     const config = this.#context.clientConfig
-    if (config != null) {
-      const equality = config.keyPackageEqualityConfig
-      context.clientConfig = {
-        keyRetentionConfig: structuredClone(config.keyRetentionConfig),
-        lifetimeConfig: structuredClone(config.lifetimeConfig),
-        paddingConfig: structuredClone(config.paddingConfig),
-        keyPackageEqualityConfig: {
-          compareKeyPackages: equality.compareKeyPackages.bind(equality),
-          compareKeyPackageToLeafNode: equality.compareKeyPackageToLeafNode.bind(equality),
-        },
-      }
-    }
+    if (config != null) context.clientConfig = copyClientConfig(config)
     context.externalPsks = structuredClone(this.#context.externalPsks)
     const params: CloneGroupHandleParams = {
       [CLONE_SOURCE]: this,
@@ -1311,7 +1300,9 @@ export class GroupHandle {
    * For a host that restores a persisted state and must not reuse a generation it may have
    * sent from before a crash. Each skipped generation costs one KDF step, not an encrypt.
    * Receivers must still cross the gap: ts-mls refuses a jump beyond its forward-ratchet
-   * window (`maximumForwardRatchetSteps`, 200 by default).
+   * window (`maximumForwardRatchetSteps`: 512 for a kumiai context, see
+   * `KUMIAI_KEY_RETENTION_CONFIG`; 200 in ts-mls's default, which a peer on an older
+   * release still applies).
    *
    * No cap by default: a host catching up a stored high-water mark may legitimately step
    * far past any receiver's position (a receiver's window counts from the last generation
@@ -2278,7 +2269,8 @@ export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle
   return new GroupHandle({
     state,
     credential: group.credential,
-    context: createMlsContext(group.context.cipherSuite, group.anchor),
+    // The post-commit handle keeps the source's receive retention, not ts-mls's defaults.
+    context: createMlsContext(group.context.cipherSuite, group.anchor, group.context.clientConfig),
     ledger: group.ledger,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,

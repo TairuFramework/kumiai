@@ -17,6 +17,7 @@ export {
   DuplicateFrameError,
   EncryptError,
   EnvelopeDecodeError,
+  ExpiredFrameError,
   FrameDecodeError,
   HubReconnectingError,
   SessionNotEstablishedError,
