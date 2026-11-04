@@ -167,7 +167,7 @@ test('real MLS delivers accepted plaintext after a commit overtakes publication'
   expect(received).toEqual([plaintext, plaintext])
   expect(opened).toEqual(publications.map((m) => ({ bytes: m.payload, handleEpoch: 2 })))
   for (const topicID of new Set(publications.map((m) => m.topicID))) {
-    expect(alice.appCursorStore.stored(topicID)).toBe(hub.log.head(topicID))
+    expect(await alice.appCursorStore.stored(topicID)).toBe(hub.log.head(topicID))
   }
 })
 

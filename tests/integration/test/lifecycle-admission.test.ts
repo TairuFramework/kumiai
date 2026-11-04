@@ -1,13 +1,13 @@
 import { randomIdentity } from '@kokuin/token'
 import { commitLedgerEntries, createGroup, type GroupHandle, signLedgerEntry } from '@kumiai/mls'
-import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
+import { createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { createGroupPeer, digestAppliedCommit } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import {
   chat,
+  createDurableGroupCrypto,
   createDurableHandleAccess,
-  createMemoryAppCursorStore,
   createOperationHost,
   encodeJournal,
   groupMLSDependencies,
@@ -31,7 +31,7 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
       expect(crypto.epoch()).toBe(epochBefore)
     },
   })
-  const crypto = createGroupCrypto({ access })
+  const crypto = createDurableGroupCrypto(access)
   const mls = createGroupMLS({
     ...groupMLSDependencies(access),
     identity,
@@ -80,7 +80,7 @@ test('accepted adoption entries seal at the matching admission epoch once the de
       expect(seals).toHaveLength(0)
     },
   })
-  const crypto = createGroupCrypto({ access })
+  const crypto = createDurableGroupCrypto(access)
   const mls = createGroupMLS({
     ...groupMLSDependencies(access),
     identity,
@@ -113,7 +113,6 @@ test('accepted adoption entries seal at the matching admission epoch once the de
     crypto,
     mls,
     ...host,
-    appCursorStore: createMemoryAppCursorStore(),
     appOutbox: {
       ...appOutbox,
       put: async (entry) => {

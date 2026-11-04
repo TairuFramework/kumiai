@@ -84,7 +84,6 @@ import {
   bareTestHandle,
   buildRealUnavailableCommit,
   createRealGroup,
-  createTestCompletion,
   testGroupMLSDependencies,
   testHandleAccess,
 } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
@@ -378,6 +377,7 @@ export function makeMember(params: MakeMemberParams): Member {
     persist: (next, write) => stateStore.save(next, write),
   })
   operationStores.set(access, stateStore)
+  operationPersistence.set(access, memberPersistence)
   const adopt = (next: GroupHandle) => access.replace(next)
   const pending = params.durablePending === false ? undefined : memberPersistence.pending
   const crypto = createGroupCrypto({ access, pending })
@@ -735,6 +735,17 @@ export function newIdentity(): OwnIdentity {
 }
 
 const operationStores = new WeakMap<HandleAccess, StateStore>()
+const operationPersistence = new WeakMap<HandleAccess, ReturnType<typeof createMemberPersistence>>()
+
+function persistenceForAccess(access: HandleAccess) {
+  const persistence = operationPersistence.get(access)
+  if (persistence === undefined) throw new Error('Missing durable member persistence')
+  return persistence
+}
+
+export function createDurableGroupCrypto(access: HandleAccess) {
+  return createGroupCrypto({ access, pending: persistenceForAccess(access).pending })
+}
 
 export function groupMLSDependencies(
   access: HandleAccess,
@@ -747,7 +758,11 @@ export function groupMLSDependencies(
 export async function createDurableHandleAccess(
   params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
 ): Promise<HandleAccess> {
-  const store = createMemoryStateStore({ groupID: params.handle().groupID, incarnation: 1 })
+  const persistence = createMemberPersistence(
+    createMemoryStateStore({ groupID: params.handle().groupID, incarnation: 1 }),
+    params.handle(),
+  )
+  const store = persistence.stateStore
   await store.save(params.handle())
   const access = simpleHandleAccess({
     key: store.control.key,
@@ -756,6 +771,7 @@ export async function createDurableHandleAccess(
     stateVersion: () => store.database.loadVersion('state'),
   })
   operationStores.set(access, store)
+  operationPersistence.set(access, persistence)
   return access
 }
 
@@ -783,7 +799,8 @@ export function createOperationHost(access: HandleAccess, identity: OwnIdentity)
   })
   return {
     ...createHostApplicationPorts(access),
-    completion: createTestCompletion(control.key),
+    completion: persistenceForAccess(access).completion,
+    appCursorStore: persistenceForAccess(access).cursor,
     builders,
     welcomes,
     control,

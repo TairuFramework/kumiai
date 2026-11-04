@@ -41,6 +41,7 @@ import { expect, vi } from 'vitest'
 import { createRegistryAppPublication } from '../../../../packages/mls-rpc/src/app-publication.js'
 import { createCheckpointService } from '../../../../packages/mls-rpc/src/checkpoint.js'
 import { entryCapability } from '../../../../packages/mls-rpc/src/entry-capability.js'
+import { createHandlerCompletion } from '../../../../packages/mls-rpc/src/handler-completion.js'
 import {
   createControlBuildPort,
   createLedgerEntrySlot,
@@ -59,7 +60,6 @@ import { recoveryTrustFor } from '../../../../packages/mls-rpc/src/registry/trus
 import {
   bareTestHandle,
   createRealGroup,
-  createTestCompletion,
   type RealMember,
   testGroupMLSDependencies,
 } from '../../../../packages/mls-rpc/test/fixtures/real-group.js'
@@ -450,7 +450,29 @@ export async function makeCheckpointPeer(
       )
     },
   })
-  const cryptoPort = createGroupCrypto({ access })
+  const completion = createHandlerCompletion({ persistence: groups, key })
+  const cryptoPort = createGroupCrypto({
+    access,
+    pending: {
+      async persistOpened(state, record) {
+        await entry.run(
+          { groupID: key.groupID, mutationID: crypto.randomUUID() },
+          async (reads) => ({
+            expected: await reads.lifetime(),
+            value: await reads.state(key.incarnation),
+          }),
+          async (stores, previous) => {
+            if (previous === null || previous.deleted) throw new Error('Missing persisted source')
+            const rows = stores.incarnation(key.incarnation)
+            await rows.state.save({ ...previous, state, version: previous.version + 1 })
+            await rows.pending.put([record])
+          },
+        )
+      },
+      list: () => entry.read(key.groupID, (reads) => reads.pendingFrames(key.incarnation)),
+      complete: (id) => completion.complete([id]),
+    },
+  })
   const mls = createGroupMLS({
     ...testGroupMLSDependencies(access, ports.control),
     identity: real.identity,
@@ -489,7 +511,7 @@ export async function makeCheckpointPeer(
   })
   const readEvidence = vi.fn(() => groups.readEvidence(key))
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
-    completion: createTestCompletion(key, cryptoPort.pending),
+    completion,
     openedDeliveryContext,
     ...callbacks,
     appOutboxLimit: 128,

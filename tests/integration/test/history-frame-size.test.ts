@@ -1,6 +1,6 @@
 import { randomIdentity } from '@kokuin/token'
 import { commitLedgerEntries, createGroup, signLedgerEntry } from '@kumiai/mls'
-import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
+import { createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   assertFrameFits,
   commitTopic,
@@ -12,8 +12,8 @@ import { expect, test, vi } from 'vitest'
 
 import {
   chat,
+  createDurableGroupCrypto,
   createDurableHandleAccess,
-  createMemoryAppCursorStore,
   createOperationHost,
   encodeJournal,
   groupMLSDependencies,
@@ -78,7 +78,7 @@ test('a final frame one byte above the hub cap settles rejected before publishin
       group = next
     },
   })
-  const crypto = createGroupCrypto({ access })
+  const crypto = createDurableGroupCrypto(access)
   const mls = createGroupMLS({
     ...groupMLSDependencies(access),
     identity,
@@ -105,7 +105,6 @@ test('a final frame one byte above the hub cap settles rejected before publishin
           return { ...result, sealed }
         }),
       ),
-    appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {
       chat: { 'chat/changed': () => {}, 'chat/posted': () => {}, 'chat/double': () => ({}) },

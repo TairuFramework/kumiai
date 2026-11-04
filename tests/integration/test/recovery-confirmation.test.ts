@@ -14,13 +14,7 @@ import {
   sealRecoveryVerdict,
   signLedgerEntry,
 } from '@kumiai/mls'
-import {
-  createGroupCrypto,
-  createGroupMLS,
-  createLedgerEntrySlot,
-  deriveEntryKey,
-  sealEntries,
-} from '@kumiai/mls-rpc'
+import { createGroupMLS, createLedgerEntrySlot, deriveEntryKey, sealEntries } from '@kumiai/mls-rpc'
 import {
   commitTopic,
   createGroupPeer,
@@ -44,8 +38,8 @@ import { afterEach, beforeAll, expect, test, vi } from 'vitest'
 import { bareTestHandle } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   chat,
+  createDurableGroupCrypto,
   createDurableHandleAccess,
-  createMemoryAppCursorStore,
   createOperationHost,
   encodeJournal,
   groupMLSDependencies,
@@ -202,7 +196,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
       openedDeliveryContext,
       appOutboxLimit: 128,
       hub: connection,
-      crypto: createGroupCrypto({ access }),
+      crypto: createDurableGroupCrypto(access),
       mls,
       localDID: identity.id,
       protocols: { chat },
@@ -216,7 +210,6 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
         },
       },
       ...operationHost,
-      appCursorStore: createMemoryAppCursorStore(),
       onRecovery: (event) => {
         events.push(event)
       },

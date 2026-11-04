@@ -19,7 +19,6 @@ import {
   verifyLedgerEntry,
 } from '@kumiai/mls'
 import {
-  createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
   guardedReplace,
@@ -39,8 +38,8 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { bareTestHandle } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   chat,
+  createDurableGroupCrypto,
   createDurableHandleAccess,
-  createMemoryAppCursorStore,
   createOperationHost,
   groupMLSDependencies,
   type Protocols,
@@ -194,11 +193,10 @@ function recoveryPeer(params: {
     openedDeliveryContext,
     appOutboxLimit: 128,
     hub: hub.connect(identity),
-    crypto: createGroupCrypto({ access }),
+    crypto: createDurableGroupCrypto(access),
     mls,
     localDID: identity.id,
     ...createOperationHost(access, identity),
-    appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {
       chat: { 'chat/changed': () => {}, 'chat/posted': () => {}, 'chat/double': () => ({}) },
