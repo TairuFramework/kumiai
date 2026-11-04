@@ -111,10 +111,14 @@ Phase 2.3c adds durable application publication and retirement drainage:
   prevents resuming superseded resync work while preserving owed outcomes and Welcome obligations.
 - Accepted plaintext and capture-inspection byte fields own their bytes even for Node Buffer inputs.
 
-Default handlers, publication and external status delivery remain at least once. HandlerCompletion
-atomicity and metadata migration (2.3d), declared restore (2.3e), HTTP smoke (2.4), real provider faults
-and child-process SIGKILL evidence remain outstanding.
+Default handlers, publication and external status delivery remain at least once. Declared restore
+(2.3e), HTTP smoke (2.4), real provider faults and child-process SIGKILL evidence remain outstanding.
 
+Phase 2.3d adds handler completion and batching:
+
+- **Breaking — rpc peers:** every peer requires `completion: HandlerCompletion<TTx>` bound to its exact
+  `{ groupID, incarnation }`. The former recovery completion callback is renamed `recoveryCompletion`;
+  it does not acknowledge application records. Hosts migrate by supplying both.
 
 Add shared handler-completion and batching conformance suites with production completion adapters in real-MLS and double fixtures.
 Preserve durable cursors when independent adapters have no ordered prefix proof.
