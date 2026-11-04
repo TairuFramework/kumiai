@@ -34,7 +34,9 @@ import type {
 export type ConformanceUnwrapResult = {
   payload: Uint8Array
   senderDID: string
+  /** Handle epoch read under the operation lock. */
   epoch: number
+  /** Authenticated sealing epoch, independent of the epoch hint. */
   frameEpoch: number
 }
 

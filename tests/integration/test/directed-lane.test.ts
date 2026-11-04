@@ -84,6 +84,7 @@ describe('directed RPC over real MLS, end to end', () => {
           })
           expect(ctx).not.toHaveProperty('frame')
           expect(ctx).not.toHaveProperty('idempotencyKey')
+          expect(ctx).not.toHaveProperty('tx')
           calls.push(ctx.param.n)
           return { n: ctx.param.n * 2 }
         },
@@ -91,10 +92,13 @@ describe('directed RPC over real MLS, end to end', () => {
     })
     await flush()
 
+    const before = await bob.appOutbox.list()
     const client = await alice.peer.protocol('chat').to(bobID.id)
     const reply = await client.request('chat/double', { param: { n: 21 } })
     expect(reply).toEqual({ n: 42 })
     expect(calls).toEqual([21])
+    expect(bob.pendingStore?.size ?? 0).toBe(0)
+    expect(await bob.appOutbox.list()).toEqual(before)
 
     await alice.peer.dispose()
     await bob.peer.dispose()

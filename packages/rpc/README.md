@@ -42,7 +42,7 @@ Four constraints a port implementation is most likely to get wrong, all of which
   lag its handle or, after a rolled-back transaction, run ahead of it. So every port result that
   acted on the handle carries the epoch it acted at, read under the host's handle lock:
   `exportSecret` returns `{ secret, epoch }`, `sealEntries` returns `{ sealed, epoch }`, `unwrap`
-  returns `epoch`, `processCommit` returns `{ advanced, epochBefore, epochAfter }`, and
+  returns `{ epoch, frameEpoch }`, `processCommit` returns `{ advanced, epochBefore, epochAfter }`, and
   `GroupMLS.readEpoch()` answers when no operation runs. The suite's epoch clauses set the hint one
   behind and one ahead and expect the same answers.
 - **`unwrap` throwing is ordinary control flow**, not an error: a future or no-longer-retained epoch
@@ -69,6 +69,45 @@ when it is safe to open stops existing rather than being managed.
 
 ## The app lane: logged events
 
+### Handler policies and completion
+
+Every peer supplies `completion: HandlerCompletion<TTx>` bound to its exact `{ groupID, incarnation }`.
+Recovery uses the separate `recoveryCompletion` callback. It does not acknowledge application records.
+`GroupProcedureHandlers<P, TTx>` keeps each procedure's context and result types.
+Only events declared `retain: 'log'` accept policy objects:
+
+```ts
+const handlers: GroupProcedureHandlers<typeof protocol, HostTransaction> = {
+  posted: {
+    mode: 'transactional',
+    async handle({ data, tx, frame, idempotencyKey, epoch, incarnation }) {
+      await messages.put(tx, { data, frame, idempotencyKey, epoch, incarnation })
+    },
+  },
+}
+const maps = adaptBusHandlers(protocol, handlers, { completion, suppress })
+```
+
+The host supplies `HostTransaction` and `messages.put` over the shared transaction provider and database.
+Legacy functions and `{ handle }` use at-least-once delivery outside group ownership.
+Transactional handlers receive the supplied transaction in the effects phase.
+Their durable effect and saved-record removal commit together. Callback invocation can repeat after rollback.
+Handlers stay short and perform no network, timers or root-store calls.
+`combineDurableHandlers([...])` composes listeners of one policy. Mixed policies reject before registration.
+The retained-event emitter also rejects listeners that bypass this policy boundary.
+
+`complete(ids)` deduplicates IDs and splits oversized calls into bounded transactions.
+A later-prefix failure preserves earlier committed prefixes. Retrying the original IDs safely resumes remaining work.
+`transact(ids, callback)` keeps its complete set atomic and refuses an oversized count or staging-work budget before effects.
+Distinct `transact` calls use separate callback transactions. A failed protocol A callback cannot roll back protocol B's transaction.
+Missing or completed IDs produce no callback, hooks or durable mutation.
+
+Authenticated handler metadata includes the original frame `epoch` and originating `incarnation` on every path.
+Durable contexts also require the complete `frame` and stable `idempotencyKey`.
+Requests, replies, streams, channels and ephemeral events omit these durable fields and initiate no persistence.
+Wire/header fields cannot supply or override authenticated metadata.
+`GroupUnwrapResult.epoch` is the locked handle epoch. `frameEpoch` is the authenticated sealing epoch used for handler metadata.
+
 ### Durable delivery (opt-in)
 
 Peers with `crypto.pending` require an `openedDeliveryContext` that propagates tokens across
@@ -77,7 +116,7 @@ at construction. For Node hosts:
 
 ```ts
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { createGroupCrypto } from '@kumiai/mls-rpc'
+import { createGroupCrypto, createHandlerCompletion } from '@kumiai/mls-rpc'
 import { createGroupPeer } from '@kumiai/rpc'
 
 const deliveryTokens = new AsyncLocalStorage<object>()
@@ -85,11 +124,13 @@ const openedDeliveryContext = {
   run: <T>(token: object, fn: () => T): T => deliveryTokens.run(token, fn),
   get: () => deliveryTokens.getStore(),
 }
-const crypto = createGroupCrypto({ access, pending })
-const peer = createGroupPeer({ ...peerParams, crypto, openedDeliveryContext })
+const completion = createHandlerCompletion({ persistence: device.groups, key })
+const crypto = createGroupCrypto({ access: await registry.access(key.groupID) })
+const peer = createGroupPeer({ ...peerParams, crypto, completion, openedDeliveryContext })
 ```
 
-`peerParams` supplies the remaining peer ports, including `appPublication` for a durable outbox.
+`key` is the actual key returned by `registry.seed`. `device` supplies the registry's persistence.
+`peerParams` supplies the remaining ports, including `appPublication` for a durable outbox.
 Other runtimes supply an equivalent async context; reuse the same context for the registry,
 its peers and storage-only delivery.
 
@@ -97,17 +138,17 @@ Supplying `GroupCrypto.pending` enables acknowledged delivery for events declare
 For a conforming hub that appends and retains the frame until it is durably opened, the peer
 delivers these events **at least once**, in log order per protocol, across process restarts and
 handler failures. A successful handler return acknowledges the event; a thrown handler or failed
-`pending.complete` retries the same record with backoff, holding later events in that protocol.
+`completion.complete` retries the same record with backoff, holding later events in that protocol.
 An event handler that never settles holds its protocol indefinitely. Disposing the peer does not
 cancel an active handler; the host must settle its work or restart the peer to retry the record.
 The handler context's `frame: AppFrameRef` identifies a logged delivery. Store a deduplication
-entry keyed by `frame.id` in the same transaction as the handler's effect before returning.
-External effects must be idempotent or reconciled by that id. A record may be delivered again if
+entry keyed by `idempotencyKey` in the same transaction as the handler's effect before returning.
+External effects must be idempotent or reconciled by that key. A record may be delivered again if
 the process crashes after the effect but before completion.
 
-`AppFrameRef` includes `id`, `topicID`, `protocol`, anchor `segment`, and log `position`. The id
+`AppFrameRef` includes `groupID`, `incarnation`, `id`, `topicID`, `protocol`, derived `procedure`, anchor `segment`, and log `position`. The id
 is derived from the topic and ciphertext, so it stays stable across replay. `pending.list()`
-restores records at startup in `(segment, position)` order; `pending.complete(id)` is idempotent.
+restores records at startup in `(incarnation, segment, position, id)` order; `pending.complete(id)` is idempotent.
 The port's `unwrap(bytes, { expectedAAD, frame })` must atomically save the consumed-key handle
 state and the pending record before resolving. A failed save must leave the handle openable and
 throw an error recognized by `isAppFrameStorageError`; the app lane retries without advancing
@@ -133,6 +174,7 @@ then app idle, then the commit tail. It does not guarantee delivery of every ret
 `peer.drainOpened()` permanently stops new pulls and opens on that peer, then waits for already
 persisted opened records and in-flight handler completions. It never opens sealed backlog.
 This is a one-way lifecycle operation: start a replacement peer to resume opening.
+Self-removal commits terminal state first, then blocks private crypto and network work while saved plaintext and completion drain.
 `dispose()` followed by `drained()` waits for admitted callbacks; it does not flush unadmitted records.
 
 With `@kumiai/mls-rpc`, `registry.drainOpened(key)` drains persisted plaintext through the shared
@@ -140,7 +182,7 @@ storage worker. Registry `deliverOpened(record)` takes precedence; without it, a
 peer's durable handler serves that source's backlog until detachment. Handoff stops the live lane
 before storage delivery, retaining exclusive admission through completion. With neither handler,
 records remain pending and lifecycle waits. `deliverOpened` requires the shared `openedDeliveryContext`.
-`createOpenedAppHandler({ localDID, protocols, handlers, suppress? })` builds a storage dispatcher.
+`createOpenedAppHandler({ localDID, protocols, handlers, completion, openedDeliveryContext, suppress? })` builds a storage dispatcher.
 Custom `OpenedDeliveryBinding.attach` sources supply `deliver(record)`, `handoff()` and `completed(id)`.
 Unknown protocols/procedures or handler failures retain records and retry.
 
@@ -353,7 +395,7 @@ Source outcomes, history and owed Welcomes remain serviceable. Destination state
 
 Unadopted legacy records retain every byte and retry with `legacy-recovery-record`; successor retirement in `@kumiai/mls-rpc` is the explicit exit.
 Installed legacy continuations require independent installation proof. Automatic captured attempts use null-authorisation records.
-Full registry crypto, leases and batching remain 2.3.
+`@kumiai/mls-rpc` supplies the registry crypto, leases and shared adaptive batching described above.
 These tests prove phase-2 memory reconstruction. Child-process SIGKILL evidence belongs to phase 6.
 
 For an authenticated Welcome newer than held state, stop and drain the peer before replacing the

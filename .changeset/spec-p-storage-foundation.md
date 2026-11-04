@@ -114,3 +114,11 @@ Phase 2.3c adds durable application publication and retirement drainage:
 Default handlers, publication and external status delivery remain at least once. HandlerCompletion
 atomicity and metadata migration (2.3d), declared restore (2.3e), HTTP smoke (2.4), real provider faults
 and child-process SIGKILL evidence remain outstanding.
+
+
+Add shared handler-completion and batching conformance suites with production completion adapters in real-MLS and double fixtures.
+Preserve durable cursors when independent adapters have no ordered prefix proof.
+Document exact-key handler policies, authenticated metadata, transactional side effects and migration from recovery completion callbacks.
+Terminal-first self-removal blocks private crypto and network continuations while saved plaintext drains through canonical completion.
+Portable saved-ID assertions and memory reconstruction complement production traversal/control-route witnesses.
+Provider fault, HTTP smoke and child-process SIGKILL evidence remain pending in later phases.

@@ -30,3 +30,13 @@ callback is ignored.
 
 Pass `signal` to cancel one gather. Aborting resolves with replies collected so far. A signal that
 was already aborted resolves `[]` without sending.
+
+## Authenticated metadata
+
+`UnwrapResult` can carry `{ payload, senderDID, epoch }` from the caller's authenticated byte transform.
+The transport replaces transit sender/epoch fields with these values and removes wire claims when authentication supplies none.
+Transport envelopes retain authenticated epoch on replies too. The responder forwards epoch unchanged to `BusEvent` and request-handler context.
+Broadcast keeps these fields optional because it has no MLS dependency.
+The RPC adapter requires authenticated epoch and binds incarnation from its exact group key.
+Only retained RPC handlers receive frame identity, idempotency keys and completion policy.
+Ephemeral broadcast work initiates no durable transaction.

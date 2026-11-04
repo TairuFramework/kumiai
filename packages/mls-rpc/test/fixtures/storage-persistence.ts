@@ -41,6 +41,7 @@ import { decodeControlJournal } from '../../src/control-journal.js'
 import { createControlValidationPort } from '../../src/control-validation.js'
 import { createGroupCrypto } from '../../src/crypto.js'
 import { type EntryCapability, entryCapability } from '../../src/entry-capability.js'
+import { createHandlerCompletion } from '../../src/handler-completion.js'
 import { memoryGroupOwnerQueues } from '../../src/memory-group-persistence.js'
 import {
   assertMemoryWrite,
@@ -163,6 +164,10 @@ type RegistryStoragePorts = {
   prepareInstallationCheckpoint: typeof prepareCheckpointInstallationFromTrust
   readConfirmedTranscriptHash(state: Uint8Array | null): Promise<Uint8Array>
   device: DevicePersistence<MemoryTransaction>
+  completion(key: {
+    groupID: string
+    incarnation: number
+  }): ReturnType<typeof createHandlerCompletion<MemoryTransaction>>
   packageStores(sourceID: string): ReturnType<typeof createMemoryPackageStores>
 }
 export type RegistryStorageFixture = Omit<
@@ -494,6 +499,8 @@ export async function createStorageFixture(params: {
         return storageTranscript(state)
       },
       device,
+      completion: (key: { groupID: string; incarnation: number }) =>
+        createHandlerCompletion({ persistence: device.groups, key }),
       packageStores: (sourceID: string) => createMemoryPackageStores({ device, sourceID }),
     }
   }

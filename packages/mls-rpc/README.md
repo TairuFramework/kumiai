@@ -844,8 +844,8 @@ Retries have no count or elapsed-time bound. Their backoff caps at 15 seconds, a
 
 The host's `createPeerForIncarnation(key, options)` supplies the actual incarnation's control, crypto, anchor, cursor, outbox and `appPublication` ports.
 It spreads `options` into `createGroupPeer`, preferring `options.hub` and `options.control` over its own.
-That forwards `openedDeliveryContext`, `internalOperations`, `mls`, `checkpoints`, `manualRecovery`, `recoveryTarget`, `onNotMember`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`,
-both reconciliation callbacks, `continuation` and `completion`.
+That forwards `completion`, `openedDeliveryContext`, `internalOperations`, `mls`, `checkpoints`, `manualRecovery`, `recoveryTarget`, `onNotMember`, `recoveryOnly`, `onConfirmedRecovery`, `settleAcceptedRecovery`,
+both reconciliation callbacks, `continuation` and `recoveryCompletion`.
 Forward `internalOperations` unchanged so the registry can bind its private rotation enqueue and consume internal outcomes.
 `onConfirmedRecovery` requires `settleAcceptedRecovery`. Direct construction without the settlement callback throws `TypeError`.
 The coordinator supplies both callbacks and waits for source completion and drainage before restoring the raw candidate.
@@ -883,5 +883,72 @@ Custom `recoverySecret` requires equivalent `recoverySecretFromTrust` at constru
 `RecoveryCandidateError`, `RegistryResyncRefusedError`, `RegistryRetiringError`, `RegistryRetireHookError` and `RegistryRecoveryReplacementError` expose actionable failures.
 `SeedAdmissionRefusedError` reports Welcome admission refusal. Existing conflict, uncertainty, movement and safety errors remain exported.
 Unadopted legacy attempts retry with `legacy-recovery-record`, preserving saved bytes; successor retirement is the explicit exit.
-Application attempt co-commit, handler batching, package burn and backup restore remain follow-up work. Phase-3 providers are excluded.
+Application attempt co-commit and handler batching use the shared group scheduler. Package burn and backup restore remain follow-up work. Phase-3 providers are excluded.
 The integration witnesses reconstruct memory persistence. They do not provide phase-6 child-process SIGKILL evidence.
+
+## Handler completion and host migration
+
+`createHandlerCompletion({ persistence: device.groups, key })` supplies the canonical `HandlerCompletion<TTx>` for an exact group incarnation.
+The service requires registered entry capability and the shared coordinator binding.
+It never follows a replacement incarnation. Recovery coordination uses `recoveryCompletion`, independently of this port.
+
+The shared memory fixtures plant A at position `10` and B at `2` under `{ groupID: 'handler-completion', incarnation: 1 }`.
+Both use topic `handler-topic` and protocol `chat`. Completing B removes only B and preserves the null cursor.
+Completing A also preserves that cursor without ordered traversal proof. Reopening preserves both removals and all unrelated rows.
+Opaque positions use code-unit ordering, so `10` precedes `2`.
+With production AppLane coverage, completing A after B can advance through B to `2` atomically.
+
+A transactional handler writes application rows through its supplied transaction.
+For the memory fixture's actual `MemoryTransaction`, the host side-row operation is:
+
+```ts
+async function saveEffect(tx: MemoryTransaction, idempotencyKey: string, bytes: Uint8Array) {
+  const rows = tx.rows['host-side']
+  if (rows === undefined) throw new Error('Missing transaction side-row namespace')
+  rows.set(idempotencyKey, bytes.slice())
+}
+```
+
+The host creates that namespace with its database. Production providers supply equivalent transaction-bound application stores.
+Do not open another transaction from the handler. Kumiai domain writes through supplied, copied or constructed transaction views refuse in effects.
+`tx.onCommit` runs only after proven commit. Rollback retains pending data and discards side rows.
+An ambiguous commit resolves its marker before exposing completion or hooks.
+The shared conformance wrapper tests rollback and commit-then-reject in real-MLS and double modes.
+It preserves the storage fixture's pending restore work. That fixture refuses live crypto until restoration completes.
+Live crypto, traversal and control-route evidence comes from the dedicated registry and peer tests.
+
+Prefer a key-neutral registry resolver for cold and retired delivery:
+
+```ts
+const registry = createGroupHandleRegistry({
+  ...registryParams,
+  openedDeliveryContext,
+  openedHandler: ({ key, completion, openedDeliveryContext }) =>
+    createOpenedAppHandler({
+      localDID: identity.id,
+      protocols,
+      handlers,
+      completion,
+      openedDeliveryContext,
+    }),
+})
+```
+
+The resolver receives each actual key and canonical completion. Select group-specific handlers using that supplied key when needed.
+Never capture one group's completion in a resolver reused across groups or incarnation switches.
+An explicit `openedHandler` and legacy `deliverOpened` are mutually exclusive.
+The normalised dispatcher owns completion, including legacy callbacks. Callers must not append another completion.
+Without an explicit resolver/callback, the attached source peer supplies fallback delivery until detachment.
+Claims remain exclusive until completion proof. Disposal withdraws new fallback admission immediately.
+
+Use the exact same required `openedDeliveryContext` for registry, peer factory options, live handlers and cold dispatchers.
+It propagates delivery tokens across awaits and rejects lifecycle operations that would join their own handler.
+The optional `ownershipContext` serves a different purpose: it diagnoses root ownership reentry across awaits.
+Without it, synchronous root reentry still refuses, but after-await root calls cannot reliably diagnose self-waits.
+Transactional handlers therefore use only supplied transaction stores in either context mode.
+
+`complete` may commit several prefixes before a later failure. Retry the original IDs after failure.
+`transact` refuses an oversized atomic set before invoking effects and never fuses separate callbacks.
+Defaults are 64 frames, 2 ms maximum coalescing delay and 8 ms staging work.
+Idle work starts immediately. Each group releases ownership between ordinary batches and schedules ready control before the next app burst.
+Retained ambiguous proof and certified-finalisation retries preserve ownership until resolution.

@@ -153,6 +153,7 @@ async function replay(
     payload: first.payload,
     senderDID: first.senderDID,
     epoch: first.epoch,
+    frameEpoch: first.frameEpoch,
   })
 }
 
@@ -362,7 +363,9 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
         refs.set(id, ref)
         await fixture.receiver.unwrap(sealed, { frame: ref })
       }
+      const saved = await fixture.receiver.pending.list()
       const restarted = await fixture.restore()
+      expect(await restarted.pending.list()).toEqual(saved)
       expect((await restarted.pending.list()).map((record) => record.frame.id)).toEqual([
         refs.get('first')?.id,
         refs.get('middle')?.id,

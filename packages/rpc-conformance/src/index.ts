@@ -174,6 +174,8 @@ export {
   assertPartialLossSpentRefused,
   testGroupStorageConformance,
 } from './group-storage.js'
+export { testHandlerBatchingConformance } from './handler-batching.js'
+export { testHandlerCompletionConformance } from './handler-completion.js'
 export * from './manual-recovery.js'
 export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
 export { createMemoryControlStore, type MemoryControlStore } from './memory-control-store.js'

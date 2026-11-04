@@ -1,6 +1,12 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import type { HubPublishParams } from '@kumiai/hub-tunnel'
-import { commitTopic, encodeAppAAD, protocolTopic } from '@kumiai/rpc'
+import {
+  appFrameIdempotencyKey,
+  commitTopic,
+  encodeAppAAD,
+  type GroupHandlerMetadata,
+  protocolTopic,
+} from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import { createRealGroup } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
@@ -104,6 +110,7 @@ test('terminal restart retains the outbox until real MLS plaintext delivery comp
     if (anchor === null) throw new Error('Missing anchor')
     const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
     const aad = encodeAppAAD({ topicID, intent: 'log' })
+    const openedEpoch = Number(alice.handle().epoch)
     const plaintext = encodeEventFrame('chat/posted', { text: 'opened before removal' })
     const sealed = await alice.crypto.wrap(plaintext, { aad })
     const frame = {
@@ -134,14 +141,25 @@ test('terminal restart retains the outbox until real MLS plaintext delivery comp
     })
     const retained = await bob.appOutbox.list()
     const seen: Array<unknown> = []
+    const restartedHandle = await restoreMemberHandle(bob, recipient.slot)
+    const cryptoCalls = (['encrypt', 'decrypt', 'decryptStaged', 'exportSecret'] as const).map(
+      (name) => vi.spyOn(restartedHandle, name),
+    )
     again = makeMember({
       hub,
       identity: recipient.identity,
-      group: await restoreMemberHandle(bob, recipient.slot),
+      group: restartedHandle,
       entrySlot: recipient.slot,
       restartOf: bob,
       handlers: {
-        'chat/posted': async (event: { data: unknown }) => {
+        'chat/posted': async (event: { data: unknown } & GroupHandlerMetadata) => {
+          expect(event).toMatchObject({
+            epoch: openedEpoch,
+            incarnation: bob.control.key.incarnation,
+            frame: { ...frame, procedure: 'chat/posted' },
+            idempotencyKey: appFrameIdempotencyKey({ ...frame, procedure: 'chat/posted' }),
+          })
+          expect(event).not.toHaveProperty('tx')
           seen.push(event.data)
           await handler.promise
         },
@@ -155,6 +173,7 @@ test('terminal restart retains the outbox until real MLS plaintext delivery comp
     handler.resolve()
     await vi.waitFor(async () => expect(await again?.appOutbox.list()).toEqual([]))
     expect(again.pendingStore?.size).toBe(0)
+    for (const call of cryptoCalls) expect(call).not.toHaveBeenCalled()
   } finally {
     handler.resolve()
     await again?.peer.dispose()

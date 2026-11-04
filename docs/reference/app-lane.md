@@ -244,3 +244,31 @@ A portable `HandlerCompletion` adapter owns idempotent durable completion and ma
 Without registered prefix coverage, the lane advances only its volatile position after the supplied completion promise resolves.
 It preserves the durable cursor, including for rowless dead frames. Restart therefore refetches that prefix and repeats refusal checks.
 Canonical completion binds live ordered coverage and commits pending removal, poison pruning and eligible cursor advancement together.
+
+
+## Completion proof, poison and lifecycle
+
+`HandlerCompletion.key` binds every operation to the original group and incarnation.
+Without ordered prefix proof, saved-ID removal preserves the durable cursor. This conservative policy costs refetch and refusal checks after restart.
+IDs, topic positions and sparse hub pages alone cannot establish traversal coverage.
+Independent adapters may use `bindAppCompletionCoverage(completion, source)` when they can supply equivalent ordered proof.
+An unregistered structural adapter keeps its original identity and remains usable without that optional binding.
+
+Canonical completion removes saved pending records and eligible poison with the cursor in one transaction.
+Authenticated malformed plaintext persists poison after key consumption. Unauthenticated refusals consume no key and create no poison.
+Poison remains until its occurrence is completed or an eligible proven prefix prunes it.
+Completed later occurrences remain in live coverage until earlier pending or held occurrences settle.
+Generation changes, moved cursors, incarnation changes, reset and unbinding invalidate captured proof before writes.
+Rowless dead prefixes advance only through bound proof. Unknown-ID completion remains a no-op.
+
+`complete(ids)` streams bounded prefixes. A failed suffix retains earlier committed progress, and retrying the original IDs is idempotent.
+`transact(ids, callback)` preserves one atomic callback set or refuses it before effects when count/work bounds cannot accommodate it.
+Separate callback transactions preserve protocol failure isolation.
+Only log events use these durable boundaries. Ephemeral traffic and decrypt batches write no pending, cursor or outbox rows.
+
+Self-removal commits the terminal flag and control changes before opened delivery drains.
+The peer's `removalCommitted()` choke point blocks new private crypto calls, fetches and network continuations after that commitment. Private/network retry timers check the same terminal admission.
+Live and restarted workers deliver already saved plaintext through both policies and await completion proof before transport clearing.
+No decryption, fetch or publication is needed for this drain. Failure retains pending rows and delays clearing indefinitely.
+The key-neutral registry `openedHandler({ key, completion, openedDeliveryContext })` resolver preserves exact-key delivery across groups and incarnations.
+Every dispatcher path shares that delivery context. The optional ownership context separately diagnoses after-await root-store reentry.

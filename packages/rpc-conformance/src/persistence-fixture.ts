@@ -910,6 +910,22 @@ export type StorageTestPorts<TTx extends ConformanceGroupTransaction> =
       lastResort: ConformanceLastResortStore
     }
   }
+export type HandlerConformancePorts<TTx extends ConformanceGroupTransaction> =
+  StorageTestPorts<TTx> & {
+    completion(key: ConformanceGroupKey): ConformanceHandlerCompletion<TTx>
+    crypto(key: ConformanceGroupKey): ConformanceGroupCrypto
+  }
+
+export type HandlerConformanceParams<TTx extends ConformanceGroupTransaction> = Omit<
+  StorageConformanceParams<TTx>,
+  'createFixture'
+> & {
+  createFixture(
+    id: string,
+    options?: FixtureOptions<TTx>,
+  ): Promise<ConformancePersistenceFixture<HandlerConformancePorts<TTx>>>
+}
+
 export type FixtureOptions<TTx extends ConformanceGroupTransaction> = {
   effects?: ConformanceTransactionalGroupEffects<TTx>
   ownershipContext?: ConformanceOwnershipContextPort

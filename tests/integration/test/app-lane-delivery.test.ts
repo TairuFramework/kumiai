@@ -10,7 +10,12 @@ import {
   verifyLedgerEntry,
 } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
-import { APP_TOPIC_LABEL, encodeAppAAD, protocolTopic } from '@kumiai/rpc'
+import {
+  APP_TOPIC_LABEL,
+  encodeAppAAD,
+  type GroupHandlerMetadata,
+  protocolTopic,
+} from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import {
@@ -817,8 +822,16 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     const walkSuspended = Promise.withResolvers<void>()
     const abandoned = new Promise<never>(() => {})
     let crashOnDelivery = true
+    const deliveries: Array<GroupHandlerMetadata & { data: unknown }> = []
     const handlers = {
-      'chat/posted': async (ctx: { data: unknown }) => {
+      'chat/posted': async (ctx: { data: unknown } & GroupHandlerMetadata) => {
+        deliveries.push({
+          data: ctx.data,
+          epoch: ctx.epoch,
+          incarnation: ctx.incarnation,
+          frame: ctx.frame,
+          idempotencyKey: ctx.idempotencyKey,
+        })
         seen.push(ctx.data)
         if (!crashOnDelivery) return
         crashOnDelivery = false
@@ -896,6 +909,10 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // The first process persisted the opened record with the consumed ratchet state, then died
     // before its handler completed. The restart replays it because the cursor was not advanced.
     expect(bob.handle().epoch).toBe(3n)
+    expect(deliveries[1]).toEqual(deliveries[0])
+    expect(deliveries[0]).toMatchObject({ epoch: 1, incarnation: bob.control.key.incarnation })
+    expect(deliveries[0]?.frame).toBeDefined()
+    expect(deliveries[0]?.idempotencyKey).toBeTypeOf('string')
     expect(seen).toEqual([
       { text: 'at epoch one' },
       { text: 'at epoch one' },
