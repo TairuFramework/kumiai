@@ -1,5 +1,6 @@
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import { describe, expect, test } from 'vitest'
+import { reset, setup } from '@sozai/log'
+import { describe, expect, onTestFinished, test } from 'vitest'
 
 import { createHandlers } from '../src/handlers.js'
 import { createMemoryStore } from '../src/memoryStore.js'
@@ -226,6 +227,29 @@ describe('hub/v1/receive ack window', () => {
   })
 
   test('a full window with no ack at all stops counting after the ack timeout and the drain goes on', async () => {
+    const warnings: Array<{
+      category: ReadonlyArray<string>
+      level: string
+      message: string
+      properties: Record<string, unknown>
+    }> = []
+    setup({
+      sinks: {
+        capture: (record) => {
+          warnings.push({
+            category: record.category,
+            level: record.level,
+            message: record.message.join(''),
+            properties: record.properties,
+          })
+        },
+      },
+      loggers: [
+        { category: ['logtape', 'meta'], lowestLevel: 'error', sinks: [] },
+        { category: ['kumiai'], lowestLevel: 'warning', sinks: ['capture'] },
+      ],
+    })
+    onTestFinished(() => reset())
     const store = createMemoryStore()
     const ids = await seed(store, 20)
     const registry = new HubClientRegistry()
@@ -238,12 +262,26 @@ describe('hub/v1/receive ack window', () => {
     const feed = ackFeed()
     const written: Array<Frame> = []
     const { controller, done } = open({ handlers, acks: feed.readable, written })
+    onTestFinished(async () => {
+      controller.abort()
+      await done
+    })
 
     // The first 5 frames are never acked (e.g. a topic no sink on the device claims).
     await settle(50)
     expect(written).toHaveLength(5)
+    expect(warnings).toEqual([])
     // After the timeout the hub stops counting them, keeps the channel, and writes the next 5.
     await until(() => written.length === 10)
+    expect(warnings).toEqual([
+      {
+        category: ['kumiai', 'hub-server', 'receive'],
+        level: 'warning',
+        message:
+          'receive ack timeout for did:key:receiver: released 5 frames (1430 bytes) after 100 ms',
+        properties: { recipientDID: DID, frames: 5, bytes: 1430, timeoutMs: 100 },
+      },
+    ])
     expect(registry.isWriterBound(DID)).toBe(true)
     // Acks from then on pace the drain as usual.
     feed.ack(ids.slice(5, 10))
