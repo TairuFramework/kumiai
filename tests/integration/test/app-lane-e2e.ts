@@ -605,6 +605,9 @@ export function createEntryBodies() {
 
 export type GroupBuilder = ReturnType<typeof createEntryBodies>
 
+// Registry handles retain 4 epochs; plain @kumiai/mls now defaults to 1, too few for app history catch-up.
+const E2E_KEY_RETENTION = { retainKeysForEpochs: 4 }
+
 export async function createFoundingGroup(
   creator: OwnIdentity,
   groupID: string,
@@ -612,6 +615,7 @@ export async function createFoundingGroup(
 ): Promise<GroupHandle> {
   const { group } = await createGroup(creator, groupID, {
     resolveLedgerEntries: entrySlot.resolve,
+    keyRetention: E2E_KEY_RETENTION,
   })
   return group
 }
@@ -721,7 +725,7 @@ export async function joinFromWelcome(params: {
     welcome: params.welcome,
     keyPackageBundle: params.bundle,
     ratchetTree: params.ratchetTree,
-    options: { resolveLedgerEntries: params.entrySlot.resolve },
+    options: { resolveLedgerEntries: params.entrySlot.resolve, keyRetention: E2E_KEY_RETENTION },
   })
   return group
 }
