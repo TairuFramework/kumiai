@@ -197,6 +197,10 @@
   dir: packages/hub-server
   intents:
     - hub-server-receive-ack-window
+"@kumiai/hub-server@0.12.2":
+  dir: packages/hub-server
+  intents:
+    - hub-server-receive-window-logging
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
