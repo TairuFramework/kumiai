@@ -14,7 +14,7 @@ import {
   wakeRecipientKeyProblem,
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
-import { getReporter } from '@sozai/log'
+import { getLogger, getReporter } from '@sozai/log'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
@@ -137,6 +137,7 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
 }
 
 const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
+const receiveLogger = getLogger(['kumiai', 'hub-server', 'receive'])
 
 /** What the failed operation was about, for the default log line: a DID for the per-recipient
  * methods, a topic for fan-out, nothing for a store-wide purge. */
@@ -712,11 +713,24 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // backpressure stalls `writer.write` until `receiveBufferLimit` tears the channel down.
       function waitForRoom(bytes: number): Promise<void> {
         if (tornDown || hasRoom(bytes)) return Promise.resolve()
+        receiveLogger.debug(
+          'receive window full for {recipientDID}: paused with {frames} frames ({bytes} bytes) unacked',
+          { recipientDID: clientDID, frames: inFlight.size, bytes: inFlightBytes },
+        )
         return new Promise<void>((resolve) => {
           let timer: ReturnType<typeof setTimeout> | undefined
           const arm = (): void => {
             clearTimeout(timer)
             timer = setTimeout(() => {
+              receiveLogger.warn(
+                'receive ack timeout for {recipientDID}: released {frames} frames ({bytes} bytes) after {timeoutMs} ms',
+                {
+                  recipientDID: clientDID,
+                  frames: inFlight.size,
+                  bytes: inFlightBytes,
+                  timeoutMs: receiveAckTimeout,
+                },
+              )
               releaseAll()
               notifyWindow()
             }, receiveAckTimeout)
@@ -757,10 +771,19 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         resolveDone = resolve
       })
 
+      function logUnackedFrames(): void {
+        if (inFlight.size === 0) return
+        receiveLogger.debug(
+          'receive stream ended for {recipientDID} with {frames} frames ({bytes} bytes) unacked',
+          { recipientDID: clientDID, frames: inFlight.size, bytes: inFlightBytes },
+        )
+      }
+
       // Idempotent teardown, shared by every failure and end path. Frames stay pending in the store
       // and redeliver on the next connect (store-and-forward).
       function finish(): void {
         if (tornDown) return
+        logUnackedFrames()
         tornDown = true
         notifyWindow()
         if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
@@ -906,6 +929,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         }
       } catch (error) {
         // A synchronous drain error (e.g. store.fetch threw): clean up and reject the handler.
+        if (!tornDown) logUnackedFrames()
         tornDown = true
         notifyWindow()
         if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
