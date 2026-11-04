@@ -344,6 +344,7 @@ describe('recovery ordering', { concurrent: false }, () => {
   test.each(['probe', 'put', 'publish', 'seal'] as const)(
     'retries a failed %s without another lane trigger',
     async (failure) => {
+      controlRecoveryClock()
       const hub = new FakeHub()
       const store = createMemoryAppOutbox()
       let failed = false
@@ -360,10 +361,10 @@ describe('recovery ordering', { concurrent: false }, () => {
         },
       })
       const received: Array<unknown> = []
-      member(hub, 'alice', {
+      const alice = member(hub, 'alice', {
         handlers: { 'chat/posted': (ctx: { data: unknown }) => received.push(ctx.data) },
       })
-      await flush()
+      await Promise.all([alice.peer.resync(), bob.peer.resync()])
       if (failure === 'probe') {
         const fetch = hub.fetchTopic.bind(hub)
         vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
@@ -395,13 +396,19 @@ describe('recovery ordering', { concurrent: false }, () => {
         })
       }
       await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: failure } })
-      await flush()
+      await drainUntil(() => failed, 'first publication failure')
       expect(failed).toBe(true)
       expect(await store.list()).toHaveLength(1)
       expect(hub.published).toEqual([])
-      await vi.waitFor(async () => expect(await store.list()).toEqual([]), { timeout: 1800 })
-      expect(received).toEqual([{ text: failure }])
-      expect(hub.published).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1000)
+      await vi.waitFor(
+        async () => {
+          expect(await store.list()).toEqual([])
+          expect(received).toEqual([{ text: failure }])
+          expect(hub.published).toHaveLength(1)
+        },
+        { timeout: 1800 },
+      )
     },
   )
 

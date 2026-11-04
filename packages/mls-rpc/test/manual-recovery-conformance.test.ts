@@ -681,6 +681,10 @@ const { FakeHub } = (await import(
     MailboxHub & { published: Array<{ senderDID: string; topicID: string; payload: Uint8Array }> }
 }
 
+const { controlRecoveryClock } = (await import(
+  new URL('../../rpc/test/fixtures/recovery-clock.ts', import.meta.url).href
+)) as { controlRecoveryClock(): void }
+
 async function liveManualPeer(
   fixture: Awaited<ReturnType<typeof createRegistryFixture>>,
   key: GroupKey,
@@ -1116,6 +1120,8 @@ for (const expiry of ['age', 'restart', 'count'] as const) {
           expiry === 'count'
             ? { timeoutMs: 10000, deadlineMs: 90000, getDelayMs: () => 0 }
             : undefined
+        // Keep recovery deadlines independent of host load while crypto and storage settle.
+        controlRecoveryClock()
         const remote = await liveManualPeer(
           fixture.remote(),
           { ...key, incarnation: 1 },
@@ -1168,7 +1174,7 @@ for (const expiry of ['age', 'restart', 'count'] as const) {
         })
         void installing.catch(() => {})
         await vi.waitFor(
-          () =>
+          async () => {
             expect(
               requester.owner.installedKey().incarnation,
               JSON.stringify({
@@ -1178,15 +1184,16 @@ for (const expiry of ['age', 'restart', 'count'] as const) {
                 remoteStatus: remote.owner.status(),
                 remoteKey: remote.owner.installedKey(),
               }),
-            ).toBe(2),
+            ).toBe(2)
+            const retired = await fixture.snapshot()
+            expect(retired.rejoin).toEqual(before.rejoin)
+            expect(retired.recoveryEpochFloor).toBe(20)
+            expect(retired.settledRejoins).toEqual(before.settledRejoins)
+            expect((await local.safety().status(key)).manualRecovery?.kind).toBe('completed')
+          },
           { timeout: expiry === 'count' ? 90000 : 12000 },
         )
         expect(await installing).not.toEqual(key)
-        const retired = await fixture.snapshot()
-        expect(retired.rejoin).toEqual(before.rejoin)
-        expect(retired.recoveryEpochFloor).toBe(20)
-        expect(retired.settledRejoins).toEqual(before.settledRejoins)
-        expect((await local.safety().status(key)).manualRecovery?.kind).toBe('completed')
         if (withheldCheckpoint !== null)
           expect(hub.published.some((row) => row.topicID === withheldCheckpoint)).toBe(false)
       } finally {

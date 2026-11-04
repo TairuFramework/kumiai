@@ -309,6 +309,7 @@ testGroupMLSConformance({
 for (const ownership of ['supplied', 'absent'] as const) {
   testForkRecoveryConformance({
     label: `real MLS / transactional / ownership ${ownership}`,
-    createFixture: () => createForkRecoveryRealFixture(true, { ownership }),
+    createFixture: () =>
+      createForkRecoveryRealFixture(true, { ownership, backgroundMaintenance: 'gated' }),
   })
 }
