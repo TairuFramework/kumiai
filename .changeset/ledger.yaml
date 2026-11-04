@@ -193,6 +193,14 @@
   intents:
     - hub-adoption-host-seams
     - management-tier-0-12
+"@kumiai/hub-server@0.12.1":
+  dir: packages/hub-server
+  intents:
+    - hub-server-receive-ack-window
+"@kumiai/hub-server@0.12.2":
+  dir: packages/hub-server
+  intents:
+    - hub-server-receive-window-logging
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -252,6 +260,14 @@
   dir: packages/hub-tunnel
   intents:
     - management-tier-0-12
+"@kumiai/hub-tunnel@0.12.1":
+  dir: packages/hub-tunnel
+  intents:
+    - hub-tunnel-duplicate-frame
+"@kumiai/hub-tunnel@0.12.2":
+  dir: packages/hub-tunnel
+  intents:
+    - hub-tunnel-expired-frame
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -417,6 +433,14 @@
   dir: packages/mls
   intents:
     - settled-removal-tombstones
+"@kumiai/mls@0.12.3":
+  dir: packages/mls
+  intents:
+    - mls-group-handle-clone
+"@kumiai/mls@0.12.4":
+  dir: packages/mls
+  intents:
+    - mls-key-retention
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -517,6 +541,18 @@
   dir: packages/rpc
   intents:
     - management-tier-0-12
+"@kumiai/rpc@0.12.2":
+  dir: packages/rpc
+  intents:
+    - rpc-dispose-seal-barrier
+"@kumiai/rpc@0.12.3":
+  dir: packages/rpc
+  intents:
+    - rpc-app-log-own-frames
+"@kumiai/rpc@0.12.4":
+  dir: packages/rpc
+  intents:
+    - rpc-retained-open-order
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

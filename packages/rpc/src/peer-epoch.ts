@@ -24,7 +24,7 @@ import {
   createUnroutedTagResponder,
   type InboundPath,
 } from './directed.js'
-import { GroupSafetyHeldError, SendNotAdmissibleError } from './errors.js'
+import { GroupSafetyHeldError, PeerDisposedError, SendNotAdmissibleError } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
 import type { GroupTransaction, HandlerCompletion } from './handler-completion.js'
 import { adaptBusHandlers } from './handlers.js'
@@ -73,7 +73,7 @@ export type EpochRuntimeParams<
   sealError: () => Error | undefined
   isDisposed: () => boolean
   note: AppLane['note']
-  requestAppPull: () => void
+  requestAppPull: () => Promise<void>
   safetyHold: () => SafetyHold
 }
 
@@ -130,6 +130,18 @@ export function createEpochRuntime<
   }
 
   let runtimes = new Map<string, ProtocolRuntime>()
+  // Keep one queue across topics AND epoch rebuilds. A retained pull spends keys before
+  // any later live or inbox frame can advance the same group's receive ratchet.
+  let ingressTail: Promise<void> = Promise.resolve()
+  const ingress = (task: () => Promise<void>): Promise<void> => {
+    const op = ingressTail.then(async () => {
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
+      await task()
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
+    })
+    ingressTail = op.catch(() => {})
+    return op
+  }
 
   /**
    * The epoch's self-inbox topic and the one path that opens its frames. Held per peer rather
@@ -165,7 +177,8 @@ export function createEpochRuntime<
    * of their own (unlike `app-lane.ts`'s `note`/`ahead`), which is what made acking a transient
    * refusal here a permanent loss.
    */
-  const retainOnFailure = (_message: StoredMessage, error: unknown): boolean => isFrameAhead(error)
+  const retainOnFailure = (_message: StoredMessage, error: unknown): boolean =>
+    isDisposed() || isFrameAhead(error)
 
   /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
@@ -178,6 +191,7 @@ export function createEpochRuntime<
     return createOpenOncePath<Uint8Array>({
       mux,
       topicID,
+      ingress,
       unwrap: (b) => {
         assertOpen()
         const hinted = crypto.frameAAD(b)
@@ -206,11 +220,11 @@ export function createEpochRuntime<
         return payload
       },
       note: (message, failure) => params.note(name, topicID, message, failure),
-      wakeup: (message) => {
+      wakeup: async (message) => {
         if (crypto.pending == null) return false
         const aad = crypto.frameAAD(message.payload)
         if (aad == null || decodeAppAAD(aad)?.intent !== 'log') return false
-        params.requestAppPull()
+        await params.requestAppPull()
         return true
       },
     })
@@ -270,6 +284,7 @@ export function createEpochRuntime<
         mux,
         key: params.completion.key,
         topicID: selfInbox,
+        ingress,
         unwrap: (b) => {
           assertOpen()
           return crypto.unwrap(b, {
@@ -370,6 +385,7 @@ export function createEpochRuntime<
     assertAdmissible: () => void = () => {},
   ): Promise<SegmentFrame> => {
     while (true) {
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
       const refused = sealError()
       if (refused != null) throw refused
       const barrier = sealBarrier()
@@ -381,6 +397,7 @@ export function createEpochRuntime<
       const topicID = protocolTopic(at.secret, at.epoch, name)
       assertAdmissible()
       const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
+      if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
       const refusedAfter = sealError()
       if (refusedAfter != null) throw refusedAfter
       if (anchor() === at && sealBarrier() == null) {

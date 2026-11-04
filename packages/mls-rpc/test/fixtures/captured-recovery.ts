@@ -247,6 +247,8 @@ async function boundCapturedGroup(identity = randomIdentity()) {
   const controller = await lifecycle.bindingFor(identity)
   const source = (
     await createGroup(identity, `captured-contract-${crypto.randomUUID()}`, {
+      // Imported-history witnesses install from genesis across two authenticated epochs.
+      keyRetention: { retainKeysForEpochs: 4 },
       controllerLog: { chain: controller.prefix, events: [] },
       controller,
     })

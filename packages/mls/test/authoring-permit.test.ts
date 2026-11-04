@@ -330,8 +330,12 @@ test('derived handles inherit restriction from restricted and permit handles', a
   restrictCommitAuthoring(group)
   const derived = deriveGroup(group, structuredClone(group.state))
   await expect(commitKeyRotation(derived)).rejects.toBeInstanceOf(CommitAuthoringRefusedError)
+  await expect(commitKeyRotation(group.clone())).rejects.toBeInstanceOf(CommitAuthoringRefusedError)
   await withCommitPermit(restore, async (permitted) => {
     const derived = deriveGroup(permitted, structuredClone(permitted.state))
+    await expect(commitKeyRotation(permitted.clone())).rejects.toBeInstanceOf(
+      CommitAuthoringRefusedError,
+    )
     await expect(commitKeyRotation(derived)).rejects.toBeInstanceOf(CommitAuthoringRefusedError)
     const result = await commitKeyRotation(permitted)
     await expect(commitKeyRotation(result.newGroup)).rejects.toBeInstanceOf(

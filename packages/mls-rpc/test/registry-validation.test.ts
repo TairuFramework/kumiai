@@ -22,12 +22,12 @@ const ciphersuiteName = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519'
 
 async function setup() {
   const identity = randomIdentity()
-  const options: GroupOptions = {
+  const options: GroupOptions = registryOptions({
     keyRetention: { retainKeysForGenerations: 1000, maximumForwardRatchetSteps: 1000 },
     commitPolicy: () => 'accept',
     resolveLedgerEntries: async () => [],
     onLedgerEntries: () => {},
-  }
+  })
   const { group: handle } = await createGroup(identity, 'registry-validation', options)
   const token = await signLedgerEntry(identity, {
     type: 'kumiai.role',

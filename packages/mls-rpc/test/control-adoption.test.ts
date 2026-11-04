@@ -126,7 +126,10 @@ async function liveRotation(size = 1) {
       state,
       credential: member.handle.credential,
       ledgerEntries: store.snapshot().ledger,
-      options: { resolveLedgerEntries: member.slot.resolve },
+      options: {
+        resolveLedgerEntries: member.slot.resolve,
+        keyRetention: member.handle.context.clientConfig?.keyRetentionConfig,
+      },
     })
   }
   const accept = async (target: typeof store, slot: ControlSlot) => {

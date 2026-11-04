@@ -332,6 +332,8 @@ export async function createRealGroup(
   groupID: string,
   identities: Array<OwnIdentity> = [],
 ): Promise<RealGroup> {
+  // Port conformance witnesses retain several epochs across successive adoptions.
+  const keyRetention = { retainKeysForEpochs: 4 }
   const bodies = new Map<string, string>()
   const resolveLedgerEntries = async (ids: Array<string>) =>
     ids.map((id) => {
@@ -352,6 +354,7 @@ export async function createRealGroup(
   const committerSlot = makeSlot()
   const { group } = await createGroup(committerIdentity, groupID, {
     resolveLedgerEntries: committerSlot.resolve,
+    keyRetention,
   })
   const committer: RealMember = {
     identity: committerIdentity,
@@ -382,7 +385,7 @@ export async function createRealGroup(
       welcome: added.welcomeMessage,
       keyPackageBundle: bundle,
       ratchetTree: committer.handle.state.ratchetTree,
-      options: { resolveLedgerEntries: slot.resolve },
+      options: { resolveLedgerEntries: slot.resolve, keyRetention },
     })
     members.push({ identity, handle: joined, slot })
   }

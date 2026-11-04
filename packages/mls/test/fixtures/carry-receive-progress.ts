@@ -4,10 +4,13 @@ import { decodeClientState, encodeClientState } from '../../src/codec.js'
 import type { GroupHandle, Invite } from '../../src/index.js'
 import * as mls from '../../src/index.js'
 
+// These witnesses need two historical epochs, beyond the normal one-epoch retention.
+const keyRetention = { retainKeysForEpochs: 4 }
+
 export async function restore(group: GroupHandle) {
   const state = decodeClientState(encodeClientState(group.state))
   if (state == null) throw new Error('failed to decode state')
-  return mls.restoreGroup({ state, credential: group.credential })
+  return mls.restoreGroup({ state, credential: group.credential, options: { keyRetention } })
 }
 
 export async function carryReceiveFixture(groupID: string) {
@@ -31,7 +34,10 @@ export async function carryReceiveFixture(groupID: string) {
     for (const token of invite.ledgerEntries) tokens.set(mls.ledgerEntryDigest(token), token)
     return invite
   }
-  const { group: created } = await mls.createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await mls.createGroup(alice, groupID, {
+    resolveLedgerEntries,
+    keyRetention,
+  })
   const earlierSender = await restore(created)
   const invite: Invite = await buildInvite(created, bob.id)
   const bundle = await mls.createKeyPackageBundle(bob)
@@ -42,7 +48,7 @@ export async function carryReceiveFixture(groupID: string) {
     welcome: added.welcomeMessage,
     keyPackageBundle: bundle,
     ratchetTree: added.newGroup.state.ratchetTree,
-    options: { resolveLedgerEntries },
+    options: { resolveLedgerEntries, keyRetention },
   })
   const aliceGroup = added.newGroup
   const charlie = randomIdentity()

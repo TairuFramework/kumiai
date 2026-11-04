@@ -1,5 +1,17 @@
 # @kumiai/hub-tunnel
 
+## 0.12.2
+
+### Patch Changes
+
+- Add `ExpiredFrameError` and `precedesSequenceID`. An `Encryptor` rejects with `ExpiredFrameError` for a ciphertext whose key it no longer holds, and the encrypted transport acks that frame, reports a `frame-expired` event and drops it as `expired` instead of reporting a decrypt failure. A frame the hub sequenced after the session's first publish or delivered frame fails the session at once, with a session-end to the peer, instead of leaving it to its idle timeout.
+
+## 0.12.1
+
+### Patch Changes
+
+- Add `DuplicateFrameError`. An `Encryptor` rejects with it for a ciphertext it has already opened, and the encrypted transport acks that frame and drops it as `dedup` instead of reporting a decrypt failure. A hub redelivers a frame whose ack was lost, and a ratcheting cipher cannot open it twice.
+
 ## 0.12.0
 
 ### Minor Changes

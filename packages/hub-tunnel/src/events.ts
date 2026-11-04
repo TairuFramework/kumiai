@@ -1,8 +1,10 @@
-import type { DecryptError, EnvelopeDecodeError } from './errors.js'
+import type { DecryptError, EnvelopeDecodeError, ExpiredFrameError } from './errors.js'
 
 export type FrameDroppedReason =
   | 'envelope-decode'
   | 'decrypt'
+  /** Meant for this reader, but its key is gone: see `ExpiredFrameError`. */
+  | 'expired'
   | 'group-mismatch'
   | 'topic-mismatch'
   | 'session-mismatch'
@@ -11,6 +13,7 @@ export type FrameDroppedReason =
 
 export type ObservabilityEvent =
   | { type: 'decrypt-failed'; error: DecryptError }
+  | { type: 'frame-expired'; error: ExpiredFrameError }
   | { type: 'envelope-decode-failed'; error: EnvelopeDecodeError }
   | { type: 'decrypt-drain-timeout'; timeoutMs: number }
   | { type: 'ack-failed'; sequenceID: string; error: unknown }

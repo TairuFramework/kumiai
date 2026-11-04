@@ -416,7 +416,11 @@ export async function createTransactionalAccess(
         state,
         credential: member.handle.credential,
         ledgerEntries: row.ledger,
-        options: { ...callbacks, resolveLedgerEntries: member.slot.resolve },
+        options: {
+          ...callbacks,
+          resolveLedgerEntries: member.slot.resolve,
+          keyRetention: member.handle.context.clientConfig?.keyRetentionConfig,
+        },
       }),
     )
   }

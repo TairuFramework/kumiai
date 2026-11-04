@@ -86,6 +86,9 @@ describe('application send policy', () => {
     const derived = deriveGroup(handle, structuredClone(handle.state))
     expect(isApplicationSendDenied(derived)).toBe(true)
     await expect(derived.encrypt(payload)).rejects.toBeInstanceOf(ApplicationSendRefusedError)
+    const cloned = handle.clone()
+    expect(isApplicationSendDenied(cloned)).toBe(true)
+    await expect(cloned.encrypt(payload)).rejects.toBeInstanceOf(ApplicationSendRefusedError)
   })
 
   test('concurrent encryptApplication reports the wire generation', async () => {
@@ -381,7 +384,9 @@ test.each([undefined, 100])(
       const frame = await sender.encryptApplication(payload)
       expect(frame.generation).toBe(490)
       expect((await receiver.decrypt(frame.ciphertext)).payload).toEqual(payload)
-      expect(receiver.context.clientConfig?.keyRetentionConfig.maximumForwardRatchetSteps).toBe(500)
+      expect(receiver.context.clientConfig?.keyRetentionConfig.maximumForwardRatchetSteps).toBe(
+        maximumForwardRatchetSteps === undefined ? 512 : 500,
+      )
       expect(
         createMlsContext(receiver.context.cipherSuite, undefined, {
           keyRetention: { maximumForwardRatchetSteps: 600 },

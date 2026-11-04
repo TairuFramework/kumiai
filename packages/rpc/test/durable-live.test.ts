@@ -70,7 +70,7 @@ async function setup(hub = new DurableFakeHub(), handlers: Record<string, unknow
 }
 
 describe('durable live app delivery', () => {
-  test('a live log push is acked and only the fetched copy opens, in fetched order', async () => {
+  test('a live log push waits for the fetched copy to open, in fetched order', async () => {
     const hub = new PushMetadataHub()
     const { bob, store, unwrap, publish } = await setup(hub)
     const fetch = hub.fetchTopic.bind(hub)
@@ -88,7 +88,10 @@ describe('durable live app delivery', () => {
     hub.transform = (message) => ({ ...message, logPosition: a.sequenceID })
     hub.reattach('bob')
     await publish('B')
-    await vi.waitFor(() => expect(hub.ackedCount('bob')).toBe(1))
+    await vi.waitFor(() =>
+      expect(hub.fetchTopic).toHaveBeenCalledWith(expect.objectContaining({ topicID })),
+    )
+    expect(hub.ackedCount('bob')).toBe(0)
     expect(unwrap).not.toHaveBeenCalled()
     releaseFetch?.()
     await vi.waitFor(() => expect(store.opened).toHaveLength(2))
@@ -98,7 +101,7 @@ describe('durable live app delivery', () => {
     ])
     expect(unwrap).toHaveBeenCalledTimes(2)
     expect(unwrap.mock.calls.every(([, opts]) => opts?.frame != null)).toBe(true)
-    expect(hub.ackedCount('bob')).toBe(1)
+    await vi.waitFor(() => expect(hub.ackedCount('bob')).toBe(1))
     await bob.peer.dispose()
   })
 

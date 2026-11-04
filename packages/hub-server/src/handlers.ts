@@ -14,7 +14,7 @@ import {
   wakeRecipientKeyProblem,
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
-import { getReporter } from '@sozai/log'
+import { getLogger, getReporter } from '@sozai/log'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
@@ -137,6 +137,7 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
 }
 
 const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
+const receiveLogger = getLogger(['kumiai', 'hub-server', 'receive'])
 
 /** What the failed operation was about, for the default log line: a DID for the per-recipient
  * methods, a topic for fan-out, nothing for a store-wide purge. */
@@ -227,6 +228,37 @@ export const DEFAULT_RECEIVE_BUFFER_LIMIT = 256
  */
 export const DEFAULT_RECEIVE_AUTH_CACHE_TTL = 5000
 
+/**
+ * Max frames in flight on a receive channel: written, and not yet followed by an ack for that frame
+ * or a later one. The hub writes the next frame only once acks bring the count back under this
+ * window.
+ *
+ * Without it the drain writes a whole backlog at once, and a transport that buffers per session
+ * (the SSE bridge drops a session whose unread buffer passes `maxSessionBufferBytes`) ends the
+ * session before the slow client's acks reach the hub: every connect then redelivers the same
+ * backlog. The window must stay well above the client's ack batch (10 for Kubun's device client)
+ * so batched acks keep the pipe full.
+ */
+export const DEFAULT_RECEIVE_WINDOW = 256
+
+/**
+ * Max bytes (base64 payload plus an estimate of the frame's envelope) in flight on a receive
+ * channel. Kept well below the HTTP transport's per-session buffer (1 MiB by default in `@enkaku/http-serve`, 8 MiB
+ * on Kubun's relay) so a window of large frames cannot overflow it. A single frame is always let
+ * through when nothing else is in flight, whatever its size.
+ */
+export const DEFAULT_RECEIVE_WINDOW_BYTES = 512 * 1024
+
+/**
+ * How long (ms) a receive channel with a full window waits without any ack before it releases the
+ * whole window and writes on. Each ack restarts the wait. The channel is NOT ended: a window full
+ * of frames the client will never ack (topics no sink on the device claims) would come back first
+ * on every reconnect and livelock it. Long enough for a busy phone to open the first frames of a
+ * window and flush an ack batch (10 frames or 500 ms on Kubun's device client); short, because it
+ * is the delay a window of never-acked frames costs per connect.
+ */
+export const DEFAULT_RECEIVE_ACK_TIMEOUT = 15_000
+
 export type CreateHandlersParams = {
   registry: HubClientRegistry
   store: HubStore
@@ -236,6 +268,19 @@ export type CreateHandlersParams = {
   /** Max frames queued-but-unflushed on a receive channel. See {@link DEFAULT_RECEIVE_BUFFER_LIMIT}
    * for the >= 50-frame-page floor this should respect. Default: 256 */
   receiveBufferLimit?: number
+  /** Max frames in flight on a receive channel. Default: {@link DEFAULT_RECEIVE_WINDOW} */
+  receiveWindow?: number
+  /**
+   * Max bytes (payload plus envelope estimate) in flight on a receive channel. Default:
+   * {@link DEFAULT_RECEIVE_WINDOW_BYTES}
+   */
+  receiveWindowBytes?: number
+  /**
+   * How long (ms) a receive channel with a full window waits for an ack before it releases the
+   * window and writes on.
+   * Default: {@link DEFAULT_RECEIVE_ACK_TIMEOUT}
+   */
+  receiveAckTimeout?: number
   /**
    * TTL (ms) for the per-(did, topicID) receive delivery-authorization cache. `0` disables reuse
    * (the hook is consulted for every frame). Non-finite or negative values fall back to
@@ -319,6 +364,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   const topicLimiter = createRateLimiter(rateLimits.perTopic)
   const receiveBufferLimit = params.receiveBufferLimit ?? DEFAULT_RECEIVE_BUFFER_LIMIT
   const receiveAuthCacheTTL = resolveReceiveAuthCacheTTL(params.receiveAuthCacheTTL)
+  const receiveWindow = Math.max(1, params.receiveWindow ?? DEFAULT_RECEIVE_WINDOW)
+  const receiveWindowBytes = params.receiveWindowBytes ?? DEFAULT_RECEIVE_WINDOW_BYTES
+  const receiveAckTimeout = params.receiveAckTimeout ?? DEFAULT_RECEIVE_ACK_TIMEOUT
   const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
 
   const fetchLimits: KeyPackageFetchLimits = {
@@ -636,16 +684,108 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       let tornDown = false
       let writeChain: Promise<void> = Promise.resolve()
 
+      // Ack window (flow control). `writer.ready` says nothing about the transport's per-session
+      // buffer (the HTTP bridge's writable is shared by every session and resolves at once), so the
+      // hub paces itself on acks instead: at most `receiveWindow` frames and `receiveWindowBytes`
+      // bytes are in flight, i.e. written and not yet known to have reached the client. Denied frames
+      // are never written, so never counted.
+      //
+      // The channel is ordered, so an ack for one frame proves the client has read every frame
+      // written before it: an ack releases that frame and all earlier ones from the window. A
+      // client may leave some frames unacked for good (a topic no sink on the device claims, a sink
+      // torn down mid-session); they stay pending in the store but cannot hold the window. This is
+      // window accounting only — the store still frees exactly the deliveries acked.
+      const inFlight = new Map<string, number>() // sequenceID -> counted bytes, in write order
+      let inFlightBytes = 0
+      let onWindowChange: (() => void) | null = null
+      const hasRoom = (bytes: number): boolean =>
+        inFlight.size === 0 ||
+        (inFlight.size < receiveWindow && inFlightBytes + bytes <= receiveWindowBytes)
+      function releaseAll(): void {
+        inFlight.clear()
+        inFlightBytes = 0
+      }
+      // Resolves once the frame fits or the channel is torn down. A full window that sees no ack for
+      // `receiveAckTimeout` ms is released whole and the drain goes on: the frames in it may be ones
+      // the client will never ack, and ending the channel would only redeliver them first on the
+      // next connect. A client that has stopped reading is not left to grow a buffer: the HTTP
+      // bridge drops a session that falls `maxSessionBufferBytes` behind, and a transport with real
+      // backpressure stalls `writer.write` until `receiveBufferLimit` tears the channel down.
+      function waitForRoom(bytes: number): Promise<void> {
+        if (tornDown || hasRoom(bytes)) return Promise.resolve()
+        receiveLogger.debug(
+          'receive window full for {recipientDID}: paused with {frames} frames ({bytes} bytes) unacked',
+          { recipientDID: clientDID, frames: inFlight.size, bytes: inFlightBytes },
+        )
+        return new Promise<void>((resolve) => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const arm = (): void => {
+            clearTimeout(timer)
+            timer = setTimeout(() => {
+              receiveLogger.warn(
+                'receive ack timeout for {recipientDID}: released {frames} frames ({bytes} bytes) after {timeoutMs} ms',
+                {
+                  recipientDID: clientDID,
+                  frames: inFlight.size,
+                  bytes: inFlightBytes,
+                  timeoutMs: receiveAckTimeout,
+                },
+              )
+              releaseAll()
+              notifyWindow()
+            }, receiveAckTimeout)
+          }
+          onWindowChange = () => {
+            if (tornDown || hasRoom(bytes)) {
+              clearTimeout(timer)
+              onWindowChange = null
+              resolve()
+            } else {
+              arm()
+            }
+          }
+          arm()
+        })
+      }
+      function notifyWindow(): void {
+        onWindowChange?.()
+      }
+      function release(sequenceIDs: Array<string>): void {
+        const acked = new Set(sequenceIDs)
+        // The acked frame written last, in write order (an ack batch need not be sorted).
+        let last: string | undefined
+        for (const id of inFlight.keys()) {
+          if (acked.has(id)) last = id
+        }
+        if (last === undefined) return
+        for (const [id, bytes] of inFlight) {
+          inFlight.delete(id)
+          inFlightBytes -= bytes
+          if (id === last) break
+        }
+        notifyWindow()
+      }
+
       let resolveDone: () => void = () => {}
       const done = new Promise<void>((resolve) => {
         resolveDone = resolve
       })
 
+      function logUnackedFrames(): void {
+        if (inFlight.size === 0) return
+        receiveLogger.debug(
+          'receive stream ended for {recipientDID} with {frames} frames ({bytes} bytes) unacked',
+          { recipientDID: clientDID, frames: inFlight.size, bytes: inFlightBytes },
+        )
+      }
+
       // Idempotent teardown, shared by every failure and end path. Frames stay pending in the store
       // and redeliver on the next connect (store-and-forward).
       function finish(): void {
         if (tornDown) return
+        logUnackedFrames()
         tornDown = true
+        notifyWindow()
         if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
         registry.unregisterIfIdle(clientDID)
         reader.cancel().catch(() => {})
@@ -666,7 +806,13 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           if (tornDown) return
           try {
             if (!(await gate(frame.topicID))) return // denied: skip, leave pending, no ack
+            // The payload plus the frame's other fields and the transport's envelope (~256 chars).
+            const bytes = frame.payload.length + frame.senderDID.length + frame.topicID.length + 256
+            await waitForRoom(bytes)
+            if (tornDown) return
             await writer.ready
+            inFlight.set(frame.sequenceID, bytes)
+            inFlightBytes += bytes
             await writer.write(frame)
             if (frame.sequenceID > lastServed) lastServed = frame.sequenceID
           } catch {
@@ -701,6 +847,32 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         }
       }
 
+      // Ack loop (M1): a store.ack failure must not stop later acks; only a reader error closes.
+      // It runs from connect, alongside the drain: the drain waits on the ack window, so acks for the
+      // backlog must be read while it is still being served.
+      void (async () => {
+        while (true) {
+          let result: { done: boolean; value?: { ack?: Array<string> } }
+          try {
+            result = await reader.read()
+          } catch {
+            break
+          }
+          if (result.done) break
+          const ack = result.value?.ack
+          if (ack != null) {
+            // The client has the frames, whatever the store does with the ack.
+            release(ack)
+            try {
+              await store.ack({ recipientDID: clientDID, sequenceIDs: ack })
+            } catch (error) {
+              // Frame stays pending; the client re-acks next round. Do NOT break.
+              storeErrorReporter({ method: 'ack', did: clientDID, error })
+            }
+          }
+        }
+      })()
+
       try {
         // Binding evicts whatever held the lane: a reconnect means the old connection broke and the
         // server learns last, so the stale writer must give way to the live one. See
@@ -713,6 +885,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         evicted?.()
         // The device is draining; a trailing summary would be noise it has already outrun.
         params.wake?.dispatcher?.online(clientDID)
+
+        // Teardown triggers are armed before the drain: the drain waits on the ack window, so it
+        // can last as long as the client takes to ack, and an abort or eviction must end it.
+        // H2: an already-aborted signal never fires 'abort', so run teardown now.
+        if (ctx.signal.aborted) {
+          finish()
+        } else {
+          void evictedHere.then(finish)
+          ctx.signal.addEventListener('abort', finish, { once: true })
+        }
 
         // Drain the backlog. Await each page so lastServed is exact before the flush.
         let cursor: string | null | undefined = after
@@ -747,7 +929,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         }
       } catch (error) {
         // A synchronous drain error (e.g. store.fetch threw): clean up and reject the handler.
+        if (!tornDown) logUnackedFrames()
         tornDown = true
+        notifyWindow()
         if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
         registry.unregisterIfIdle(clientDID)
         reader.cancel().catch(() => {})
@@ -755,35 +939,6 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         throw error
       }
 
-      // Ack loop (M1): a store.ack failure must not stop later acks; only a reader error closes.
-      void (async () => {
-        while (true) {
-          let result: { done: boolean; value?: { ack?: Array<string> } }
-          try {
-            result = await reader.read()
-          } catch {
-            break
-          }
-          if (result.done) break
-          const ack = result.value?.ack
-          if (ack != null) {
-            try {
-              await store.ack({ recipientDID: clientDID, sequenceIDs: ack })
-            } catch (error) {
-              // Frame stays pending; the client re-acks next round. Do NOT break.
-              storeErrorReporter({ method: 'ack', did: clientDID, error })
-            }
-          }
-        }
-      })()
-
-      // H2: an already-aborted signal never fires 'abort', so run teardown now.
-      if (ctx.signal.aborted) {
-        finish()
-        return done
-      }
-      void evictedHere.then(finish)
-      ctx.signal.addEventListener('abort', finish, { once: true })
       return done
     }) as ChannelHandler<HubProtocol, 'hub/v1/receive'>,
 

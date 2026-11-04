@@ -208,3 +208,13 @@ test('controller cache copies isolate Maps, Sets and key bytes', () => {
   expect(source.denied).toEqual(new Set(['revoked']))
   expect(() => cloneData(new Date())).toThrow('unsupported value')
 })
+
+test('clones a handle without structuredClone or shared mutable state', async () => {
+  const { deviceGroup } = await joinBoundDevice()
+  const snapshot = structuredClone(deviceGroup.state)
+  vi.stubGlobal('structuredClone', undefined)
+  const cloned = deviceGroup.clone()
+  expect(cloned.state).toEqual(snapshot)
+  expect(cloned.state).not.toBe(deviceGroup.state)
+  expect(cloned.context).not.toBe(deviceGroup.context)
+})

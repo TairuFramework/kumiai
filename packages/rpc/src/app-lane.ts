@@ -166,6 +166,8 @@ export type AppLane = {
    * Deliver buffered frames at current or retained epochs, leaving future frames buffered.
    */
   deliver: () => Promise<void>
+  /** Join retained opens and feasible fetch continuations before later live crypto. Never waits handlers. */
+  openRetained: () => Promise<void>
   /** Request a drain without waiting; an active drain coalesces requests into one rerun. */
   kick: () => void
   dropFrame: (topicID: string, position: string) => Promise<void>
@@ -686,7 +688,8 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
   const bufferBlockedTopics = new Set<string>()
   const pageDrains = new Set<Promise<unknown>>()
   /** Snapshot and merge under the app mutex. Hub I/O holds no lane reservation. */
-  const pull = async (
+  const activePulls = new Set<Promise<boolean>>()
+  const pullOnce = async (
     onlyTopics?: Set<string>,
     onReady?: (opening: Promise<boolean>) => void,
   ): Promise<boolean> => {
@@ -849,11 +852,12 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
                     position,
                   },
                   ...(commitLaneCaughtUp() ? { caughtUpAt: now() } : {}),
-                  sealed: oversized
-                    ? { state: 'done' }
-                    : restored == null
-                      ? { state: 'sealed', bytes: message.payload }
-                      : { state: 'pending', id: restored.frame.id },
+                  sealed:
+                    restored != null
+                      ? { state: 'pending', id: restored.frame.id }
+                      : oversized || normalizeDID(message.senderDID) === localDID
+                        ? { state: 'done' }
+                        : { state: 'sealed', bytes: message.payload },
                 },
                 crypto.pending != null,
               )
@@ -911,6 +915,19 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
       clearTimeout(timer)
       pulls.delete(controller)
     }
+  }
+
+  const pull = (
+    onlyTopics?: Set<string>,
+    onReady?: (opening: Promise<boolean>) => void,
+  ): Promise<boolean> => {
+    const work = pullOnce(onlyTopics, onReady)
+    activePulls.add(work)
+    void work.then(
+      () => activePulls.delete(work),
+      () => activePulls.delete(work),
+    )
+    return work
   }
 
   // Unregistered adapters own durable proof. This prefix is deliberately volatile.
@@ -1512,11 +1529,12 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
   const deliver = async (
     generation = segmentGeneration,
     onlyTopics?: Set<string>,
-  ): Promise<void> => {
+  ): Promise<{ continuation: boolean; progress: boolean }> => {
     try {
       const earlyDrains: Array<Promise<boolean>> = []
       const continuation = await pull(onlyTopics, (opening) => earlyDrains.push(opening))
-      if (generation !== segmentGeneration || disposed || openedOnly) return
+      if (generation !== segmentGeneration || disposed || openedOnly)
+        return { continuation: false, progress: false }
       drainingEpoch = anchor().epoch
       let progress: boolean
       try {
@@ -1536,6 +1554,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
           scheduleContinuation(progress)
         }
       }
+      return { continuation, progress }
     } finally {
       if (generation === segmentGeneration && crypto.pending != null && !disposed) {
         for (const record of pendingRecords) reportUnknown(record)
@@ -1544,6 +1563,43 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
         }
       }
     }
+  }
+
+  const openingPauses = new Set<() => void>()
+  const settleOpening = async (): Promise<void> => {
+    while (activePulls.size !== 0 || pageDrains.size !== 0 || openingTurns.size !== 0) {
+      await Promise.all([...activePulls, ...pageDrains, ...openingTurns])
+    }
+  }
+  const openRetained = async (): Promise<void> => {
+    let continuation: boolean
+    do {
+      await settleOpening()
+      if (disposed || openedOnly || safetyHold() !== null) return
+      const pass = await deliver()
+      continuation = pass.continuation
+      await settleOpening()
+      if (disposed || openedOnly || safetyHold() !== null) return
+      // A concurrent turn may have hidden its remaining suffix behind a source reservation.
+      await drain()
+      // Match autonomous pacing, including backoff for a hub flooding refused frames.
+      if (continuation) {
+        await new Promise<void>((resolve) => {
+          const signal = openCancellation.signal
+          const finish = () => {
+            clearTimeout(timer)
+            signal.removeEventListener('abort', finish)
+            openingPauses.delete(finish)
+            resolve()
+          }
+          const timer = setTimeout(finish, pass.progress ? 0 : continuationBackoff)
+          openingPauses.add(finish)
+          if (signal.aborted) finish()
+          else signal.addEventListener('abort', finish, { once: true })
+        })
+      }
+      // A full buffer or future frame never waits for a handler.
+    } while (continuation)
   }
 
   let kickScheduled = false
@@ -1569,7 +1625,11 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     busyTopics.clear()
     kickAllTopics = false
     void Promise.resolve()
-      .then(() => scheduleDrain(() => deliver(generation, topics)))
+      .then(() =>
+        scheduleDrain(async () => {
+          await deliver(generation, topics)
+        }),
+      )
       .then(
         () => {
           kickScheduled = false
@@ -1684,7 +1744,10 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     retryDelivery,
     kick,
     /** Fetches run outside the mutex; opening and non-durable handlers reserve the app lane. */
-    deliver,
+    deliver: async () => {
+      await deliver()
+    },
+    openRetained,
     note,
     pendingRecords: () => [...pendingRecords],
     stopOpening,
@@ -1775,6 +1838,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     },
     dispose: (): void => {
       disposed = true
+      for (const finish of openingPauses) finish()
       coverageBinding?.unbind()
       coverageBinding = undefined
       cancelBusyRetry?.()

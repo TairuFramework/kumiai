@@ -2,7 +2,6 @@ import { randomIdentity } from '@kokuin/token'
 import {
   type ClientConfig,
   defaultKeyPackageEqualityConfig,
-  defaultKeyRetentionConfig,
   defaultLifetimeConfig,
   defaultPaddingConfig,
 } from 'ts-mls'
@@ -18,12 +17,16 @@ import {
   processWelcome,
   restoreGroup,
 } from '../src/group.js'
-import { createMlsContext, resolveMlsContext } from '../src/group-context.js'
+import {
+  createMlsContext,
+  KUMIAI_KEY_RETENTION_CONFIG,
+  resolveMlsContext,
+} from '../src/group-context.js'
 import { deriveGroup } from '../src/group-handle.js'
 import type { GroupOptions } from '../src/types.js'
 
 const defaults = {
-  keyRetentionConfig: { ...defaultKeyRetentionConfig, maximumForwardRatchetSteps: 500 },
+  keyRetentionConfig: { ...KUMIAI_KEY_RETENTION_CONFIG },
   lifetimeConfig: defaultLifetimeConfig,
   keyPackageEqualityConfig: defaultKeyPackageEqualityConfig,
   paddingConfig: defaultPaddingConfig,
@@ -33,11 +36,11 @@ const options: GroupOptions = {
 }
 const effective = {
   ...defaults,
-  keyRetentionConfig: { ...defaultKeyRetentionConfig, ...options.keyRetention },
+  keyRetentionConfig: { ...KUMIAI_KEY_RETENTION_CONFIG, ...options.keyRetention },
 }
 
 describe('MLS key retention', () => {
-  test('uses the reservation forward bound with other retention defaults unchanged', async () => {
+  test('uses the kumiai retention defaults and covers the reservation forward bound', async () => {
     const { group } = await createGroup(randomIdentity(), 'retention-defaults')
     expect(group.context.clientConfig).toEqual(defaults)
   })

@@ -808,6 +808,8 @@ export function createGroupPeerWithControlWalk<
     }
     if (openedDrain !== undefined) return openedDrain
     appLane.stopOpening()
+    for (const resolve of appPullWaiters) resolve()
+    appPullWaiters.clear()
     openedDrain = (async () => {
       const records = await (openedBinding?.list() ?? openedPending?.list())
       if (records !== undefined) await appLane.restore(records)
@@ -921,12 +923,13 @@ export function createGroupPeerWithControlWalk<
     }
   }
 
-  // Live log pushes wake independent app and control pulls. Neither trusts pushed metadata.
+  // Live log pushes wake independent control and app pulls. Ingress waits for retained opens.
   let appPullNeeded = false
   let appPullActive = false
   let appPullTimer: ReturnType<typeof setTimeout> | undefined
   let appPullBackoff = 1000
   let appPullRetryNow = false
+  const appPullWaiters = new Set<() => void>()
   const armAppPull = (delay: number): void => {
     if (
       disposed ||
@@ -941,6 +944,8 @@ export function createGroupPeerWithControlWalk<
       if (disposed || removalCommitted() || safetyHold() !== null) return
       appPullActive = true
       appPullNeeded = false
+      // Requests arriving during this pass need a subsequent fetch, even if this pass succeeds.
+      const waiters = [...appPullWaiters]
       let retryDelay = 0
       void (async () => {
         try {
@@ -953,7 +958,8 @@ export function createGroupPeerWithControlWalk<
             await runSerial(async () => {
               if (removalCommitted() || safetyHold() !== null) return
               await settleOperations()
-              await ensureLedger(Date.now() + recoveryTimeoutMs)
+              if (!(await ensureLedger(Date.now() + recoveryTimeoutMs)))
+                throw new Error('app pull is waiting for the ledger')
               await reconcileCommits()
             })
           await healIfRequested()
@@ -961,7 +967,16 @@ export function createGroupPeerWithControlWalk<
             appPullNeeded = true
             retryDelay = appPullBackoff
             appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
-          } else appPullBackoff = 1000
+          } else {
+            if (disposed || removalCommitted() || safetyHold() !== null) return
+            // App opening stays outside the commit queue and never waits for durable handlers.
+            if (waiters.length !== 0) await appLane.openRetained()
+            appPullBackoff = 1000
+            for (const resolve of waiters) {
+              appPullWaiters.delete(resolve)
+              resolve()
+            }
+          }
         } catch {
           appPullNeeded = true
           retryDelay = appPullBackoff
@@ -1085,7 +1100,15 @@ export function createGroupPeerWithControlWalk<
       appLane.note(name, topicID, message, failure)
       if (crypto.pending != null && message.logPosition != null) requestAppPull()
     },
-    requestAppPull,
+    requestAppPull: () =>
+      new Promise<void>((resolve) => {
+        if (disposed || removalCommitted() || safetyHold() !== null) {
+          resolve()
+          return
+        }
+        appPullWaiters.add(resolve)
+        requestAppPull()
+      }),
     safetyHold,
   })
   const {
@@ -3695,6 +3718,8 @@ export function createGroupPeerWithControlWalk<
     for (const timer of recoveryTimers.values()) clearTimeout(timer)
     recoveryTimers.clear()
     appLane.stopOpening()
+    for (const resolve of appPullWaiters) resolve()
+    appPullWaiters.clear()
     logDelivery?.removed()
     appPullNeeded = false
     appPullRetryNow = false
@@ -6557,6 +6582,9 @@ export function createGroupPeerWithControlWalk<
       }
       if (disposePromise != null) return disposePromise
       disposed = true
+      // Rotation can no longer release sealing writes that transport teardown must drain.
+      sealError = new PeerDisposedError('Peer is disposed')
+      finishSealBarrier()
       if (internalRetry !== undefined) clearTimeout(internalRetry)
       const checkpointDrain = checkpointWorker?.dispose()
       unsubscribeSafety?.()
@@ -6587,6 +6615,8 @@ export function createGroupPeerWithControlWalk<
       if (ledgerRetryTimer != null) clearTimeout(ledgerRetryTimer)
       ledgerRetryTimer = undefined
       appPullTimer = undefined
+      for (const resolve of appPullWaiters) resolve()
+      appPullWaiters.clear()
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
       // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
       // it — awaiting the commit mutex here is unsafe (`build()`/`adopt()` are host-supplied
