@@ -55,6 +55,7 @@ import type {
   GroupTransaction,
 } from '../persistence-types.js'
 import { clearGroupCondition } from '../safety-conditions.js'
+import { assertNotTerminal } from '../terminal-admission.js'
 import { createRegistryAppOpen } from './app-open.js'
 import { bindRegistryStreamingOpen } from './app-open-binding.js'
 import { createPublicationPreparation } from './app-publication.js'
@@ -125,7 +126,17 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   safetyHeld(): SafetyHold
   diagnoseFailure(error: unknown): Promise<void>
 }): RegistryHandleAccess {
-  const { owner, capability, environment } = params
+  const { owner, capability } = params
+  const assertPrivateAdmission = () => {
+    assertNotTerminal({ admission: () => owner.admission })
+  }
+  const environment: ColdEnvironment = {
+    ...params.environment,
+    restore(record) {
+      assertPrivateAdmission()
+      return params.environment.restore(record)
+    },
+  }
   function assertSafety(): void {
     const reason = params.safetyHeld()
     if (reason !== null) throw new GroupSafetyHeldError(reason)
@@ -135,14 +146,17 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     if (reason !== null) throw new GroupSafetyHeldError(reason)
     assertSafety()
   }
-  const live = createLiveSend({ ...params, slot: params.live, assertWorkSafety })
+  const live = createLiveSend({ ...params, environment, slot: params.live, assertWorkSafety })
   owner.maintenance = live
   async function isolated(
     reads: EntryReads,
     assertMutationSafety?: () => void,
   ): Promise<ControlRead> {
     try {
-      const value = await params.load(reads, assertMutationSafety)
+      const value = await params.load(reads, () => {
+        assertPrivateAdmission()
+        assertMutationSafety?.()
+      })
       if (value.key.incarnation !== owner.key.incarnation)
         throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
       assertMutationSafety?.()

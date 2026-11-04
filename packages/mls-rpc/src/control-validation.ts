@@ -35,6 +35,7 @@ import {
   HANDSHAKE_VERSION,
   isUnsupportedCommitFrameVersion,
   LedgerEntryRefusedError,
+  PeerRemovedError,
   type RecoveryCommitValidation,
   UnsupportedLedgerEntriesVersionError,
 } from '@kumiai/rpc'
@@ -52,6 +53,7 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 function diagnostic(error: unknown): Exclude<ControlFrameValidation, { kind: 'valid' }> {
+  if (error instanceof PeerRemovedError) throw error
   let current = error
   let policyRefused = false
   const seen = new Set<unknown>()
@@ -165,7 +167,9 @@ export function createControlValidationPort(params: {
   /** Accept host journals and the library envelope decoded by decodeAutoRotationCandidate. */
   restoreCandidate: (candidate: Uint8Array) => Promise<GroupHandle>
   restoreSource?: typeof restoreGroup
+  assertNotTerminal?: () => void
 }): ControlValidationPort {
+  const assertNotTerminal = params.assertNotTerminal ?? (() => {})
   return {
     async restoreValidation(built) {
       let journal: ReturnType<typeof decodeControlJournal>
@@ -199,6 +203,7 @@ export function createControlValidationPort(params: {
         const credential = decodeStoredValue(
           encodeStoredValue(journal.sourceCredential),
         ) as typeof journal.sourceCredential
+        assertNotTerminal()
         return {
           slot,
           group: denyApplicationSend(
@@ -249,16 +254,19 @@ export function createControlValidationPort(params: {
             return false
           }
           if (digestAppliedCommit(commit) !== value.digest) return false
+          assertNotTerminal()
           const header = readHeader ?? (await source.readCommitHeader(commit))
           if (
             header?.epoch !== BigInt(identity.epoch) ||
             header.external === true ||
             header.committerDID === undefined ||
             normalizeDID(header.committerDID) !== normalizeDID(params.identity.id) ||
-            normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id) ||
-            !(await source.verifyCommitSignature(commit))
+            normalizeDID(journal.sourceCredential.id) !== normalizeDID(params.identity.id)
           )
             return false
+          assertNotTerminal()
+          if (!(await source.verifyCommitSignature(commit))) return false
+          assertNotTerminal()
           const candidate = denyApplicationSend(
             restrictCommitAuthoring(await params.restoreCandidate(journal.candidate.slice())),
           )
@@ -291,6 +299,7 @@ export function createControlValidationPort(params: {
         source: journal.source,
         async readCommitHeader(commit) {
           const restored = await restore()
+          assertNotTerminal()
           const header = await restored.group.readCommitHeader(commit.slice())
           if (header === null) return null
           const converted = { ...header, epoch: Number(header.epoch) }
@@ -323,6 +332,7 @@ export function createControlValidationPort(params: {
           const { group: working, slot } = restored
           let header: Awaited<ReturnType<GroupHandle['readCommitHeader']>>
           try {
+            assertNotTerminal()
             header = retainedRead?.header ?? (await working.readCommitHeader(commit))
           } catch (error) {
             return diagnostic(error)
@@ -355,6 +365,7 @@ export function createControlValidationPort(params: {
                 savedRecognition !== deliveredRecognition)
             ) {
               try {
+                assertNotTerminal()
                 if (!(await working.verifyCommitSignature(commit)))
                   return { kind: 'invalid', reason: 'authentication' }
               } catch (error) {
@@ -368,11 +379,13 @@ export function createControlValidationPort(params: {
             // resolve only references absent from the same retained pre-state as a receiver.
             const held = new Set(journal.sourceLedger.map(ledgerEntryDigest))
             const missing = readCommitEntryIDs(commit).filter((id) => !held.has(id))
+            assertNotTerminal()
             const key =
               missing.length === 0 ? null : await deriveEntryKey(working, params.entryLabel)
             try {
               const resolve = createLedgerEntryResolver(sealedEntries, async (blob) => {
                 if (key === null) throw new Error('Unexpected no-entry resolution')
+                assertNotTerminal()
                 return openEntries(key, blob)
               })
               let tokens: Array<string>
@@ -385,6 +398,7 @@ export function createControlValidationPort(params: {
               }
               const resolved = new Set<string>()
               for (const token of tokens) {
+                assertNotTerminal()
                 const id = ledgerEntryDigest(token)
                 if (
                   missing.includes(id) &&
@@ -411,12 +425,14 @@ export function createControlValidationPort(params: {
           slot.install(async () => {
             let key: Uint8Array
             try {
+              assertNotTerminal()
               key = await deriveEntryKey(working, params.entryLabel)
             } catch (error) {
               localFailure = { error }
               throw error
             }
             try {
+              assertNotTerminal()
               const opened = openEntries(key, sealedEntries.slice())
               try {
                 return decodeLedgerEntries(opened)
@@ -437,6 +453,7 @@ export function createControlValidationPort(params: {
           try {
             const before = working.epoch
             const policy = params.options.commitPolicy
+            assertNotTerminal()
             await working.processMessage(
               commit,
               policy === undefined

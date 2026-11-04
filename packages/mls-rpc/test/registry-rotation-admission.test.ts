@@ -170,6 +170,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         const eligibility = eligibilityOf(handle.state, handle.ownLeafLapsed())
         const control = await base.device.groups.ports(fixture.key).control.load()
         const next = { ...original, version: original.version + 1, terminal: true }
+        // The delayed probe differs; the committed source stays active.
+        const observed = { ...next, terminal: false }
         const entered = deferred<void>()
         const released = deferred<void>()
         let first = true
@@ -197,18 +199,18 @@ for (const mode of ['real-mls', 'double'] as const) {
           await entered.promise
           await base.installRows({
             key: fixture.key,
-            state: next,
+            state: observed,
             control: { cursor: { position: null, epoch: 0 } },
           })
           await live.accounting()
           released.resolve()
           await refreshing
-          await live.refreshed(next, eligibility)
+          await live.refreshed(observed, eligibility)
           // If C1 replaced C2, this control-only difference would require a restore.
           base.overrideRestore(async () => {
             throw new Error('Newer control was lost')
           })
-          const candidate = { ...next, version: next.version + 1 }
+          const candidate = { ...observed, version: observed.version + 1 }
           await live.refreshed(candidate, undefined, {
             ...control,
             cursor: { position: null, epoch: 0 },

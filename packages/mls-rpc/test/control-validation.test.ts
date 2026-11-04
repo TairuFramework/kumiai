@@ -1,5 +1,6 @@
 import type * as TokenModule from '@kokuin/token'
 import { randomIdentity } from '@kokuin/token'
+import * as Mls from '@kumiai/mls'
 import {
   CommitValidationUnavailableError,
   type ControllerBinding,
@@ -25,6 +26,7 @@ import {
   signLedgerEntry,
 } from '@kumiai/mls'
 import type { GroupForkEvidence } from '@kumiai/rpc'
+import * as Rpc from '@kumiai/rpc'
 import {
   type AdoptionExpected,
   type AdoptionWrite,
@@ -49,6 +51,7 @@ import {
   HANDSHAKE_KIND,
   type LogPosition,
   type Operation,
+  PeerRemovedError,
 } from '@kumiai/rpc'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
@@ -74,6 +77,7 @@ import { expect, test, vi } from 'vitest'
 
 import { decodeControlJournal, encodeControlJournal } from '../src/control-journal.js'
 import { createControlValidationPort } from '../src/control-validation.js'
+import * as entryCrypto from '../src/crypto.js'
 import { createGroupCrypto, deriveEntryKey, sealEntries } from '../src/crypto.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createMemoryGroupPersistence } from '../src/memory-group-persistence.js'
@@ -208,6 +212,7 @@ async function fixture(
   beforeJoin = 0,
   afterJoin = 0,
   blankLeaf = false,
+  ownLedger = false,
 ) {
   const group = await createRealGroup(beforeJoin > 0 ? 0 : blankLeaf ? 2 : 1, 'validation')
   if (beforeJoin > 0) {
@@ -235,7 +240,7 @@ async function fixture(
     })
     group.members.push({ identity, handle: joined.group, slot })
   }
-  const member = group.members[0]
+  const member = ownLedger ? group.committer : group.members[0]
   if (member === undefined) throw new Error('missing member')
   if (blankLeaf) {
     const removed = group.members[1]
@@ -264,11 +269,28 @@ async function fixture(
       authenticator: member.handle.state.keySchedule.epochAuthenticator.slice(),
     },
   }
-  const rotation = await commitKeyRotation(member.handle)
+  const bodies = ownLedger
+    ? [
+        await signLedgerEntry(member.identity, {
+          type: 'note',
+          groupID: member.handle.groupID,
+          subject: member.identity.id,
+          value: 'own body',
+        }),
+      ]
+    : []
+  const rotation = ownLedger
+    ? await commitLedgerEntries(member.handle, bodies)
+    : await commitKeyRotation(member.handle)
+  const entryKey = ownLedger ? await deriveEntryKey(member.handle) : null
   const payload = encodeHandshakeFrame(
     HANDSHAKE_KIND.commit,
-    encodeCommitFrame(rotation.commitMessage, new Uint8Array()),
+    encodeCommitFrame(
+      rotation.commitMessage,
+      entryKey === null ? new Uint8Array() : sealEntries(entryKey, encodeLedgerEntries(bodies)),
+    ),
   )
+  entryKey?.fill(0)
   const built: BuiltCommit = {
     opID: 'own',
     kind: 'rotation',
@@ -284,7 +306,7 @@ async function fixture(
     payload,
     payloadDigest: toB64U(sha256(payload)),
     digest: digestAppliedCommit(rotation.commitMessage),
-    bodies: [],
+    bodies,
     welcome: null,
     journal: encodeControlJournal({
       version: 1,
@@ -1010,6 +1032,162 @@ async function publicLedger(f: Awaited<ReturnType<typeof fixture>>) {
     frame: { position: asLogPosition('000101'), senderDID: 'relay', payload },
   }
 }
+
+test.each([
+  { workflow: 'header', pause: 'entry', target: 'restore' },
+  { workflow: 'header', pause: 'restore', target: 'header' },
+  { workflow: 'own', pause: 'restore', target: 'header' },
+  { workflow: 'own', pause: 'header', target: 'signature' },
+  { workflow: 'own', pause: 'signature', target: 'candidate' },
+  { workflow: 'foreign', pause: 'restore', target: 'header' },
+  { workflow: 'foreign', pause: 'header', target: 'process' },
+  { workflow: 'foreign', pause: 'resolver', target: 'export' },
+  { workflow: 'foreign', pause: 'export', target: 'open' },
+  { workflow: 'own-ledger', pause: 'candidate', target: 'export' },
+  { workflow: 'own-ledger', pause: 'export', target: 'open' },
+  { workflow: 'own-ledger', pause: 'resolved', target: 'entry' },
+  { workflow: 'own-copy', pause: 'header', target: 'signature' },
+])(
+  'retained validation refuses terminal $workflow $target after $pause',
+  async ({ workflow, pause, target }) => {
+    const f = await fixture({}, 0, 0, false, workflow === 'own-ledger')
+    const ledger = await publicLedger(f)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let terminal = false
+    const after: Array<string> = []
+    const hold = async (name: string) => {
+      if (pause !== name) return
+      entered.resolve()
+      await release.promise
+    }
+    const count = (name: string) => {
+      if (terminal) after.push(name)
+    }
+    const open = entryCrypto.openEntries
+    const rawOpen = vi.spyOn(entryCrypto, 'openEntries').mockImplementation((...args) => {
+      count('open')
+      return open(...args)
+    })
+    const verifyEntry = Mls.verifyLedgerEntry
+    const rawEntry = vi.spyOn(Mls, 'verifyLedgerEntry').mockImplementation((...args) => {
+      count('entry')
+      return verifyEntry(...args)
+    })
+    const resolver = Rpc.createLedgerEntryResolver
+    const rawResolver = vi.spyOn(Rpc, 'createLedgerEntryResolver').mockImplementation((...args) => {
+      const resolve = resolver(...args)
+      return async (...ids) => {
+        const result = await resolve(...ids)
+        await hold('resolved')
+        return result
+      }
+    })
+    const port = createControlValidationPort({
+      identity: f.member.identity,
+      options: {},
+      ...{
+        assertNotTerminal: () => {
+          if (terminal) throw new PeerRemovedError()
+        },
+      },
+      restoreSource: async (input) => {
+        count('restore')
+        const resolve = input.options?.resolveLedgerEntries
+        const group = await restoreGroup({
+          ...input,
+          options: {
+            ...input.options,
+            resolveLedgerEntries: async (ids) => {
+              await hold('resolver')
+              if (resolve === undefined) throw new Error('Missing resolver')
+              return resolve(ids)
+            },
+          },
+        })
+        const header = group.readCommitHeader.bind(group)
+        const signature = group.verifyCommitSignature.bind(group)
+        const exporter = group.exportSecret.bind(group)
+        const process = group.processMessage.bind(group)
+        group.readCommitHeader = async (...args) => {
+          count('header')
+          const result = await header(...args)
+          await hold('header')
+          return result
+        }
+        group.verifyCommitSignature = async (...args) => {
+          count('signature')
+          const result = await signature(...args)
+          await hold('signature')
+          return result
+        }
+        group.exportSecret = async (...args) => {
+          count('export')
+          const result = await exporter(...args)
+          await hold('export')
+          return result
+        }
+        group.processMessage = (...args) => {
+          count('process')
+          return process(...args)
+        }
+        await hold('restore')
+        return group
+      },
+      restoreCandidate: async (candidate) => {
+        count('candidate')
+        const state = decodeClientState(candidate)
+        if (state === undefined) throw new Error('Missing candidate')
+        const result = await restoreGroup({
+          state,
+          credential: f.member.handle.credential,
+          ledgerEntries: f.member.handle.ledgerTokens,
+        })
+        await hold('candidate')
+        return result
+      },
+    })
+    const validation = await port.restoreValidation(f.built)
+    if (validation === null) throw new Error('Missing validation')
+    const work = (async () => {
+      if (pause === 'entry') await hold('entry')
+      if (workflow === 'header') return validation.readCommitHeader(ledger.commit)
+      if (workflow === 'own') return validation.verifyOwn(f.built)
+      if (workflow === 'own-ledger') {
+        const commit = decodeCommitFrame(decodeHandshakeFrame(f.built.payload).payload).commit
+        return validation.validateFrame({ ...f.frame(commit), payload: f.built.payload }, f.built)
+      }
+      if (workflow === 'own-copy') {
+        const state = decodeClientState(f.state)
+        if (state === undefined) throw new Error('Missing source')
+        const copy = await restoreGroup({
+          state,
+          credential: f.member.handle.credential,
+          ledgerEntries: f.member.handle.ledgerTokens,
+        })
+        const commit = (await commitKeyRotation(copy)).commitMessage
+        return validation.validateFrame(f.frame(commit), f.built)
+      }
+      return validation.validateFrame(ledger.frame, f.built)
+    })().catch((error: unknown) => error)
+    try {
+      expect(await Promise.race([entered.promise.then(() => true), work.then(() => false)])).toBe(
+        true,
+      )
+      terminal = true
+      release.resolve()
+      const result = await work
+      expect(after).not.toContain(target)
+      expect(result).toMatchObject({ name: 'PeerRemovedError' })
+    } finally {
+      release.resolve()
+      await work
+      rawOpen.mockRestore()
+      rawEntry.mockRestore()
+      rawResolver.mockRestore()
+    }
+  },
+)
 
 test('public member ledger commits run mandatory policy checks', async () => {
   const policy = vi.fn(() => 'accept' as const)

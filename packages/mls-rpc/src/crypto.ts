@@ -9,6 +9,7 @@ import {
   InvalidAppEntryError,
   isAppFrameStorageError,
   LedgerEntryRefusedError,
+  PeerRemovedError,
   type PendingAppFrame,
   type PendingAppFrames,
   sortPendingAppFrames,
@@ -25,6 +26,7 @@ import type {
 } from './persistence-types.js'
 import type { RegistryHandleAccess } from './registry/types.js'
 import { createRegistryGroupCrypto } from './registry-crypto.js'
+import { assertNotTerminal } from './terminal-admission.js'
 
 /**
  * Label the ledger-entry seal key is exported under. Distinct from any label a caller passes to
@@ -242,7 +244,8 @@ function createLegacyGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           if (
             error === openError ||
             isAppFrameStorageError(error) ||
-            error instanceof GroupSafetyHeldError
+            error instanceof GroupSafetyHeldError ||
+            error instanceof PeerRemovedError
           )
             throw error
           throw new AppFrameStorageError('handle access failed during durable open', {
@@ -281,9 +284,15 @@ export function assertCryptoSafety(access: Pick<HandleAccess, 'admission'>): voi
 export function assertDurableCryptoSafety(access: Pick<HandleAccess, 'admission'>): void {
   // Admission can fail on a reversible retirement fence before any receive key is spent.
   try {
+    assertNotTerminal(access)
     assertCryptoSafety(access)
   } catch (error) {
-    if (error instanceof GroupSafetyHeldError || isAppFrameStorageError(error)) throw error
+    if (
+      error instanceof GroupSafetyHeldError ||
+      error instanceof PeerRemovedError ||
+      isAppFrameStorageError(error)
+    )
+      throw error
     throw new AppFrameStorageError('handle admission failed during durable open', { cause: error })
   }
 }
@@ -294,7 +303,10 @@ export function createGroupCryptoBase(
   },
 ): GroupCrypto {
   const { access, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime() } = params
-  const assertSafety = () => assertCryptoSafety(access)
+  const assertSafety = () => {
+    assertNotTerminal(access)
+    assertCryptoSafety(access)
+  }
   return {
     epoch: () => access.epoch(),
 

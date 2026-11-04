@@ -1,3 +1,4 @@
+import * as Mls from '@kumiai/mls'
 import {
   confirmationTag,
   decodeClientState,
@@ -7,11 +8,12 @@ import {
 import { type AdoptionWrite, type AdoptionWriteFactory, asLogPosition } from '@kumiai/rpc'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { defaultProposalTypes } from 'ts-mls'
-import { expect, expectTypeOf, test } from 'vitest'
+import { expect, expectTypeOf, test, vi } from 'vitest'
 
-import { createGroupMLS } from '../src/mls.js'
+import { createGroupMLS, groupHandleAccess } from '../src/mls.js'
 import { decodeStoredValue, encodeStoredValue } from '../src/persistence-codec.js'
 import type { RecoveryCandidate } from '../src/recovery.js'
+import * as codec from '../src/recovery-codec.js'
 import {
   type CapturedRecoverySnapshot,
   decodeCapturedRecoveryCandidate,
@@ -276,6 +278,42 @@ test('candidate restores exact state and source tree with its bound verdict judg
   await expect(restored.confirmationKey('another-position', 'digest-1')).rejects.toThrow('bound')
   expect(await s.port.readEpoch()).toBe(s.pending.epoch - 1)
 })
+
+test.each(['confirmation', 'serialize', 'restore'] as const)(
+  'legacy candidate refuses terminal %s',
+  async (boundary) => {
+    const s = await setup()
+    const candidate = s.pending.serialize()
+    const access = groupHandleAccess.get(s.port)
+    if (access === undefined) throw new Error('Missing candidate source')
+    const admission = vi
+      .spyOn(access, 'admission')
+      .mockReturnValue({ epoch: 0, admissible: false, reason: 'terminal' })
+    const confirmation = vi.spyOn(Mls, 'confirmationKey')
+    const encode = vi.spyOn(codec, 'encodeRecoveryCandidate')
+    const decode = vi.spyOn(codec, 'decodeRecoveryCandidate')
+    try {
+      const result = await Promise.resolve()
+        .then<unknown>(() =>
+          boundary === 'confirmation'
+            ? s.pending.confirmationKey('p', 'd')
+            : boundary === 'serialize'
+              ? s.pending.serialize()
+              : s.port.restoreRecovery(candidate, s.requestKey),
+        )
+        .catch((error: unknown) => error)
+      expect(confirmation).not.toHaveBeenCalled()
+      expect(encode).not.toHaveBeenCalled()
+      expect(decode).not.toHaveBeenCalled()
+      expect(result).toMatchObject({ name: 'PeerRemovedError' })
+    } finally {
+      admission.mockRestore()
+      confirmation.mockRestore()
+      encode.mockRestore()
+      decode.mockRestore()
+    }
+  },
+)
 
 test('restored acceptance persists the adoption write once, including after another restore', async () => {
   const s = await setup()

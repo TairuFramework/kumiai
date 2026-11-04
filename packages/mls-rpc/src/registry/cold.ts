@@ -1,7 +1,12 @@
 import { normalizeDID } from '@kokuin/token'
 import type { GroupHandle } from '@kumiai/mls'
 import { denyApplicationSend, restrictCommitAuthoring } from '@kumiai/mls'
-import { type ControlSnapshot, controlSafetyHeld, type SendAdmission } from '@kumiai/rpc'
+import {
+  type ControlSnapshot,
+  controlSafetyHeld,
+  PeerRemovedError,
+  type SendAdmission,
+} from '@kumiai/rpc'
 
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
 import { decodeStoredValue, encodeStoredValue, isStoredOpenFailure } from '../persistence-codec.js'
@@ -71,6 +76,7 @@ export async function restoreValidated(
       })
       return handle
     } catch (cause) {
+      if (cause instanceof PeerRemovedError) throw cause
       // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
       throw new GroupUnavailableError({ reason: 'invalid', cause })
     }
@@ -190,6 +196,7 @@ export async function loadValidatedGroup(
       control,
     }
   } catch (cause) {
+    if (cause instanceof PeerRemovedError) throw cause
     // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
     throw new GroupUnavailableError({ reason: 'invalid', cause })
   }

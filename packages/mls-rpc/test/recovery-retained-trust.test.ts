@@ -8,6 +8,7 @@ import {
   sealRecoveryVerdict,
   verifyRecoveryRequest,
 } from '@kumiai/mls'
+import { PeerRemovedError, type SendAdmission } from '@kumiai/rpc'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { toB64U } from '@sozai/codec'
 import {
@@ -19,10 +20,13 @@ import {
 } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
+import { createGroupMLS, groupHandleAccess } from '../src/mls.js'
 import * as recovery from '../src/recovery.js'
+import * as recoveryCodec from '../src/recovery-codec.js'
 import { forkCaptureTranscriptPermitted } from '../src/registry/recovery-coordinator.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createCapturedFormerMember } from './fixtures/captured-recovery.js'
+import { testGroupMLSDependencies } from './fixtures/real-group.js'
 
 test('retained former-member proof authenticates through the public trust adapter', async () => {
   const s = await createCapturedFormerMember()
@@ -310,6 +314,342 @@ async function capturedFixture(options: Mls.GroupOptions = {}) {
     ...held,
   }
 }
+
+test.each([
+  { workflow: 'build', pause: 'auth', target: 'join' },
+  { workflow: 'build', pause: 'join', target: 'restore' },
+  { workflow: 'restore', pause: 'auth', target: 'restore' },
+  { workflow: 'restore', pause: 'restore', target: 'confirmation' },
+  { workflow: 'inspect', pause: 'auth', target: 'inspect' },
+  { workflow: 'serialize', pause: 'entry', target: 'encode' },
+  { workflow: 'confirmation', pause: 'entry', target: 'confirmation' },
+  { workflow: 'confirmation', pause: 'confirmation', target: 'tag' },
+  { workflow: 'build', pause: 'entry', target: 'auth' },
+  { workflow: 'inspect', pause: 'entry', target: 'auth' },
+  { workflow: 'reconcile', pause: 'entry', target: 'decode' },
+  { workflow: 'reconcile', pause: 'auth', target: 'auth' },
+])(
+  'captured recovery refuses terminal $workflow $target after $pause',
+  async ({ workflow, pause, target }) => {
+    const s = await capturedFixture()
+    const pending = await recovery.buildRecoveryCandidate(s)
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    await pending.confirmationKey('p', 'd')
+    const candidate = pending.serialize()
+    const { capturedRecord } = await import('./fixtures/captured-recovery.js')
+    const record = capturedRecord(pending, s.request, s.requestKey, s.requestID)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let terminal = false
+    const after: Array<string> = []
+    const count = (name: string) => {
+      if (terminal) after.push(name)
+    }
+    const hold = async (name: string) => {
+      if (pause !== name) return
+      entered.resolve()
+      await release.promise
+    }
+    const authenticate = Mls.authenticateRecoveryReply
+    const auth = vi.spyOn(Mls, 'authenticateRecoveryReply').mockImplementation(async (...args) => {
+      count('auth')
+      const result = await authenticate(...args)
+      await hold('auth')
+      return result
+    })
+    const joinGroup = Mls.joinGroupExternal
+    const join = vi.spyOn(Mls, 'joinGroupExternal').mockImplementation(async (...args) => {
+      count('join')
+      const result = await joinGroup(...args)
+      await hold('join')
+      return result
+    })
+    const restoreGroup = Mls.restoreGroup
+    const restore = vi.spyOn(Mls, 'restoreGroup').mockImplementation(async (...args) => {
+      count('restore')
+      const result = await restoreGroup(...args)
+      await hold('restore')
+      return result
+    })
+    const confirm = Mls.confirmationKey
+    let confirmationKey: Uint8Array | undefined
+    const confirmation = vi.spyOn(Mls, 'confirmationKey').mockImplementation(async (...args) => {
+      count('confirmation')
+      const result = await confirm(...args)
+      confirmationKey = result
+      await hold('confirmation')
+      return result
+    })
+    const tag = vi.spyOn(Mls, 'confirmationTag')
+    const decodeCandidate = recoveryCodec.decodeCapturedRecoveryCandidate
+    const decode = vi
+      .spyOn(recoveryCodec, 'decodeCapturedRecoveryCandidate')
+      .mockImplementation((...args) => {
+        count('decode')
+        return decodeCandidate(...args)
+      })
+    const inspectGroup = Mls.inspectRecoveryGroupInfo
+    const inspect = vi.spyOn(Mls, 'inspectRecoveryGroupInfo').mockImplementation((...args) => {
+      count('inspect')
+      return inspectGroup(...args)
+    })
+    const encodeCandidate = recoveryCodec.encodeCapturedRecoveryCandidate
+    const encode = vi
+      .spyOn(recoveryCodec, 'encodeCapturedRecoveryCandidate')
+      .mockImplementation((...args) => {
+        count('encode')
+        return encodeCandidate(...args)
+      })
+    const environment = {
+      ...s.environment,
+      assertNotTerminal: () => {
+        if (terminal) throw new PeerRemovedError()
+      },
+    }
+    const work = (async () => {
+      if (workflow === 'serialize' || workflow === 'confirmation') {
+        const restored = await recovery.restoreRecoveryCandidate({ ...s, candidate, environment })
+        if (pause === 'entry') await hold('entry')
+        return workflow === 'serialize' ? restored.serialize() : restored.confirmationKey('p', 'd')
+      }
+      if (pause === 'entry') await hold('entry')
+      if (workflow === 'reconcile')
+        return recovery.reconcileRecoveryCapture({
+          ...s,
+          record,
+          reply: {
+            sealed: s.sealed,
+            requestID: s.requestID,
+            requestKey: s.requestKey,
+            epochFloor: null,
+          },
+          environment,
+        })
+      if (workflow === 'restore')
+        return recovery.restoreRecoveryCandidate({ ...s, candidate, environment })
+      if (workflow === 'inspect')
+        return recovery.inspectRecoveryCapture({
+          source: s.source,
+          reply: {
+            sealed: s.sealed,
+            requestID: s.requestID,
+            requestKey: s.requestKey,
+            epochFloor: null,
+          },
+          environment,
+        })
+      return recovery.buildRecoveryCandidate({ ...s, environment })
+    })().catch((error: unknown) => error)
+    try {
+      expect(await Promise.race([entered.promise.then(() => true), work.then(() => false)])).toBe(
+        true,
+      )
+      terminal = true
+      tag.mockClear()
+      release.resolve()
+      const result = await work
+      expect(after).not.toContain(target)
+      expect(result).toMatchObject({ name: 'PeerRemovedError' })
+      if (pause === 'confirmation') {
+        expect(tag).not.toHaveBeenCalled()
+        expect(confirmationKey).toEqual(new Uint8Array(32))
+      }
+    } finally {
+      release.resolve()
+      await work
+      for (const spy of [auth, join, restore, confirmation, inspect, encode, decode, tag])
+        spy.mockRestore()
+    }
+  },
+)
+
+test.each(['request', 'verdict', 'absence', 'apply', 'decode', 'sign', 'join', 'restore'] as const)(
+  'recovery adapter rechecks terminal admission after source awaits before %s',
+  async (boundary) => {
+    const s = await capturedFixture()
+    const pending = await recovery.buildRecoveryCandidate(s)
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    const candidate = pending.serialize()
+    const original = groupHandleAccess.get(s.port)
+    if (original === undefined) throw new Error('Missing source access')
+    let admission: SendAdmission = { epoch: 0, admissible: true }
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const readSource = async () => {
+      if (boundary !== 'join' && boundary !== 'restore') {
+        entered.resolve()
+        await release.promise
+      }
+      return s.source
+    }
+    const port = createGroupMLS({
+      ...testGroupMLSDependencies({ ...original, admission: () => admission }, s.control),
+      readRecoverySource: readSource,
+      identity: s.member.identity,
+      entrySlot: s.member.slot,
+      recoveryAdoption: {
+        target: s.target,
+        environment: s.environment,
+        readRecoverySource: readSource,
+        accept: s.environment.accept,
+      },
+    })
+    const authenticate = Mls.authenticateRecoveryReply
+    const joinGroup = Mls.joinGroupExternal
+    const raw = {
+      request: vi.spyOn(Mls, 'createRecoveryRequestFromTrust'),
+      verdict: vi.spyOn(Mls, 'openRecoveryVerdictFromTrust'),
+      absence: vi.spyOn(Mls, 'verifyRosterAbsence'),
+      apply: vi.spyOn(Mls, 'authenticateRecoveryReply'),
+      decode: vi.spyOn(recoveryCodec, 'decodeCapturedRecoveryCandidate'),
+      sign: vi.spyOn(s.member.identity, 'signToken'),
+      join: vi.spyOn(Mls, 'joinGroupExternal'),
+      restore: vi.spyOn(Mls, 'restoreGroup'),
+    }
+    let authentications = 0
+    if (boundary === 'join')
+      raw.apply.mockImplementation(async (...args) => {
+        const result = await authenticate(...args)
+        if (++authentications === 2) {
+          entered.resolve()
+          await release.promise
+        }
+        return result
+      })
+    if (boundary === 'restore')
+      raw.join.mockImplementation(async (...args) => {
+        const result = await joinGroup(...args)
+        entered.resolve()
+        await release.promise
+        return result
+      })
+    const captured = port.capturedRecovery
+    if (captured === undefined) throw new Error('Missing captured port')
+    const checkAbsence = captured.checkRosterAbsence
+    if (checkAbsence === undefined) throw new Error('Missing absence check')
+    const work = (async () => {
+      switch (boundary) {
+        case 'request':
+          return port.createRecoveryRequest('new-request')
+        case 'verdict':
+          return port.openRecoveryVerdict(new Uint8Array([1]), s.requestID, s.requestKey)
+        case 'absence':
+          return checkAbsence(new Uint8Array([1]), s.requestID, s.requestKey)
+        case 'apply':
+          return captured.applyRecovery(s.sealed, s.requestID, s.requestKey)
+        case 'join':
+          return captured.applyRecovery(s.sealed, s.requestID, s.requestKey)
+        case 'restore':
+          return captured.applyRecovery(s.sealed, s.requestID, s.requestKey)
+        case 'decode':
+          return captured.restoreRecovery(candidate, s.requestKey)
+        case 'sign':
+          return port.signRecoveryConfirmation({
+            groupID: s.source.key.groupID,
+            requestID: s.requestID,
+            position: 'p',
+            commitDigest: 'd',
+          })
+      }
+    })().catch((error: unknown) => error)
+    try {
+      expect(await Promise.race([entered.promise.then(() => true), work.then(() => false)])).toBe(
+        true,
+      )
+      admission = { epoch: 0, admissible: false, reason: 'terminal' }
+      for (const spy of Object.values(raw)) spy.mockClear()
+      release.resolve()
+      const result = await work
+      expect(raw[boundary]).not.toHaveBeenCalled()
+      expect(result).toMatchObject({ name: 'PeerRemovedError' })
+    } finally {
+      release.resolve()
+      await work
+      for (const spy of Object.values(raw)) spy.mockRestore()
+    }
+  },
+)
+
+test.each(['manual', 'fork'] as const)(
+  'saved recovery refuses terminal %s decode after admission awaits',
+  async (branch) => {
+    const s = await capturedFixture()
+    const pending = await recovery.buildRecoveryCandidate(s)
+    if (pending === null || 'renewalRequired' in pending) throw new Error('Missing candidate')
+    const candidate = pending.serialize()
+    const original = groupHandleAccess.get(s.port)
+    if (original === undefined) throw new Error('Missing source access')
+    let admission: SendAdmission = { epoch: 0, admissible: true }
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const pause = async () => {
+      entered.resolve()
+      await release.promise
+    }
+    const snapshot = await s.control.load()
+    const port = createGroupMLS({
+      ...testGroupMLSDependencies({ ...original, admission: () => admission }, s.control),
+      identity: s.member.identity,
+      entrySlot: s.member.slot,
+      control: {
+        ...s.control,
+        load: async () => {
+          if (branch === 'fork') await pause()
+          return branch === 'manual'
+            ? snapshot
+            : {
+                ...snapshot,
+                forkRecoveryAttempt: {
+                  id: 'fork-attempt',
+                  source: s.source.key,
+                  forkRecovery: {
+                    attemptID: 'fork-attempt',
+                    noticeID: 'fork-notice',
+                    splitEpoch: 0,
+                    otherAuthHash: 'other',
+                    responderKeyHash: 'responder',
+                    source: s.source.key,
+                    evidence: new Uint8Array([1]),
+                  },
+                },
+              }
+        },
+      },
+      recoveryAdoption: {
+        target: s.target,
+        environment: s.environment,
+        readRecoverySource: s.readSource,
+        accept: s.environment.accept,
+        manualRecovery:
+          branch === 'manual'
+            ? { authorisationID: 'manual', source: s.source.key, check: pause }
+            : undefined,
+      },
+    })
+    const decode = vi.spyOn(recoveryCodec, 'decodeCapturedRecoveryCandidate')
+    const work = port.capturedRecovery
+      ?.restoreRecovery(candidate, s.requestKey)
+      .catch((error: unknown) => error)
+    try {
+      expect(
+        await Promise.race([
+          entered.promise.then(() => true),
+          Promise.resolve(work).then(() => false),
+        ]),
+      ).toBe(true)
+      admission = { epoch: 0, admissible: false, reason: 'terminal' }
+      decode.mockClear()
+      release.resolve()
+      const result = await work
+      expect(decode).not.toHaveBeenCalled()
+      expect(result).toMatchObject({ name: 'PeerRemovedError' })
+    } finally {
+      release.resolve()
+      await work
+      decode.mockRestore()
+    }
+  },
+)
 
 async function attestInfo(
   s: Awaited<ReturnType<typeof capturedFixture>>,

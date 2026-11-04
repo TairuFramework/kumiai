@@ -50,6 +50,7 @@ import {
   ReentrantOwnershipError,
 } from './persistence-errors.js'
 import type { GroupKey, GroupPersistence, GroupTransaction } from './persistence-types.js'
+import { assertNotTerminal } from './terminal-admission.js'
 
 export type { SaveControlBuild } from '@kumiai/rpc'
 
@@ -347,19 +348,23 @@ export function createControlBuildPort(params: {
         if (isAutoRotation(saved) && saved.id !== autoRotationRequest(identity).id)
           throw new OperationRejectedError(ROTATION_IDENTITY_SUPERSEDED)
         const { value: output, receipt } = await withCommitPermit(
-          async () =>
-            denyApplicationSend(
+          async () => {
+            assertNotTerminal(params.access)
+            return denyApplicationSend(
               await restoreSource({
                 state: sourceState,
                 credential: sourceCredential,
                 ledgerEntries: sourceLedger,
               }),
-            ),
-          (permitted) =>
-            (isAutoRotation(saved) ? (params.rotate ?? buildKeyRotation) : params.build)(
+            )
+          },
+          (permitted) => {
+            assertNotTerminal(params.access)
+            return (isAutoRotation(saved) ? (params.rotate ?? buildKeyRotation) : params.build)(
               saved,
               permitted,
-            ),
+            )
+          },
         )
         const host = copyStoredValue(output)
         const rejected = () => ({
@@ -376,6 +381,7 @@ export function createControlBuildPort(params: {
           !sameStoredValue(receipt.authenticatorBefore, host.authenticatorBefore)
         )
           return rejected()
+        assertNotTerminal(params.access)
         try {
           const candidate = denyApplicationSend(
             restrictCommitAuthoring(await params.restoreCandidate(host.journal)),
@@ -411,6 +417,7 @@ export function createControlBuildPort(params: {
         const framed = await frame(host, async (bytes) => {
           const held = await safetyHeld()
           if (held !== null) throw new GroupSafetyHeldError(held)
+          assertNotTerminal(params.access)
           return { sealed: sealEntries(key, bytes, params.runtime), epoch: identity.epoch }
         })
         const { commit: _commit, ...retained } = host

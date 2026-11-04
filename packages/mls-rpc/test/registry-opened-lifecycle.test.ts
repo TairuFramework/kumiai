@@ -22,6 +22,7 @@ import {
   HANDSHAKE_KIND,
   OpenedDeliveryReentryError,
   openedDeliveryBinding,
+  PeerRemovedError,
   protocolTopic,
   rendezvousTopic,
   runOpenedDelivery,
@@ -33,11 +34,18 @@ import type * as AppLaneModule from '../../rpc/lib/app-lane.js'
 import type * as BufferedControlModule from '../../rpc/lib/buffered-control.js'
 import type * as HostBoundaryModule from '../../rpc/lib/host-boundary.js'
 import type * as HubMuxModule from '../../rpc/lib/hub-mux.js'
-import { autoRotationRequest } from '../src/auto-rotation.js'
+import {
+  autoRotationRequest,
+  buildKeyRotation as controlBuildRotation,
+} from '../src/auto-rotation.js'
 import * as checkpoint from '../src/checkpoint.js'
+import * as controlBuild from '../src/control-build.js'
+import * as entryCrypto from '../src/crypto.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
+import * as coldModule from '../src/registry/cold.js'
+import * as liveSendModule from '../src/registry/live-send.js'
 import { deleteIncarnations, retireIncarnation } from '../src/registry/retired.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
@@ -49,6 +57,7 @@ import {
   createRegistryFixture,
   type PendingFault,
   registryFixtureObserveDecrypts,
+  registryFixtureObserveRestoredControl,
   registryFixtureObserveStagedDecrypts,
 } from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
@@ -352,11 +361,20 @@ for (const mode of ['real-mls', 'double'] as const) {
             [true, false].map((restart) => ({ policy, restart, interruption: 'idle' })),
           )
           .concat(
-            (['at-least-once', 'transactional'] as const).map((policy) => ({
-              policy,
-              restart: false,
-              interruption: 'builder-continuation',
-            })),
+            (['at-least-once', 'transactional'] as const).flatMap((policy) =>
+              [
+                'builder-continuation',
+                'builder-safety-pending',
+                'builder-source-pending',
+                'builder-build-pending',
+                'builder-candidate-pending',
+                'crypto-access-pending',
+                'receive-between-frames',
+                'mls-creation-pending',
+                'captured-restore-pending',
+                'captured-registry-restore-pending',
+              ].map((interruption) => ({ policy, restart: false, interruption })),
+            ),
           )
           .concat(
             [
@@ -389,6 +407,15 @@ for (const mode of ['real-mls', 'double'] as const) {
             'preparation-timer',
             'control-continuation',
             'builder-continuation',
+            'builder-safety-pending',
+            'builder-source-pending',
+            'builder-build-pending',
+            'builder-candidate-pending',
+            'crypto-access-pending',
+            'receive-between-frames',
+            'mls-creation-pending',
+            'captured-restore-pending',
+            'captured-registry-restore-pending',
             'startup-continuation',
             'ledger-request',
             'ledger-timer',
@@ -471,6 +498,77 @@ for (const mode of ['real-mls', 'double'] as const) {
           const releaseBuilder = Promise.withResolvers<void>()
           const builderFinished = Promise.withResolvers<void>()
           const builderSeal = vi.fn()
+          const builderRestore = vi.fn()
+          const builderHost = vi.fn()
+          let builderKey: Uint8Array | undefined
+          let builderError: unknown
+          let queuedCrypto: Promise<unknown> | undefined
+          const senderReads = vi.fn()
+          const receiveDecrypt = vi.fn()
+          const captureLive = vi.spyOn(liveSendModule, 'createLiveSend')
+          const captureCold = vi.spyOn(coldModule, 'loadValidatedGroup')
+          const rawSeal = vi.spyOn(entryCrypto, 'sealEntries')
+          let sealing = false
+          const createBuild = controlBuild.createControlBuildPort
+          const captureBuild = vi
+            .spyOn(controlBuild, 'createControlBuildPort')
+            .mockImplementation((params) => {
+              const pause = async () => {
+                builderEntered.resolve()
+                await releaseBuilder.promise
+              }
+              const read = params.access.readControl.bind(params.access)
+              const restoreSource = params.restoreSource
+              const build =
+                (host: typeof params.build): typeof params.build =>
+                async (...args) => {
+                  builderHost()
+                  const result = await host(...args)
+                  if (interruption === 'builder-candidate-pending') await pause()
+                  return result
+                }
+              return createBuild({
+                ...params,
+                access: {
+                  ...params.access,
+                  readControl: async (fn) => {
+                    const result = await read(fn)
+                    if (
+                      typeof result === 'object' &&
+                      result !== null &&
+                      'key' in result &&
+                      result.key instanceof Uint8Array
+                    )
+                      builderKey = result.key
+                    if (
+                      (interruption === 'builder-safety-pending' && sealing) ||
+                      (interruption === 'builder-source-pending' &&
+                        typeof result === 'object' &&
+                        result !== null &&
+                        'kind' in result &&
+                        result.kind === 'captured')
+                    )
+                      await pause()
+                    return result
+                  },
+                },
+                build: build(params.build),
+                rotate: build(params.rotate ?? controlBuildRotation),
+                restoreCandidate: (...args) => {
+                  builderRestore()
+                  return params.restoreCandidate(...args)
+                },
+                restoreSource:
+                  restoreSource === undefined
+                    ? undefined
+                    : async (...args) => {
+                        builderRestore()
+                        const result = await restoreSource(...args)
+                        if (interruption === 'builder-build-pending') await pause()
+                        return result
+                      },
+              })
+            })
           let localMux: HubMuxModule.HubMux | undefined
           const inbound = new Map<string, Parameters<HubMuxModule.HubMux['onInbound']>[1]>()
           const muxModule = (await import(
@@ -513,20 +611,30 @@ for (const mode of ['real-mls', 'double'] as const) {
             .spyOn(hostModule, 'wrapPeerHost')
             .mockImplementation((boundary, input) => {
               let hostInput = input
-              if (interruption === 'builder-continuation') {
+              if (interruption.startsWith('builder-')) {
                 const buildInput = input as GroupPeerParams<Record<string, GroupProtocolDefinition>>
                 const prepare = buildInput.prepareBuild
                 if (prepare === undefined) throw new Error('Missing builder')
                 const heldBuild: typeof prepare = async (op, frame) => {
                   try {
                     return await prepare(op, async (built, seal) => {
-                      builderEntered.resolve()
-                      await releaseBuilder.promise
-                      return frame(built, (...args) => {
+                      if (interruption === 'builder-continuation') {
+                        builderEntered.resolve()
+                        await releaseBuilder.promise
+                      }
+                      return frame(built, async (...args) => {
                         builderSeal()
-                        return seal(...args)
+                        sealing = true
+                        try {
+                          return await seal(...args)
+                        } finally {
+                          sealing = false
+                        }
                       })
                     })
+                  } catch (error) {
+                    builderError = error
+                    throw error
                   } finally {
                     builderFinished.resolve()
                   }
@@ -706,7 +814,103 @@ for (const mode of ['real-mls', 'double'] as const) {
               })
             if (running !== undefined && separate) {
               if (!vi.isFakeTimers()) vi.useFakeTimers()
-              if (interruption === 'builder-continuation') {
+              if (
+                interruption === 'captured-restore-pending' ||
+                interruption === 'captured-registry-restore-pending'
+              ) {
+                const supplied =
+                  interruption === 'captured-registry-restore-pending'
+                    ? captureCold.mock.calls.find(([, groupID]) => groupID === key.groupID)?.[3]
+                        .restore
+                    : captureLive.mock.calls.find(
+                        ([params]) =>
+                          params.owner.key.groupID === key.groupID &&
+                          params.owner.key.incarnation === key.incarnation,
+                      )?.[0].environment.restore
+                const record = await fixture.device.groups.loadState(key)
+                if (
+                  supplied === undefined ||
+                  record === null ||
+                  record.deleted ||
+                  record.state === null
+                )
+                  throw new Error('Missing supplied restorer')
+                const source = { ...record, state: record.state }
+                queuedCrypto = releaseBuilder.promise
+                  .then(() => supplied(source))
+                  .catch((error: unknown) => error)
+              }
+              if (interruption === 'mls-creation-pending') {
+                const access = fixture.registry.access.bind(fixture.registry)
+                vi.spyOn(fixture.registry, 'access').mockImplementationOnce(async (...args) => {
+                  builderEntered.resolve()
+                  await releaseBuilder.promise
+                  return access(...args)
+                })
+                queuedCrypto = createRegistryGroupMLS({
+                  registry: fixture.registry,
+                  key,
+                  recovery: fixture.environment,
+                  identity: fixture.identity,
+                  entrySlot: local.slot,
+                  target: { targetID: 'terminal-hub', topicID: 'terminal-commits' },
+                })
+                  .then((port) => port.readEpoch())
+                  .catch((error: unknown) => error)
+                expect(
+                  await Promise.race([
+                    builderEntered.promise.then(() => true),
+                    queuedCrypto.then(() => false),
+                  ]),
+                ).toBe(true)
+              }
+              if (interruption === 'receive-between-frames') {
+                registryFixtureObserveRestoredControl(fixture, (handle) => {
+                  const read = handle.readSenderData.bind(handle)
+                  const decrypt = handle.decrypt.bind(handle)
+                  handle.readSenderData = (...args) => {
+                    senderReads()
+                    return read(...args)
+                  }
+                  handle.decrypt = async (...args) => {
+                    receiveDecrypt()
+                    const result = await decrypt(...args)
+                    builderEntered.resolve()
+                    await releaseBuilder.promise
+                    return result
+                  }
+                })
+                const frames = await Promise.all(
+                  [1, 2].map(async (value) => ({
+                    ciphertext: await sender.encrypt(new Uint8Array([value]), {
+                      aad: new Uint8Array(),
+                    }),
+                    expectedAAD: new Uint8Array(),
+                  })),
+                )
+                queuedCrypto = openedAccess.receive(frames).catch((error: unknown) => error)
+                expect(
+                  await Promise.race([
+                    builderEntered.promise.then(() => true),
+                    queuedCrypto.then(() => false),
+                  ]),
+                ).toBe(true)
+              }
+              if (interruption === 'crypto-access-pending') {
+                const read = openedAccess.read.bind(openedAccess)
+                vi.spyOn(openedAccess, 'read').mockImplementationOnce(async (fn) => {
+                  builderEntered.resolve()
+                  await releaseBuilder.promise
+                  return read(fn)
+                })
+                if (peerParams === undefined) throw new Error('Missing peer crypto')
+                const peerCrypto = peerParams.crypto
+                queuedCrypto = Promise.resolve()
+                  .then(() => peerCrypto.sealEntries(new Uint8Array([1])))
+                  .catch((error: unknown) => error)
+                await builderEntered.promise
+              }
+              if (interruption.startsWith('builder-')) {
                 const identity = (await fixture.device.groups.readEvidence(key)).source.identity
                 if (identity === null) throw new Error('Missing build source')
                 await fixture.device.groups.ports(key).control.apply(
@@ -994,6 +1198,11 @@ for (const mode of ['real-mls', 'double'] as const) {
             }
             const fetch = running === undefined ? vi.fn() : vi.spyOn(running.hub, 'fetchTopic')
             const publish = running === undefined ? vi.fn() : vi.spyOn(running.hub, 'publish')
+            rawSeal.mockClear()
+            builderRestore.mockClear()
+            builderHost.mockClear()
+            senderReads.mockClear()
+            receiveDecrypt.mockClear()
             expect(await fixture.device.groups.loadState(key)).toMatchObject({ terminal: true })
             expect(await openedAccess.pending.list()).toEqual(pending)
             expect(calls).toBe(0)
@@ -1046,11 +1255,11 @@ for (const mode of ['real-mls', 'double'] as const) {
               restoreCompletion = () => spy.mockRestore()
             }
             const restores = fixture.restores()
-            const access = vi.spyOn(fixture.registry, 'access')
+            const access = vi.spyOn(fixture.registry, 'access').mockClear()
             const receive = vi.fn()
             fixture.overrideRestore(async () => {
               receive()
-              throw new Error('Terminal drain attempted crypto')
+              throw new PeerRemovedError('Terminal drain attempted crypto')
             })
             const blocks: Array<unknown> = []
             const safety = registrySafety(fixture.registry)
@@ -1094,10 +1303,40 @@ for (const mode of ['real-mls', 'double'] as const) {
               ledgerCheck.mockClear()
               ledgerSeal.mockClear()
               releaseLedger.resolve()
-              if (interruption === 'builder-continuation') {
+              if (
+                [
+                  'crypto-access-pending',
+                  'receive-between-frames',
+                  'mls-creation-pending',
+                  'captured-restore-pending',
+                  'captured-registry-restore-pending',
+                ].includes(interruption)
+              ) {
+                releaseBuilder.resolve()
+                const result = await queuedCrypto
+                expect(senderReads).not.toHaveBeenCalled()
+                expect(receiveDecrypt).not.toHaveBeenCalled()
+                expect(fixture.restores()).toBe(restores)
+                expect(rawSeal).not.toHaveBeenCalled()
+                expect(result).toMatchObject(
+                  interruption !== 'receive-between-frames'
+                    ? { name: 'PeerRemovedError' }
+                    : [
+                        { kind: 'opened' },
+                        { kind: 'refused', error: { name: 'GroupUnavailableError' } },
+                      ],
+                )
+              }
+              if (interruption.startsWith('builder-')) {
                 releaseBuilder.resolve()
                 await builderFinished.promise
-                expect(builderSeal).not.toHaveBeenCalled()
+                if (interruption === 'builder-continuation')
+                  expect(builderSeal).not.toHaveBeenCalled()
+                expect(rawSeal).not.toHaveBeenCalled()
+                expect(builderHost).not.toHaveBeenCalled()
+                expect(builderRestore).not.toHaveBeenCalled()
+                expect(builderError).toMatchObject({ name: 'PeerRemovedError' })
+                expect(builderKey).toEqual(new Uint8Array(32))
               }
               if (interruption === 'control-continuation') {
                 releaseControl.resolve()
@@ -1300,6 +1539,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             await work
             unsubscribe()
             expect((await fixture.device.groups.load(groupID))?.activeIncarnation).toBeNull()
+            expect(mls.sendAdmission()).toMatchObject({ admissible: false, reason: 'terminal' })
             expect((await fixture.inspectRows()).pending?.size ?? 0).toBe(0)
             expect(open).not.toHaveBeenCalled()
             expect(receive).not.toHaveBeenCalled()
@@ -1312,6 +1552,11 @@ for (const mode of ['real-mls', 'double'] as const) {
               )
           } finally {
             releaseBuilder.resolve()
+            await queuedCrypto
+            captureLive.mockRestore()
+            captureCold.mockRestore()
+            captureBuild.mockRestore()
+            rawSeal.mockRestore()
             releaseControl.resolve()
             releaseFetch.resolve()
             releaseLedger.resolve()

@@ -4,6 +4,7 @@ import type { ControlSnapshot, ForkHalt, SafetyHold } from '@kumiai/rpc'
 import {
   assertOpenedDeliveryEntry,
   OpenedDeliveryReentryError,
+  PeerRemovedError,
   requireOpenedDeliveryContext,
 } from '@kumiai/rpc'
 
@@ -40,6 +41,7 @@ import type {
   GroupTransaction,
 } from '../persistence-types.js'
 import { groupCondition, groupConditionWriter } from '../safety-conditions.js'
+import { assertNotTerminal } from '../terminal-admission.js'
 import { createRegistryAccess, type RegistryOwner, registryCapturedReplacements } from './access.js'
 import { scheduleRegistryAccounting } from './accounting.js'
 import { bindRegistryStreamingOpen, registryStreamingOpen } from './app-open-binding.js'
@@ -193,6 +195,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       try {
         return await restore()
       } catch (error) {
+        if (error instanceof PeerRemovedError) throw error
         // A failed old restore must not clear a replacement owner.
         if (slot.owner === previous && slot.generation === generation) {
           invalidateAccess(slot, false)
@@ -723,6 +726,9 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       {
         ...environment,
         restore: async (record) => {
+          const current = slot.owner
+          if (current?.key.incarnation === record.incarnation)
+            assertNotTerminal({ admission: () => current.admission })
           const handle = restrictCommitAuthoring(await environment.restore(record))
           restoredLapsed = handle.ownLeafLapsed()
           return handle

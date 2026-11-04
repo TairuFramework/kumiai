@@ -12,6 +12,7 @@ import type { ControlHandleAccess } from './access.js'
 import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal } from './control-journal.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
+import { assertNotTerminal } from './terminal-admission.js'
 
 export function createControlAdoptionPort(params: {
   access: ControlHandleAccess
@@ -35,6 +36,7 @@ export function createControlAdoptionPort(params: {
         (proof.coverage !== 'complete' && proof.coverage !== 'incomplete')
       )
         return 'moved'
+      assertNotTerminal(params.access)
       const candidate = restrictCommitAuthoring(await params.restoreCandidate(journal.candidate))
       if (
         candidate.groupID !== expected.key.groupID ||

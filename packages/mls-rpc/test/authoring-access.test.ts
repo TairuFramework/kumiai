@@ -509,6 +509,60 @@ test('buildRevokeProofOperation builds on the supplied handle', async () => {
   }
 })
 
+test('proof builder rechecks terminal admission after reading its incarnation', async () => {
+  const f = await authoringAccessFixture('simple')
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let terminal = false
+  const read = f.access.readControl
+  const admission = f.access.admission
+  f.access.readControl = async (fn) => {
+    const result = await read(fn)
+    entered.resolve()
+    await release.promise
+    return result
+  }
+  f.access.admission = () =>
+    terminal ? { epoch: 0, admissible: false, reason: 'terminal' } : admission()
+  const raw = vi.spyOn(publicMLS, 'revokeWithProof')
+  const journal = vi.fn(() => new Uint8Array())
+  const mls = createGroupMLS({
+    ...testGroupMLSDependencies(f.access, f.control()),
+    identity: f.member.identity,
+    entrySlot: f.member.slot,
+  })
+  const work = buildRevokeProofOperation({
+    mls,
+    group: await f.restoreStored((await f.stored()).state),
+    op: {
+      ...rotationIntent,
+      body: new TextEncoder().encode(
+        JSON.stringify({
+          type: 'revoke-proof',
+          input: { deny: [f.member.identity.id], log: { chain: [], events: [] } },
+        }),
+      ),
+    },
+    options: { serializeJournal: journal },
+  }).catch((error: unknown) => error)
+  try {
+    await entered.promise
+    terminal = true
+    release.resolve()
+    const result = await work
+    expect(raw).not.toHaveBeenCalled()
+    expect(journal).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ name: 'PeerRemovedError' })
+  } finally {
+    release.resolve()
+    await work
+    raw.mockRestore()
+    f.access.readControl = read
+    f.access.admission = admission
+    await f.close()
+  }
+})
+
 test.each([
   { referencedProposals: null },
   { referencedProposals: [1] },

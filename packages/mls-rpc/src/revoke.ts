@@ -17,6 +17,7 @@ import {
 } from '@kumiai/rpc'
 
 import { groupHandleAccess } from './mls.js'
+import { assertNotTerminal } from './terminal-admission.js'
 
 const proofResults = new Map<
   string,
@@ -48,6 +49,7 @@ export async function buildRevokeProofOperation(params: {
   const access = groupHandleAccess.get(params.mls)
   if (access == null) throw new Error('Proof operations require an adapter-created GroupMLS')
   const incarnation = await access.readControl(async ({ source }) => source.key.incarnation)
+  assertNotTerminal(access)
   return buildRevokeProofOnHandle({
     group: params.group,
     incarnation,

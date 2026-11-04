@@ -480,7 +480,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           key,
           state: { ...record, version: record.version + 1, terminal: true },
         })
-        await access.read(() => {})
+        const restores = fixture.restoreCount(groupID)
+        await expect(access.read(() => {})).rejects.toMatchObject({ name: 'PeerRemovedError' })
+        expect(fixture.restoreCount(groupID)).toBe(restores)
         expect(access.admission()).toEqual({ epoch: 0, admissible: false, reason: 'terminal' })
         expect(access.runtime.snapshot()?.available).toBe(false)
       } finally {
@@ -541,9 +543,12 @@ for (const mode of ['real-mls', 'double'] as const) {
         const access = await registry(fixture).access(groupID)
         expect(access.admission()).toEqual({ epoch: 0, admissible: false, reason: 'terminal' })
         expect(access.runtime.snapshot()?.available).toBe(false)
-        expect(await access.read((handle) => handle.state.groupActiveState.kind)).toBe(
-          'removedFromGroup',
-        )
+        expect(access.runtime.snapshot()?.members.has(fixture.identity.id)).toBe(true)
+        const restores = fixture.restoreCount(groupID)
+        await expect(
+          access.read((handle) => handle.state.groupActiveState.kind),
+        ).rejects.toMatchObject({ name: 'PeerRemovedError' })
+        expect(fixture.restoreCount(groupID)).toBe(restores)
       } finally {
         await fixture.close()
       }

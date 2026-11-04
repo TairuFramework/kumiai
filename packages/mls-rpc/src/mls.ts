@@ -107,6 +107,7 @@ import {
 } from './registry/control-batch.js'
 import type { RegistryRecoverySource } from './registry/types.js'
 import type { RecoveryEnvironment } from './registry/validation.js'
+import { assertNotTerminal } from './terminal-admission.js'
 
 // Bound only by the registry adapter, never by host-supplied dependency data.
 export const registryRosterSealers = new WeakMap<
@@ -300,6 +301,7 @@ function createGroupMLSBase(
     boundCommit?: BoundRecoveryCommit,
   ): RecoveryCandidate {
     const judge = createVerdictJudge({
+      assertNotTerminal: () => assertNotTerminal(access),
       group: data.group,
       sourceTree: data.sourceTree,
       known: data.knownRegistry,
@@ -314,11 +316,13 @@ function createGroupMLSBase(
       markBindingUnusable: () => recovery.markCandidateBindingUnusable(data.group),
       confirmationKey: judge.confirmationKey,
       judgeVerdict: judge.judgeVerdict,
-      serialize: () =>
-        encodeRecoveryCandidate(
+      serialize: () => {
+        assertNotTerminal(access)
+        return encodeRecoveryCandidate(
           { ...data, state: data.group.state, requestID, boundCommit: judge.boundCommit() },
           requestKey,
-        ),
+        )
+      },
       onAccepted: (write: AdoptionWriteFactory) => {
         if (typeof write !== 'function') {
           return Promise.reject(
@@ -360,6 +364,7 @@ function createGroupMLSBase(
       ? undefined
       : {
           ...captured.environment,
+          assertNotTerminal: () => assertNotTerminal(access),
           denySend: params.denySend,
           accept: captured.accept,
           recoveryBinding: captured.environment.recoveryBinding ?? params.recoveryBinding,
@@ -388,6 +393,7 @@ function createGroupMLSBase(
               requestKey,
             ): Promise<AuthenticatedRosterAbsence | null> {
               const { trust } = await captured.readRecoverySource()
+              assertNotTerminal(access)
               return await verifyRosterAbsence({
                 trust,
                 evidence,
@@ -406,6 +412,7 @@ function createGroupMLSBase(
               await captured.manualRecovery?.check()
               const source = await captured.readRecoverySource()
               if (captured.manualRecovery === undefined && snapshot.forkRecoveryAttempt == null) {
+                assertNotTerminal(access)
                 const verified = await authenticateRecoveryReply({
                   trust: source.trust,
                   sealed,
@@ -462,6 +469,7 @@ function createGroupMLSBase(
               const saved = control.rejoin
               if (captured.manualRecovery !== undefined) {
                 await captured.manualRecovery.check()
+                assertNotTerminal(access)
                 const snapshot = decodeCapturedRecoveryCandidate(candidate, requestKey)
                 if (snapshot.target.groupInfoEpoch < (control.recoveryEpochFloor ?? 0))
                   throw new RecoveryTargetBehindError('Manual recovery capture is target-behind')
@@ -471,6 +479,7 @@ function createGroupMLSBase(
                 attempt != null ||
                 (saved !== null && 'format' in saved && saved.forkRecovery !== undefined)
               ) {
+                assertNotTerminal(access)
                 const snapshot = decodeCapturedRecoveryCandidate(candidate, requestKey)
                 if (
                   attempt == null ||
@@ -554,6 +563,7 @@ function createGroupMLSBase(
     async signRecoveryConfirmation(binding: RecoveryConfirmationBinding) {
       const groupID = (await params.readRecoverySource()).key.groupID
       if (binding.groupID !== groupID) throw new Error('Confirmation group mismatch')
+      assertNotTerminal(access)
       return new TextEncoder().encode(
         stringifyToken(
           await identity.signToken(
@@ -621,6 +631,7 @@ function createGroupMLSBase(
     ): Promise<OpenedRecoveryVerdict | null> {
       if (params.recoveryAdoption !== undefined) {
         const { trust } = await params.recoveryAdoption.readRecoverySource()
+        assertNotTerminal(access)
         return await openRecoveryVerdictFromTrust({
           trust,
           sealed,
@@ -803,6 +814,7 @@ function createGroupMLSBase(
     async createRecoveryRequest(requestID: string, deadlineMs?: number, comparisonEpoch?: number) {
       if (params.recoveryAdoption !== undefined) {
         const { trust } = await params.recoveryAdoption.readRecoverySource()
+        assertNotTerminal(access)
         return await createRecoveryRequestFromTrust({
           trust,
           identity,
@@ -860,6 +872,7 @@ function createGroupMLSBase(
         })
         const state = decodeClientState(snapshot.state)
         if (state == null) throw new Error('Invalid captured state')
+        assertNotTerminal(access)
         const group = recoveryHandle(
           restrictCommitAuthoring(
             await restoreGroup({
@@ -876,6 +889,7 @@ function createGroupMLSBase(
             }),
           ),
         )
+        assertNotTerminal(access)
         return await sealCapturedGroupInfo({
           group,
           identity,
@@ -951,6 +965,7 @@ function createGroupMLSBase(
     },
 
     async restoreRecovery(bytes, requestKey) {
+      assertNotTerminal(access)
       const snapshot = decodeRecoveryCandidate(bytes, requestKey)
       const group = await access.read(async (current) => {
         const restored = recoveryHandle(
@@ -1126,6 +1141,7 @@ function createGroupMLSBase(
                 return result
               }
             const validation = createControlValidationPort({
+              assertNotTerminal: () => assertNotTerminal(access),
               identity,
               options: params.recoveryAdoption?.environment.options ?? {},
               entryLabel,

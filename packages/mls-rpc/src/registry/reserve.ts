@@ -9,6 +9,7 @@ import {
   reserveApplicationRange,
   restrictCommitAuthoring,
 } from '@kumiai/mls'
+import { PeerRemovedError } from '@kumiai/rpc'
 import { sha256 } from '@noble/hashes/sha2.js'
 
 import { controlProjection } from '../control-compat.js'
@@ -71,6 +72,7 @@ export async function restoreCaptured(
         restrictCommitAuthoring(await environment.restore(copyRecord(record))),
       )
     } catch (cause) {
+      if (cause instanceof PeerRemovedError) throw cause
       // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause.
       throw new GroupUnavailableError({ reason: 'invalid', cause })
     }

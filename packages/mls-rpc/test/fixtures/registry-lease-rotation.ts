@@ -14,6 +14,7 @@ import { expect } from 'vitest'
 import { decodeAutoRotationCandidate } from '../../src/auto-rotation.js'
 import * as api from '../../src/index.js'
 import type { GroupKey, MemoryTransaction } from '../../src/persistence-types.js'
+import { assertNotTerminal } from '../../src/terminal-admission.js'
 import type { createRegistryFixture } from './registry.js'
 import {
   buildSealedMemoryOperation,
@@ -140,6 +141,7 @@ export async function startLeaseRotationPeer(params: {
           mode === 'double'
             ? sealedMemoryValidation()
             : api.createControlValidationPort({
+                assertNotTerminal: () => assertNotTerminal(access),
                 identity: fixture.identity,
                 options: fixture.environment.options,
                 restoreCandidate: restore,

@@ -1,4 +1,9 @@
-import { asLogPosition, GroupSafetyHeldError, type SendAdmission } from '@kumiai/rpc'
+import {
+  asLogPosition,
+  GroupSafetyHeldError,
+  PeerRemovedError,
+  type SendAdmission,
+} from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
 import type { HandleAccess } from '../src/access.js'
@@ -77,7 +82,7 @@ async function fixture() {
     failAccess(error: Error) {
       adapterError = error
     },
-    hold(reason: 'fork-halted' | 'recovery-unavailable' | 'lapsed') {
+    hold(reason: 'fork-halted' | 'recovery-unavailable' | 'lapsed' | 'terminal') {
       admission = { epoch: Number(member.handle.epoch), admissible: false, reason }
     },
     assertUnused() {
@@ -147,6 +152,65 @@ for (const reason of ['fork-halted', 'recovery-unavailable'] as const) {
     })
   })
 }
+
+test.each(boundaries)(
+  'queued %s refuses terminal admission before raw crypto',
+  async (boundary) => {
+    const f = await fixture()
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const read = f.access.read
+    const mutate = f.access.mutate
+    const open = f.access.open
+    let retainedKey: Uint8Array | undefined
+    const pause = async () => {
+      entered.resolve()
+      await release.promise
+    }
+    f.access.read = async (fn) => {
+      if (boundary === 'sealEntries' || boundary === 'openEntries') {
+        const value = await read(fn)
+        if (value instanceof Uint8Array) retainedKey = value
+        else if (
+          typeof value === 'object' &&
+          value !== null &&
+          'key' in value &&
+          value.key instanceof Uint8Array
+        )
+          retainedKey = value.key
+        await pause()
+        return value
+      }
+      await pause()
+      return read(fn)
+    }
+    f.access.mutate = async (...args) => {
+      await pause()
+      return mutate(...args)
+    }
+    f.access.open = async (...args) => {
+      await pause()
+      return open(...args)
+    }
+    const work = Promise.resolve().then(() => f.run(boundary))
+    const result = work.catch((error: unknown) => error)
+    await entered.promise
+    f.hold('terminal')
+    release.resolve()
+    expect(await result).toMatchObject({ name: 'PeerRemovedError' })
+    if (boundary === 'sealEntries' || boundary === 'openEntries')
+      expect(retainedKey).toEqual(new Uint8Array(32))
+    if (boundary !== 'sealEntries' && boundary !== 'openEntries') f.assertUnused()
+  },
+)
+
+test('durable unwrap preserves terminal refusal raised by access', async () => {
+  const f = await fixture()
+  const removed = new PeerRemovedError()
+  f.failAccess(removed)
+  await expect(f.crypto.unwrap(bytes, { frame })).rejects.toBe(removed)
+  f.assertUnused()
+})
 
 test('ordinary lapsed control entry reads remain available', async () => {
   const f = await fixture()

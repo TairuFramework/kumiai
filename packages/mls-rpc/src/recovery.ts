@@ -122,10 +122,11 @@ export async function authenticateRecoveryReply(
 export async function inspectRecoveryCapture(params: {
   source: RegistryRecoverySource
   reply: CapturedRecapture
-  environment: RecoveryEnvironment
+  environment: RecoveryEnvironment & { assertNotTerminal?: () => void }
 }): Promise<{ groupID: string; epoch: number; authenticator: Uint8Array } | null> {
   const source = copyRecoverySource(validateRecoverySource(params.source))
   const { reply, environment } = params
+  environment.assertNotTerminal?.()
   const verified = await authenticateRecoveryReply({
     trust: source.trust,
     sealed: reply.sealed,
@@ -137,6 +138,7 @@ export async function inspectRecoveryCapture(params: {
   let controller = source.trust.binding ?? undefined
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
+      environment.assertNotTerminal?.()
       const facts = await inspectRecoveryGroupInfo({
         groupInfo: verified.groupInfo,
         identity: environment.identity,
@@ -206,6 +208,7 @@ export type RecoveryBinding = (request: RecoveryBindingRequest) => Promise<Contr
 export type RecoveryReply = { groupInfo: Uint8Array; ledger: Array<string>; signer: string }
 
 export type VerdictJudgeParams = {
+  assertNotTerminal?: () => void
   group: GroupHandle
   sourceTree: ClientState['ratchetTree']
   known: DeviceRegistry
@@ -443,9 +446,16 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
         throw new RecoveryCandidateError('Pending recovery already bound to another commit')
       tuple ??= { position, commitDigest }
+      params.assertNotTerminal?.()
       const key = await confirmationKey(group, position, commitDigest)
-      tuple.tag = confirmationTag(key, requestID)
-      return key
+      try {
+        params.assertNotTerminal?.()
+        tuple.tag = confirmationTag(key, requestID)
+        return key
+      } catch (error) {
+        key.fill(0)
+        throw error
+      }
     },
     verdictRefusal,
     judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory' {
@@ -461,6 +471,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
 }
 
 export type CapturedRecoveryEnvironment = RecoveryEnvironment & {
+  assertNotTerminal?: () => void
   denySend?: boolean
   accept: RecoveryAdoptionDependencies['accept']
 }
@@ -572,6 +583,7 @@ async function capturedPending(
   const key = requestKey.slice()
   let group: GroupHandle
   try {
+    environment.assertNotTerminal?.()
     group = restrictCommitAuthoring(
       await restoreGroup({
         state: snapshot.state,
@@ -590,6 +602,7 @@ async function capturedPending(
   let judge: ReturnType<typeof createVerdictJudge>
   try {
     judge = createVerdictJudge({
+      assertNotTerminal: environment.assertNotTerminal,
       group,
       sourceTree: snapshot.sourceTree,
       known: snapshot.knownRegistry,
@@ -624,11 +637,13 @@ async function capturedPending(
     markBindingUnusable: () => binding.markCandidateBindingUnusable(group),
     confirmationKey: judge.confirmationKey,
     judgeVerdict: judge.judgeVerdict,
-    serialize: () =>
-      encodeCapturedRecoveryCandidate(
+    serialize: () => {
+      environment.assertNotTerminal?.()
+      return encodeCapturedRecoveryCandidate(
         { ...snapshot, source, target, state: group.state, boundCommit: judge.boundCommit() },
         key,
-      ),
+      )
+    },
     async onAccepted(expected, proof, write) {
       const narrowed = validateRecoverySource(expected as RegistryRecoverySource)
       if (!sameOrigin(source, narrowed) || typeof write !== 'function')
@@ -653,6 +668,7 @@ export async function buildRecoveryCandidate(params: {
     throw new TypeError('Invalid recovery target')
   const sealed = params.sealed.slice()
   const requestKey = params.requestKey.slice()
+  environment.assertNotTerminal?.()
   const reply = await authenticateRecoveryReply({
     trust: source.trust,
     sealed,
@@ -664,8 +680,9 @@ export async function buildRecoveryCandidate(params: {
   const info = decode(mlsMessageDecoder, reply.groupInfo)
   if (info?.wireformat !== wireformats.mls_group_info) return null
   let controller = source.trust.binding ?? undefined
-  const build = () =>
-    joinGroupExternal({
+  const build = () => {
+    environment.assertNotTerminal?.()
+    return joinGroupExternal({
       identity: environment.identity,
       credential: source.trust.credential,
       groupInfo: reply.groupInfo,
@@ -689,6 +706,7 @@ export async function buildRecoveryCandidate(params: {
       if (environment.denySend) denyApplicationSend(result.group)
       return { ...result, group: restrictCommitAuthoring(result.group) }
     })
+  }
   let result: Awaited<ReturnType<typeof build>>
   try {
     result = await build()
@@ -762,6 +780,7 @@ export async function restoreRecoveryCandidate(params: {
     throw new RecoveryCandidateError('Invalid saved recovery source', { cause })
   }
   assertOwner(source, params.environment)
+  params.environment.assertNotTerminal?.()
   const snapshot = decodeCapturedRecoveryCandidate(params.candidate, params.requestKey)
   if (!sameOrigin(source, snapshot.source))
     throw new RecoveryCandidateError('Captured recovery origin mismatch')
@@ -780,6 +799,7 @@ export async function reconcileRecoveryCapture(params: {
   const { record, reply, environment } = params
   const source = validateRecoverySource(params.source)
   assertOwner(source, environment)
+  environment.assertNotTerminal?.()
   validateCapturedRecoveryRecord(record)
   const snapshot = decodeCapturedRecoveryCandidate(record.candidate, record.requestKey)
   if (
@@ -788,6 +808,7 @@ export async function reconcileRecoveryCapture(params: {
   )
     throw new TypeError('Captured recovery origin or target mismatch')
   await authenticateSnapshot(snapshot, record.requestKey, environment)
+  environment.assertNotTerminal?.()
   const recaptured = await authenticateRecoveryReply({
     trust: snapshot.source.trust,
     sealed: reply.sealed,
