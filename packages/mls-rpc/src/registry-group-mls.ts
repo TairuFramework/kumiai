@@ -321,8 +321,14 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       ),
   }
   if (readableSource && manualRecovery === undefined) {
-    const selected = registryControlBatch(await access())
-    if (selected !== undefined) bindRegistryControlBatch(lazy, selected)
+    bindRegistryControlBatch(lazy, {
+      key: { ...key },
+      async run(input) {
+        const selected = registryControlBatch(await access())
+        if (selected === undefined) throw new TypeError('Missing registry control batch')
+        return await selected.run(input)
+      },
+    })
   }
   const control =
     manualRecovery === undefined

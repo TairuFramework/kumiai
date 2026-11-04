@@ -6,7 +6,7 @@ import type { AnchorSlot } from './anchor.js'
 import { RETAINED_EPOCHS_MAX } from './app-frame.js'
 import type { BufferedControlPage } from './buffered-control.js'
 import { classifyCommit, digestAppliedCommit } from './classify.js'
-import { decodeCommitFrame } from './commit-frame.js'
+import { decodeCommitFrame, isUnsupportedCommitFrameVersion } from './commit-frame.js'
 import { appliedRows } from './control/forks.js'
 import { controlSafetyHeld } from './control/safety.js'
 import { consumeOwnOccurrence } from './control/slot.js'
@@ -131,7 +131,16 @@ export async function prepareControlOccurrence(params: {
     }
     if (frame.kind !== HANDSHAKE_KIND.commit) return skip()
     commitFrame = decodeCommitFrame(frame.payload)
-  } catch {
+  } catch (error) {
+    if (isUnsupportedCommitFrameVersion(error))
+      diagnostic = {
+        position,
+        commitDigest: null,
+        localEpoch: epoch,
+        claimedEpoch: null,
+        kind: 'unknown-version',
+        confidence: 'claimed',
+      }
     return skip()
   }
   let header: Awaited<ReturnType<ReadyControlScope['readCommitHeader']>>
@@ -294,6 +303,15 @@ export async function prepareControlOccurrence(params: {
         error instanceof LedgerEntryRefusedError ||
         isMissingLedgerEntries(error)
       ) {
+        if (error instanceof UnsupportedLedgerEntriesVersionError)
+          diagnostic = {
+            position,
+            commitDigest: digest,
+            localEpoch: epoch,
+            claimedEpoch: header?.epoch ?? null,
+            kind: 'unknown-version',
+            confidence: 'claimed',
+          }
         if (originalAnchor !== null) scope.stageAnchor(originalAnchor)
         return skip(header?.epoch)
       }

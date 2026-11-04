@@ -29,6 +29,23 @@ function makePeer(hub: FakeHub, localDID: string, handlers: Record<string, unkno
 }
 
 describe('createGroupPeer', () => {
+  test.each(['legacy', 'at-least-once', 'transactional'] as const)(
+    'retained %s handlers reject construction without atomic pending storage',
+    (mode) => {
+      const handle = async () => {}
+      expect(() =>
+        createGroupPeer({
+          completion: createTestCompletion(),
+          hub: new FakeHub(),
+          crypto: createFakeCrypto({ epoch: 1, localDID: 'alice' }),
+          localDID: 'alice',
+          protocols: { chat: { posted: { type: 'event', retain: 'log' } } },
+          handlers: { chat: { posted: mode === 'legacy' ? handle : { mode, handle } } },
+        }),
+      ).toThrow('Retained handlers require atomic pending storage')
+    },
+  )
+
   test('bus event reaches all subscribed members with the sender', async () => {
     const hub = new FakeHub()
     const seen: Array<{ data: unknown; from?: string }> = []

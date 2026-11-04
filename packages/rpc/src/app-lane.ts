@@ -500,7 +500,7 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     }
     coverage = next
   }
-  const coverageBinding = bindAppCompletionCoverage(params.completion, {
+  let coverageBinding = bindAppCompletionCoverage(params.completion, {
     // Completion may own the group gate. Capture must never wait for the app mutex.
     capture: () =>
       [...coverage.values()].map((item) => ({
@@ -1775,6 +1775,8 @@ export function createAppLane<TTx extends GroupTransaction = GroupTransaction>(
     },
     dispose: (): void => {
       disposed = true
+      coverageBinding?.unbind()
+      coverageBinding = undefined
       cancelBusyRetry?.()
       cancelBusyRetry = undefined
       busyTopics.clear()

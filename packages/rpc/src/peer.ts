@@ -379,6 +379,18 @@ export function createGroupPeerWithControlWalk<
     throw new TypeError('Installed recovery continuation required')
   if (input.crypto.pending != null && input.mls == null)
     throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
+  if (input.crypto.pending == null) {
+    for (const [name, protocol] of Object.entries(input.protocols)) {
+      for (const [procedure, definition] of Object.entries(protocol)) {
+        if (
+          definition.type === 'event' &&
+          definition.retain === 'log' &&
+          input.handlers[name]?.[procedure] != null
+        )
+          throw new TypeError('Retained handlers require atomic pending storage')
+      }
+    }
+  }
   const completion = input.completion
   const originalBatch = appBatch(input.crypto)
   const batch = originalBatch === undefined ? undefined : terminalPort(originalBatch)
@@ -3093,6 +3105,9 @@ export function createGroupPeerWithControlWalk<
     }
     const epochBefore = appliedEpoch
     const generation = controlGeneration
+    const workVersion = commitWorkVersion
+    const started = logDelivery?.beginWalk() ?? 0
+    await logDelivery?.readyWalk(started)
     // Explicit reconciliation waits outside ownership; ingress only advertises readiness.
     await fetchBufferedControl()
     while (!disposed && generation === controlGeneration) {
@@ -3105,6 +3120,20 @@ export function createGroupPeerWithControlWalk<
       if (controlFetch !== undefined) await controlFetch
       else if (controlFetchNeeded) await fetchBufferedControl()
     }
+    if (
+      !disposed &&
+      !removalCommitted() &&
+      safetyHold() === null &&
+      !stranded &&
+      !hardControlHeld() &&
+      generation === controlGeneration &&
+      workVersion === commitWorkVersion &&
+      bufferedControl.next() === undefined &&
+      commitLaneCaughtUp &&
+      reconciledHead === commitLogHead &&
+      floor.covered
+    )
+      await logDelivery?.certify(floor.epoch, started)
     return appliedEpoch !== epochBefore
   }
   function requestBufferedControl(): void {

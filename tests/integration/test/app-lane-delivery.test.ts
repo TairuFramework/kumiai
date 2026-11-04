@@ -18,6 +18,7 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createRealGroup } from '../../../packages/mls-rpc/test/fixtures/real-group.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -32,6 +33,64 @@ import {
   restoreMemberHandle,
 } from './app-lane-e2e.js'
 import { createWireHub } from './log-hub-over-wire.js'
+
+test('an ambiguous open save retains plaintext with the consumed MLS key across restart', async () => {
+  const group = await createRealGroup(1, 'ambiguous-member-open')
+  const local = group.members[0]
+  if (local === undefined) throw new Error('Missing local member')
+  const hub = createWireHub()
+  const member = makeMember({
+    hub,
+    identity: local.identity,
+    group: local.handle,
+    entrySlot: local.slot,
+  })
+  let restarted: Member | undefined
+  try {
+    await member.peer.replay()
+    const anchor = member.anchorStore.stored()
+    if (anchor === null) throw new Error('Missing anchor')
+    const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+    const aad = encodeAppAAD({ topicID, intent: 'log' })
+    const sealed = await group.committer.handle.encrypt(
+      encodeEventFrame('chat/posted', { saved: true }),
+      { aad },
+    )
+    const frame = {
+      ...member.control.key,
+      id: 'ambiguous-open',
+      topicID,
+      protocol: 'chat',
+      segment: anchor.epoch,
+      position: '000000000001',
+    }
+    member.stateStore.database.commitThenRejectNext('save')
+    await Promise.resolve(member.crypto.unwrap(sealed, { expectedAAD: aad, frame })).catch(() => {})
+    expect(await member.crypto.pending?.list()).toHaveLength(1)
+    await member.peer.dispose()
+    await member.disconnect()
+    const seen: Array<unknown> = []
+    restarted = makeMember({
+      hub,
+      identity: local.identity,
+      group: await restoreMemberHandle(member, local.slot),
+      entrySlot: local.slot,
+      restartOf: member,
+      handlers: {
+        'chat/posted': async (event: { data: unknown }) => {
+          seen.push(event.data)
+        },
+      },
+    })
+    await restarted.peer.replay()
+    await vi.waitFor(() => expect(seen).toEqual([{ saved: true }]))
+    await vi.waitFor(async () => expect(await restarted?.crypto.pending?.list()).toEqual([]))
+  } finally {
+    await restarted?.peer.dispose()
+    await member.peer.dispose()
+    await hub.dispose()
+  }
+})
 
 const flush = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -236,8 +295,8 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       await vi.waitFor(() => expect(seen).toEqual([{ text: 'epoch one' }, { text: 'epoch four' }]))
       expect(bob.handle().epoch).toBe(4n)
       const result = await observer.fetchTopic({ subscriberDID: observerID.id, topicID })
-      await vi.waitFor(() =>
-        expect(bob.appCursorStore.stored(topicID)).toBe(result.messages.at(-1)?.sequenceID),
+      await vi.waitFor(async () =>
+        expect(await bob.appCursorStore.stored(topicID)).toBe(result.messages.at(-1)?.sequenceID),
       )
     } finally {
       await alice.peer.dispose()
@@ -284,9 +343,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
         payload: sealed,
         retain: 'log',
       })
-      await vi.waitFor(() => expect(member.appCursorStore.stored(topicID)).toBe(sent.sequenceID))
+      await vi.waitFor(async () =>
+        expect(await member.appCursorStore.stored(topicID)).toBe(sent.sequenceID),
+      )
       expect(opens).not.toHaveBeenCalled()
-      expect(member.pendingStore?.size).toBe(0)
+      expect((await member.crypto.pending?.list())?.length).toBe(0)
       expect(seen).not.toHaveBeenCalled()
       expect((await member.control.load()).controlHold).toBeNull()
       expect((await member.control.load()).forkHalt).toBeNull()
@@ -882,7 +943,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // It died partway: the first frame reached the host and the walk did not finish.
     expect(seen).toEqual([{ text: 'at epoch one' }])
     expect(bob.handle().epoch).toBe(2n)
-    expect(bob.pendingStore?.size).toBeGreaterThanOrEqual(1)
+    expect((await bob.crypto.pending?.list())?.length).toBeGreaterThanOrEqual(1)
 
     const restoredHandle = await restoreMemberHandle(bob, bobSlot)
     expect(restoredHandle.epoch).toBe(2n)
@@ -919,7 +980,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       { text: 'at epoch 2' },
       { text: 'at epoch 3' },
     ])
-    expect(bob.pendingStore?.size).toBe(0)
+    expect((await bob.crypto.pending?.list())?.length).toBe(0)
 
     await alice.peer.dispose()
     await bob.peer.dispose()

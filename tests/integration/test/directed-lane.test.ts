@@ -97,7 +97,7 @@ describe('directed RPC over real MLS, end to end', () => {
     const reply = await client.request('chat/double', { param: { n: 21 } })
     expect(reply).toEqual({ n: 42 })
     expect(calls).toEqual([21])
-    expect(bob.pendingStore?.size ?? 0).toBe(0)
+    expect((await bob.crypto.pending?.list())?.length ?? 0).toBe(0)
     expect(await bob.appOutbox.list()).toEqual(before)
 
     await alice.peer.dispose()

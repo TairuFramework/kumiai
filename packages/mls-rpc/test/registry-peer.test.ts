@@ -215,7 +215,7 @@ test('an ordinary registry peer receives a private rotation producer that stops 
     })
     f.created[0]?.options.internalOperations?.bind({ enqueue: async () => {} })
     await new Promise<void>((resolve) => setTimeout(resolve, 10))
-    expect(access).toHaveBeenCalledExactlyOnceWith(groupID)
+    expect(access).not.toHaveBeenCalled()
   } finally {
     owner.dispose()
     await owner.drained()

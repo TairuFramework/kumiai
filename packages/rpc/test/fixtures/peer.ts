@@ -362,7 +362,12 @@ export function makeMLSPeer(
     ...(options.onSubscribeFailed != null ? { onSubscribeFailed: options.onSubscribeFailed } : {}),
     localDID,
     protocols: { chat },
-    handlers: { chat: { 'chat/posted': async () => {}, ...options.handlers } } as never,
+    handlers: {
+      chat: {
+        ...(crypto.pending == null ? {} : { 'chat/posted': async () => {} }),
+        ...options.handlers,
+      },
+    } as never,
     ...(options.operationTimeoutMs != null
       ? { operationTimeoutMs: options.operationTimeoutMs }
       : {}),

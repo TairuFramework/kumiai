@@ -1,7 +1,7 @@
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
 import type { LogHub } from '@kumiai/hub-tunnel'
-import { createGroup, type GroupHandle } from '@kumiai/mls'
+import { createGroup, encodeClientState, type GroupHandle } from '@kumiai/mls'
 import {
   type AnchorStore,
   appFrameIdempotencyKey,
@@ -22,12 +22,11 @@ import { orderedCoverage } from './fixtures/handler-completion.js'
 type TestHub = { connect(identity: OwnIdentity): LogHub; dispose(): Promise<void> }
 type TestMember = {
   crypto: GroupCrypto
-  pendingStore?: Map<string, PendingAppFrame>
   peer: Pick<GroupPeer<Record<string, never>>, 'replay' | 'dispose'>
   anchorStore: AnchorStore
-  appCursorStore: { stored(topicID: string): string | null }
+  appCursorStore: { stored(topicID: string): Promise<string | null> }
 }
-const { makeMember, createMemoryAppCursorStore } = (await import(
+const { makeMember, createMemoryStateStore } = (await import(
   new URL('../../../tests/integration/test/app-lane-e2e.ts', import.meta.url).href
 )) as {
   makeMember(params: {
@@ -37,17 +36,28 @@ const { makeMember, createMemoryAppCursorStore } = (await import(
     entrySlot: LedgerEntrySlot
     durablePending?: boolean
   }): TestMember
-  createMemoryAppCursorStore(): {
-    stored(topicID: string): string | null
-    completion(
-      key: { groupID: string; incarnation: number },
-      pending: Map<string, PendingAppFrame>,
-    ): HandlerCompletion<GroupTransaction>
-  }
+  createMemoryStateStore(key: { groupID: string; incarnation: number }): unknown
 }
 const { createWireHub } = (await import(
   new URL('../../../tests/integration/test/log-hub-over-wire.ts', import.meta.url).href
 )) as { createWireHub(): TestHub }
+
+const { createMemberPersistence } = (await import(
+  new URL('../../../tests/integration/test/member-persistence.ts', import.meta.url).href
+)) as {
+  createMemberPersistence(
+    base: unknown,
+    handle: GroupHandle,
+    ledger: () => Array<string>,
+  ): {
+    completion: HandlerCompletion<GroupTransaction>
+    cursor: { stored(topicID: string): Promise<string | null> }
+    pending: {
+      persistOpened(state: Uint8Array, record: PendingAppFrame): Promise<void>
+      list(): Promise<Array<PendingAppFrame>>
+    }
+  }
+}
 
 test('member fixture supplies saved-frame delivery for retained handlers by default', async () => {
   const hub = createWireHub()
@@ -59,7 +69,7 @@ test('member fixture supplies saved-frame delivery for retained handlers by defa
   const member = makeMember({ hub, identity, group, entrySlot: slot })
   try {
     expect(member.crypto.pending).toBeDefined()
-    expect(member.pendingStore).toBeDefined()
+    expect(await member.crypto.pending?.list()).toEqual([])
   } finally {
     await member.peer.dispose()
     await hub.dispose()
@@ -93,8 +103,10 @@ test('member fixture proves a fetched dead prefix into its durable cursor', asyn
       payload,
       retain: 'log',
     })
-    await vi.waitFor(() => expect(member.appCursorStore.stored(topicID)).toBe(sent.sequenceID))
-    expect(member.pendingStore?.size).toBe(0)
+    await vi.waitFor(async () =>
+      expect(await member.appCursorStore.stored(topicID)).toBe(sent.sequenceID),
+    )
+    expect(await member.crypto.pending?.list()).toEqual([])
   } finally {
     await member.peer.dispose()
     await hub.dispose()
@@ -103,7 +115,13 @@ test('member fixture proves a fetched dead prefix into its durable cursor', asyn
 
 test('fixture completion preserves the cursor behind a held predecessor', async () => {
   const key = { groupID: 'fixture-held-prefix', incarnation: 1 }
-  const cursor = createMemoryAppCursorStore()
+  const { group } = await createGroup(randomIdentity(), key.groupID)
+  const storage = createMemberPersistence(
+    createMemoryStateStore(key),
+    group,
+    () => group.ledgerTokens,
+  )
+  const cursor = storage.cursor
   const frame = {
     ...key,
     id: 'later',
@@ -120,16 +138,16 @@ test('fixture completion preserves the cursor behind a held predecessor', async 
     senderDID: randomIdentity().id,
     idempotencyKey: appFrameIdempotencyKey(frame),
   }
-  const pending = new Map([[frame.id, record]])
-  const completion = cursor.completion(key, pending)
+  await storage.pending.persistOpened(encodeClientState(group.state), record)
+  const completion = storage.completion
   const coverage = orderedCoverage([{ frame: { ...frame, id: 'held', position: '1' } }, record])
   const binding = bindAppCompletionCoverage(completion, coverage.source)
   if (binding === undefined) throw new Error('Missing fixture completion coverage')
   try {
     await completion.complete(['later'])
     await binding.advance()
-    expect(pending.size).toBe(0)
-    expect(cursor.stored('chat')).toBeNull()
+    expect(await storage.pending.list()).toEqual([])
+    expect(await cursor.stored('chat')).toBeNull()
   } finally {
     binding.unbind()
   }
@@ -137,8 +155,14 @@ test('fixture completion preserves the cursor behind a held predecessor', async 
 
 test('fixture completion ignores unknown IDs without writing a cursor', async () => {
   const key = { groupID: 'fixture-unknown-completion', incarnation: 1 }
-  const cursor = createMemoryAppCursorStore()
-  const completion = cursor.completion(key, new Map())
+  const { group } = await createGroup(randomIdentity(), key.groupID)
+  const storage = createMemberPersistence(
+    createMemoryStateStore(key),
+    group,
+    () => group.ledgerTokens,
+  )
+  const cursor = storage.cursor
+  const completion = storage.completion
   const coverage = orderedCoverage(
     [
       {
@@ -151,9 +175,9 @@ test('fixture completion ignores unknown IDs without writing a cursor', async ()
   if (binding === undefined) throw new Error('Missing fixture completion coverage')
   try {
     await completion.complete(['missing'])
-    expect(cursor.stored('chat')).toBeNull()
+    expect(await cursor.stored('chat')).toBeNull()
     await binding.advance()
-    expect(cursor.stored('chat')).toBe('1')
+    expect(await cursor.stored('chat')).toBe('1')
   } finally {
     binding.unbind()
   }

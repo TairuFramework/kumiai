@@ -457,7 +457,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (temperature === 'cold') {
           await foreignWithoutRefresh(fixture, 'proposal')
           expect(slot(fixture).base).toBeNull()
-        } else if (temperature === 'reopened') await fixture.reopen()
+        } else if (temperature === 'reopened') {
+          await expect(fixture.reopen()).rejects.toMatchObject({ name: 'PeerRemovedError' })
+          return
+        }
         await expect(fixture.openEphemeral([input])).rejects.toMatchObject({
           name: 'GroupUnavailableError',
         })

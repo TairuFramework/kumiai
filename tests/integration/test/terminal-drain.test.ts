@@ -122,7 +122,7 @@ test('terminal restart retains the outbox until real MLS plaintext delivery comp
       position: '000000000001',
     }
     await bob.crypto.unwrap(sealed, { expectedAAD: aad, frame })
-    expect(bob.pendingStore?.size).toBe(1)
+    expect((await bob.crypto.pending?.list())?.length).toBe(1)
     bob.stateStore.database.seam('after-save', () => {
       void bob.peer.dispose()
     })
@@ -169,10 +169,10 @@ test('terminal restart retains the outbox until real MLS plaintext delivery comp
     await vi.waitFor(() => expect(seen).toEqual([{ text: 'opened before removal' }]))
     await new Promise((resolve) => setTimeout(resolve, 25))
     expect(await again.appOutbox.list()).toEqual(retained)
-    expect(again.pendingStore?.size).toBe(1)
+    expect((await again.crypto.pending?.list())?.length).toBe(1)
     handler.resolve()
     await vi.waitFor(async () => expect(await again?.appOutbox.list()).toEqual([]))
-    expect(again.pendingStore?.size).toBe(0)
+    expect((await again.crypto.pending?.list())?.length).toBe(0)
     for (const call of cryptoCalls) expect(call).not.toHaveBeenCalled()
   } finally {
     handler.resolve()

@@ -726,6 +726,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       {
         ...environment,
         restore: async (record) => {
+          if (record.terminal) throw new PeerRemovedError()
           const current = slot.owner
           if (current?.key.incarnation === record.incarnation)
             assertNotTerminal({ admission: () => current.admission })

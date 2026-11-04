@@ -998,8 +998,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             )
           },
         )
-        const access = await s.owner.access(groupID)
-        expect(access.admission()).toMatchObject({ admissible: false, reason: 'terminal' })
+        await expect(s.owner.access(groupID)).rejects.toMatchObject({ name: 'PeerRemovedError' })
         expect((await groups.readEvidence(destination)).terminal).toBe(true)
         expect((await groups.readEvidence(destination)).applied).toHaveLength(1)
       } finally {

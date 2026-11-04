@@ -214,7 +214,9 @@ test('ephemeral handlers never invoke completion', async () => {
     tx: {},
   } as never)
   await requestHandlers.ask?.({}, { epoch: 7, frame: {}, tx: {} } as never)
-  await events.emit('posted', { data: {}, epoch: 7 } as never)
+  await expect(events.emit('posted', { data: {}, epoch: 7 } as never)).rejects.toThrow(
+    'Retained handler requires a saved frame',
+  )
   expect(handler).toHaveBeenCalledTimes(2)
   for (const context of contexts)
     for (const field of ['frame', 'idempotencyKey', 'tx']) expect(context).not.toHaveProperty(field)

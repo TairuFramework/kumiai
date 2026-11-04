@@ -223,8 +223,8 @@ export function adaptBusHandlers<
           await invoke(event)
           return
         }
-        // A frame-less bus event cannot invoke a retained policy.
-        if (event.frame === undefined) return
+        if (event.frame === undefined)
+          throw new TypeError('Retained handler requires a saved frame')
         if (
           event.frame.groupID !== completion.key.groupID ||
           event.frame.incarnation !== completion.key.incarnation ||
