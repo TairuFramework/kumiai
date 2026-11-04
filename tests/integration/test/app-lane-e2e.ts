@@ -42,6 +42,8 @@ import type {
   Anchor,
   AnchorSlot,
   AnchorStore,
+  AppCompletionCoverage,
+  AppCompletionCoverageSource,
   AppCursorStore,
   AppOutbox,
   AppOutboxEntry,
@@ -54,6 +56,8 @@ import type {
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
+  GroupTransaction,
+  HandlerCompletion,
   HostBuilt,
   Operation,
   OperationRequest,
@@ -76,6 +80,7 @@ import {
   HANDSHAKE_KIND,
   OperationRejectedError,
   protocolTopic,
+  registerAppCompletionCoverage,
 } from '@kumiai/rpc'
 import { createGroupPeerWithControlWalk } from '@kumiai/rpc/testing'
 import type { CommitOnceEvidence, CommitOnceScenario } from '@kumiai/rpc-conformance'
@@ -139,6 +144,10 @@ export function createMemoryAnchorStore(
 
 export function createMemoryAppCursorStore(): AppCursorStore & {
   stored: (topicID: string) => string | null
+  completion(
+    key: GroupKey,
+    pending?: Map<string, PendingAppFrame>,
+  ): HandlerCompletion<GroupTransaction>
 } {
   const positions = new Map<string, string>()
   return {
@@ -153,6 +162,75 @@ export function createMemoryAppCursorStore(): AppCursorStore & {
       positions.set(topicID, position)
     },
     stored: (topicID) => positions.get(topicID) ?? null,
+    completion(key, pending) {
+      if (pending === undefined) return createTestCompletion(key)
+      const sources = new Set<AppCompletionCoverageSource>()
+      const settle = async (ids: Array<string>, advance = false): Promise<void> => {
+        const completed = [...new Set(ids)].filter((id) => pending.has(id))
+        if (completed.length === 0 && !advance) return
+        for (const id of completed) {
+          const frame = pending.get(id)?.frame
+          if (frame?.groupID !== key.groupID || frame.incarnation !== key.incarnation)
+            throw new Error('Completion key mismatch')
+        }
+        const proofs = [...sources].map((source) => {
+          const consumed: Array<AppCompletionCoverage> = []
+          for (const coverage of source.capture(completed)) {
+            if (coverage.through === null) continue
+            if (
+              !source.current(coverage) ||
+              coverage.key.groupID !== key.groupID ||
+              coverage.key.incarnation !== key.incarnation ||
+              (positions.get(coverage.topicID) ?? null) !== coverage.previous
+            )
+              throw new Error('Completion coverage moved')
+            const prefix: AppCompletionCoverage['prefix'] = []
+            let previous = coverage.previous
+            for (const member of coverage.prefix) {
+              const frame = member.frame
+              const saved = pending.get(frame.id)
+              if (
+                frame.groupID !== key.groupID ||
+                frame.incarnation !== key.incarnation ||
+                frame.topicID !== coverage.topicID ||
+                (previous !== null && frame.position <= previous) ||
+                (member.state === 'pending' && !completed.includes(frame.id)) ||
+                (member.state === 'dead' && saved !== undefined) ||
+                (member.state === 'completed' &&
+                  saved !== undefined &&
+                  !completed.includes(frame.id)) ||
+                (saved !== undefined &&
+                  (saved.frame.topicID !== frame.topicID ||
+                    saved.frame.position !== frame.position ||
+                    saved.frame.segment !== frame.segment ||
+                    saved.frame.protocol !== frame.protocol))
+              )
+                break
+              prefix.push(member)
+              previous = frame.position
+              if (frame.position === coverage.through) break
+            }
+            if (prefix.length !== 0) consumed.push({ ...coverage, prefix, through: previous })
+          }
+          return { source, consumed }
+        })
+        // These fixture maps commit together, without a suspension between row and cursor writes.
+        for (const id of completed) pending.delete(id)
+        for (const { consumed } of proofs)
+          for (const proof of consumed)
+            if (proof.through !== null) positions.set(proof.topicID, proof.through)
+        for (const { source, consumed } of proofs) source.committed(completed, consumed)
+      }
+      const completion = { ...createTestCompletion(key), complete: settle }
+      registerAppCompletionCoverage(completion, (source) => {
+        sources.add(source)
+        return {
+          advance: () => settle([], true),
+          unbind: () => sources.delete(source),
+        }
+      })
+      return completion
+    },
   }
 }
 
@@ -363,7 +441,7 @@ export function makeMember(params: MakeMemberParams): Member {
     restartOf?.anchorStore ?? createMemoryAnchorStore(stateStore.database.anchorStore('state'))
   const pendingStore =
     restartOf?.pendingStore ??
-    (params.durablePending ? new Map<string, PendingAppFrame>() : undefined)
+    (params.durablePending !== false ? new Map<string, PendingAppFrame>() : undefined)
 
   const getHandle = () => handle
   const adoptHandle = async (next: GroupHandle) => {
@@ -527,7 +605,7 @@ export function makeMember(params: MakeMemberParams): Member {
     return result
   }
   const { peer, controlWalk } = createGroupPeerWithControlWalk<Protocols>({
-    completion: createTestCompletion(stateStore.control.key, crypto.pending),
+    completion: appCursorStore.completion(stateStore.control.key, pendingStore),
     openedDeliveryContext,
     appOutboxLimit: 128,
     onRecovery: params.onRecovery,
