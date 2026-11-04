@@ -119,6 +119,9 @@ Phase 2.3d adds handler completion and batching:
 - **Breaking — rpc peers:** every peer requires `completion: HandlerCompletion<TTx>` bound to its exact
   `{ groupID, incarnation }`. The former recovery completion callback is renamed `recoveryCompletion`;
   it does not acknowledge application records. Hosts migrate by supplying both.
+- **Breaking — retained handlers:** registering any retained handler, plain functions included,
+  requires atomic `crypto.pending` storage; construction refuses it otherwise instead of dropping
+  events. Unsupported commit and ledger-entry versions now report `unknown-version`.
 
 Add shared handler-completion and batching conformance suites with production completion adapters in real-MLS and double fixtures.
 Preserve durable cursors when independent adapters have no ordered prefix proof.
