@@ -699,6 +699,7 @@ export async function buildRecoveryCandidate(params: {
         if (controller !== undefined) {
           if (capturedBindingState(environment).isBindingUnusable(controller))
             throw new LeafBindingError('floating-refused')
+          environment.assertNotTerminal?.()
           await assertRecoveryBinding({ group: before, identity: environment.identity, controller })
         }
       },
@@ -823,6 +824,7 @@ export async function reconcileRecoveryCapture(params: {
     source.trust.ciphersuiteName as CiphersuiteName,
     environment.options.cryptoProvider ?? nobleCryptoProvider,
   )
+  environment.assertNotTerminal?.()
   if (!(await verifyOfferedGroupInfo(snapshot.state, info, suite))) return { kind: 'retry' }
   const epoch = Number(info.groupInfo.groupContext.epoch)
   if (!Number.isSafeInteger(epoch)) return { kind: 'retry' }

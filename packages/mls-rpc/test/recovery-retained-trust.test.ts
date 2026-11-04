@@ -23,6 +23,7 @@ import { expect, test, vi } from 'vitest'
 import { createGroupMLS, groupHandleAccess } from '../src/mls.js'
 import * as recovery from '../src/recovery.js'
 import * as recoveryCodec from '../src/recovery-codec.js'
+import * as recoveryPublicState from '../src/recovery-public-state.js'
 import { forkCaptureTranscriptPermitted } from '../src/registry/recovery-coordinator.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createCapturedFormerMember } from './fixtures/captured-recovery.js'
@@ -328,6 +329,8 @@ test.each([
   { workflow: 'inspect', pause: 'entry', target: 'auth' },
   { workflow: 'reconcile', pause: 'entry', target: 'decode' },
   { workflow: 'reconcile', pause: 'auth', target: 'auth' },
+  { workflow: 'reconcile', pause: 'recapture-auth', target: 'verify' },
+  { workflow: 'reconcile', pause: 'ciphersuite', target: 'verify' },
 ])(
   'captured recovery refuses terminal $workflow $target after $pause',
   async ({ workflow, pause, target }) => {
@@ -350,10 +353,16 @@ test.each([
       entered.resolve()
       await release.promise
     }
+    let authentications = 0
+    let recaptureAuthenticated = false
     const authenticate = Mls.authenticateRecoveryReply
     const auth = vi.spyOn(Mls, 'authenticateRecoveryReply').mockImplementation(async (...args) => {
       count('auth')
       const result = await authenticate(...args)
+      if (++authentications === 2 && workflow === 'reconcile') {
+        recaptureAuthenticated = true
+        await hold('recapture-auth')
+      }
       await hold('auth')
       return result
     })
@@ -381,6 +390,13 @@ test.each([
       return result
     })
     const tag = vi.spyOn(Mls, 'confirmationTag')
+    const verifyGroupInfo = recoveryPublicState.verifyOfferedGroupInfo
+    const verify = vi
+      .spyOn(recoveryPublicState, 'verifyOfferedGroupInfo')
+      .mockImplementation((...args) => {
+        count('verify')
+        return verifyGroupInfo(...args)
+      })
     const decodeCandidate = recoveryCodec.decodeCapturedRecoveryCandidate
     const decode = vi
       .spyOn(recoveryCodec, 'decodeCapturedRecoveryCandidate')
@@ -402,6 +418,16 @@ test.each([
       })
     const environment = {
       ...s.environment,
+      options: {
+        ...s.environment.options,
+        cryptoProvider: {
+          async getCiphersuiteImpl(id: number) {
+            const suite = await Mls.nobleCryptoProvider.getCiphersuiteImpl(id)
+            if (recaptureAuthenticated) await hold('ciphersuite')
+            return suite
+          },
+        },
+      },
       assertNotTerminal: () => {
         if (terminal) throw new PeerRemovedError()
       },
@@ -457,11 +483,81 @@ test.each([
     } finally {
       release.resolve()
       await work
-      for (const spy of [auth, join, restore, confirmation, inspect, encode, decode, tag])
+      for (const spy of [auth, join, restore, confirmation, inspect, encode, decode, tag, verify])
         spy.mockRestore()
     }
   },
 )
+
+test('captured recovery refuses terminal binding authentication in the delayed join callback', async () => {
+  const { requester, responder, trust } = await createCapturedFormerMember(true)
+  const identity = requester.identity
+  const { recoveryTrustDigest } = await import('../src/recovery-trust-digest.js')
+  const requestID = 'delayed-binding'
+  const held = await recovery.createRecoveryRequestFromTrust({ trust, identity, requestID })
+  const sealed = await sealCapturedGroupInfo({
+    group: responder.handle,
+    identity: responder.identity,
+    request: new TextDecoder().decode(held.request),
+    captureHead: 'head',
+  })
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let terminal = false
+  const joinGroup = Mls.joinGroupExternal
+  const join = vi.spyOn(Mls, 'joinGroupExternal').mockImplementation(async (params) => {
+    return await joinGroup({
+      ...params,
+      beforeBinding: async (...args) => {
+        entered.resolve()
+        await release.promise
+        await params.beforeBinding?.(...args)
+      },
+    })
+  })
+  const binding = vi.spyOn(Mls, 'assertRecoveryBinding')
+  const work = recovery
+    .buildRecoveryCandidate({
+      source: {
+        key: { groupID: trust.groupID, incarnation: 1 },
+        stateVersion: 1,
+        lifetimeRevision: 1,
+        identity: null,
+        trust,
+        trustDigest: recoveryTrustDigest(trust),
+      },
+      sealed,
+      requestID,
+      requestKey: held.requestKey,
+      target: { targetID: 'hub', topicID: 'commits' },
+      environment: {
+        identity,
+        options: {},
+        accept: async () => {
+          throw new Error('Unexpected adoption')
+        },
+        assertNotTerminal: () => {
+          if (terminal) throw new PeerRemovedError()
+        },
+      },
+    })
+    .catch((error: unknown) => error)
+  try {
+    expect(await Promise.race([entered.promise.then(() => true), work.then(() => false)])).toBe(
+      true,
+    )
+    terminal = true
+    release.resolve()
+    const result = await work
+    expect(binding.mock.calls.length).toBe(0)
+    expect(result).toMatchObject({ name: 'PeerRemovedError' })
+  } finally {
+    release.resolve()
+    await work
+    binding.mockRestore()
+    join.mockRestore()
+  }
+})
 
 test.each(['request', 'verdict', 'absence', 'apply', 'decode', 'sign', 'join', 'restore'] as const)(
   'recovery adapter rechecks terminal admission after source awaits before %s',
