@@ -3987,6 +3987,8 @@ export function createGroupPeerWithControlWalk<
       },
       frame: async (built, seal) => {
         assertLive()
+        // A builder may resume after removal with its own seal, outside the crypto port.
+        if (removalCommitted()) throw new PeerRemovedError('Peer was removed')
         const { payload } = await frameCommit(built.commit, built.bodies, built.epoch, seal)
         return { payload, publishID: newPublishID(), expectedHead: commitLogHead }
       },

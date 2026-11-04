@@ -33,6 +33,7 @@ import type * as AppLaneModule from '../../rpc/lib/app-lane.js'
 import type * as BufferedControlModule from '../../rpc/lib/buffered-control.js'
 import type * as HostBoundaryModule from '../../rpc/lib/host-boundary.js'
 import type * as HubMuxModule from '../../rpc/lib/hub-mux.js'
+import { autoRotationRequest } from '../src/auto-rotation.js'
 import * as checkpoint from '../src/checkpoint.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
@@ -351,6 +352,13 @@ for (const mode of ['real-mls', 'double'] as const) {
             [true, false].map((restart) => ({ policy, restart, interruption: 'idle' })),
           )
           .concat(
+            (['at-least-once', 'transactional'] as const).map((policy) => ({
+              policy,
+              restart: false,
+              interruption: 'builder-continuation',
+            })),
+          )
+          .concat(
             [
               'replay-only',
               'separate-route',
@@ -380,6 +388,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             'separate-route',
             'preparation-timer',
             'control-continuation',
+            'builder-continuation',
             'startup-continuation',
             'ledger-request',
             'ledger-timer',
@@ -458,6 +467,10 @@ for (const mode of ['real-mls', 'double'] as const) {
           const startupEntered = Promise.withResolvers<void>()
           const releaseFetch = Promise.withResolvers<void>()
           const releaseLedger = Promise.withResolvers<void>()
+          const builderEntered = Promise.withResolvers<void>()
+          const releaseBuilder = Promise.withResolvers<void>()
+          const builderFinished = Promise.withResolvers<void>()
+          const builderSeal = vi.fn()
           let localMux: HubMuxModule.HubMux | undefined
           const inbound = new Map<string, Parameters<HubMuxModule.HubMux['onInbound']>[1]>()
           const muxModule = (await import(
@@ -499,7 +512,31 @@ for (const mode of ['real-mls', 'double'] as const) {
           const captureHost = vi
             .spyOn(hostModule, 'wrapPeerHost')
             .mockImplementation((boundary, input) => {
-              const params = wrapHost(boundary, input)
+              let hostInput = input
+              if (interruption === 'builder-continuation') {
+                const buildInput = input as GroupPeerParams<Record<string, GroupProtocolDefinition>>
+                const prepare = buildInput.prepareBuild
+                if (prepare === undefined) throw new Error('Missing builder')
+                const heldBuild: typeof prepare = async (op, frame) => {
+                  try {
+                    return await prepare(op, async (built, seal) => {
+                      builderEntered.resolve()
+                      await releaseBuilder.promise
+                      return frame(built, (...args) => {
+                        builderSeal()
+                        return seal(...args)
+                      })
+                    })
+                  } finally {
+                    builderFinished.resolve()
+                  }
+                }
+                hostInput = {
+                  ...buildInput,
+                  prepareBuild: heldBuild,
+                }
+              }
+              const params = wrapHost(boundary, hostInput)
               peerParams = params as typeof peerParams
               if (
                 interruption === 'startup-continuation' &&
@@ -669,6 +706,27 @@ for (const mode of ['real-mls', 'double'] as const) {
               })
             if (running !== undefined && separate) {
               if (!vi.isFakeTimers()) vi.useFakeTimers()
+              if (interruption === 'builder-continuation') {
+                const identity = (await fixture.device.groups.readEvidence(key)).source.identity
+                if (identity === null) throw new Error('Missing build source')
+                await fixture.device.groups.ports(key).control.apply(
+                  {
+                    putOperations: [
+                      {
+                        ...autoRotationRequest(identity),
+                        stage: 'intent',
+                        seq: 1,
+                        enqueuedAt: Date.now(),
+                        deadline: Date.now() + 30_000,
+                      },
+                    ],
+                  },
+                  crypto.randomUUID(),
+                )
+                await running.owner.peer()?.replay()
+                await vi.advanceTimersByTimeAsync(0)
+                await builderEntered.promise
+              }
               if (interruption === 'control-continuation') {
                 const binding = controlBatch(running.mls())
                 if (binding === undefined) throw new Error('Missing control binding')
@@ -899,6 +957,7 @@ for (const mode of ['real-mls', 'double'] as const) {
               expect(offered).not.toHaveBeenCalled()
               restoreNetwork?.()
             } else {
+              const operations = (await fixture.device.groups.ports(key).control.load()).operations
               const result = await route.run({
                 source: 'terminal-removal',
                 prepare: async (scope) => {
@@ -908,6 +967,13 @@ for (const mode of ['real-mls', 'double'] as const) {
                       mutationID: crypto.randomUUID(),
                       changes: {
                         commitOnce: null,
+                        deleteOperations: operations.map((op) => op.id),
+                        putOutcomes: operations.map((op) => ({
+                          id: op.id,
+                          opID: op.id,
+                          at: Date.now(),
+                          kind: 'unknown',
+                        })),
                         cursor: { position, epoch: staged.epochAfter },
                         putApplied: [
                           {
@@ -1028,6 +1094,11 @@ for (const mode of ['real-mls', 'double'] as const) {
               ledgerCheck.mockClear()
               ledgerSeal.mockClear()
               releaseLedger.resolve()
+              if (interruption === 'builder-continuation') {
+                releaseBuilder.resolve()
+                await builderFinished.promise
+                expect(builderSeal).not.toHaveBeenCalled()
+              }
               if (interruption === 'control-continuation') {
                 releaseControl.resolve()
                 await expect(removalReplay).resolves.toEqual({})
@@ -1240,6 +1311,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                 new Uint8Array([1]),
               )
           } finally {
+            releaseBuilder.resolve()
             releaseControl.resolve()
             releaseFetch.resolve()
             releaseLedger.resolve()
