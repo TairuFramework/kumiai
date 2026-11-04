@@ -48,7 +48,6 @@ const { createMemberPersistence } = (await import(
   createMemberPersistence(
     base: unknown,
     handle: GroupHandle,
-    ledger: () => Array<string>,
   ): {
     completion: HandlerCompletion<GroupTransaction>
     cursor: { stored(topicID: string): Promise<string | null> }
@@ -116,11 +115,7 @@ test('member fixture proves a fetched dead prefix into its durable cursor', asyn
 test('fixture completion preserves the cursor behind a held predecessor', async () => {
   const key = { groupID: 'fixture-held-prefix', incarnation: 1 }
   const { group } = await createGroup(randomIdentity(), key.groupID)
-  const storage = createMemberPersistence(
-    createMemoryStateStore(key),
-    group,
-    () => group.ledgerTokens,
-  )
+  const storage = createMemberPersistence(createMemoryStateStore(key), group)
   const cursor = storage.cursor
   const frame = {
     ...key,
@@ -156,11 +151,7 @@ test('fixture completion preserves the cursor behind a held predecessor', async 
 test('fixture completion ignores unknown IDs without writing a cursor', async () => {
   const key = { groupID: 'fixture-unknown-completion', incarnation: 1 }
   const { group } = await createGroup(randomIdentity(), key.groupID)
-  const storage = createMemberPersistence(
-    createMemoryStateStore(key),
-    group,
-    () => group.ledgerTokens,
-  )
+  const storage = createMemberPersistence(createMemoryStateStore(key), group)
   const cursor = storage.cursor
   const completion = storage.completion
   const coverage = orderedCoverage(

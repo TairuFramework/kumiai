@@ -19,6 +19,7 @@ import {
 
 import type { ControlHandleAccess, ControlReadScope } from './access.js'
 import { provenCheckpointFacts } from './checkpoint-store.js'
+import { registryControlEntryLabels } from './crypto.js'
 import type { AccountedGroupObservation, EntryReads } from './entry-capability.js'
 import { manualRecoveryAttempt } from './manual-recovery.js'
 import { sameStoredValue } from './memory-incarnation-stores.js'
@@ -321,14 +322,18 @@ export async function createRegistryGroupMLS(params: RegistryGroupMLSParams): Pr
       ),
   }
   if (readableSource && manualRecovery === undefined) {
-    bindRegistryControlBatch(lazy, {
+    const batch: NonNullable<ReturnType<typeof registryControlBatch>> = {
       key: { ...key },
       async run(input) {
         const selected = registryControlBatch(await access())
         if (selected === undefined) throw new TypeError('Missing registry control batch')
+        const label = registryControlEntryLabels.get(selected)
+        if (label === undefined) registryControlEntryLabels.delete(batch)
+        else registryControlEntryLabels.set(batch, label)
         return await selected.run(input)
       },
-    })
+    }
+    bindRegistryControlBatch(lazy, batch)
   }
   const control =
     manualRecovery === undefined

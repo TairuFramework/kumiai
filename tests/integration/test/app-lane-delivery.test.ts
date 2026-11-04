@@ -3,10 +3,12 @@ import { encodeEventFrame } from '@kumiai/broadcast'
 import {
   type ControllerBinding,
   commitInvite,
+  commitLedgerEntries,
   createGroup,
   createInvite,
   createKeyPackageBundle,
   processWelcome,
+  signLedgerEntry,
   verifyLedgerEntry,
 } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
@@ -33,6 +35,73 @@ import {
   restoreMemberHandle,
 } from './app-lane-e2e.js'
 import { createWireHub } from './log-hub-over-wire.js'
+
+test('a restarted member preserves newly adopted ledger bodies when opening durable app data', async () => {
+  const group = await createRealGroup(1, 'restarted-member-ledger')
+  const local = group.members[0]
+  if (local === undefined) throw new Error('Missing local member')
+  const hub = createWireHub()
+  const member = makeMember({
+    hub,
+    identity: local.identity,
+    group: local.handle,
+    entrySlot: local.slot,
+  })
+  let restarted: Member | undefined
+  try {
+    await member.peer.replay()
+    await member.peer.dispose()
+    await member.disconnect()
+    restarted = makeMember({
+      hub,
+      identity: local.identity,
+      group: await restoreMemberHandle(member, local.slot),
+      entrySlot: local.slot,
+      restartOf: member,
+    })
+    await restarted.peer.replay()
+    const token = await signLedgerEntry(group.committer.identity, {
+      type: 'note',
+      groupID: local.handle.groupID,
+      subject: local.identity.id,
+      value: 'after restart',
+    })
+    const committed = await commitLedgerEntries(group.committer.handle, [token])
+    const ledger = [...local.handle.ledgerTokens, token]
+    await expect(
+      restarted.mls.processCommit(committed.commitMessage, {
+        resolveLedgerEntries: async () => [token],
+      }),
+    ).resolves.toMatchObject({ applied: true })
+    const saved = await restarted.stateStore.saved()
+    expect(saved?.ledger).toEqual(ledger)
+    const anchor = restarted.anchorStore.stored()
+    if (anchor === null) throw new Error('Missing anchor')
+    const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+    const aad = encodeAppAAD({ topicID, intent: 'log' })
+    const plaintext = encodeEventFrame('chat/posted', { afterRestart: true })
+    const sealed = await committed.newGroup.encrypt(plaintext, { aad })
+    await expect(
+      restarted.crypto.unwrap(sealed, {
+        expectedAAD: aad,
+        frame: {
+          ...restarted.control.key,
+          id: 'after-restart',
+          topicID,
+          protocol: 'chat',
+          segment: anchor.epoch,
+          position: '000000000001',
+        },
+      }),
+    ).resolves.toMatchObject({ payload: plaintext })
+    expect((await restarted.stateStore.saved())?.ledger).toEqual(ledger)
+    expect((await restoreMemberHandle(restarted, local.slot)).ledgerTokens).toEqual(ledger)
+  } finally {
+    await restarted?.peer.dispose()
+    await member.peer.dispose()
+    await hub.dispose()
+  }
+})
 
 test('an ambiguous open save retains plaintext with the consumed MLS key across restart', async () => {
   const group = await createRealGroup(1, 'ambiguous-member-open')
@@ -509,6 +578,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     // Nothing reached Carol: she was never online, and a subscription back-fills nothing.
     const carolPosted: Array<unknown> = []
+    const delivered = Promise.withResolvers<void>()
 
     // --- Carol comes back. Her handle is still at epoch 2. ---------------------------------
     expect(carolHandle.epoch).toBe(2n)
@@ -517,9 +587,14 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       identity: carolID,
       group: carolHandle,
       entrySlot: carolSlot,
-      handlers: { 'chat/posted': (ctx: { data: unknown }) => void carolPosted.push(ctx.data) },
+      handlers: {
+        'chat/posted': (ctx: { data: unknown }) => {
+          carolPosted.push(ctx.data)
+          if (carolPosted.length === 4) delivered.resolve()
+        },
+      },
     })
-    await flush(400)
+    await delivered.promise
 
     // She walked the commit log to the head...
     expect(carol.handle().epoch).toBe(4n)

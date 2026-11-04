@@ -2,6 +2,7 @@ import { commitLedgerEntries, signLedgerEntry } from '@kumiai/mls'
 import {
   asLogPosition,
   controlBatch,
+  createLedgerEntryResolver,
   encodeCommitFrame,
   encodeHandshakeFrame,
   encodeLedgerEntries,
@@ -18,6 +19,66 @@ import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
 import { memoryModel } from './fixtures/sealed-memory-mls.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
+  test(`buffered control opens new ledger bodies with a custom entry label (${mode})`, async () => {
+    const group = await createRegistryCryptoGroup(mode, crypto.randomUUID(), 2, {
+      backgroundMaintenance: 'gated',
+    })
+    try {
+      const f = group.fixture()
+      const author = group.group.committer
+      const local = group.group.members[0]
+      if (local === undefined) throw new Error('Missing local member')
+      const token = await signLedgerEntry(author.identity, {
+        type: 'note',
+        groupID: group.key.groupID,
+        subject: author.identity.id,
+        value: 'custom label',
+      })
+      const commit =
+        mode === 'double'
+          ? memoryModel(author.handle).buildCommit([token])
+          : (await commitLedgerEntries(author.handle, [token])).commitMessage
+      const entryLabel = 'custom-control-entries'
+      const sender = createGroupCrypto({
+        access: testHandleAccess({ handle: () => author.handle, adopt: async () => {} }),
+        entryLabel,
+      })
+      const receiver = createGroupCrypto({ access: group.access(), entryLabel })
+      const entries = encodeLedgerEntries([token])
+      const { sealed } = await sender.sealEntries(entries)
+      await expect(receiver.openEntries(sealed)).resolves.toEqual(entries)
+      const mls = await createRegistryGroupMLS({
+        registry: f.registry,
+        key: group.key,
+        recovery: f.environment,
+        identity: f.identity,
+        entrySlot: local.slot,
+        target: { targetID: 'hub', topicID: 'commits' },
+      })
+      const binding = controlBatch(mls)
+      if (binding === undefined) throw new Error('Missing control batch')
+      await expect(
+        binding.run({
+          source: 'custom-entry-label',
+          prepare: (scope) =>
+            scope.prepareCommit(commit, {
+              resolveLedgerEntries: createLedgerEntryResolver(sealed, scope.openEntries),
+              adoption: (staged) => ({
+                mutationID: crypto.randomUUID(),
+                changes: { cursor: { position: asLogPosition('01'), epoch: staged.epochAfter } },
+              }),
+            }),
+        }),
+      ).resolves.toMatchObject({ value: { applied: true } })
+      expect(await f.device.groups.loadState(group.key)).toMatchObject({
+        epoch: group.access().epoch(),
+        ledger: expect.arrayContaining([token]),
+      })
+    } finally {
+      await group.close()
+    }
+  })
+
   test.each(['commit', 'entries-outer', 'entries-inner'] as const)(
     `selected unsupported %s version preserves the upgrade diagnostic (${mode})`,
     async (kind) => {

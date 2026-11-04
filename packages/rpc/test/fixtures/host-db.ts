@@ -57,7 +57,13 @@ type SeedOptions = { replace?: false } | { replace: true; expectedVersion: numbe
 type WritePoint = 'apply' | 'save' | 'anchor' | 'seed'
 type FailurePoint = 'mid-apply' | 'mid-save' | 'mid-anchor' | 'mid-seed'
 
+export type MemoryHostTransaction = (
+  groupID: string,
+  work: (commit: (record: GroupRecord, publish: () => void) => Promise<void>) => Promise<boolean>,
+) => Promise<boolean>
+
 export type MemoryHostDatabase = {
+  bindTransactions(run: MemoryHostTransaction): void
   bindIdentity(
     storageID: string,
     reader: (state: Uint8Array, key: GroupKey) => EpochIdentity | null,
@@ -159,6 +165,7 @@ export function createMemoryHostDatabase(
   const seams = new Map<string, () => void | Promise<void>>()
   let failure: FailurePoint | undefined
   let ambiguous: WritePoint | undefined
+  let transaction: MemoryHostTransaction | undefined
   const read = (groupID: string) => groups.get(groupID) ?? emptyRecord()
   const runSeam = async (name: string) => {
     const hook = seams.get(name)
@@ -171,14 +178,22 @@ export function createMemoryHostDatabase(
     mutate: (next: GroupRecord) => undefined | false,
   ) => {
     await runSeam(`before-${point}`)
-    const next = structuredClone(read(groupID))
-    if (mutate(next) === false) return
-    if (failure === `mid-${point}`) {
-      failure = undefined
-      throw new Error('Injected transaction failure')
+    const work: Parameters<MemoryHostTransaction>[1] = async (commit) => {
+      const next = structuredClone(read(groupID))
+      if (mutate(next) === false) return false
+      if (failure === `mid-${point}`) {
+        failure = undefined
+        throw new Error('Injected transaction failure')
+      }
+      if (point === 'save' || point === 'seed') next.version = ++version
+      await commit(next, () => groups.set(groupID, next))
+      return true
     }
-    if (point === 'save' || point === 'seed') next.version = ++version
-    groups.set(groupID, next)
+    const committed =
+      transaction === undefined
+        ? await work(async (_record, publish) => publish())
+        : await transaction(groupID, work)
+    if (!committed) return
     if (ambiguous === point) {
       ambiguous = undefined
       throw new StorageOutcomeUnknownError('Committed transaction outcome unknown')
@@ -187,6 +202,10 @@ export function createMemoryHostDatabase(
   }
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
   return {
+    bindTransactions(run) {
+      if (transaction !== undefined) throw new Error('Host transaction already bound')
+      transaction = run
+    },
     appOutbox(storageID, key) {
       const event = (next: GroupRecord, value: AppStatusEvent) =>
         next.appEvents.set(value.id, structuredClone(value))

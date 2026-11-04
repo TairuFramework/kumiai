@@ -356,8 +356,7 @@ export function makeMember(params: MakeMemberParams): Member {
     restartOf?.stateStore ??
     createMemoryStateStore({ groupID: handle.groupID, incarnation: 1 })
   const memberPersistence =
-    restartOf?.memberPersistence ??
-    createMemberPersistence(legacyStore, handle, () => handle.ledgerTokens)
+    restartOf?.memberPersistence ?? createMemberPersistence(legacyStore, handle)
   const stateStore = memberPersistence.stateStore
   const appCursorStore = memberPersistence.cursor
   const anchorStore =
