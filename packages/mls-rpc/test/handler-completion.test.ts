@@ -15,6 +15,7 @@ import { entryCapability } from '../src/entry-capability.js'
 import { groupBatchFor } from '../src/group-batch-binding.js'
 import { createHandlerCompletion, handlerCompletionForEntry } from '../src/handler-completion.js'
 import type { GroupStores, MemoryTransaction } from '../src/persistence-types.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import {
   authenticatedCompletionFixture,
   completionFixture,
@@ -674,14 +675,13 @@ for (const mode of ['real-mls', 'double'] as const)
                 (reads, closing) =>
                   prepare(
                     phase === 'prepare'
-                      ? {
-                          ...reads,
+                      ? copyEntryReads(reads, {
                           async appCursor(incarnation, topicID) {
                             const value = await reads.appCursor(incarnation, topicID)
                             await suspend()
                             return value
                           },
-                        }
+                        })
                       : reads,
                     closing,
                   ),
@@ -1050,13 +1050,12 @@ for (const mode of ['real-mls', 'double'] as const)
                 const batch: Array<string> = []
                 stagedReads.push(batch)
                 return prepare(
-                  {
-                    ...reads,
+                  copyEntryReads(reads, {
                     async appFrame(incarnation, id) {
                       batch.push(id)
                       return reads.appFrame(incarnation, id)
                     },
-                  },
+                  }),
                   closing,
                 )
               },
@@ -1084,13 +1083,14 @@ for (const mode of ['real-mls', 'double'] as const)
             read(groupID, (reads) => {
               const batch: Array<string> = []
               batches.push(batch)
-              return fn({
-                ...reads,
-                async appFrame(incarnation, id) {
-                  batch.push(id)
-                  return reads.appFrame(incarnation, id)
-                },
-              })
+              return fn(
+                copyEntryReads(reads, {
+                  async appFrame(incarnation, id) {
+                    batch.push(id)
+                    return reads.appFrame(incarnation, id)
+                  },
+                }),
+              )
             })
           const before = await f.fixture.inspectRows()
           const handle = vi.fn(async () => {})
@@ -1129,8 +1129,7 @@ for (const mode of ['real-mls', 'double'] as const)
                   const batch: Array<string> = []
                   batches.push(batch)
                   return prepare(
-                    {
-                      ...reads,
+                    copyEntryReads(reads, {
                       async appFrame(incarnation, id) {
                         batch.push(id)
                         const value = await reads.appFrame(incarnation, id)
@@ -1154,7 +1153,7 @@ for (const mode of ['real-mls', 'double'] as const)
                           })
                         return value
                       },
-                    },
+                    }),
                     closing,
                   )
                 },

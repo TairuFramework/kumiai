@@ -25,6 +25,7 @@ import type { GroupKey } from '../src/persistence-types.js'
 import { registryConsumers } from '../src/registry/consumers.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import {
   createRegistryFixture,
   type RegistryFixture,
@@ -225,12 +226,13 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await create()
       try {
         const conflict = new GroupStateConflictError('Unreadable report control')
-        overrideReads(fixture, (reads) => ({
-          ...reads,
-          control: async () => {
-            throw conflict
-          },
-        }))
+        overrideReads(fixture, (reads) =>
+          copyEntryReads(reads, {
+            control: async () => {
+              throw conflict
+            },
+          }),
+        )
         const api = await safety(fixture)
         const before = await fixture.inspectRows()
         const work = api.reportFork(key, await authenticatorEvidence(fixture, key))
@@ -326,13 +328,14 @@ for (const mode of ['real-mls', 'double'] as const) {
       try {
         const error = new Error('Transient trust I/O')
         let fail = false
-        overrideReads(fixture, (reads) => ({
-          ...reads,
-          trust: async () => {
-            if (fail) throw error
-            return await reads.trust()
-          },
-        }))
+        overrideReads(fixture, (reads) =>
+          copyEntryReads(reads, {
+            trust: async () => {
+              if (fail) throw error
+              return await reads.trust()
+            },
+          }),
+        )
         const access = await fixture.registry.access(groupID)
         fail = true
         const api = await safety(fixture)

@@ -18,6 +18,7 @@ import {
   coordinatorBinding,
   type EntryReads,
   entryCapability,
+  entryReadsAttempt,
 } from '../entry-capability.js'
 import { bindGroupBatchOptions } from '../group-batch-binding.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
@@ -82,9 +83,13 @@ import {
 } from './safety.js'
 import { createRegistrySeed } from './seed.js'
 import { readRecoverySource } from './source.js'
+import { readSourceAdmission } from './source-command-runtime.js'
+import { registerSourceLoader, sourceCryptoScope } from './source-crypto-commands.js'
 import {
+  admitOwnedSource,
   bindRegistrySourceExecutor,
   createSourceExecutor,
+  registrySourceExecutor,
   releaseRegistrySourceExecutor,
 } from './source-executor.js'
 import { createRegistrySwitch } from './switch.js'
@@ -582,6 +587,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     return slot
   }
   function invalidate(slot: GroupSlot): void {
+    if (slot.owner !== null)
+      registrySourceExecutor(registry).control.invalidate(
+        slot.owner.key,
+        new DisplacedGroupHandleError('Registry owner invalidated'),
+      )
     slot.generation++
     slot.live.base = null
     slot.live.cancellation.abort(new DisplacedGroupHandleError('Registry owner invalidated'))
@@ -722,6 +732,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     assertMutationSafety?: () => void,
   ) {
     function assertLoadCurrent(): void {
+      if (capability.failureSignal?.aborted) throw capability.failureSignal.reason
       if (admittedOwner !== undefined) {
         if (slot.owner !== admittedOwner)
           throw new DisplacedGroupHandleError('Registry owner is no longer current')
@@ -740,7 +751,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           const current = slot.owner
           if (current?.key.incarnation === record.incarnation)
             assertNotTerminal({ admission: () => current.admission })
-          const handle = restrictCommitAuthoring(await environment.restore(record))
+          const scope = sourceCryptoScope(entryReadsAttempt(reads), assertOpen)
+          const handle = restrictCommitAuthoring(
+            await scope.call(() => environment.restore(record)),
+          )
+          scope.assertLive()
           restoredLapsed = handle.ownLeafLapsed()
           return handle
         },
@@ -753,13 +768,27 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     if (value.snapshot.condition === 'spent-set-corrupt') latch(value.key, 'spent-set-corrupt')
     if (admittedOwner !== undefined && value.key.incarnation !== admittedOwner.key.incarnation)
       throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
+    const sourceBinding = await admitOwnedSource(
+      registrySourceExecutor(registry).executor,
+      value.key,
+      reads,
+    )
     setReceiveBase(slot.live, value.record)
-    if (slot.owner === null || slot.owner.key.incarnation !== value.key.incarnation) {
+    if (
+      slot.owner === null ||
+      slot.owner.key.incarnation !== value.key.incarnation ||
+      slot.owner.sourceBinding.generation !== sourceBinding.generation
+    ) {
+      slot.owner?.maintenance?.cancel(
+        new DisplacedGroupHandleError('Source binding is superseded'),
+        true,
+      )
       slot.live.cancellation = new AbortController()
       // Host registrations survive cache invalidation, but never cross incarnations.
       if (slot.hooks?.key.incarnation !== value.key.incarnation)
         slot.hooks = { key: { ...value.key }, callbacks: new Set() }
       const owner: RegistryOwner = {
+        sourceBinding,
         key: { ...value.key },
         value,
         acceptedTrust: value.trust,
@@ -774,6 +803,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       }
       const access = createRegistryAccess({
         owner,
+        source: registrySourceExecutor(registry),
         initialControl: control,
         initialEligibility: eligibilityOf(
           decodedState(value.record.state),
@@ -885,7 +915,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     }
     const handoff = slot.pendingHandoff
     slot.pendingHandoff = null
-    if (handoff !== null) await slot.owner?.maintenance?.handoff(handoff)
+    if (handoff !== null)
+      await slot.owner?.maintenance?.handoff(
+        handoff,
+        sourceCryptoScope(entryReadsAttempt(reads), assertLoadCurrent),
+      )
     slot.owner?.maintenance?.schedule()
     return value
   }
@@ -1146,14 +1180,24 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         try {
           for (;;) {
             try {
-              const access = await capability.read(groupID, async (reads) => {
-                retirement.assertGeneration(groupID, retirementGeneration)
-                await load(reads, groupID, slot, generation)
-                const access = slot.owner?.access
-                if (access === null || access === undefined)
-                  throw new GroupUnavailableError({ reason: 'invalid' })
-                return access
+              retirement.assertGeneration(groupID, retirementGeneration)
+              const source = registrySourceExecutor(registry)
+              const lifetime = await persistence.groups.load(groupID)
+              if (lifetime === null) throw new GroupUnavailableError({ reason: 'absent' })
+              if (lifetime.activeIncarnation === null)
+                throw new GroupUnavailableError({ reason: 'deleted' })
+              const sourceBinding = await source.control.admit(
+                { groupID, incarnation: lifetime.activeIncarnation },
+                'source',
+              )
+              await source.executor.execute({
+                binding: sourceBinding,
+                command: 'source.load',
+                input: undefined,
               })
+              const access = slot.owner?.access
+              if (access === null || access === undefined)
+                throw new GroupUnavailableError({ reason: 'invalid' })
               if (slot.generation !== generation || slot.owner?.access !== access)
                 throw new StaleRegistryGeneration()
               publish(slot, previous)
@@ -1162,6 +1206,10 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               return access
             } catch (error) {
               await diagnoseFailure(error)
+              if (error instanceof DisplacedGroupHandleError && slot.generation !== generation) {
+                generation = slot.generation
+                continue
+              }
               retirement.assertGeneration(groupID, retirementGeneration)
               retirement.assertAvailable(groupID)
               if (!(error instanceof StaleRegistryGeneration)) {
@@ -1270,6 +1318,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     capability.read(groupID, async (reads) => {
       assertOpen()
       const lifetime = await reads.lifetime()
+      if (lifetime?.activeIncarnation != null)
+        await readSourceAdmission(reads, { groupID, incarnation: lifetime.activeIncarnation })
       const record =
         lifetime?.activeIncarnation == null ? null : await reads.state(lifetime.activeIncarnation)
       if (record === null || record.deleted || record.state === null)
@@ -1299,6 +1349,11 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
       lifecycle: { beforeUse: start, assertCurrent: assertOpen },
     }),
   )
+  registerSourceLoader(binding, async (key, reads) => {
+    const slot = groupSlot(key.groupID)
+    retirement.assertAvailable(key.groupID)
+    await load(reads, key.groupID, slot, slot.generation)
+  })
   liveRegistries.set(binding, registry)
   return registry
 }

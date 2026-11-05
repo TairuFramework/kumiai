@@ -27,9 +27,18 @@ function calls(source: ts.SourceFile): Array<ts.CallExpression | ts.NewExpressio
 }
 function wrapped(node: ts.Node): boolean {
   let parent = node.parent
-  while (ts.isAwaitExpression(parent) || ts.isParenthesizedExpression(parent))
+  while (parent !== undefined) {
+    if (ts.isCallExpression(parent) && parent.expression.getText() === 'restrictCommitAuthoring')
+      return true
+    if (
+      ts.isVariableDeclaration(parent) ||
+      ts.isReturnStatement(parent) ||
+      ts.isFunctionDeclaration(parent)
+    )
+      return false
     parent = parent.parent
-  return ts.isCallExpression(parent) && parent.expression.getText() === 'restrictCommitAuthoring'
+  }
+  return false
 }
 
 test('the control builder is the only production permit holder and private commits use the gate', async () => {

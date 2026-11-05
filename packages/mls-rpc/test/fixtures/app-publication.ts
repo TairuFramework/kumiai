@@ -88,8 +88,7 @@ export async function createAppPublicationFixture(
     const scheduler = groupBatchFor(binding, key.groupID)
     const schedule = scheduler.schedule.bind(scheduler)
     vi.spyOn(scheduler, 'schedule').mockImplementation(async (work) => {
-      const gate =
-        work.source === JSON.stringify(['publication', key.incarnation]) ? prepareGate : null
+      const gate = work.source === 'app.publication' ? prepareGate : null
       if (gate !== null) {
         prepareGate = null
         gate.entered.resolve()

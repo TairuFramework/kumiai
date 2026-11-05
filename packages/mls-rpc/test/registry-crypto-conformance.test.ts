@@ -6,6 +6,8 @@ import {
 } from '@kumiai/rpc-conformance'
 import { expect, test, vi } from 'vitest'
 
+import { sourceResultBinding } from '../src/registry/source-crypto-commands.js'
+import { registrySourceExecutor } from '../src/registry/source-executor.js'
 import * as registryFixtures from './fixtures/registry.js'
 import {
   createRegistryCryptoFixture,
@@ -15,6 +17,33 @@ import {
 import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
+  test(`managed crypto bytes retain their originating source binding (${mode})`, async () => {
+    const group = await createRegistryCryptoGroup(mode, crypto.randomUUID(), 2, {
+      backgroundMaintenance: 'gated',
+    })
+    try {
+      const commands = vi.spyOn(
+        registrySourceExecutor(group.fixture().registry).executor,
+        'execute',
+      )
+      const crypto = group.receiver()
+      const sealed = await crypto.wrap(new Uint8Array([1]))
+      expect(sourceResultBinding(sealed)?.key).toEqual(group.key)
+      const entries = await crypto.sealEntries(new Uint8Array([2]))
+      expect(sourceResultBinding(entries.sealed)?.key).toEqual(group.key)
+      expect(await crypto.openEntries(entries.sealed)).toEqual(new Uint8Array([2]))
+      await crypto.exportSecret('host-owned')
+      expect(commands.mock.calls.map(([request]) => request.command)).toEqual([
+        'app.seal',
+        'crypto.sealEntries',
+        'crypto.openEntries',
+        'crypto.export',
+      ])
+      expect(commands.mock.calls.at(-1)?.[0].input).toEqual({ label: 'host-owned', length: 32 })
+    } finally {
+      await group.close()
+    }
+  })
   test(`invalid-position unwrap leaves persistence faults for write-staging calls (${mode})`, async () => {
     const original = registryFixtures.createRegistryFixture
     let arm: { mock: { calls: Array<unknown> } } | undefined

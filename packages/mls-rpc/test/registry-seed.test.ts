@@ -510,7 +510,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           await result
           if (outcome === 'rollback') {
             expect(await fixture.inspectRows()).toEqual(before)
-            expect(await source.read((handle) => handle.groupID)).toBe(groupID)
+            const fresh = await owner.access(groupID)
+            expect(fresh).not.toBe(source)
+            expect(await fresh.read((handle) => handle.groupID)).toBe(groupID)
           } else {
             await expect(source.read(() => {})).rejects.toMatchObject({
               name: 'DisplacedGroupHandleError',

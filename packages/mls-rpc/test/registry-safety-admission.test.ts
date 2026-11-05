@@ -21,6 +21,7 @@ import { RetainedTrustUnavailableError, registrySafety } from '../src/registry/s
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
 import { registryLeaseSnapshot } from '../src/testing.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import {
   createRegistryFixture,
   type RegistryFixture,
@@ -121,13 +122,14 @@ for (const mode of ['real-mls', 'double'] as const) {
           let armed = false
           const trustFailure = new GroupStateConflictError('Corrupt retained trust')
           const persistFailure = new Error('Hold persistence write failed')
-          intercept(fixture, (reads) => ({
-            ...reads,
-            trust: async () => {
-              if (armed) throw trustFailure
-              return reads.trust()
-            },
-          }))
+          intercept(fixture, (reads) =>
+            copyEntryReads(reads, {
+              trust: async () => {
+                if (armed) throw trustFailure
+                return reads.trust()
+              },
+            }),
+          )
           const capability = entry(fixture)
           const binding = coordinatorBinding(fixture.device.groups)
           if (binding === null) throw new Error('Missing binding')
@@ -204,22 +206,23 @@ for (const mode of ['real-mls', 'double'] as const) {
             const fixture = await create()
             try {
               let armed = false
-              intercept(fixture, (reads) => ({
-                ...reads,
-                metadata: async (incarnation) => {
-                  const metadata = await reads.metadata(incarnation)
-                  return armed && cache === 'uncached' && metadata !== null
-                    ? { ...metadata, version: metadata.version + 1 }
-                    : metadata
-                },
-                state: async (incarnation) => {
-                  const record = await reads.state(incarnation)
-                  if (armed) registrySafety(fixture.registry)?.latch(key, reason)
-                  return armed && cache === 'uncached' && record !== null
-                    ? { ...record, version: record.version + 1 }
-                    : record
-                },
-              }))
+              intercept(fixture, (reads) =>
+                copyEntryReads(reads, {
+                  metadata: async (incarnation) => {
+                    const metadata = await reads.metadata(incarnation)
+                    return armed && cache === 'uncached' && metadata !== null
+                      ? { ...metadata, version: metadata.version + 1 }
+                      : metadata
+                  },
+                  state: async (incarnation) => {
+                    const record = await reads.state(incarnation)
+                    if (armed) registrySafety(fixture.registry)?.latch(key, reason)
+                    return armed && cache === 'uncached' && record !== null
+                      ? { ...record, version: record.version + 1 }
+                      : record
+                  },
+                }),
+              )
               const access = await fixture.registry.access(groupID)
               const accepted = await fixture.acceptedOrdinary(access)
               const callback = vi.fn(async () => true)
@@ -481,13 +484,14 @@ for (const mode of ['real-mls', 'double'] as const) {
         const fixture = await create()
         try {
           if (damage === 'empty-spent')
-            intercept(fixture, (reads) => ({
-              ...reads,
-              trust: async () => {
-                const trust = await reads.trust()
-                return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
-              },
-            }))
+            intercept(fixture, (reads) =>
+              copyEntryReads(reads, {
+                trust: async () => {
+                  const trust = await reads.trust()
+                  return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
+                },
+              }),
+            )
           const owner = fixture.registry
           if (damage === 'missing') await registryFixtureRemoveTrust(fixture, groupID)
           if (damage === 'corrupt') await fixture.corruptTrust(groupID)
@@ -515,15 +519,16 @@ for (const mode of ['real-mls', 'double'] as const) {
       async (operation) => {
         const fixture = await create()
         try {
-          intercept(fixture, (reads) => ({
-            ...reads,
-            trust: async () => {
-              const trust = await reads.trust()
-              return trust === null
-                ? null
-                : { ...trust, installed: { ...trust.installed, incarnation: 2 } }
-            },
-          }))
+          intercept(fixture, (reads) =>
+            copyEntryReads(reads, {
+              trust: async () => {
+                const trust = await reads.trust()
+                return trust === null
+                  ? null
+                  : { ...trust, installed: { ...trust.installed, incarnation: 2 } }
+              },
+            }),
+          )
           const owner = fixture.registry
           const api = await registryFixtureSafety(fixture)
           const before = await fixture.inspectRows()
@@ -620,13 +625,14 @@ for (const mode of ['real-mls', 'double'] as const) {
         const fixture = await create()
         try {
           if (damage === 'empty-spent')
-            intercept(fixture, (reads) => ({
-              ...reads,
-              trust: async () => {
-                const trust = await reads.trust()
-                return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
-              },
-            }))
+            intercept(fixture, (reads) =>
+              copyEntryReads(reads, {
+                trust: async () => {
+                  const trust = await reads.trust()
+                  return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
+                },
+              }),
+            )
           const owner = fixture.registry
           const api = await registryFixtureSafety(fixture)
           if (damage === 'missing') await registryFixtureRemoveTrust(fixture, groupID)
@@ -662,16 +668,17 @@ for (const mode of ['real-mls', 'double'] as const) {
             ...capability,
             read: (id, read) =>
               capability.read(id, (reads) =>
-                read({
-                  ...reads,
-                  trust: async () => {
-                    if (loseTrust) {
-                      loseTrust = false
-                      return null
-                    }
-                    return reads.trust()
-                  },
-                }),
+                read(
+                  copyEntryReads(reads, {
+                    trust: async () => {
+                      if (loseTrust) {
+                        loseTrust = false
+                        return null
+                      }
+                      return reads.trust()
+                    },
+                  }),
+                ),
               ),
             async run(request, prepare, work) {
               if (move) {
@@ -789,14 +796,15 @@ for (const mode of ['real-mls', 'double'] as const) {
         try {
           let armed = false
           let lifetimes = 0
-          intercept(fixture, (reads) => ({
-            ...reads,
-            lifetime: async () => {
-              const lifetime = await reads.lifetime()
-              if (armed && ++lifetimes === 2) registrySafety(fixture.registry)?.latch(key, reason)
-              return lifetime
-            },
-          }))
+          intercept(fixture, (reads) =>
+            copyEntryReads(reads, {
+              lifetime: async () => {
+                const lifetime = await reads.lifetime()
+                if (armed && ++lifetimes === 2) registrySafety(fixture.registry)?.latch(key, reason)
+                return lifetime
+              },
+            }),
+          )
           const access = await fixture.registry.access(groupID)
           const accepted = await fixture.acceptedOrdinary(access)
           const factory = vi.fn(() => accepted.write)
@@ -933,13 +941,14 @@ for (const mode of ['real-mls', 'double'] as const) {
         let reopened: RegistryFixture | undefined
         try {
           if (damage === 'empty-spent')
-            intercept(fixture, (reads) => ({
-              ...reads,
-              trust: async () => {
-                const trust = await reads.trust()
-                return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
-              },
-            }))
+            intercept(fixture, (reads) =>
+              copyEntryReads(reads, {
+                trust: async () => {
+                  const trust = await reads.trust()
+                  return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
+                },
+              }),
+            )
           const owner = fixture.registry
           if (damage === 'missing') await registryFixtureRemoveTrust(fixture, groupID)
           if (damage === 'corrupt' || damage === 'both-corrupt') await fixture.corruptTrust(groupID)
@@ -1040,13 +1049,14 @@ for (const mode of ['real-mls', 'double'] as const) {
         try {
           let armed = false
           const error = new Error('Transient mutation trust I/O')
-          intercept(fixture, (reads) => ({
-            ...reads,
-            trust: async () => {
-              if (armed) throw error
-              return reads.trust()
-            },
-          }))
+          intercept(fixture, (reads) =>
+            copyEntryReads(reads, {
+              trust: async () => {
+                if (armed) throw error
+                return reads.trust()
+              },
+            }),
+          )
           const access = await fixture.registry.access(groupID)
           const accepted = await fixture.acceptedOrdinary(access)
           const before = await fixture.inspectRows()
@@ -1071,13 +1081,14 @@ for (const mode of ['real-mls', 'double'] as const) {
         const fixture = await create()
         try {
           if (damage === 'empty-spent')
-            intercept(fixture, (reads) => ({
-              ...reads,
-              trust: async () => {
-                const trust = await reads.trust()
-                return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
-              },
-            }))
+            intercept(fixture, (reads) =>
+              copyEntryReads(reads, {
+                trust: async () => {
+                  const trust = await reads.trust()
+                  return trust === null ? null : { ...trust, spentEpochAuthenticators: [] }
+                },
+              }),
+            )
           const api = await registryFixtureSafety(fixture)
           if (damage === 'missing') await registryFixtureRemoveTrust(fixture, groupID)
           if (damage === 'corrupt') await fixture.corruptTrust(groupID)
@@ -1104,12 +1115,13 @@ for (const mode of ['real-mls', 'double'] as const) {
         const fixture = await create()
         try {
           const error = new Error('Transient trust I/O')
-          intercept(fixture, (reads) => ({
-            ...reads,
-            trust: async () => {
-              throw error
-            },
-          }))
+          intercept(fixture, (reads) =>
+            copyEntryReads(reads, {
+              trust: async () => {
+                throw error
+              },
+            }),
+          )
           const owner = fixture.registry
           const api = await registryFixtureSafety(fixture)
           const before = await fixture.inspectRows()
@@ -1138,15 +1150,16 @@ for (const mode of ['real-mls', 'double'] as const) {
         const fixture = await create()
         try {
           if (damage === 'installed-key')
-            intercept(fixture, (reads) => ({
-              ...reads,
-              trust: async () => {
-                const trust = await reads.trust()
-                return trust === null
-                  ? null
-                  : { ...trust, installed: { ...trust.installed, incarnation: 2 } }
-              },
-            }))
+            intercept(fixture, (reads) =>
+              copyEntryReads(reads, {
+                trust: async () => {
+                  const trust = await reads.trust()
+                  return trust === null
+                    ? null
+                    : { ...trust, installed: { ...trust.installed, incarnation: 2 } }
+                },
+              }),
+            )
           const owner = fixture.registry
           if (damage === 'metadata') await fixture.mutateMetadata(key, () => null)
           if (damage === 'control') {

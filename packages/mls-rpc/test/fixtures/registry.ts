@@ -37,10 +37,12 @@ import { encodeControlJournal } from '../../src/control-journal.js'
 import { controlBuildContexts } from '../../src/control-write-context.js'
 import {
   bindEntryCapability,
+  bindEntryReadsAttempt,
   coordinatorBinding,
   type EntryCapability,
   type EntryReads,
   entryCapability,
+  entryReadsAttempt,
 } from '../../src/entry-capability.js'
 import {
   createManualRecoveryStore,
@@ -262,6 +264,15 @@ export function registryFixtureObserveStagedDecrypts(
 const markerWriters = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['forceOwnerMarker']>()
 const rowRemovers = new WeakMap<RegistryFixtureBase, RegistryStorageFixture['deleteCommittedRow']>()
 
+const sourceDiagnostics = new WeakMap<
+  RegistryFixtureBase,
+  Pick<RegistryStorageFixture, 'failStop' | 'transactionCount' | 'pauseBarrier'>
+>()
+export function registryFixtureSourceDiagnostics(fixture: RegistryFixtureBase) {
+  const diagnostics = sourceDiagnostics.get(fixture)
+  if (diagnostics === undefined) throw new Error('Missing source diagnostics')
+  return diagnostics
+}
 const sealFaults = new WeakMap<RegistryFixtureBase, (error?: Error) => void>()
 export function failRegistrySeal(fixture: RegistryFixtureBase, error: Error): void {
   const fail = sealFaults.get(fixture)
@@ -900,7 +911,7 @@ async function assemble(
   const binding = coordinatorBinding(fixture.device.groups)
   if (capability === null || binding === null) throw new Error('Missing fixture binding')
   function faultReads(reads: EntryReads): EntryReads {
-    return {
+    const wrapped = {
       ...reads,
       trust: async () => {
         trustReads++
@@ -908,6 +919,8 @@ async function assemble(
         return reads.trust()
       },
     }
+    bindEntryReadsAttempt(wrapped, entryReadsAttempt(reads))
+    return wrapped
   }
   bindEntryCapability({
     persistence: fixture.device.groups,
@@ -959,6 +972,7 @@ async function assemble(
   sealFaults.set(fixture, storage.failNextSeal)
   trustReadCounters.set(fixture, () => trustReads)
   capturedStates.set(fixture, captured)
+  sourceDiagnostics.set(fixture, storage)
   markerWriters.set(fixture, storage.forceOwnerMarker)
   rowRemovers.set(fixture, storage.deleteCommittedRow)
   stateVersionBumpers.set(fixture, async (key) => {

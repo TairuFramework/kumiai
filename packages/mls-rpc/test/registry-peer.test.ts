@@ -51,6 +51,7 @@ import { recoveryTrustFor } from '../src/registry/trust.js'
 import * as verdictAPI from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
 import { drainRegistryMaintenance } from '../src/testing.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
@@ -1450,44 +1451,44 @@ describe('registry peer recovery coordination', () => {
         if (metadata === null) throw new Error('Missing metadata')
         expect(metadata.terminal).toBe(false)
         const authenticator = s.recovery.candidate.state.keySchedule.epochAuthenticator
-        const override = (reads: EntryReads): EntryReads => ({
-          ...reads,
-          metadata: async (incarnation) => {
-            if (incarnation !== 2) return reads.metadata(incarnation)
-            if (kind === 'destination-row')
-              return { ...metadata, ...destination, initialIdentity: null }
-            if (kind === 'initial-identity')
-              return {
-                ...metadata,
-                ...destination,
-                initialIdentity: {
+        const override = (reads: EntryReads): EntryReads =>
+          copyEntryReads(reads, {
+            metadata: async (incarnation) => {
+              if (incarnation !== 2) return reads.metadata(incarnation)
+              if (kind === 'destination-row')
+                return { ...metadata, ...destination, initialIdentity: null }
+              if (kind === 'initial-identity')
+                return {
+                  ...metadata,
                   ...destination,
-                  epoch: s.recovery.record.epochAfter,
-                  authenticator,
-                },
-              }
-            if (kind === 'adopted-uninstalled') return null
-            return reads.metadata(incarnation)
-          },
-          trust: async () => {
-            const trust = await reads.trust()
-            if (trust === null) throw new Error('Missing trust')
-            if (kind === 'missing-trust') return null
-            if (kind === 'spent-candidate')
-              return {
-                ...trust,
-                spentEpochAuthenticators: [...trust.spentEpochAuthenticators, authenticator],
-              }
-            if (kind === 'adopted-unspent')
-              return {
-                ...trust,
-                spentEpochAuthenticators: trust.spentEpochAuthenticators.filter(
-                  (value) => !value.every((byte, index) => byte === authenticator[index]),
-                ),
-              }
-            return trust
-          },
-        })
+                  initialIdentity: {
+                    ...destination,
+                    epoch: s.recovery.record.epochAfter,
+                    authenticator,
+                  },
+                }
+              if (kind === 'adopted-uninstalled') return null
+              return reads.metadata(incarnation)
+            },
+            trust: async () => {
+              const trust = await reads.trust()
+              if (trust === null) throw new Error('Missing trust')
+              if (kind === 'missing-trust') return null
+              if (kind === 'spent-candidate')
+                return {
+                  ...trust,
+                  spentEpochAuthenticators: [...trust.spentEpochAuthenticators, authenticator],
+                }
+              if (kind === 'adopted-unspent')
+                return {
+                  ...trust,
+                  spentEpochAuthenticators: trust.spentEpochAuthenticators.filter(
+                    (value) => !value.every((byte, index) => byte === authenticator[index]),
+                  ),
+                }
+              return trust
+            },
+          })
         vi.spyOn(safety.entry, 'read').mockImplementation((id, fn) =>
           read(id, (reads) => fn(override(reads))),
         )

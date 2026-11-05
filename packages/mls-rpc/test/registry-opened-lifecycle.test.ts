@@ -54,6 +54,7 @@ import {
 } from '../src/registry/retired.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
+import { registrySourceExecutor } from '../src/registry/source-executor.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { retireToSuccessor } from '../src/successor.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
@@ -919,11 +920,12 @@ for (const mode of ['real-mls', 'double'] as const) {
                 ).toBe(true)
               }
               if (interruption === 'crypto-access-pending') {
-                const read = openedAccess.read.bind(openedAccess)
-                vi.spyOn(openedAccess, 'read').mockImplementationOnce(async (fn) => {
+                const source = registrySourceExecutor(fixture.registry).executor
+                const execute = source.execute.bind(source)
+                vi.spyOn(source, 'execute').mockImplementationOnce(async (request) => {
                   builderEntered.resolve()
                   await releaseBuilder.promise
-                  return read(fn)
+                  return execute(request)
                 })
                 if (peerParams === undefined) throw new Error('Missing peer crypto')
                 const peerCrypto = peerParams.crypto
@@ -1022,6 +1024,19 @@ for (const mode of ['real-mls', 'double'] as const) {
                   for (let turn = 0; turn < 100; turn++) await Promise.resolve()
                 }
               }
+            }
+            if (interruption === 'receive-between-frames') {
+              const capability = entryCapability(fixture.device.groups)
+              if (capability === null) throw new Error('Missing entry capability')
+              let read = false
+              const waiting = capability.read(key.groupID, async () => {
+                read = true
+              })
+              await vi.advanceTimersByTimeAsync(0)
+              expect(read).toBe(false)
+              releaseBuilder.resolve()
+              expect(await queuedCrypto).toMatchObject([{ kind: 'opened' }, { kind: 'opened' }])
+              await waiting
             }
             if (running !== undefined && !separate) {
               if (interrupted) vi.useFakeTimers()
@@ -1248,7 +1263,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                 (error: unknown) => error,
               )
             expect(decrypt).not.toHaveBeenCalled()
-            expect(refused).toMatchObject({ name: 'GroupUnavailableError' })
+            expect(refused).toMatchObject({ name: 'PeerRemovedError' })
             expect(await openedAccess.pending.list()).toEqual(pending)
             const open = vi.spyOn(openedAccess, 'openBatch')
             if (restart) fixture = await fixture.reopen()
@@ -1343,10 +1358,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                 expect(result).toMatchObject(
                   interruption !== 'receive-between-frames'
                     ? { name: 'PeerRemovedError' }
-                    : [
-                        { kind: 'opened' },
-                        { kind: 'refused', error: { name: 'GroupUnavailableError' } },
-                      ],
+                    : [{ kind: 'opened' }, { kind: 'opened' }],
                 )
               }
               if (interruption.startsWith('builder-')) {

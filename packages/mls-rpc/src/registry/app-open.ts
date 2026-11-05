@@ -17,7 +17,7 @@ import {
 } from '@kumiai/rpc'
 
 import type { ControlRead } from '../access.js'
-import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import { type EntryCapability, type EntryReads, entryReadsAttempt } from '../entry-capability.js'
 import { handlerCompletionForEntry } from '../handler-completion.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import { bindRegistryOpenedDelivery } from '../opened-delivery.js'
@@ -38,6 +38,7 @@ import type { RegistryStreamingOpen } from './app-open-binding.js'
 import type { createLiveSend } from './live-send.js'
 import type { Reservation } from './reserve.js'
 import { RetainedTrustUnavailableError } from './safety.js'
+import { sourceCryptoScope } from './source-crypto-commands.js'
 import type { ReadableGroupState, RegistryHandleAccess } from './types.js'
 
 function sameOccurrence(a: PreOpenAppFrameRef, b: PreOpenAppFrameRef): boolean {
@@ -103,8 +104,10 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
           return await params.run(
             { groupID: owner.key.groupID, mutationID },
             async (reads) => {
+              const scope = sourceCryptoScope(entryReadsAttempt(reads), params.assertCurrent)
               params.assertSafety()
               const { handle, source } = await params.isolated(reads, params.assertSafety)
+              scope.protect(handle)
               const value = owner.value
               const lifetime = await reads.lifetime()
               const results: Array<OpenAppResult> = []
@@ -168,14 +171,14 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                 }
                 let opened: Awaited<ReturnType<GroupHandle['decryptStaged']>>
                 try {
-                  opened = await handle.decryptStaged(
-                    ciphertext,
-                    { expectedAAD },
-                    async (_state, opened) => {
+                  opened = await scope.call(() =>
+                    handle.decryptStaged(ciphertext, { expectedAAD }, async (_state, opened) => {
                       decoded.value = decodeAppEventPlaintext(opened.payload)
-                    },
+                    }),
                   )
+                  scope.assertLive()
                 } catch {
+                  scope.assertLive()
                   return refuse('invalid-ciphertext')
                 }
                 if (decoded.value === null) {

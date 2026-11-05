@@ -741,7 +741,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       await Promise.resolve()
       expect(drained).toBe(false)
       block.release()
-      await sealing
+      await expect(sealing).rejects.toMatchObject({ name: 'DisplacedGroupHandleError' })
       await closing
     })
     test('host callbacks never receive the live copy', async () => {
@@ -921,12 +921,19 @@ for (const mode of ['real-mls', 'double'] as const) {
       if (old === undefined) throw new Error('Missing old copy')
       // Consume its last generation while the wrapper holds the earlier call.
       expect((await old.encryptApplication(new Uint8Array([3]))).generation).toBe(15)
-      await fixture.forceStoredGeneration(48)
+      let replaced = false
+      const replacing = fixture.forceStoredGeneration(48).then(() => {
+        replaced = true
+      })
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(replaced).toBe(false)
+      const refused = expect(waiting).rejects.toMatchObject({ reason: 'exhausted' })
+      blocked.release()
+      await refused
+      await replacing
       await registryLiveSend.get(fixture.access())?.accounting()
       await fixture.reserveNow()
       expect(fixture.lease()?.copy).not.toBe(old)
-      blocked.release()
-      await expect(waiting).rejects.toMatchObject({ reason: 'exhausted' })
       blockMaintenance.release()
     })
     test('seals before and after restart open exactly once at the peer', async () => {
@@ -1208,6 +1215,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await setup(mode)
       const block = fixture.blockNextEncrypt()
       const sealing = fixture.sealEphemeral()
+      const refused = expect(sealing).rejects.toMatchObject({ name: 'RegistryRetiringError' })
       await block.started
       const retirement = registryRetirement(fixture.fixture().registry).beginRetirement(fixture.key)
       let drained = false
@@ -1217,7 +1225,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       await expect(fixture.sealEphemeral()).rejects.toMatchObject({ name: 'RegistryRetiringError' })
       expect(drained).toBe(false)
       block.release()
-      await sealing
+      await refused
       await draining
       retirement.settle('rolled-back')
     })

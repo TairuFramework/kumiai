@@ -20,6 +20,7 @@ import {
   controlOwnConsumptionAllowed,
   controlSafetyHeld,
   GroupSafetyHeldError,
+  PeerRemovedError,
   type SafetyHold,
   SavedControlCompatibilityError,
   type SendAdmission,
@@ -37,7 +38,7 @@ import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpo
 import { controlCompatible } from '../control-compat.js'
 import { type ControlJournal, decodeControlJournal } from '../control-journal.js'
 import { controlBuildContexts } from '../control-write-context.js'
-import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import { type EntryCapability, type EntryReads, entryReadsAttempt } from '../entry-capability.js'
 import { groupBatchFor } from '../group-batch-binding.js'
 import { consumesInboundCommit } from '../inbound-commit.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
@@ -54,6 +55,7 @@ import type {
   GroupStores,
   GroupTransaction,
 } from '../persistence-types.js'
+import { untilAbort } from '../runtime.js'
 import { clearGroupCondition } from '../safety-conditions.js'
 import { assertNotTerminal } from '../terminal-admission.js'
 import { createRegistryAppOpen } from './app-open.js'
@@ -67,7 +69,13 @@ import {
   type RegistryControlBatchEntry,
 } from './control-batch.js'
 import { createLiveReceive, registryReceiveSlots } from './live-receive.js'
-import { createLiveSend, type LiveSlot, leaseReaders, registryLiveSend } from './live-send.js'
+import {
+  ApplicationLeaseUnavailableError,
+  createLiveSend,
+  type LiveSlot,
+  leaseReaders,
+  registryLiveSend,
+} from './live-send.js'
 import {
   capturedRecord,
   eligibilityOf,
@@ -78,11 +86,22 @@ import {
 import type { createRegistryRuntime } from './runtime.js'
 import { RetainedTrustUnavailableError, readRetainedTrust } from './safety.js'
 import { readRecoverySource } from './source.js'
+import {
+  registerSourceCrypto,
+  sourceCryptoAdapter,
+  sourceCryptoScope,
+} from './source-crypto-commands.js'
+import type {
+  SourceBinding,
+  SourceExecutor,
+  SourceExecutorControl,
+} from './source-executor-types.js'
 import { recoveryTrustFor } from './trust.js'
 import type { GroupRuntimeSnapshot, ReadableGroupState, RegistryHandleAccess } from './types.js'
 import { ordinaryCandidateMatches, validateRegistryHandle } from './validation.js'
 
 export type RegistryOwner = {
+  sourceBinding: SourceBinding
   key: GroupKey
   value: ValidatedGroupState
   acceptedTrust: GroupRecoveryTrust
@@ -107,6 +126,7 @@ export const registryCapturedReplacements = new WeakMap<
 
 export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
+  source: { executor: SourceExecutor; control: SourceExecutorControl }
   initialControl: ControlSnapshot
   initialEligibility: Uint8Array
   live: LiveSlot
@@ -146,7 +166,25 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     if (reason !== null) throw new GroupSafetyHeldError(reason)
     assertSafety()
   }
-  const live = createLiveSend({ ...params, environment, slot: params.live, assertWorkSafety })
+  const commands = sourceCryptoAdapter({
+    ...params.source,
+    key: owner.key,
+    coordinator: params.binding,
+    capability,
+  })
+  const live = createLiveSend({
+    ...params,
+    assertAvailable: () => {
+      params.assertAvailable()
+      commands.assertAvailable()
+    },
+    environment,
+    slot: params.live,
+    assertWorkSafety,
+    executeSeal: (input, signal) => commands.execute('app.seal', input, signal),
+    executeMaintain: () => commands.execute('app.maintain', undefined),
+    executeHandoff: commands.handoff,
+  })
   owner.maintenance = live
   async function isolated(
     reads: EntryReads,
@@ -160,7 +198,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       if (value.key.incarnation !== owner.key.incarnation)
         throw new DisplacedGroupHandleError('Registry access belongs to a retired incarnation')
       assertMutationSafety?.()
-      const handle = await restoreValidated(value, environment)
+      const scope = sourceCryptoScope(entryReadsAttempt(reads), params.assertCurrent)
+      const handle = await scope.call(() => restoreValidated(value, environment))
+      scope.assertLive()
       params.assertCurrent()
       return {
         handle,
@@ -850,22 +890,92 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     assertSafety: assertReceiveAvailable,
     assertWorkSafety,
   })
+  const receive = createLiveReceive({
+    ...params,
+    slot: params.live,
+    accounting: live.accounting,
+    assertAvailable: assertReceiveAvailable,
+    refresh: async () => {
+      await capability.read(owner.key.groupID, async (reads) => {
+        assertReceiveAvailable()
+        await params.load(reads, assertSafety)
+        assertReceiveAvailable()
+      })
+    },
+  })
+  const publication = createPublicationPreparation({ ...params, live, assertWorkSafety })
+  registerSourceCrypto(params.binding, owner.key, {
+    seal: live.sealOwned,
+    open: (input) => appOpen.openBatch(input),
+    publication: ({ entry, floor }, expected) =>
+      publication.preparePublication(entry, floor, expected),
+    publicationSnapshot: publication.publicationSnapshot,
+    maintain: live.maintain,
+    handoff: live.acceptPending,
+    receive: receive.owned,
+    async handle(scope) {
+      assertReceiveAvailable()
+      const handle = await restoreCaptured(environment, live.committedRecord)
+      scope.assertLive()
+      return handle
+    },
+  })
   const access: RegistryHandleAccess = {
-    ...createPublicationPreparation({ ...params, live, assertWorkSafety }),
-    receive: createLiveReceive({
-      ...params,
-      slot: params.live,
-      accounting: live.accounting,
-      assertAvailable: assertReceiveAvailable,
-      refresh: async () => {
-        await capability.read(owner.key.groupID, async (reads) => {
-          assertReceiveAvailable()
-          await params.load(reads, assertSafety)
-          assertReceiveAvailable()
-        })
-      },
-    }),
-    openBatch: appOpen.openBatch,
+    assertPublicationEntry: publication.assertPublicationEntry,
+    preparePublication: async (entry, floor) => {
+      capability.assertRoot()
+      await live.accounting()
+      return commands.execute('app.publication', { entry, floor })
+    },
+    publicationSnapshot: async (protocol) => {
+      capability.assertRoot()
+      if (live.pendingProof()) return null
+      await live.accounting()
+      try {
+        return await commands.execute('app.publicationSnapshot', protocol)
+      } catch (error) {
+        if (
+          error instanceof DisplacedGroupHandleError ||
+          error instanceof GroupUnavailableError ||
+          error instanceof PeerRemovedError
+        )
+          return null
+        throw error
+      }
+    },
+    receive: async (frames) => {
+      capability.assertRoot()
+      const signal = params.live.cancellation.signal
+      await untilAbort(live.accounting(), signal)
+      try {
+        return await commands.execute('app.receive', frames, signal)
+      } catch (error) {
+        if (!(error instanceof ApplicationLeaseUnavailableError) || error.reason !== 'cold')
+          throw error
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await untilAbort(
+            Promise.race([
+              receive.refresh(),
+              new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, 5_000)
+              }),
+            ]),
+            signal,
+          )
+        } finally {
+          clearTimeout(timer)
+        }
+        if (params.live.base === null) throw error
+        return await commands.execute('app.receive', frames, signal)
+      }
+    },
+    openBatch: async (frames) => {
+      capability.assertRoot()
+      if (frames.length > 64) throw new RangeError('App batch exceeds 64 frames')
+      await live.accounting()
+      return commands.execute('app.open', frames)
+    },
     pending: appOpen.pending,
     get key() {
       return { ...owner.key }
@@ -902,6 +1012,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       }
     },
   }
+  commands.bind(access.seal)
+  commands.bind(access.runtime)
   bindRegistryStreamingOpen(access, {
     key: owner.key,
     scheduler: groupBatchFor(params.binding, owner.key.groupID),

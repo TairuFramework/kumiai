@@ -8,11 +8,32 @@ import { finaliseAppSettlements } from '../src/app-settlement.js'
 import { groupBatchFor } from '../src/group-batch-binding.js'
 import { memoryTransactionEntry } from '../src/memory-group-state.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
+import { sourceResultBinding } from '../src/registry/source-crypto-commands.js'
 import { createAppPublicationFixture } from './fixtures/app-publication.js'
 import { completionFixture } from './fixtures/handler-completion.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
+  test(`prepared publication bytes retain the source binding (${mode})`, async () => {
+    const f = await createAppPublicationFixture(mode)
+    try {
+      const entry = {
+        seq: 0,
+        protocol: 'chat',
+        prc: 'posted',
+        data: encodeEventFrame('posted', {}),
+        status: 'accepted' as const,
+        lastAttempt: null,
+      }
+      await f.outbox.put(entry)
+      const prepared = await f.publication.prepare(entry, null)
+      const binding = sourceResultBinding(prepared.payload)
+      expect(binding?.key).toEqual(f.key)
+      expect(binding?.generation).toBeGreaterThan(0)
+    } finally {
+      await f.close()
+    }
+  })
   for (const context of ['supplied', 'absent'] as const) {
     testAppPublicationConformance({
       label: `${mode} / ${context}`,

@@ -20,6 +20,7 @@ import type { GroupRecoveryTrust } from '../src/persistence-types.js'
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { preparedTransition } from './fixtures/closing.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
@@ -130,26 +131,27 @@ for (const mode of ['real-mls', 'double'] as const) {
         const forbidden = vi.fn(async () => {
           throw new Error('Private/control read forbidden')
         })
-        const read = intercept(fixture, (reads) => ({
-          ...reads,
-          lifetime: async () => {
-            lifetime()
-            return reads.lifetime()
-          },
-          metadata: async (incarnation) => {
-            metadata(incarnation)
-            return reads.metadata(incarnation)
-          },
-          trust: async () => {
-            trust()
-            return reads.trust()
-          },
-          state: forbidden,
-          control: forbidden,
-          appFrame: forbidden,
-          pendingFrames: forbidden,
-          diagnoseState: forbidden,
-        }))
+        const read = intercept(fixture, (reads) =>
+          copyEntryReads(reads, {
+            lifetime: async () => {
+              lifetime()
+              return reads.lifetime()
+            },
+            metadata: async (incarnation) => {
+              metadata(incarnation)
+              return reads.metadata(incarnation)
+            },
+            trust: async () => {
+              trust()
+              return reads.trust()
+            },
+            state: forbidden,
+            control: forbidden,
+            appFrame: forbidden,
+            pendingFrames: forbidden,
+            diagnoseState: forbidden,
+          }),
+        )
         const owner = registry(fixture)
         const before = await fixture.inspectRows()
         await owner.recoverySource(groupID)
@@ -175,12 +177,13 @@ for (const mode of ['real-mls', 'double'] as const) {
           metadata: await reads.metadata(1),
           trust: await reads.trust(),
         }))
-        intercept(fixture, (reads) => ({
-          ...reads,
-          lifetime: async () => retained.lifetime,
-          metadata: async () => retained.metadata,
-          trust: async () => retained.trust,
-        }))
+        intercept(fixture, (reads) =>
+          copyEntryReads(reads, {
+            lifetime: async () => retained.lifetime,
+            metadata: async () => retained.metadata,
+            trust: async () => retained.trust,
+          }),
+        )
         const owner = registry(fixture)
         const first = await owner.recoverySource(groupID)
         const expected = await owner.recoverySource(groupID)
@@ -232,32 +235,35 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (damage === 'malformed-metadata')
           await fixture.mutateMetadata(key, (value) => ({ ...(value as object), version: -1 }))
         if (damage === 'corrupt-trust') await fixture.corruptTrust(groupID)
-        intercept(fixture, (reads) => ({
-          ...reads,
-          lifetime: async () => {
-            const lifetime = await reads.lifetime()
-            return damage === 'retired-installed' && lifetime !== null
-              ? { ...lifetime, activeIncarnation: 2, latestIncarnation: 2 }
-              : lifetime
-          },
-          metadata: async (incarnation) => {
-            const metadata = await reads.metadata(damage === 'retired-installed' ? 1 : incarnation)
-            return damage === 'retired-installed' && metadata !== null
-              ? { ...metadata, incarnation: 2 }
-              : metadata
-          },
-          trust: async () => {
-            const trust = await reads.trust()
-            if (trust === null) throw new Error('Missing fixture trust')
-            if (damage === 'missing-trust') return null
-            if (damage === 'malformed-trust')
-              return { ...trust, installed: { ...trust.installed, epoch: -1 } }
-            if (damage === 'empty-spent') return { ...trust, spentEpochAuthenticators: [] }
-            if (damage === 'foreign-installed')
-              return { ...trust, installed: { ...trust.installed, groupID: 'foreign' } }
-            return trust
-          },
-        }))
+        intercept(fixture, (reads) =>
+          copyEntryReads(reads, {
+            lifetime: async () => {
+              const lifetime = await reads.lifetime()
+              return damage === 'retired-installed' && lifetime !== null
+                ? { ...lifetime, activeIncarnation: 2, latestIncarnation: 2 }
+                : lifetime
+            },
+            metadata: async (incarnation) => {
+              const metadata = await reads.metadata(
+                damage === 'retired-installed' ? 1 : incarnation,
+              )
+              return damage === 'retired-installed' && metadata !== null
+                ? { ...metadata, incarnation: 2 }
+                : metadata
+            },
+            trust: async () => {
+              const trust = await reads.trust()
+              if (trust === null) throw new Error('Missing fixture trust')
+              if (damage === 'missing-trust') return null
+              if (damage === 'malformed-trust')
+                return { ...trust, installed: { ...trust.installed, epoch: -1 } }
+              if (damage === 'empty-spent') return { ...trust, spentEpochAuthenticators: [] }
+              if (damage === 'foreign-installed')
+                return { ...trust, installed: { ...trust.installed, groupID: 'foreign' } }
+              return trust
+            },
+          }),
+        )
         await expect(registry(fixture).recoverySource(groupID)).rejects.toBeInstanceOf(
           damage === 'empty-spent' ? SpentSetCorruptError : GroupUnavailableError,
         )
@@ -357,15 +363,16 @@ for (const mode of ['real-mls', 'double'] as const) {
       async ({ damage }) => {
         const fixture = await create()
         try {
-          intercept(fixture, (reads) => ({
-            ...reads,
-            trust: async () => {
-              const trust = await reads.trust()
-              if (trust === null) throw new Error('Missing fixture trust')
-              // Inject a serializable malformed provider row at the administrative read boundary.
-              return damage(trust) as GroupRecoveryTrust
-            },
-          }))
+          intercept(fixture, (reads) =>
+            copyEntryReads(reads, {
+              trust: async () => {
+                const trust = await reads.trust()
+                if (trust === null) throw new Error('Missing fixture trust')
+                // Inject a serializable malformed provider row at the administrative read boundary.
+                return damage(trust) as GroupRecoveryTrust
+              },
+            }),
+          )
           await expect(registry(fixture).recoverySource(groupID)).rejects.toMatchObject({
             name: 'GroupUnavailableError',
             reason: 'recovery-unavailable',
@@ -426,7 +433,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           },
           ledger: ['token'],
         }
-        intercept(fixture, (reads) => ({ ...reads, trust: async () => trust }))
+        intercept(fixture, (reads) => copyEntryReads(reads, { trust: async () => trust }))
         expect((await registry(fixture).recoverySource(groupID)).trust).toEqual(trust)
       } finally {
         await fixture.close()

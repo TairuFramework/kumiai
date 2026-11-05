@@ -1,7 +1,12 @@
 import { PeerRemovedError } from '@kumiai/rpc'
 
 import { observeSourceClosure } from '../closing-preparation.js'
-import { coordinatorBinding, type EntryCapability, entryCapability } from '../entry-capability.js'
+import {
+  coordinatorBinding,
+  type EntryCapability,
+  type EntryReads,
+  entryCapability,
+} from '../entry-capability.js'
 import { groupBatchFor } from '../group-batch-binding.js'
 import { copyStoredValue } from '../memory-incarnation-stores.js'
 import {
@@ -16,7 +21,19 @@ import {
   readSourceAdmission,
   runSourceCommand,
   type SourceAdmission,
+  SourceProjectionUnavailableError,
 } from './source-command-runtime.js'
+import type { CryptoCommands, SourceEntryCommand } from './source-crypto-commands.js'
+import {
+  isSourceEntryCommand,
+  loadSourceCrypto,
+  releaseSourceCrypto,
+  retainSourceResult,
+  runSourceCryptoCommand,
+  runSourceCryptoEntry,
+  sourceCryptoConfiguration,
+  sourceCryptoScope,
+} from './source-crypto-commands.js'
 import type {
   DeviceLifecycle,
   SourceBinding,
@@ -29,7 +46,34 @@ type SourceCell = {
   generation: number
   key: GroupKey | null
   projection: SourceAdmission | null
+  accounted: SourceAdmission | null
   reason: Error | null
+}
+const ownedAdmissions = new WeakMap<
+  SourceExecutor,
+  (key: GroupKey, reads: EntryReads) => Promise<SourceBinding>
+>()
+const cryptoAssertions = new WeakMap<SourceExecutor, (binding: SourceBinding) => void>()
+export function assertCryptoBinding(executor: SourceExecutor, binding: SourceBinding): void {
+  const assert = cryptoAssertions.get(executor)
+  if (assert === undefined) throw new GroupStateConflictError('Missing source admission')
+  assert(binding)
+}
+const currentBindings = new WeakMap<SourceExecutor, (key: GroupKey) => SourceBinding>()
+export function admitOwnedSource(
+  executor: SourceExecutor,
+  key: GroupKey,
+  reads: EntryReads,
+): Promise<SourceBinding> {
+  const admit = ownedAdmissions.get(executor)
+  if (admit === undefined) throw new GroupStateConflictError('Missing owned admission')
+  return admit(key, reads)
+}
+export function currentSourceBinding(
+  executor: SourceExecutor,
+  key: GroupKey,
+): SourceBinding | undefined {
+  return currentBindings.get(executor)?.(key)
 }
 type Executor = { executor: SourceExecutor; control: SourceExecutorControl }
 const registryExecutors = new WeakMap<object, Executor>()
@@ -80,14 +124,50 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
       generation: nextGeneration(),
       key: null,
       projection: null,
+      accounted: null,
       reason: null,
     }
     cells.set(groupID, cell)
     const observed = cell
     observers.push(
       entry.observe(groupID, (observation) => {
+        const previous = observed.projection ?? observed.accounted
         observed.projection = null
+        observed.accounted = null
         if (observed.key === null) return
+        const metadata =
+          observation.metadata.find((value) => value.incarnation === observed.key?.incarnation) ??
+          (previous?.metadata.version === observation.activeVersion ? previous.metadata : undefined)
+        if (
+          metadata !== undefined &&
+          observation.lifetime !== null &&
+          observation.trust !== null &&
+          observation.trustStatus === 'readable'
+        ) {
+          observed.accounted = copyStoredValue({
+            lifetime: observation.lifetime,
+            metadata,
+            source: {
+              key: observed.key,
+              stateVersion: metadata.version,
+              identity: observation.trust.installed,
+            },
+          })
+        }
+        if (
+          observation.stateStatus === 'unobserved' &&
+          previous !== null &&
+          metadata !== undefined &&
+          observation.lifetime !== null
+        ) {
+          // Side-write accounting advances metadata without changing the installed private identity.
+          observed.accounted = copyStoredValue({
+            ...previous,
+            lifetime: observation.lifetime,
+            metadata,
+            source: { ...previous.source, stateVersion: metadata.version },
+          })
+        }
         const lifetime = observation.lifetime
         if (lifetime?.restorePending) {
           close(observed, new GroupUnavailableError({ reason: 'restore-pending' }))
@@ -104,9 +184,10 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
     cell.generation = nextGeneration()
     cell.key = null
     cell.projection = null
+    cell.accounted = null
     cell.reason = reason
   }
-  function assertBinding(binding: SourceBinding): SourceCell {
+  function assertBinding(binding: SourceBinding, crypto = false): SourceCell {
     lifecycle.assertCurrent()
     if (entry.failureSignal?.aborted) throw entry.failureSignal.reason
     const cell = cells.get(binding.key.groupID)
@@ -114,10 +195,17 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
       cell === undefined ||
       cell.generation !== binding.generation ||
       cell.key?.incarnation !== binding.key.incarnation
-    )
+    ) {
+      if (
+        crypto &&
+        (cell?.reason instanceof PeerRemovedError || cell?.reason instanceof GroupUnavailableError)
+      )
+        throw cell.reason
       throw new DisplacedGroupHandleError('Source binding is superseded', { cause: cell?.reason })
-    if (cell.projection === null) throw new GroupUnavailableError({ reason: 'invalid' })
-    assertSourceAdmission(binding.key, cell.projection)
+    }
+    const projection = cell.projection ?? (crypto ? cell.accounted : null)
+    if (projection === null) throw new SourceProjectionUnavailableError()
+    assertSourceAdmission(binding.key, projection)
     return cell
   }
   const control: SourceExecutorControl = {
@@ -160,7 +248,15 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
       assertRoot()
       const binding = copyStoredValue(request.binding)
       const command = request.command
-      const input = request.input
+      const input = copyStoredValue(request.input)
+      const configuration = sourceCryptoConfiguration(request)
+      const expected =
+        command === 'app.publication'
+          ? copyStoredValue(
+              (assertBinding(binding, true).projection ?? assertBinding(binding, true).accounted)
+                ?.source,
+            )
+          : undefined
       await lifecycle.beforeUse()
       lifecycle.assertCurrent()
       const signals = anySignal([
@@ -170,28 +266,103 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
       try {
         return await groupBatchFor(coordinator, binding.key.groupID).schedule({
           source: command,
-          kind: 'accounting',
+          kind:
+            command === 'app.open' || command === 'app.receive'
+              ? 'open'
+              : command === 'app.publication'
+                ? 'enqueue'
+                : 'accounting',
           signal: signals.signal,
-          run: async () =>
-            await entry.command(
+          run: async (budget) => {
+            if (command === 'source.load') {
+              return await entry.read(binding.key.groupID, async (reads) => {
+                const projection = await readSourceAdmission(reads, binding.key)
+                const cell = cells.get(binding.key.groupID)
+                if (cell === undefined || cell.generation !== binding.generation)
+                  throw new DisplacedGroupHandleError('Source binding is superseded')
+                cell.projection = projection
+                assertBinding(binding)
+                await loadSourceCrypto(coordinator, binding.key, reads)
+                assertBinding(binding, command !== 'source.inspect')
+                return {
+                  binding: copyStoredValue(binding),
+                  value: copyStoredValue(projection.source),
+                }
+              })
+            }
+            if (isSourceEntryCommand(command)) {
+              const cell = cells.get(binding.key.groupID)
+              if (cell === undefined || cell.generation !== binding.generation)
+                throw new DisplacedGroupHandleError('Source binding is superseded')
+              const value = await runSourceCryptoEntry<SourceEntryCommand>({
+                coordinator,
+                binding,
+                command,
+                input: input as CryptoCommands[SourceEntryCommand]['input'],
+                expected,
+                budget,
+              })
+              if (cell.generation !== binding.generation)
+                throw new DisplacedGroupHandleError('Source binding is superseded')
+              retainSourceResult(value, binding)
+              return { binding: copyStoredValue(binding), value }
+            }
+            return await entry.command(
               binding.key.groupID,
               async (attempt) => {
-                const cell = assertBinding(binding)
-                const projection = cell.projection
-                if (projection === null) throw new GroupUnavailableError({ reason: 'invalid' })
-                const value = runSourceCommand({ command, input }, projection, attempt)
+                const cell = assertBinding(binding, command !== 'source.inspect')
+                const projection =
+                  cell.projection ?? (command !== 'source.inspect' ? cell.accounted : null)
+                if (projection === null) throw new SourceProjectionUnavailableError()
+                const value =
+                  command === 'source.inspect'
+                    ? runSourceCommand({ command, input: undefined }, projection, attempt)
+                    : await runSourceCryptoCommand<keyof CryptoCommands>({
+                        coordinator,
+                        binding,
+                        command,
+                        input,
+                        configuration,
+                        scope: sourceCryptoScope(attempt, () => {
+                          assertBinding(binding, true)
+                        }),
+                      })
                 attempt.assertLive()
-                assertBinding(binding)
+                assertBinding(binding, command !== 'source.inspect')
+                retainSourceResult(value, binding)
                 return { binding: copyStoredValue(binding), value }
               },
               { signal: signals.signal },
-            ),
+            )
+          },
         })
+      } catch (error) {
+        if (signals.signal.aborted) throw signals.signal.reason
+        throw error
       } finally {
         signals.dispose()
       }
     },
   }
+  ownedAdmissions.set(executor, async (key, reads) => {
+    const cell = cellFor(key.groupID)
+    const projection = await readSourceAdmission(reads, key)
+    if (cell.key !== null && cell.key.incarnation !== key.incarnation)
+      close(cell, new DisplacedGroupHandleError('Source incarnation is displaced'))
+    cell.key = copyStoredValue(key)
+    cell.projection = projection
+    cell.reason = null
+    return { key: copyStoredValue(key), generation: cell.generation }
+  })
+  cryptoAssertions.set(executor, (binding) => {
+    assertBinding(binding, true)
+  })
+  currentBindings.set(executor, (key) => {
+    const cell = cellFor(key.groupID)
+    const binding = { key: copyStoredValue(key), generation: cell.generation }
+    assertBinding(binding)
+    return binding
+  })
   observers.push(
     observeSourceClosure(coordinator, (key, reason) => control.invalidate(key, reason)),
   )
@@ -199,6 +370,7 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
   executorDisposals.set(source, () => {
     for (const unsubscribe of observers.splice(0)) unsubscribe()
     cells.clear()
+    releaseSourceCrypto(coordinator)
   })
   return source
 }

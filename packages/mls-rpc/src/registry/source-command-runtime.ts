@@ -3,9 +3,21 @@ import { type AdoptionExpected, PeerRemovedError } from '@kumiai/rpc'
 import type { EntryReads, StateMetadata } from '../entry-capability.js'
 import { copyStoredValue } from '../memory-incarnation-stores.js'
 import type { OwnerAttempt } from '../owner-queue.js'
-import { DisplacedGroupHandleError, GroupUnavailableError } from '../persistence-errors.js'
-import type { GroupKey, GroupLifetime, GroupRecoveryTrust } from '../persistence-types.js'
+import { isStoredOpenFailure } from '../persistence-codec.js'
+import {
+  DisplacedGroupHandleError,
+  GroupStateConflictError,
+  GroupUnavailableError,
+} from '../persistence-errors.js'
+import type { GroupKey, GroupLifetime } from '../persistence-types.js'
+import { readRetainedTrust } from './safety.js'
 import type { SourceCommands } from './source-executor-types.js'
+
+export class SourceProjectionUnavailableError extends GroupUnavailableError {
+  constructor() {
+    super({ reason: 'invalid' })
+  }
+}
 
 export type SourceAdmission = {
   lifetime: GroupLifetime
@@ -36,10 +48,10 @@ export function assertSourceAdmission(
   if (metadata.terminal) throw new PeerRemovedError()
 }
 
-export async function readSourceAdmission(
+export async function readSourceMetadata(
   reads: EntryReads,
   key: GroupKey,
-): Promise<SourceAdmission> {
+): Promise<Pick<SourceAdmission, 'lifetime' | 'metadata'>> {
   let lifetime: GroupLifetime | null
   let metadata: StateMetadata | null
   try {
@@ -56,22 +68,19 @@ export async function readSourceAdmission(
       cause instanceof GroupUnavailableError
     )
       throw cause
+    if (!isStoredOpenFailure(cause) && !(cause instanceof GroupStateConflictError)) throw cause
     // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
     throw new GroupUnavailableError({ reason: 'invalid', cause })
   }
-  let trust: GroupRecoveryTrust | null
-  try {
-    trust = await reads.trust()
-  } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: The constructor forwards params.cause to Error.
-    throw new GroupUnavailableError({ reason: 'recovery-unavailable', cause })
-  }
-  if (
-    trust === null ||
-    trust.installed.groupID !== key.groupID ||
-    trust.installed.incarnation !== key.incarnation
-  )
-    throw new GroupUnavailableError({ reason: 'recovery-unavailable' })
+  return { lifetime, metadata }
+}
+
+export async function readSourceAdmission(
+  reads: EntryReads,
+  key: GroupKey,
+): Promise<SourceAdmission> {
+  const { lifetime, metadata } = await readSourceMetadata(reads, key)
+  const trust = await readRetainedTrust(reads, key)
   return copyStoredValue({
     lifetime,
     metadata,

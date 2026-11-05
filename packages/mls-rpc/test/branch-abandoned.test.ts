@@ -25,6 +25,7 @@ import { entryCapability } from '../src/entry-capability.js'
 import { registryRecoveryCoordinator } from '../src/registry/recovery-coordinator.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createForkRecoveryRealFixture } from './fixtures/captured-recovery.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import {
@@ -382,13 +383,14 @@ test.each(['known', 'unknown'] as const)(
       if (entry === null) throw new Error('Missing entry')
       for (const { notices, want } of cases) {
         const event = await entry.read(source.groupID, (reads) =>
-          branchAbandonmentPreparer({
-            ...reads,
-            checkpoints: async () => [
-              ...records.filter((row) => row.kind !== 'notice'),
-              ...notices,
-            ],
-          })({
+          branchAbandonmentPreparer(
+            copyEntryReads(reads, {
+              checkpoints: async () => [
+                ...records.filter((row) => row.kind !== 'notice'),
+                ...notices,
+              ],
+            }),
+          )({
             source,
             destination: { ...source, incarnation: 2 },
             mutationID: crypto.randomUUID(),

@@ -259,7 +259,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       const first = fixture.openEphemeral([input])
       await entered.promise
       try {
-        await fixture.openDurable()
+        let durableFinished = false
+        const durable = fixture.openDurable().then(() => {
+          durableFinished = true
+        })
         let secondFinished = false
         const second = fixture.openEphemeral([input]).then((results) => {
           secondFinished = true
@@ -267,20 +270,24 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         await new Promise<void>((resolve) => setTimeout(resolve, 50))
         expect(secondFinished).toBe(false)
+        expect(durableFinished).toBe(false)
         release.resolve()
         expect(await first).toMatchObject([{ kind: 'opened' }])
+        await durable
         expect(await second).toMatchObject([{ kind: 'refused', reason: 'consumed' }])
       } finally {
         release.resolve()
       }
     })
-    test('receive queued behind the lock rechecks availability and retirement drains admitted work', async () => {
+    test('receive queued behind the owner rechecks availability and retirement drains admitted work', async () => {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await warm(fixture)
       const entered = deferred<void>()
       const release = deferred<void>()
-      const held = slot(fixture).lock.run(async () => {
+      const capability = entryCapability(fixture.fixture().device.groups)
+      if (capability === null) throw new Error('Missing entry')
+      const held = capability.command(fixture.key.groupID, async () => {
         entered.resolve()
         await release.promise
       })
@@ -455,14 +462,14 @@ for (const mode of ['real-mls', 'double'] as const) {
         await warm(fixture)
         await fixture.setUnavailable()
         if (temperature === 'cold') {
-          await foreignWithoutRefresh(fixture, 'proposal')
+          slot(fixture).base = null
           expect(slot(fixture).base).toBeNull()
         } else if (temperature === 'reopened') {
           await expect(fixture.reopen()).rejects.toMatchObject({ name: 'PeerRemovedError' })
           return
         }
         await expect(fixture.openEphemeral([input])).rejects.toMatchObject({
-          name: 'GroupUnavailableError',
+          name: 'PeerRemovedError',
         })
       },
     )
@@ -506,7 +513,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             )
           }
         }
-        const receiving = fixture.openEphemeral(inputs)
+        const receiving = fixture.openEphemeral(inputs).catch((error: unknown) => error)
         await (heldRestore?.started ?? entered.promise)
         try {
           if (transition === 'drop') dropRegistryOwner(fixture.access())
@@ -519,25 +526,16 @@ for (const mode of ['real-mls', 'double'] as const) {
           heldRestore?.release()
           release.resolve()
           if (transition === 'drop') await fixture.dropOwner()
-          const refused = {
-            kind: 'refused',
-            reason: 'invalid',
-            error: {
-              name: transition === 'drop' ? 'DisplacedGroupHandleError' : 'RegistryRetiringError',
-            },
-          }
-          expect(await receiving).toMatchObject(
-            boundary === 'restore'
-              ? [refused, refused, refused]
-              : [{ kind: 'opened' }, refused, refused],
-          )
+          expect(await receiving).toMatchObject({
+            name: transition === 'drop' ? 'DisplacedGroupHandleError' : 'RegistryRetiringError',
+          })
           if (boundary === 'restore') expect(live.receive).toBeNull()
           else expect(senderReads).toHaveBeenCalledTimes(boundary === 'decrypt' ? 1 : 2)
-          expect(await fixture.openEphemeral(inputs)).toMatchObject(
-            boundary === 'restore'
-              ? [{ kind: 'opened' }, { kind: 'opened' }, { kind: 'opened' }]
-              : [{ kind: 'refused', reason: 'consumed' }, { kind: 'opened' }, { kind: 'opened' }],
-          )
+          expect(await fixture.openEphemeral(inputs)).toMatchObject([
+            { kind: 'opened' },
+            { kind: 'opened' },
+            { kind: 'opened' },
+          ])
         } finally {
           heldRestore?.release()
           release.resolve()

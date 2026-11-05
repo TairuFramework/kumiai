@@ -12,6 +12,7 @@ import { createMemoryTransaction, gateRegistryMaintenance } from '../src/testing
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
 import { preparedTransition } from './fixtures/closing.js'
 import { createDevicePackages } from './fixtures/device-packages.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
@@ -232,6 +233,11 @@ for (const mode of ['real-mls', 'double'] as const) {
               : kind === 'missing-trust'
                 ? 'recovery-unavailable'
                 : 'invalid'
+        if (kind === 'conflicting-terminal') {
+          await expect(owner.access(groupID)).rejects.toMatchObject({ name: 'PeerRemovedError' })
+          expect(fixture.restoreCount(groupID)).toBe(0)
+          return
+        }
         await expect(owner.access(groupID)).rejects.toBeInstanceOf(GroupUnavailableError)
         await expect(owner.access(groupID)).rejects.toMatchObject({ reason })
         expect(fixture.restoreCount(groupID)).toBe(0)
@@ -284,14 +290,15 @@ for (const mode of ['real-mls', 'double'] as const) {
             ...capability,
             read: (groupID, fn) =>
               capability.read(groupID, (reads) =>
-                fn({
-                  ...reads,
-                  async state(incarnation) {
-                    const record = await reads.state(incarnation)
-                    if (record === null) throw new Error('Missing state')
-                    return { ...key, version: record.version, deleted: true }
-                  },
-                }),
+                fn(
+                  copyEntryReads(reads, {
+                    async state(incarnation) {
+                      const record = await reads.state(incarnation)
+                      if (record === null) throw new Error('Missing state')
+                      return { ...key, version: record.version, deleted: true }
+                    },
+                  }),
+                ),
               ),
           },
         })
@@ -468,7 +475,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           held = fixture.holdRestore(groupID)
           refreshed = scope.refresh()
           // Attach the assertion before releasing restoration to handle rejection immediately.
-          refreshed = expect(refreshed).rejects.toThrow('scope has ended')
+          refreshed = expect(refreshed).rejects.toMatchObject({ name: 'PersistencePhaseError' })
           await held.started
         })
         held?.release()
@@ -670,16 +677,17 @@ for (const mode of ['real-mls', 'double'] as const) {
                       return Promise.reject(error)
                     }
                     return capability.read(groupID, (reads) =>
-                      fn({
-                        ...reads,
-                        lifetime:
-                          boundary === 'lifetime' ? failOnce(reads.lifetime) : reads.lifetime,
-                        metadata:
-                          boundary === 'metadata' ? failOnce(reads.metadata) : reads.metadata,
-                        trust: boundary === 'trust' ? failOnce(reads.trust) : reads.trust,
-                        control: boundary === 'control' ? failOnce(reads.control) : reads.control,
-                        state: boundary === 'state' ? failOnce(reads.state) : reads.state,
-                      }),
+                      fn(
+                        copyEntryReads(reads, {
+                          lifetime:
+                            boundary === 'lifetime' ? failOnce(reads.lifetime) : reads.lifetime,
+                          metadata:
+                            boundary === 'metadata' ? failOnce(reads.metadata) : reads.metadata,
+                          trust: boundary === 'trust' ? failOnce(reads.trust) : reads.trust,
+                          control: boundary === 'control' ? failOnce(reads.control) : reads.control,
+                          state: boundary === 'state' ? failOnce(reads.state) : reads.state,
+                        }),
+                      ),
                     )
                   },
                 },

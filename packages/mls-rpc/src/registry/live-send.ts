@@ -22,6 +22,7 @@ import type {
   EntryReads,
   Prepared,
 } from '../entry-capability.js'
+import { entryReadsAttempt } from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   GroupStateConflictError,
@@ -30,6 +31,7 @@ import {
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
 import type { EpochIdentity, GroupStores, GroupTransaction } from '../persistence-types.js'
+import { untilAbort } from '../runtime.js'
 import type { RegistryOwner } from './access.js'
 import { scheduleRegistryAccounting } from './accounting.js'
 import { type ColdEnvironment, copyRecord } from './cold.js'
@@ -43,6 +45,9 @@ import {
   reservationEnvelope,
   reserveFromBytes,
 } from './reserve.js'
+import { readSourceAdmission } from './source-command-runtime.js'
+import type { CryptoCommands, SourceCryptoScope } from './source-crypto-commands.js'
+import { sourceCryptoScope } from './source-crypto-commands.js'
 import type { GroupHandleRegistry, ReadableGroupState, RegistryHandleAccess } from './types.js'
 
 export class ApplicationLeaseUnavailableError extends Error {
@@ -64,7 +69,6 @@ export type SendCopy = {
   eligibility: Uint8Array
 }
 export type LiveSlot = {
-  lock: { run<T>(fn: () => Promise<T>): Promise<T> }
   inflight: Set<Promise<unknown>>
   base: ReadableGroupState | null
   receive: GroupHandle | null
@@ -151,7 +155,6 @@ type CommittedEvidence = {
 }
 
 export function createLiveSlot(): LiveSlot {
-  let tail = Promise.resolve()
   return {
     inflight: new Set(),
     base: null,
@@ -160,26 +163,17 @@ export function createLiveSlot(): LiveSlot {
     consumed: { incarnation: null, epochs: new Map(), closed: new Set() },
     cancellation: new AbortController(),
     refresh: null,
-    lock: {
-      async run<T>(fn: () => Promise<T>): Promise<T> {
-        const previous = tail
-        let release!: () => void
-        tail = new Promise<void>((resolve) => {
-          release = resolve
-        })
-        await previous
-        try {
-          return await fn()
-        } finally {
-          release()
-        }
-      },
-    },
   }
 }
 
 export function createLiveSend<TTx extends GroupTransaction>(params: {
   owner: RegistryOwner
+  executeMaintain(): Promise<void>
+  executeHandoff(): Promise<void>
+  executeSeal(
+    input: CryptoCommands['app.seal']['input'],
+    signal: AbortSignal,
+  ): Promise<CryptoCommands['app.seal']['output']>
   initialControl: ControlSnapshot
   initialEligibility: Uint8Array
   slot: LiveSlot
@@ -201,8 +195,12 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   const proofs = new WeakMap<ReadableGroupState, OwnProof>()
   let generation = 0
   let sealVersion = 0
+  let encryptFault: {
+    when: 'throw-before' | 'throw-after' | 'block'
+    entered(): void
+    release: Promise<void>
+  } | null = null
   let publicationConsumed: { identity: EpochIdentity; next: number } | null = null
-  let sendTail = Promise.resolve()
   let foreignGeneration = 0
   let closed = false
   let paused = false
@@ -211,6 +209,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   let cancellation = new AbortController()
   const closing = new AbortController()
   let maintenance: Promise<void> | null = null
+  const pendingAccept = new Set<OwnProof>()
   let maintenanceAbort: AbortController | null = null
   let block: { started(): void; release: Promise<void> } | null = null
   const admissionListeners = new Set<() => void>()
@@ -259,6 +258,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     return (
       available() &&
       unresolved.size === 0 &&
+      pendingAccept.size === 0 &&
       !deferred &&
       owner.admission.admissible &&
       params.safetyHeld() === null &&
@@ -457,11 +457,11 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     changed()
     if (foreign) schedule()
   }
-  async function accept(proof: OwnProof): Promise<void> {
+  async function accept(proof: OwnProof, scope: SourceCryptoScope): Promise<void> {
     const headroom = committed.headroom
     const fence = headroom.kind === 'cold' ? generation : headroom.fence
     try {
-      await acceptReservation(proof)
+      await acceptReservation(proof, scope)
     } catch {
       if (generation === fence && committed.headroom === headroom) {
         invalidate()
@@ -473,7 +473,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       changed()
     }
   }
-  async function acceptReservation(proof: OwnProof): Promise<void> {
+  async function acceptReservation(proof: OwnProof, scope: SourceCryptoScope): Promise<void> {
     const reservation = proof.reservation
     if (reservation == null || !proof.registered || !proof.proven) return
     const saved = reservation.envelope?.saved
@@ -526,7 +526,10 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
     const headroom = committed.headroom
     const capturedGeneration = headroom.kind === 'cold' ? generation : headroom.fence
-    const copy = restrictCommitAuthoring(await environment.restore(copyRecord(reservation.pre)))
+    const restore = async () =>
+      restrictCommitAuthoring(await environment.restore(copyRecord(reservation.pre)))
+    const copy = restrictCommitAuthoring(await scope.call(restore))
+    scope.assertLive()
     if (
       !valid() ||
       generation !== capturedGeneration ||
@@ -648,7 +651,10 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     if (outcome === 'committed') await account(proof)
     if (owner.expected.get(proof.record.version) === proof.record)
       owner.expected.delete(proof.record.version)
-    if (outcome === 'committed') await accept(proof)
+    if (outcome === 'committed' && proof.reservation != null && available()) {
+      pendingAccept.add(proof)
+      await params.executeHandoff()
+    }
     schedule()
   }
   async function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -740,6 +746,74 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
   }
   class NoReservation extends Error {}
+  async function maintain(signal: AbortSignal): Promise<void> {
+    await run(
+      { groupID: owner.key.groupID, mutationID: crypto.randomUUID() },
+      async (reads) => {
+        params.assertAvailable()
+        await readSourceAdmission(reads, owner.key)
+        const scope = sourceCryptoScope(entryReadsAttempt(reads), params.assertAvailable)
+        const ownedEnvironment: ColdEnvironment = {
+          ...environment,
+          restore: async (record) =>
+            scope.protect(
+              restrictCommitAuthoring(await scope.call(() => environment.restore(record))),
+            ),
+        }
+        if (!needsMaintenance() || signal.aborted) throw new NoReservation()
+        const lifetime = await reads.lifetime()
+        const record = await reads.state(owner.key.incarnation)
+        if (
+          lifetime?.activeIncarnation !== owner.key.incarnation ||
+          record === null ||
+          record.deleted ||
+          record.state === null
+        )
+          throw new NoReservation()
+        const reserved = await reserveFromBytes(
+          ownedEnvironment,
+          { ...record, state: record.state },
+          Math.max(record.senderHWM, currentNext()),
+        )
+        if (reserved.reservation === null) {
+          deferred = true
+          throw new NoReservation()
+        }
+        const saved: ReadableGroupState = {
+          ...record,
+          state: reserved.state,
+          version: record.version + 1,
+          senderHWM: reserved.senderHWM,
+        }
+        return {
+          expected: lifetime,
+          value: {
+            record: saved,
+            eligibility: reserved.reservation.eligibility,
+            reservation: { ...reserved.reservation, envelope: reservationEnvelope(saved) },
+          },
+        }
+      },
+      async (stores, prepared) => {
+        params.assertAvailable()
+        if (signal.aborted) throw new NoReservation()
+        await params.assertWorkSafety(stores)
+        const target = stores.incarnation(owner.key.incarnation)
+        const current = await target.state.load()
+        if (current?.version !== prepared.record.version - 1)
+          throw new GroupStateConflictError('Lease source moved')
+        await target.state.save(prepared.record)
+      },
+    )
+  }
+  async function acceptPending(scope: SourceCryptoScope): Promise<void> {
+    for (const proof of [...pendingAccept]) {
+      scope.assertLive()
+      await accept(proof, scope)
+      scope.assertLive()
+      pendingAccept.delete(proof)
+    }
+  }
   function schedule(): Promise<void> | null {
     if (maintenance !== null) return maintenance
     if (!needsMaintenance()) return null
@@ -763,55 +837,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         }
         if (abort.signal.aborted || !needsMaintenance()) return
         try {
-          await run(
-            { groupID: owner.key.groupID, mutationID: crypto.randomUUID() },
-            async (reads) => {
-              params.assertAvailable()
-              if (!needsMaintenance() || abort.signal.aborted) throw new NoReservation()
-              const lifetime = await reads.lifetime()
-              const record = await reads.state(owner.key.incarnation)
-              if (
-                lifetime?.activeIncarnation !== owner.key.incarnation ||
-                record === null ||
-                record.deleted ||
-                record.state === null
-              )
-                throw new NoReservation()
-              const reserved = await reserveFromBytes(
-                environment,
-                { ...record, state: record.state },
-                Math.max(record.senderHWM, currentNext()),
-              )
-              if (reserved.reservation === null) {
-                deferred = true
-                throw new NoReservation()
-              }
-              const saved: ReadableGroupState = {
-                ...record,
-                state: reserved.state,
-                version: record.version + 1,
-                senderHWM: reserved.senderHWM,
-              }
-              return {
-                expected: lifetime,
-                value: {
-                  record: saved,
-                  eligibility: reserved.reservation.eligibility,
-                  reservation: { ...reserved.reservation, envelope: reservationEnvelope(saved) },
-                },
-              }
-            },
-            async (stores, prepared) => {
-              params.assertAvailable()
-              if (abort.signal.aborted) throw new NoReservation()
-              await params.assertWorkSafety(stores)
-              const target = stores.incarnation(owner.key.incarnation)
-              const current = await target.state.load()
-              if (current?.version !== prepared.record.version - 1)
-                throw new GroupStateConflictError('Lease source moved')
-              await target.state.save(prepared.record)
-            },
-          )
+          await params.executeMaintain()
           if (sendCopy() === null && needsMaintenance()) {
             await delay(backoff, abort.signal)
             backoff = Math.min(backoff * 2, 15_000)
@@ -844,7 +870,14 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     let abort!: () => void
     try {
       await Promise.race([
-        job,
+        (async () => {
+          let pending: Promise<void> | null = job
+          while (pending !== null) {
+            await pending
+            if (maintenance === pending) return
+            pending = maintenance
+          }
+        })(),
         new Promise<void>((resolve) => {
           timer = setTimeout(resolve, LEASE_AWAIT_MS)
         }),
@@ -869,7 +902,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       if ((decodeAppAAD(aad)?.intent ?? 'ephemeral') !== intent)
         throw new TypeError('App AAD intent mismatch')
       assertSeal()
-      await accounting()
+      await untilAbort(accounting(), signal)
       for (let attempt = 0; ; attempt++) {
         if (signal.aborted) throw signal.reason
         assertSeal()
@@ -878,15 +911,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
           record !== null && ownApplicationGeneration(record.copy.state) >= record.limit
         if (record !== null && !exhausted) {
           try {
-            const sealed = await withSend(async () => {
-              if (ownApplicationGeneration(record.copy.state) >= record.limit)
-                throw new ApplicationLeaseUnavailableError('exhausted')
-              assertSeal()
-              if (record !== sendCopy()) throw new ApplicationLeaseUnavailableError('cold')
-              sealVersion++
-              return await record.copy.encryptApplication(bytes, { aad })
-            })
-            return { ...sealed, epoch: record.identity.epoch }
+            return await params.executeSeal({ plaintext: bytes, aad, intent }, signal)
           } catch (error) {
             if (
               !(error instanceof ApplicationSendRefusedError) ||
@@ -917,25 +942,76 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     paused = true
     foreignGeneration++
     closed ||= permanent
+    pendingAccept.clear()
     if (permanent) closing.abort(reason)
     maintenanceAbort?.abort(reason)
     cancellation.abort(reason)
     invalidate()
   }
-  async function withSend<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = sendTail
-    let release!: () => void
-    sendTail = new Promise<void>((resolve) => {
-      release = resolve
+  async function sealOwned(input: CryptoCommands['app.seal']['input'], scope: SourceCryptoScope) {
+    scope.assertLive()
+    params.assertAvailable()
+    const held = params.safetyHeld()
+    if (held !== null) throw new GroupSafetyHeldError(held)
+    const record = sendCopy()
+    if (record === null) throw new ApplicationLeaseUnavailableError('cold')
+    if (ownApplicationGeneration(record.copy.state) >= record.limit)
+      throw new ApplicationLeaseUnavailableError('exhausted')
+    assertSeal()
+    const allocated = ownApplicationGeneration(record.copy.state)
+    if ((decodeAppAAD(input.aad)?.intent ?? 'ephemeral') !== input.intent)
+      throw new TypeError('App AAD intent mismatch')
+    const unsubscribe = scope.onRevoke(() => {
+      if (record === sendCopy()) invalidate()
+      schedule()
     })
-    await previous
     try {
-      return await fn()
+      const scratch = scope.protect(record.copy)
+      scope.assertLive()
+      sealVersion++
+      const fault = encryptFault
+      encryptFault = null
+      if (fault !== null) {
+        fault.entered()
+        if (fault.when === 'throw-before')
+          throw new Error('Injected encryption failure before consumption')
+        if (fault.when === 'block') await fault.release
+      }
+      scope.assertLive()
+      if (ownApplicationGeneration(record.copy.state) !== allocated)
+        throw new ApplicationLeaseUnavailableError('exhausted')
+      const sealed = await scope.call(() =>
+        scratch.encryptApplication(input.plaintext, { aad: input.aad }),
+      )
+      if (fault?.when === 'throw-after')
+        throw new Error('Injected encryption failure after consumption')
+      scope.assertLive()
+      if (record !== sendCopy()) throw new ApplicationLeaseUnavailableError('cold')
+      return { ...sealed, epoch: record.identity.epoch }
+    } catch (error) {
+      try {
+        scope.assertLive()
+      } catch {
+        // A revoked scratch copy burns the remainder of its reserved range.
+        if (record === sendCopy()) invalidate()
+      }
+      throw error
     } finally {
-      release()
+      unsubscribe()
     }
   }
-  async function prepareSeal(record: ReadableGroupState, bytes: Uint8Array, aad: Uint8Array) {
+  async function prepareSeal(
+    record: ReadableGroupState,
+    bytes: Uint8Array,
+    aad: Uint8Array,
+    scope: SourceCryptoScope,
+  ) {
+    scope.assertLive()
+    const ownedEnvironment: ColdEnvironment = {
+      ...environment,
+      restore: async (record) =>
+        scope.protect(restrictCommitAuthoring(await scope.call(() => environment.restore(record)))),
+    }
     assertSeal()
     let copy = sendCopy()
     if (!sameStoredValue(identityOf(record), identityOf(committed.record)))
@@ -944,7 +1020,11 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       copy === null || copy.limit - ownApplicationGeneration(copy.copy.state) < LEASE_RENEW_BELOW
     let reserved =
       renew && committedNext(record) < LEASE_MAX_GENERATION
-        ? await reserveFromBytes(environment, record, Math.max(record.senderHWM, currentNext()))
+        ? await reserveFromBytes(
+            ownedEnvironment,
+            record,
+            Math.max(record.senderHWM, currentNext()),
+          )
         : null
     if (reserved !== null && reserved.reservation === null) {
       if (copy === null || ownApplicationGeneration(copy.copy.state) >= copy.limit)
@@ -969,7 +1049,9 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
           }
     if (copy === null || ownApplicationGeneration(copy.copy.state) >= copy.limit) {
       if (reservation === null) throw new ApplicationLeaseUnavailableError('exhausted')
-      const handle = restrictCommitAuthoring(await environment.restore(copyRecord(reservation.pre)))
+      const handle = restrictCommitAuthoring(
+        await ownedEnvironment.restore(copyRecord(reservation.pre)),
+      )
       copy = {
         copy: handle,
         identity: reservation.identity,
@@ -980,10 +1062,13 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
       bindSendCeiling(handle, () => staged.limit)
       liveHandles.add(handle)
     }
+    scope.assertLive()
+    scope.protect(copy.copy)
     assertSeal()
     sealVersion++
     try {
-      const sealed = await copy.copy.encryptApplication(bytes, { aad })
+      const sealed = await scope.call(() => copy.copy.encryptApplication(bytes, { aad }))
+      scope.assertLive()
       return {
         record: saved,
         reservation,
@@ -1003,9 +1088,24 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   return {
     prepareSeal,
+    maintain: () => maintain(cancellation.signal),
+    acceptPending,
+    sealOwned,
+    armEncryptFault(when: 'throw-before' | 'throw-after' | 'block') {
+      let entered!: () => void
+      let release!: () => void
+      const started = new Promise<void>((resolve) => {
+        entered = resolve
+      })
+      const pending = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      encryptFault = { when, entered, release: pending }
+      return { started, release }
+    },
     async publication<T>(fn: () => Promise<T>): Promise<T> {
       await accounting()
-      return await withSend(fn)
+      return await fn()
     },
     frontier: () => sealVersion,
     unresolved: () => unresolved.size !== 0 || checks.size !== 0,
@@ -1053,7 +1153,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     ) {
       return advanceCommitted(record.version, record, { kind: 'refresh', eligibility, control })
     },
-    async handoff(reservation: Reservation) {
+    async handoff(reservation: Reservation, scope: SourceCryptoScope) {
       if (!available()) return
       const record = reservation.envelope?.saved
       if (record === undefined) return
@@ -1079,7 +1179,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
         committed.headroom = { kind: 'pending', proof, fence: generation }
         changed()
       }
-      await accept(proof)
+      await accept(proof, scope)
       schedule()
     },
     cancel,

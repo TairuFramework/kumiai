@@ -9,6 +9,7 @@ import {
   GroupSafetyHeldError,
   InvalidAppEntryError,
 } from '@kumiai/rpc'
+import { createRuntime } from '@sozai/runtime'
 
 import {
   assertCryptoSafety,
@@ -26,6 +27,7 @@ import {
 } from './persistence-types.js'
 import { registryStreamingOpen } from './registry/app-open-binding.js'
 import { registryControlBatch } from './registry/control-batch.js'
+import { managedEntryCrypto } from './registry/source-crypto-commands.js'
 
 /** Registry crypto uses byte-level seal/receive and owns durable pending frames. */
 export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): GroupCrypto & {
@@ -34,6 +36,11 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
 } {
   const { access } = params
   const base = createGroupCryptoBase(params)
+  const managed = managedEntryCrypto(
+    access.runtime,
+    params.entryLabel ?? ENTRY_SEAL_LABEL,
+    params.runtime ?? createRuntime(),
+  )
   const control = registryControlBatch(access)
   if (control !== undefined)
     registryControlEntryLabels.set(control, params.entryLabel ?? ENTRY_SEAL_LABEL)
@@ -68,6 +75,30 @@ export function createRegistryGroupCrypto(params: RegistryGroupCryptoParams): Gr
 
   const result: GroupCrypto & { pending: PendingAppFrames; unwrapBatch: typeof unwrapBatch } = {
     ...base,
+    ...(managed === undefined
+      ? {}
+      : ({
+          exportSecret: (label, length) => {
+            managed.assertAvailable()
+            try {
+              assertCryptoSafety(access)
+            } catch (error) {
+              if (error instanceof GroupSafetyHeldError) return Promise.reject(error)
+              throw error
+            }
+            return managed.exportSecret(label, length)
+          },
+          sealEntries: async (bytes) => {
+            managed.assertAvailable()
+            assertCryptoSafety(access)
+            return await managed.sealEntries(bytes)
+          },
+          openEntries: async (bytes) => {
+            managed.assertAvailable()
+            assertCryptoSafety(access)
+            return await managed.openEntries(bytes)
+          },
+        } satisfies Pick<GroupCrypto, 'exportSecret' | 'sealEntries' | 'openEntries'>)),
     /**
      * Cold, deferred and exhausted ephemeral sends throw ApplicationLeaseUnavailableError at once.
      * Log intent waits once, bounded, for maintenance. Inadmissible admission throws

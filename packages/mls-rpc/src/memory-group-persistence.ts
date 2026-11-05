@@ -23,6 +23,7 @@ import { controlRetirementSources } from './control-write-context.js'
 import {
   type AccountedGroupObservation,
   bindEntryCapability,
+  bindEntryReadsAttempt,
   type EntryCapability,
   type EntryReads,
   type StateMetadata,
@@ -384,6 +385,7 @@ export function createMemoryGroupCoordinator(params: {
         }
       }),
     }
+    bindEntryReadsAttempt(reads, entry.attempt())
     return Object.freeze(reads)
   }
   async function readOwned<TValue>(

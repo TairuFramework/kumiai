@@ -30,6 +30,7 @@ import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
 import { gateRegistryMaintenance } from '../src/testing.js'
 import { preparedTransition } from './fixtures/closing.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
@@ -450,6 +451,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         const binding = coordinatorBinding(fixture.device.groups)
         if (capability === null || binding === null) throw new Error('Missing capability')
         let proofs = 0
+        const seenProofs = new Set<string>()
         let firstAuthenticator: Uint8Array | undefined
         let removed = false
         bindEntryCapability({
@@ -461,10 +463,18 @@ for (const mode of ['real-mls', 'double'] as const) {
               return capability.observe(
                 groupID,
                 (value) => {
-                  proofs++
+                  if (!seenProofs.has(value.mutationID)) {
+                    seenProofs.add(value.mutationID)
+                    proofs++
+                  }
                   if (proofs === 1)
                     firstAuthenticator = value.trust?.installed.authenticator.slice()
-                  if (proofs === 2 && value.trust !== null && firstAuthenticator !== undefined) {
+                  if (
+                    proofs === 2 &&
+                    !removed &&
+                    value.trust !== null &&
+                    firstAuthenticator !== undefined
+                  ) {
                     const spent = value.trust.spentEpochAuthenticators
                     value.trust.spentEpochAuthenticators = spent.filter(
                       (bytes) =>
@@ -930,16 +940,17 @@ for (const mode of ['real-mls', 'double'] as const) {
             },
             read: (id, read) =>
               capability.read(id, (reads) =>
-                read({
-                  ...reads,
-                  trust: async () => {
-                    if (fail) {
-                      diagnosed++
-                      throw new Error('Transient trust I/O')
-                    }
-                    return reads.trust()
-                  },
-                }),
+                read(
+                  copyEntryReads(reads, {
+                    trust: async () => {
+                      if (fail) {
+                        diagnosed++
+                        throw new Error('Transient trust I/O')
+                      }
+                      return reads.trust()
+                    },
+                  }),
+                ),
               ),
           },
         })

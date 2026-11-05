@@ -727,10 +727,12 @@ for (const mode of ['real-mls', 'double'] as const) {
               await crypto.wrap(new Uint8Array([1]), { aad })
           await expect(promptly(crypto.wrap(new Uint8Array([2]), { aad }))).rejects.toMatchObject({
             name:
-              reason === 'terminal' || reason === 'rotation-required'
-                ? 'SendNotAdmissibleError'
-                : 'ApplicationLeaseUnavailableError',
-            reason,
+              reason === 'terminal'
+                ? 'PeerRemovedError'
+                : reason === 'rotation-required'
+                  ? 'SendNotAdmissibleError'
+                  : 'ApplicationLeaseUnavailableError',
+            ...(reason === 'terminal' ? {} : { reason }),
           })
         } finally {
           gate.release()

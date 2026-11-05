@@ -920,7 +920,7 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
       const fixture = await create()
       try {
         const owner = fixture.registry
-        const access = await owner.access(groupID)
+        let access = await owner.access(groupID)
         await fixture.installRows({
           key,
           control: { putOutcomes: [{ id: 'owed', opID: null, at: 1, kind: 'unknown' }] },
@@ -930,7 +930,9 @@ export function testRegistryConformance<THandle extends ConformanceRegistryHandl
           name: 'GroupControlUnsettledError',
         })
         expect(await fixture.inspectRows()).toEqual(before)
-        expect(await owner.access(groupID)).toBe(access)
+        const fresh = await owner.access(groupID)
+        expect(fresh.key).toEqual(access.key)
+        access = fresh
         await fixture.device.groups
           .ports(key)
           .control.apply({ deleteOutcomes: ['owed'] }, 'ack-control')
@@ -1458,7 +1460,8 @@ export function testRegistryCrashConformance<THandle extends ConformanceRegistry
             else expect(await operation).toHaveProperty('error')
             if (outcome === 'rollback') {
               expect(await fixture.device.groups.loadState(destination)).toBeNull()
-              expect(await sourceAccess.read((handle) => fixture.authenticator(handle))).toEqual(
+              const fresh = await owner.access(groupID)
+              expect(await fresh.read((handle) => fixture.authenticator(handle))).toEqual(
                 advancedAuthenticator,
               )
             }

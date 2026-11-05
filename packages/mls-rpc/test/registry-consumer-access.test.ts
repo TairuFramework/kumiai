@@ -31,6 +31,7 @@ import {
   dropRegistryOwner,
   gateRegistryMaintenance,
 } from '../src/testing.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import { createGatedRegistryFixture as createRegistryFixture } from './fixtures/registry.js'
 import { testRegistryBackgroundWarmup } from './fixtures/registry-maintenance.js'
 import {
@@ -290,17 +291,18 @@ for (const mode of ['real-mls', 'double'] as const) {
           ...capability,
           read: (id, fn) =>
             capability.read(id, (reads) =>
-              fn({
-                ...reads,
-                control: async (incarnation) => {
-                  const value = await reads.control(incarnation)
-                  if (suspended) {
-                    started.resolve()
-                    await release.promise
-                  }
-                  return value
-                },
-              }),
+              fn(
+                copyEntryReads(reads, {
+                  control: async (incarnation) => {
+                    const value = await reads.control(incarnation)
+                    if (suspended) {
+                      started.resolve()
+                      await release.promise
+                    }
+                    return value
+                  },
+                }),
+              ),
             ),
         },
       })

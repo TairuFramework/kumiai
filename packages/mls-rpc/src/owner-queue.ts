@@ -79,6 +79,13 @@ export type OwnerQueues = {
   readonly failure: GroupStateConflictError | null
 }
 
+const attemptCallbacks = new WeakMap<OwnerAttempt, <T>(fn: () => T) => T>()
+export function ownerAttemptCallback<T>(attempt: OwnerAttempt, fn: () => T): T {
+  const callback = attemptCallbacks.get(attempt)
+  if (callback === undefined) throw new PersistencePhaseError('Unregistered owner attempt')
+  return callback(fn)
+}
+
 const failureSignals = new WeakMap<OwnerEntry, AbortSignal>()
 
 export function ownerEntryFailureSignal(entry: OwnerEntry): AbortSignal | undefined {
@@ -302,6 +309,7 @@ export function createOwnerQueues(options?: {
             if (controller.signal.aborted) throw controller.signal.reason
           },
         })
+        attemptCallbacks.set(attempt, (fn) => entry.callback(fn))
         return { attempt, cancelled: cancelled.promise }
       }
       let currentAttempt = newAttempt()

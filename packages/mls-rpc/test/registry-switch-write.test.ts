@@ -1108,8 +1108,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           } else {
             expect(settled).toHaveProperty('error')
             expect(await s.fixture.inspectRows()).toEqual(before)
-            await expect(access.read((handle) => handle.groupID)).resolves.toBe(groupID)
-            await vi.waitFor(() => expect(registryLeaseSnapshot(access)).not.toBeNull())
+            await expect(
+              access.seal(new Uint8Array([1]), { aad: new Uint8Array(), intent: 'ephemeral' }),
+            ).rejects.toMatchObject({ name: 'DisplacedGroupHandleError' })
+            const fresh = await s.owner.access(groupID)
+            await expect(fresh.read((handle) => handle.groupID)).resolves.toBe(groupID)
+            await vi.waitFor(() => expect(registryLeaseSnapshot(fresh)).not.toBeNull())
             const original = s.recovery.source
             s.recovery.source = await s.owner.recoverySource(groupID)
             expect(s.recovery.source.stateVersion).toBeGreaterThan(original.stateVersion)

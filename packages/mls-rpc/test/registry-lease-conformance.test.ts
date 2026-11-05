@@ -1,5 +1,5 @@
 import { testRegistryLeaseConformance } from '@kumiai/rpc-conformance'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { entryCapability } from '../src/entry-capability.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
@@ -22,6 +22,11 @@ for (const mode of ['real-mls', 'double'] as const) {
           await capability.read(fixture.key.groupID, (reads) => reads.lifetime()),
         ).toMatchObject({ activeIncarnation: 1 })
         expect(fixture.providerTransactions() - before).toBe(1)
+        const commands = vi.spyOn(capability, 'command')
+        const warm = fixture.providerTransactions()
+        await fixture.sealEphemeral()
+        expect(commands).toHaveBeenCalledOnce()
+        expect(fixture.providerTransactions()).toBe(warm)
       } finally {
         await fixture.close()
       }

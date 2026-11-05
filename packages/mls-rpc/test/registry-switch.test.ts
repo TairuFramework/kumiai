@@ -107,6 +107,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       if (name === undefined) await call.toThrow()
       else await call.toMatchObject({ name })
       expect(await s.fixture.inspectRows()).toEqual(before)
+      s.access = await s.owner.access(groupID)
       expect(await s.access.read((handle) => handle.groupID)).toBe(groupID)
     }
 
@@ -963,6 +964,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             expect(settled).toHaveProperty('error')
             expect(await s.fixture.inspectRows()).toEqual(before)
             expect(changes).toEqual([])
+            s.access = await s.owner.access(groupID)
             expect(await s.access.read((handle) => handle.groupID)).toBe(groupID)
             expect(s.hooks()).toBe(1)
             expect(await run(s)).toEqual(destination)

@@ -112,25 +112,5 @@ export function armLiveEncryptFault(
   access: RegistryHandleAccess,
   when: 'throw-before' | 'throw-after' | 'block',
 ) {
-  const copy = registryLeaseSnapshot(access)?.copy
-  if (copy === undefined) throw new TypeError('Missing live sender')
-  const encrypt = copy.encryptApplication.bind(copy)
-  let release!: () => void
-  let entered!: () => void
-  const started = new Promise<void>((resolve) => {
-    entered = resolve
-  })
-  const released = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  copy.encryptApplication = async (...args) => {
-    copy.encryptApplication = encrypt
-    entered()
-    if (when === 'throw-before') throw new Error('Injected encryption failure before consumption')
-    if (when === 'block') await released
-    const sealed = await encrypt(...args)
-    if (when === 'throw-after') throw new Error('Injected encryption failure after consumption')
-    return sealed
-  }
-  return { started, release: () => release() }
+  return live(access).armEncryptFault(when)
 }

@@ -116,6 +116,7 @@ export async function loadValidatedGroup(
     control = await reads.control(key.incarnation)
     trust = await readRetainedTrust(reads, key)
     metadata = await reads.metadata(key.incarnation)
+    if (metadata?.terminal) throw new PeerRemovedError()
     if (
       metadata === null ||
       metadata.groupID !== groupID ||

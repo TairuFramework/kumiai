@@ -60,6 +60,7 @@ import {
   physicalRecordKey,
   recordAAD,
 } from '../../src/persistence-codec.js'
+import type { GroupStateConflictError } from '../../src/persistence-errors.js'
 import type {
   DevicePackageAdapters,
   DevicePersistence,
@@ -183,6 +184,9 @@ export type RegistryStorageFixture = Omit<
     phase: Parameters<PersistenceFixture<RegistryStoragePorts>['onPhase']>[0] | 'retry' | 'outcome',
     fn: () => Promise<void> | void,
   ): void
+  failStop(error: GroupStateConflictError): void
+  transactionCount(): number
+  pauseBarrier(): { started: Promise<void>; release(): void }
   entry(): EntryCapability<MemoryTransaction>
   observeCodec(fn: (kind: 'open' | 'seal', namespace: string, bytes: Uint8Array) => void): void
   armNextWorkFault(
@@ -491,7 +495,17 @@ export async function createStorageFixture(params: {
       })
     }
   }
+  let transactionCount = 0
+  const countedDatabases = new WeakSet<object>()
   function ports(effects = params.effects, database = db) {
+    if (!countedDatabases.has(database)) {
+      countedDatabases.add(database)
+      const transact = database.transact.bind(database)
+      database.transact = (...args) => {
+        transactionCount++
+        return transact(...args)
+      }
+    }
     // Capture the registered public Read callback without adding a production test API.
     const bind = packageReads.bindMemoryPackageReads
     const capture = vi
@@ -733,6 +747,32 @@ export async function createStorageFixture(params: {
       const value = decodeStoredValue(await atRest.open(bytes, recordAAD(location)))
       const changed = await atRest.seal(encodeStoredValue(fn(value)), recordAAD(location))
       memoryFaults(db).forceCommittedRow('meta', physicalKey, changed)
+    },
+    pauseBarrier() {
+      const started = deferred<void>()
+      const release = deferred<void>()
+      const barrier = db.completionBarrier.bind(db)
+      const spy = vi.spyOn(db, 'completionBarrier').mockImplementation(async (scope) => {
+        if (scope.groupID === null) return barrier(scope)
+        started.resolve()
+        await release.promise
+        return barrier(scope)
+      })
+      return {
+        started: started.promise,
+        release() {
+          release.resolve()
+          spy.mockRestore()
+        },
+      }
+    },
+    failStop(error: GroupStateConflictError) {
+      const owners = memoryGroupOwnerQueues(db)
+      if (owners === undefined) throw new Error('Missing fixture owners')
+      owners.failStop(error)
+    },
+    transactionCount() {
+      return transactionCount
     },
     entry() {
       active()

@@ -7,6 +7,7 @@ import type {
 } from '@kumiai/rpc'
 
 import type { OwnerAttempt } from './owner-queue.js'
+import { PersistencePhaseError } from './persistence-errors.js'
 import type {
   AppOutboxEntry,
   AppPoisonRecord,
@@ -120,6 +121,16 @@ export type EntryCapability<TTx extends GroupTransaction> = {
   ): Promise<T>
 }
 
+const readAttempts = new WeakMap<EntryReads, OwnerAttempt>()
+export function bindEntryReadsAttempt(reads: EntryReads, attempt: OwnerAttempt): void {
+  readAttempts.set(reads, attempt)
+}
+export function entryReadsAttempt(reads: EntryReads): OwnerAttempt {
+  const attempt = readAttempts.get(reads)
+  if (attempt === undefined) throw new PersistencePhaseError('Unregistered entry reads')
+  attempt.assertLive()
+  return attempt
+}
 const bindings = new WeakMap<object, { capability: unknown; coordinatorBinding: object }>()
 
 export function bindEntryCapability<TTx extends GroupTransaction>(params: {

@@ -19,6 +19,7 @@ import * as coldModule from '../src/registry/cold.js'
 import { loadValidatedGroup, restoreValidated } from '../src/registry/cold.js'
 import * as liveSendModule from '../src/registry/live-send.js'
 import { restoreCaptured } from '../src/registry/reserve.js'
+import { registrySourceExecutor } from '../src/registry/source-executor.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { controlAdoptionFixture } from './fixtures/control-adoption.js'
 import {
@@ -92,6 +93,7 @@ test.each(['real-mls', 'double'] as const)(
       })
       cold = await group.fixture().reopen()
       const before = cold.restores()
+      const commands = vi.spyOn(registrySourceExecutor(cold.registry).executor, 'execute')
       const result = await cold.registry.access(group.key.groupID).catch((error: unknown) => error)
       expect(cold.restores()).toBe(before)
       expect(result).toBeInstanceOf(PeerRemovedError)
@@ -106,6 +108,7 @@ test.each(['real-mls', 'double'] as const)(
         await entry.read(group.key.groupID, (reads) => reads.pendingFrames(group.key.incarnation)),
       ).toEqual([])
       expect(cold.restores()).toBe(before)
+      expect(commands).not.toHaveBeenCalled()
     } finally {
       await cold?.close()
       await group.close()

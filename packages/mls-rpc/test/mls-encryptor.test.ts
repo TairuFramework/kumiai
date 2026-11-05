@@ -4,6 +4,8 @@ import { toB64 } from '@sozai/codec'
 import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { MLSEncryptor, type MLSEncryptorParams } from '../src/mls-encryptor.js'
+import { sourceResultBinding } from '../src/registry/source-crypto-commands.js'
+import { registrySourceExecutor } from '../src/registry/source-executor.js'
 import type { GroupRuntimeSnapshot, ReceiveResult } from '../src/registry/types.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 
@@ -41,11 +43,19 @@ for (const mode of ['real-mls', 'double'] as const) {
     }
 
     test('both registry-backed members encrypt and decrypt with empty ephemeral AAD', async () => {
-      const { local, remote, access } = await setup()
+      const { local, remote, access, fixture } = await setup()
+      const commands = vi.spyOn(
+        registrySourceExecutor(fixture.fixture().registry).executor,
+        'execute',
+      )
       const seal = vi.spyOn(access, 'seal')
       const plaintext = message()
-      expect(await remote.decrypt(await local.encrypt(plaintext))).toEqual(plaintext)
+      const encrypted = await local.encrypt(plaintext)
+      expect(sourceResultBinding(encrypted)?.key).toEqual(fixture.key)
+      expect(await remote.decrypt(encrypted)).toEqual(plaintext)
       expect(await local.decrypt(await remote.encrypt(plaintext))).toEqual(plaintext)
+      expect(commands.mock.calls.map(([request]) => request.command)).toContain('app.seal')
+      expect(commands.mock.calls.map(([request]) => request.command)).toContain('app.receive')
       expect(seal).toHaveBeenCalledWith(plaintext, {
         aad: new Uint8Array(),
         intent: 'ephemeral',

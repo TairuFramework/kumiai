@@ -1,9 +1,11 @@
 import type { AdoptionExpected, GroupKey } from '@kumiai/rpc'
 
+import type { CryptoCommands } from './source-crypto-commands.js'
+
 export type SourceBinding = { key: GroupKey; generation: number }
 export type BoundSourceResult<TValue> = { binding: SourceBinding; value: TValue }
 export type SourceCommand<TInput, TOutput> = { input: TInput; output: TOutput }
-export type SourceCommands = {
+export type SourceCommands = CryptoCommands & {
   'source.inspect': SourceCommand<undefined, AdoptionExpected>
 }
 export type SourceExecutor = {

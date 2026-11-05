@@ -6,6 +6,7 @@ import { createRecoveryContinuationPort } from '../src/registry/continuation.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { createRegistryPeer, type RegistryPeer } from '../src/registry-peer.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture } from './fixtures/registry.js'
 
@@ -60,16 +61,17 @@ for (const context of ['supplied', 'absent'] as const) {
       let failNextTrustRead = true
       vi.spyOn(capability.entry, 'read').mockImplementation((groupID, fn) => {
         return read(groupID, (reads) => {
-          return fn({
-            ...reads,
-            trust: async () => {
-              if (failNextTrustRead) {
-                failNextTrustRead = false
-                throw new Error('Transient diagnostic trust read failure')
-              }
-              return reads.trust()
-            },
-          })
+          return fn(
+            copyEntryReads(reads, {
+              trust: async () => {
+                if (failNextTrustRead) {
+                  failNextTrustRead = false
+                  throw new Error('Transient diagnostic trust read failure')
+                }
+                return reads.trust()
+              },
+            }),
+          )
         })
       })
       let outcome: unknown

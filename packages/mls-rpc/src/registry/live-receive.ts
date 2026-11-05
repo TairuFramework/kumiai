@@ -14,7 +14,8 @@ import { sameStoredValue } from '../memory-incarnation-stores.js'
 import { type ColdEnvironment, copyRecord } from './cold.js'
 import type { LiveSlot } from './live-send.js'
 import { ApplicationLeaseUnavailableError } from './live-send.js'
-import { LEASE_AWAIT_MS, receiveProjection } from './reserve.js'
+import { receiveProjection } from './reserve.js'
+import type { SourceCryptoScope } from './source-crypto-commands.js'
 import type {
   ReadableGroupState,
   ReceiveInput,
@@ -101,202 +102,173 @@ export function createLiveReceive(params: {
     return pending
   }
   slot.refresh = refresh
-  async function wait(job: Promise<void> | null, signal: AbortSignal): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let abort!: () => void
-    try {
-      await Promise.race([
-        job,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, LEASE_AWAIT_MS)
-        }),
-        new Promise<never>((_resolve, reject) => {
-          abort = () => reject(signal.reason)
-          if (signal.aborted) abort()
-          else signal.addEventListener('abort', abort, { once: true })
-        }),
-      ])
-    } finally {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', abort)
-    }
-  }
-  function receive(inputs: Array<ReceiveInput>): Promise<Array<ReceiveResult>> {
-    if (inputs.length > 64) return Promise.reject(new RangeError('App batch exceeds 64 frames'))
+  async function owned(
+    inputs: Array<ReceiveInput>,
+    scope: SourceCryptoScope,
+  ): Promise<Array<ReceiveResult>> {
+    if (inputs.length > 64) throw new RangeError('App batch exceeds 64 frames')
     const frames = inputs.map(({ ciphertext, expectedAAD }) => ({
       ciphertext: ciphertext.slice(),
       expectedAAD: expectedAAD?.slice(),
     }))
     const signal = slot.cancellation.signal
     function assertCallAvailable(): void {
+      scope.assertLive()
       if (signal.aborted) throw signal.reason
       assertAvailable()
     }
-    function unavailable(error: unknown): ReceiveResult {
-      return { kind: 'refused', reason: 'invalid', error }
-    }
-    return track(
-      (async () => {
-        for (let attempt = 0; ; attempt++) {
-          let cold: Promise<void> | null = null
-          const results = await slot.lock.run(async () => {
-            assertCallAvailable()
-            await params.accounting()
-            assertCallAvailable()
-            if (slot.base === null) {
-              cold = refresh()
-              if (attempt !== 0) throw new ApplicationLeaseUnavailableError('cold')
-              return null
-            }
-            const base = slot.base
-            const state = decodeClientState(base.state)
-            if (state === undefined) throw new ApplicationLeaseUnavailableError('cold')
-            const digest = sha256(receiveProjection(state))
-            if (slot.receive === null || !sameStoredValue(digest, slot.receiveDigest)) {
-              const handle = denyApplicationSend(
-                restrictCommitAuthoring(await params.environment.restore(copyRecord(base))),
-              )
-              try {
-                assertCallAvailable()
-              } catch (error) {
-                return frames.map(() => unavailable(error))
-              }
-              slot.receive = handle
-              slot.receiveDigest = digest
-              receiveInstrumentation.get(slot)?.rebuilt?.()
-            }
-            const handle = slot.receive
-            const current = Number(handle.epoch)
-            const retained = new Set([
-              current,
-              ...Array.from(handle.state.historicalReceiverData.keys(), Number),
-            ])
-            const consumed = slot.consumed
-            for (const epoch of consumed.epochs.keys())
-              if (!retained.has(epoch)) consumed.epochs.delete(epoch)
-            for (const epoch of consumed.closed)
-              if (!retained.has(epoch)) consumed.closed.delete(epoch)
-            const cap =
-              receiveInstrumentation.get(slot)?.cap ??
-              handle.listMembers().length * 500 * retained.size + 1_024
-            const count = () =>
-              [...consumed.epochs.values()].reduce((sum, bucket) => sum + bucket.size, 0)
-            function makeRoom(): void {
-              while (count() > cap) {
-                const oldest = [...consumed.epochs.keys()]
-                  .filter((epoch) => epoch !== current)
-                  .sort((a, b) => a - b)[0]
-                if (oldest === undefined) return
-                consumed.epochs.delete(oldest)
-                consumed.closed.add(oldest)
-              }
-            }
-            makeRoom()
-            const results: Array<ReceiveResult> = []
-            for (const { ciphertext, expectedAAD } of frames) {
-              const aad = readMessageAAD(ciphertext)
-              const refuse = (
-                reason:
-                  | 'log-intent'
-                  | 'invalid'
-                  | 'closed-epoch'
-                  | 'generation-bound'
-                  | 'consumed'
-                  | 'capacity',
-              ): ReceiveResult => ({ kind: 'refused', reason })
-              if (aad !== null && decodeAppAAD(aad)?.intent === 'log') {
-                results.push(refuse('log-intent'))
-                continue
-              }
-              if (expectedAAD === undefined || !sameStoredValue(aad, expectedAAD)) {
-                results.push(refuse('invalid'))
-                continue
-              }
-              const messageEpoch = readMessageEpoch(ciphertext)
-              if (messageEpoch === undefined) {
-                results.push(refuse('invalid'))
-                continue
-              }
-              const epoch = Number(messageEpoch)
-              try {
-                assertOpenableEpoch(handle, ciphertext)
-              } catch (error) {
-                if (!(error instanceof FrameEpochError)) throw error
-                results.push({
-                  kind: 'refused',
-                  reason: epoch > current ? 'future-epoch' : 'past-epoch',
-                  frameEpoch: epoch,
-                  handleEpoch: current,
-                })
-                continue
-              }
-              if (consumed.closed.has(epoch)) {
-                results.push(refuse('closed-epoch'))
-                continue
-              }
-              let sender: Awaited<ReturnType<GroupHandle['readSenderData']>>
-              try {
-                sender = await handle.readSenderData(ciphertext)
-              } catch {
-                sender = null
-              }
-              try {
-                assertCallAvailable()
-              } catch (error) {
-                results.push(...frames.slice(results.length).map(() => unavailable(error)))
-                break
-              }
-              if (sender === null) {
-                results.push(refuse('invalid'))
-                continue
-              }
-              if (sender.generation >= 500) {
-                results.push(refuse('generation-bound'))
-                continue
-              }
-              const tuple = `${sender.leaf}:${sender.generation}`
-              if (consumed.epochs.get(epoch)?.has(tuple)) {
-                results.push(refuse('consumed'))
-                continue
-              }
-              // A refusal never closes a bucket or consumes capacity.
-              const reclaimable = [...consumed.epochs].some(
-                ([epoch, bucket]) => epoch !== current && bucket.size !== 0,
-              )
-              if (count() >= cap && !reclaimable) {
-                results.push(refuse('capacity'))
-                continue
-              }
-              try {
-                const opened = await handle.decrypt(ciphertext, { expectedAAD })
-                const bucket = consumed.epochs.get(epoch) ?? new Set<string>()
-                bucket.add(tuple)
-                consumed.epochs.set(epoch, bucket)
-                makeRoom()
-                results.push({
-                  kind: 'opened',
-                  ...opened,
-                  aad: expectedAAD.slice(),
-                  frameEpoch: epoch,
-                  handleEpoch: current,
-                })
-              } catch (error) {
-                results.push({ kind: 'refused', reason: 'invalid', error })
-              }
-              try {
-                assertCallAvailable()
-              } catch (error) {
-                results.push(...frames.slice(results.length).map(() => unavailable(error)))
-                break
-              }
-            }
-            return results
-          })
-          if (results !== null) return results
-          await wait(cold, signal)
+    assertCallAvailable()
+    if (slot.base === null) throw new ApplicationLeaseUnavailableError('cold')
+    const base = slot.base
+    const state = decodeClientState(base.state)
+    if (state === undefined) throw new ApplicationLeaseUnavailableError('cold')
+    const digest = sha256(receiveProjection(state))
+    let scratch: GroupHandle
+    if (slot.receive === null || !sameStoredValue(digest, slot.receiveDigest)) {
+      const handle = denyApplicationSend(
+        restrictCommitAuthoring(await params.environment.restore(copyRecord(base))),
+      )
+      assertCallAvailable()
+      scope.protect(handle)
+      scratch = handle
+      receiveInstrumentation.get(slot)?.rebuilt?.()
+    } else scratch = scope.protect(slot.receive)
+    const handle = scratch
+    const unsubscribe = scope.onRevoke(() => {
+      if (slot.receive === handle) {
+        slot.receive = null
+        slot.receiveDigest = null
+      }
+    })
+    try {
+      const current = Number(handle.epoch)
+      const retained = new Set([
+        current,
+        ...Array.from(handle.state.historicalReceiverData.keys(), Number),
+      ])
+      const consumed = {
+        incarnation: slot.consumed.incarnation,
+        epochs: new Map(
+          [...slot.consumed.epochs].map(([epoch, tuples]) => [epoch, new Set(tuples)]),
+        ),
+        closed: new Set(slot.consumed.closed),
+      }
+      for (const epoch of consumed.epochs.keys())
+        if (!retained.has(epoch)) consumed.epochs.delete(epoch)
+      for (const epoch of consumed.closed) if (!retained.has(epoch)) consumed.closed.delete(epoch)
+      const cap =
+        receiveInstrumentation.get(slot)?.cap ??
+        handle.listMembers().length * 500 * retained.size + 1_024
+      const count = () =>
+        [...consumed.epochs.values()].reduce((sum, bucket) => sum + bucket.size, 0)
+      function makeRoom(): void {
+        while (count() > cap) {
+          const oldest = [...consumed.epochs.keys()]
+            .filter((epoch) => epoch !== current)
+            .sort((a, b) => a - b)[0]
+          if (oldest === undefined) return
+          consumed.epochs.delete(oldest)
+          consumed.closed.add(oldest)
         }
-      })(),
-    )
+      }
+      makeRoom()
+      const results: Array<ReceiveResult> = []
+      for (const { ciphertext, expectedAAD } of frames) {
+        const aad = readMessageAAD(ciphertext)
+        const refuse = (
+          reason:
+            | 'log-intent'
+            | 'invalid'
+            | 'closed-epoch'
+            | 'generation-bound'
+            | 'consumed'
+            | 'capacity',
+        ): ReceiveResult => ({ kind: 'refused', reason })
+        if (aad !== null && decodeAppAAD(aad)?.intent === 'log') {
+          results.push(refuse('log-intent'))
+          continue
+        }
+        if (expectedAAD === undefined || !sameStoredValue(aad, expectedAAD)) {
+          results.push(refuse('invalid'))
+          continue
+        }
+        const messageEpoch = readMessageEpoch(ciphertext)
+        if (messageEpoch === undefined) {
+          results.push(refuse('invalid'))
+          continue
+        }
+        const epoch = Number(messageEpoch)
+        try {
+          assertOpenableEpoch(handle, ciphertext)
+        } catch (error) {
+          if (!(error instanceof FrameEpochError)) throw error
+          results.push({
+            kind: 'refused',
+            reason: epoch > current ? 'future-epoch' : 'past-epoch',
+            frameEpoch: epoch,
+            handleEpoch: current,
+          })
+          continue
+        }
+        if (consumed.closed.has(epoch)) {
+          results.push(refuse('closed-epoch'))
+          continue
+        }
+        let sender: Awaited<ReturnType<GroupHandle['readSenderData']>>
+        try {
+          sender = await scope.call(() => handle.readSenderData(ciphertext))
+        } catch {
+          sender = null
+        }
+        assertCallAvailable()
+        if (sender === null) {
+          results.push(refuse('invalid'))
+          continue
+        }
+        if (sender.generation >= 500) {
+          results.push(refuse('generation-bound'))
+          continue
+        }
+        const tuple = `${sender.leaf}:${sender.generation}`
+        if (consumed.epochs.get(epoch)?.has(tuple)) {
+          results.push(refuse('consumed'))
+          continue
+        }
+        // A refusal never closes a bucket or consumes capacity.
+        const reclaimable = [...consumed.epochs].some(
+          ([epoch, bucket]) => epoch !== current && bucket.size !== 0,
+        )
+        if (count() >= cap && !reclaimable) {
+          results.push(refuse('capacity'))
+          continue
+        }
+        try {
+          const opened = await scope.call(() => handle.decrypt(ciphertext, { expectedAAD }))
+          assertCallAvailable()
+          const bucket = consumed.epochs.get(epoch) ?? new Set<string>()
+          bucket.add(tuple)
+          consumed.epochs.set(epoch, bucket)
+          makeRoom()
+          results.push({
+            kind: 'opened',
+            ...opened,
+            aad: expectedAAD.slice(),
+            frameEpoch: epoch,
+            handleEpoch: current,
+          })
+        } catch (error) {
+          results.push({ kind: 'refused', reason: 'invalid', error })
+        }
+        assertCallAvailable()
+      }
+      assertCallAvailable()
+      slot.receive = handle
+      slot.receiveDigest = digest
+      slot.consumed = consumed
+      return results
+    } finally {
+      unsubscribe()
+    }
   }
-  return receive
+  return { owned, refresh }
 }

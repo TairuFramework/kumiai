@@ -316,7 +316,16 @@ export function handlerCompletionForEntry<TTx extends GroupTransaction>(params: 
     let scheduledSource = sourceID
     if (handle !== undefined) {
       const found = new Set<string>()
-      let next = 0
+      const known = new Map(
+        initial.flatMap(({ coverage }) =>
+          coverage.prefix.map(({ frame }) => [frame.id, frame.protocol] as const),
+        ),
+      )
+      for (const id of ids) {
+        const protocol = known.get(id)
+        if (protocol !== undefined) found.add(protocol)
+      }
+      let next = ids.every((id) => known.has(id)) ? ids.length : 0
       while (next < ids.length) {
         next = await scheduler.schedule({
           source: JSON.stringify([sourceID, 'identify']),

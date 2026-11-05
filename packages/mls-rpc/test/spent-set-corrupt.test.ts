@@ -11,6 +11,7 @@ import { admissionFor } from '../src/registry/cold.js'
 import { accountedRuntime } from '../src/registry/runtime-facts.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { groupCondition } from '../src/safety-conditions.js'
+import { drainRegistryMaintenance } from '../src/testing.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import {
   createNotMemberFixture,
@@ -256,7 +257,8 @@ for (const mode of ['real-mls', 'double'] as const) {
         }))
       test('healthy committed mutations start no diagnostic trust read', () =>
         run(async (f) => {
-          await f.registry.access(groupID)
+          const access = await f.registry.access(groupID)
+          await drainRegistryMaintenance(access)
           const capability = entryCapability(f.device.groups)
           if (capability === null) throw new Error('Missing capability')
           const mutate = () =>

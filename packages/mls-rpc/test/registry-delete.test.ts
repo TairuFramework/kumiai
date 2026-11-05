@@ -385,8 +385,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           const before = await fixture.inspectRows()
           await expect(owner.delete(nextKey)).rejects.toBeInstanceOf(GroupControlUnsettledError)
           expect(await fixture.inspectRows()).toEqual(before)
-          expect(await owner.access(groupID)).toBe(access)
-          expect(await access.read((handle) => handle.groupID)).toBe(groupID)
+          const fresh = await owner.access(groupID)
+          expect(fresh).not.toBe(access)
+          expect(await fresh.read((handle) => handle.groupID)).toBe(groupID)
           if (kind === 'outcome')
             await ackRetiredOutcome({ persistence: fixture.device.groups, key, id: outcome.id })
           else
@@ -508,8 +509,9 @@ for (const mode of ['real-mls', 'double'] as const) {
           })
           if (changes === 3) {
             await expect(owner.delete(key)).rejects.toBeInstanceOf(GroupControlUnsettledError)
-            expect(await owner.access(groupID)).toBe(access)
-            expect(await access.read((handle) => handle.groupID)).toBe(groupID)
+            const fresh = await owner.access(groupID)
+            expect(fresh).not.toBe(access)
+            expect(await fresh.read((handle) => handle.groupID)).toBe(groupID)
           } else await owner.delete(key)
           expect(hooks).toBe(changes === 3 ? 3 : 2)
         } finally {
@@ -768,7 +770,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           if (result === 'rollback') {
             await expect(owner.delete(key)).rejects.toBe(failure)
             expect(await fixture.inspectRows()).toEqual(before)
-            expect(await owner.access(groupID)).toBe(access)
+            expect(await owner.access(groupID)).not.toBe(access)
           } else {
             await owner.delete(key)
             expect((await fixture.inspectRows())['host-side']?.get('deleted')).toEqual(
@@ -797,7 +799,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         const before = await fixture.inspectRows()
         await expect(owner.delete(key)).rejects.toThrow()
         expect(await fixture.inspectRows()).toEqual(before)
-        expect(await owner.access(groupID)).toBe(access)
+        expect(await owner.access(groupID)).not.toBe(access)
         await owner.delete(key)
       } finally {
         await fixture.close()
@@ -829,7 +831,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           if (result === 'commit') {
             expect(access.runtime.snapshot()).toBeNull()
             await expect(owner.access(groupID)).rejects.toMatchObject({ reason: 'deleted' })
-          } else expect(await owner.access(groupID)).toBe(access)
+          } else expect(await owner.access(groupID)).not.toBe(access)
         } finally {
           await fixture.close()
         }
@@ -911,7 +913,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.device.groups
           .ports(key)
           .control.apply({ deleteOutcomes: [] }, 'raw-during-disposal')
-        expect(observers).toBe(1)
+        expect(observers).toBe(2)
         release.resolve()
         await disposing
         await owner.dispose()

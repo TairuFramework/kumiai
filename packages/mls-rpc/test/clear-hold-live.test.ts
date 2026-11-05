@@ -10,6 +10,7 @@ import { registrySafety } from '../src/registry/safety.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture, type RegistryFixture } from './fixtures/registry.js'
+import { flushReady } from './fixtures/source-executor.js'
 
 for (const mode of ['real-mls', 'double'] as const) {
   for (const context of ['supplied', 'absent'] as const) {
@@ -71,13 +72,25 @@ for (const mode of ['real-mls', 'double'] as const) {
           const fault = f.armNextWorkFault('commit-then-reject')
           const pending = f.safety().clearHold(key)
           const proof = f.holdProof(await fault.mutationID)
+          let opening: Promise<void> | undefined
           try {
             await proof.started
             const before = await f.inspectRows()
             expect(access.admission()).toMatchObject({ admissible: false, reason: 'fork-halted' })
-            await expect(cryptoPort.openEntries(sealed)).rejects.toBeInstanceOf(
-              GroupSafetyHeldError,
+            let openResult: unknown
+            opening = Promise.resolve(cryptoPort.openEntries(sealed)).then(
+              () => {
+                openResult = 'opened'
+              },
+              (error: unknown) => {
+                openResult = error
+              },
             )
+            await flushReady()
+            expect(
+              openResult,
+              'known safety hold refuses without waiting for owner proof',
+            ).toBeInstanceOf(GroupSafetyHeldError)
             await expect(cryptoPort.unwrap(new Uint8Array())).rejects.toBeInstanceOf(
               GroupSafetyHeldError,
             )
@@ -87,6 +100,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             expect(changed).toEqual(['fork-halted'])
           } finally {
             proof.release()
+            await opening
           }
           await pending
           expect(access.admission().admissible).toBe(true)

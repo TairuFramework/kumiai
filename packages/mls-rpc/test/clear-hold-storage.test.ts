@@ -8,6 +8,7 @@ import { entryCapability } from '../src/entry-capability.js'
 import { decodeStoredValue } from '../src/persistence-codec.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
 import { bindRegistrySafety, registrySafety } from '../src/registry/safety.js'
+import { copyEntryReads } from './fixtures/entry-reads.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture, type RegistryFixture } from './fixtures/registry.js'
 
@@ -239,8 +240,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                     request,
                     (reads, closing) =>
                       prepare(
-                        {
-                          ...reads,
+                        copyEntryReads(reads, {
                           checkpoints: async () =>
                             (await reads.checkpoints()).map((row) => {
                               if (row.kind !== 'app-hold') return row
@@ -254,7 +254,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                               if (field === 'event') return { ...row, eventID: 'another-event' }
                               return { ...row, reportMutationID: 'another-report' }
                             }),
-                        },
+                        }),
                         closing,
                       ),
                     work,

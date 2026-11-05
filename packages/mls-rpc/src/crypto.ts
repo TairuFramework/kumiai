@@ -93,7 +93,7 @@ export function sealEntries(
   return sealed
 }
 
-function assertSealedEntryBlob(sealed: Uint8Array): void {
+export function assertSealedEntryBlob(sealed: Uint8Array): void {
   if (sealed.length !== 0 && sealed[0] !== ENTRY_VERSION) {
     throw new UnsupportedLedgerEntriesVersionError(
       `openEntries: unsupported blob version ${sealed[0]}`,

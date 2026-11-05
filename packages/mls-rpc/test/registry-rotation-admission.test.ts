@@ -20,6 +20,8 @@ import { registryReceiveSlots } from '../src/registry/live-receive.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import { eligibilityOf, type Reservation } from '../src/registry/reserve.js'
 import { registrySafety } from '../src/registry/safety.js'
+import { sourceCryptoScope } from '../src/registry/source-crypto-commands.js'
+import { assertCryptoBinding, registrySourceExecutor } from '../src/registry/source-executor.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistryHandleAccess } from '../src/registry/types.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
@@ -40,6 +42,20 @@ async function setup(mode: 'real-mls' | 'double', source: 'seed' | 'welcome' = '
   const fixture = await createRegistryLeaseFixture(mode, source)
   fixtures.push(fixture)
   return fixture
+}
+async function handoff(fixture: Awaited<ReturnType<typeof setup>>, reservation: Reservation) {
+  const base = fixture.fixture()
+  const capability = entryCapability(base.device.groups)
+  const live = registryLiveSend.get(fixture.access())
+  const source = registrySourceExecutor(base.registry)
+  if (capability === null || live === undefined) throw new Error('Missing handoff authority')
+  const binding = await source.control.admit(fixture.key, 'source')
+  await capability.command(fixture.key.groupID, async (attempt) => {
+    await live.handoff(
+      reservation,
+      sourceCryptoScope(attempt, () => assertCryptoBinding(source.executor, binding)),
+    )
+  })
 }
 async function groupMLS(fixture: Awaited<ReturnType<typeof setup>>, open = true) {
   const base = fixture.fixture()
@@ -245,7 +261,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         )
         fixture.access().onAdmissionChanged(changes)
         try {
-          await live.handoff(reservation)
+          await handoff(fixture, reservation)
           expect(changes).not.toHaveBeenCalled()
           expect(updates).not.toHaveBeenCalled()
           expect(fixture.admission()).toMatchObject({ reason: 'rotation-required' })
@@ -277,7 +293,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         throw new Error('Handoff restore failed')
       })
       try {
-        await live.handoff(reservation)
+        await handoff(fixture, reservation)
         expect.soft(rotations).toHaveBeenCalledTimes(1)
         expect(admissions).toEqual([false, false])
         expect(fixture.lease()).toBeNull()
@@ -314,7 +330,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         return handle
       })
       try {
-        await live.handoff(reservation)
+        await handoff(fixture, reservation)
         expect(fixture.lease()).toBeNull()
         gate.release()
         await vi.waitFor(() => expect(fixture.lease()).not.toBeNull())
@@ -462,13 +478,13 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         if (reservation === undefined) throw new Error('Missing reservation')
         await live.foreign(live.classifiedVersion + 1)
-        await live.handoff(reservation)
+        await handoff(fixture, reservation)
         expect(fixture.lease()).toBeNull()
       } finally {
         gate.release()
       }
     })
-    test('a settling restore cannot overwrite headroom installed by a concurrent handoff', async () => {
+    test('a settling owned restore keeps cold seals refused until handoff', async () => {
       const fixture = await setup(mode)
       const base = fixture.fixture()
       const gate = gateRegistryMaintenance(base.registry)
@@ -504,7 +520,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       try {
         await entered.promise
         if (reservation === undefined) throw new Error('Missing reservation')
-        await live.handoff(reservation)
+        await expect(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'cold' })
+        released.resolve()
+        await settling
         expect((await fixture.sealEphemeral()).generation).toBe(16)
       } finally {
         released.resolve()
@@ -586,26 +604,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         const entered = deferred<void>()
         const released = deferred<void>()
         let committed = false
-        let ownRead: Promise<unknown> | undefined
-        const ownAccount = deferred<void>()
-        const releaseAccount = deferred<void>()
-        base.onPhase('account', async () => {
+        base.onPhase('account', () => {
           committed = true
-          if (ordering === 'own-read-first') {
-            ownAccount.resolve()
-            await releaseAccount.promise
-          }
         })
-        if (ordering === 'own-read-first') {
-          const capability = entryCapability(base.device.groups)
-          if (capability === null) throw new Error('Missing capability')
-          const run = capability.run.bind(capability)
-          vi.spyOn(capability, 'run').mockImplementationOnce(async (...args) => {
-            const result = await run(...args)
-            await ownRead
-            return result
-          })
-        }
         base.overrideRestore(async (record) => {
           const state = decodeClientState(record.state)
           if (state === undefined) throw new Error('Invalid restore state')
@@ -620,13 +621,6 @@ for (const mode of ['real-mls', 'double'] as const) {
             options: base.environment.options,
           })
         })
-        maintenance.release()
-        const draining = fixture.drainMaintenance()
-        if (ordering === 'own-read-first') {
-          await ownAccount.promise
-          ownRead = fixture.access().read(() => {})
-          releaseAccount.resolve()
-        }
         const { createAppOutboxAcceptance } = (await import(
           new URL('../../rpc/src/app-outbox.ts', import.meta.url).href
         )) as {
@@ -637,51 +631,43 @@ for (const mode of ['real-mls', 'double'] as const) {
           limit: 4,
           admission: () => mls.sendAdmission(),
         })
+        maintenance.release()
+        const draining = fixture.drainMaintenance()
+        const waiting: Array<Promise<unknown>> = []
         try {
           await entered.promise
-          await ownRead
+          expect(rotations).not.toHaveBeenCalled()
+          expect(mls.sendAdmission()).toMatchObject({ admissible: true })
+          if (ordering === 'own-read-first') waiting.push(fixture.access().read(() => {}))
           if (ordering !== 'unchanged') {
-            let queuedRead: Promise<unknown> | undefined
-            const accountEntered = deferred<void>()
-            const accountRelease = deferred<void>()
-            if (ordering === 'read-first')
-              base.onPhase('account', async () => {
-                accountEntered.resolve()
-                await accountRelease.promise
+            let written = false
+            const writing = (async () => {
+              const record = await fixture.record()
+              await base.installRows({
+                key: fixture.key,
+                state: { ...record, version: record.version + 1 },
               })
-            const record = await fixture.record()
-            const writing = base.installRows({
-              key: fixture.key,
-              state: { ...record, version: record.version + 1 },
-            })
-            if (ordering === 'read-first') {
-              await accountEntered.promise
-              queuedRead = fixture.access().read(() => {})
-              accountRelease.resolve()
-            }
-            await writing
-            await queuedRead
-            await registryLiveSend.get(fixture.access())?.accounting()
-            for (let repeat = 0; repeat < 3; repeat++) {
-              await fixture.access().read(() => {})
-              await registryLiveSend.get(fixture.access())?.accounting()
-            }
+              written = true
+            })()
+            waiting.push(writing)
+            if (ordering === 'read-first') waiting.push(fixture.access().read(() => {}))
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            expect(written).toBe(false)
           }
-          expect.soft(rotations).not.toHaveBeenCalled()
-          expect.soft(mls.sendAdmission()).toMatchObject({ admissible: true })
-          await expect.soft(fixture.sealEphemeral()).rejects.toMatchObject({ reason: 'cold' })
-          await expect
-            .soft(
-              queue.accept({
-                protocol: 'chat',
-                prc: 'posted',
-                data: encodeEventFrame('posted', { value: 1 }),
-              }),
-            )
-            .resolves.toBeUndefined()
-        } finally {
           released.resolve()
           await draining
+          await Promise.all(waiting)
+          await registryLiveSend.get(fixture.access())?.accounting()
+          await expect(
+            queue.accept({
+              protocol: 'chat',
+              prc: 'posted',
+              data: encodeEventFrame('posted', { value: 1 }),
+            }),
+          ).resolves.toBeUndefined()
+        } finally {
+          released.resolve()
+          await Promise.allSettled([draining, ...waiting])
           queue.close()
         }
         expect(fixture.lease()).toMatchObject({ own: 496, limit: 500 })
@@ -745,67 +731,69 @@ for (const mode of ['real-mls', 'double'] as const) {
       fixture.access().onRotationRequired(rotations)
       maintenance.release()
       const draining = fixture.drainMaintenance()
+      let fencing: Promise<void> | undefined
       try {
         await entered.promise
         expect(rotations).not.toHaveBeenCalled()
-        if (change === 'bytes' || change === 'bytes-back' || change === 'bytes-read') {
-          const saved = await fixture.record()
-          const state = decodeClientState(saved.state)
-          if (state === undefined) throw new Error('Invalid state')
-          const ratchet = state.secretTree.leafNodes[state.privatePath.leafIndex * 2]
-          if (ratchet === undefined) throw new Error('Missing ratchet')
-          ratchet.application.secret = ratchet.application.secret.map((byte) => byte ^ 1)
-          const accountEntered = deferred<void>()
-          const accountReleased = deferred<void>()
-          if (change === 'bytes-read')
-            base.onPhase('account', async () => {
-              accountEntered.resolve()
-              await accountReleased.promise
-            })
-          const writing = base.installRows({
-            key: fixture.key,
-            state: { ...saved, state: encodeClientState(state), version: saved.version + 1 },
-          })
-          let read: Promise<unknown> | undefined
-          if (change === 'bytes-read') {
-            await accountEntered.promise
-            read = fixture.access().read(() => {})
-            accountReleased.resolve()
-          }
-          await writing
-          await read
-          await live.accounting()
-          if (change === 'bytes-back') {
-            await base.installRows({
+        let fenced = false
+        fencing = (async () => {
+          if (change === 'bytes' || change === 'bytes-back' || change === 'bytes-read') {
+            const saved = await fixture.record()
+            const state = decodeClientState(saved.state)
+            if (state === undefined) throw new Error('Invalid state')
+            const ratchet = state.secretTree.leafNodes[state.privatePath.leafIndex * 2]
+            if (ratchet === undefined) throw new Error('Missing ratchet')
+            ratchet.application.secret = ratchet.application.secret.map((byte) => byte ^ 1)
+            const writing = base.installRows({
               key: fixture.key,
-              state: { ...saved, version: saved.version + 2 },
+              state: { ...saved, state: encodeClientState(state), version: saved.version + 1 },
             })
+            let read: Promise<unknown> | undefined
+            if (change === 'bytes-read') read = fixture.access().read(() => {})
+            await writing
+            await read
             await live.accounting()
-          }
-        } else if (change === 'eligibility') {
-          lapse = true
-          await base.device.groups
-            .ports(fixture.key)
-            .control.apply({ cursor: { position: null, epoch: oldEpoch } }, crypto.randomUUID())
-          await live.accounting()
-        } else if (change === 'invalidate') live.invalidate()
-        else if (change === 'retire') live.retire()
-        else if (change === 'epoch' || change === 'epoch-failure') await fixture.advanceEpoch()
-        else if (change === 'incarnation' || change === 'incarnation-failure')
-          await fixture.switchIncarnation()
+            if (change === 'bytes-back') {
+              await base.installRows({
+                key: fixture.key,
+                state: { ...saved, version: saved.version + 2 },
+              })
+              await live.accounting()
+            }
+          } else if (change === 'eligibility') {
+            lapse = true
+            await base.device.groups
+              .ports(fixture.key)
+              .control.apply({ cursor: { position: null, epoch: oldEpoch } }, crypto.randomUUID())
+            await live.accounting()
+          } else if (change === 'invalidate') live.invalidate()
+          else if (change === 'retire') live.retire()
+          else if (change === 'epoch' || change === 'epoch-failure') await fixture.advanceEpoch()
+          else if (change === 'incarnation' || change === 'incarnation-failure')
+            await fixture.switchIncarnation()
+          fenced = true
+        })()
+        void fencing.catch(() => {})
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        if (!['invalidate', 'retire', 'failure'].includes(change)) expect(fenced).toBe(false)
+        released.resolve()
+        await fencing
         if (['bytes', 'bytes-back', 'bytes-read', 'eligibility', 'invalidate'].includes(change))
           expect(live.effectiveNext()).toBe(500)
       } finally {
         released.resolve()
-        await draining
+        await Promise.all([draining, fencing])
       }
       if (change === 'epoch' || change === 'incarnation' || change.endsWith('-failure')) {
         expect(fixture.lease()?.identity).not.toMatchObject({ epoch: oldEpoch, incarnation: 1 })
         expect((await fixture.sealEphemeral()).generation).toBe(0)
         expect(mls.sendAdmission().epoch).toBeGreaterThanOrEqual(oldEpoch)
-        if (change === 'epoch' || change === 'epoch-failure')
-          expect(rotations).not.toHaveBeenCalled()
-        else {
+        if (change === 'epoch') expect(rotations).not.toHaveBeenCalled()
+        else if (change === 'epoch-failure') {
+          expect(rotations).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ epoch: oldEpoch }),
+          )
+        } else {
           const nextRotations = vi.fn()
           fixture.access().onRotationRequired(nextRotations)
           expect(nextRotations).not.toHaveBeenCalled()
@@ -1090,7 +1078,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         live.invalidate()
         expect(rotations).toHaveBeenCalledTimes(1)
         // No generation was sealed before losing this copy.
-        await live.handoff(reservation)
+        await handoff(fixture, reservation)
         expect(fixture.admission()).toMatchObject({ admissible: true })
         for (let generation = 496; generation < 500; generation++)
           expect((await fixture.sealEphemeral()).generation).toBe(generation)

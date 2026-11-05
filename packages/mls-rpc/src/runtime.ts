@@ -36,3 +36,22 @@ export function anySignal(signals: Array<AbortSignal>): {
   }
   return { signal: controller.signal, dispose }
 }
+
+export async function untilAbort<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void pending.catch(() => {})
+    throw signal.reason
+  }
+  let abort!: () => void
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        abort = () => reject(signal.reason)
+        signal.addEventListener('abort', abort, { once: true })
+      }),
+    ])
+  } finally {
+    signal.removeEventListener('abort', abort)
+  }
+}
