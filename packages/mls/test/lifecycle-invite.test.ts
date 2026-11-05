@@ -849,10 +849,16 @@ test('Welcome joiner with a membership leaf takes admission from the folded regi
 test('membership key package needs controllerLog', async () => {
   const f = await stagedWelcome(true)
   for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
-    await expect(build(f.member.identity, { controller: f.binding })).rejects.toMatchObject({
+    await expect(
+      build({ identity: f.member.identity, controller: f.binding }),
+    ).rejects.toMatchObject({
       reason: 'member-unavailable',
     })
-    const bundle = await build(f.member.identity, { controller: f.binding, controllerLog: f.log })
+    const bundle = await build({
+      identity: f.member.identity,
+      controller: f.binding,
+      controllerLog: f.log,
+    })
     expect(bundle.ownerDID).toBe(f.member.identity.id)
   }
 })
@@ -860,13 +866,20 @@ test('membership key package needs controllerLog', async () => {
 test('mbr key package verifies against controllerLog', async () => {
   const f = await stagedWelcome()
   for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
-    await expect(build(f.params.identity, { controller: f.binding })).rejects.toMatchObject({
+    await expect(
+      build({ identity: f.params.identity, controller: f.binding }),
+    ).rejects.toMatchObject({
       reason: 'member-unavailable',
     })
-    const bundle = await build(f.params.identity, { controller: f.binding, controllerLog: f.log })
+    const bundle = await build({
+      identity: f.params.identity,
+      controller: f.binding,
+      controllerLog: f.log,
+    })
     expect(bundle.ownerDID).toBe(f.params.identity.id)
     await expect(
-      build(f.params.identity, {
+      build({
+        identity: f.params.identity,
         controller: f.binding,
         controllerLog: { chain: f.log.chain, events: [] },
       }),

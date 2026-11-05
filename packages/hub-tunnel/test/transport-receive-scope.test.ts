@@ -17,11 +17,11 @@ describe('the tunnel scopes its receive', () => {
     const recordingHub: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
       subscribe: ({ subscriberDID, topicID, ...options }) =>
-        fakeHub.subscribe(subscriberDID, topicID, options),
-      unsubscribe: ({ subscriberDID, topicID }) => fakeHub.unsubscribe(subscriberDID, topicID),
+        fakeHub.subscribe({ subscriberDID, topicID, ...options }),
+      unsubscribe: ({ subscriberDID, topicID }) => fakeHub.unsubscribe({ subscriberDID, topicID }),
       receive: ({ subscriberDID, ...options }): HubReceiveSubscription => {
         scopes.push(options?.topicID)
-        return fakeHub.receive(subscriberDID)
+        return fakeHub.receive({ subscriberDID })
       },
     }
 

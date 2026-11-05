@@ -52,7 +52,7 @@ describe('hub-tunnel observability events', () => {
     })
 
     try {
-      hub.subscribe(bDID, topicB)
+      hub.subscribe({ subscriberDID: bDID, topicID: topicB })
       await hub.publish({
         senderDID: aDID,
         topicID: topicB,
@@ -193,7 +193,7 @@ describe('hub-tunnel observability events', () => {
         seq: 0,
         body: { header: {}, payload: { typ: 'test', msg: 'intruder' } },
       }
-      hub.subscribe(bDID, wrongTopic)
+      hub.subscribe({ subscriberDID: bDID, topicID: wrongTopic })
       await hub.publish({
         senderDID: aDID,
         topicID: wrongTopic,
@@ -260,7 +260,7 @@ describe('hub-tunnel observability events', () => {
         seq: 0,
         body: { header: {}, payload: { typ: 'test', msg: 'wrong-session' } },
       }
-      hub.subscribe(bDID, topicB)
+      hub.subscribe({ subscriberDID: bDID, topicID: topicB })
       await hub.publish({
         senderDID: aDID,
         topicID: topicB,

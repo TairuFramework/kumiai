@@ -250,10 +250,13 @@ function throwingAfter(
   return new Proxy(handle, {
     get(target, key) {
       if (key === 'processMessage') {
-        return async (
-          bytes: Uint8Array,
-          options: { persist?: (h: GroupHandle) => Promise<void> },
-        ) => {
+        return async ({
+          message: bytes,
+          ...options
+        }: {
+          message: Uint8Array
+          persist?: (h: GroupHandle) => Promise<void>
+        }) => {
           await apply(target, bytes, options)
           throw new Error('host callback failed')
         }

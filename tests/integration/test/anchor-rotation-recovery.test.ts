@@ -31,7 +31,7 @@ import { createWireHub } from './log-hub-over-wire.js'
 
 const { encodeEventFrame } = (await import(
   new URL('../../../packages/broadcast/src/event-frame.ts', import.meta.url).href
-)) as { encodeEventFrame(prc: string, data: Record<string, unknown>): Uint8Array }
+)) as { encodeEventFrame(params: { prc: string; data: Record<string, unknown> }): Uint8Array }
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -266,7 +266,7 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
     seq: 0,
     protocol: 'chat',
     prc: 'chat/posted',
-    data: encodeEventFrame('chat/posted', { text: 'held' }),
+    data: encodeEventFrame({ prc: 'chat/posted', data: { text: 'held' } }),
     lastAttempt: null,
   })
   let release = () => {}
@@ -349,7 +349,7 @@ test('persisted but not adopted repairs from the durable handle before a queued 
     seq: 0,
     protocol: 'chat',
     prc: 'chat/posted',
-    data: encodeEventFrame('chat/posted', { text: 'from durable replacement' }),
+    data: encodeEventFrame({ prc: 'chat/posted', data: { text: 'from durable replacement' } }),
     lastAttempt: null,
   })
   const restarted = await state.restart(alice)
@@ -383,7 +383,7 @@ test('a failed anchor save repairs before the restarted worker seals and reaches
     seq: 0,
     protocol: 'chat',
     prc: 'chat/posted',
-    data: encodeEventFrame('chat/posted', { text: 'after failed save' }),
+    data: encodeEventFrame({ prc: 'chat/posted', data: { text: 'after failed save' } }),
     lastAttempt: null,
   })
   refused = false
@@ -412,12 +412,12 @@ test('losing the rotation secret in process forces automatic confirmed recovery 
   const handle = bob.handle()
   const exportSecret = handle.exportSecret.bind(handle)
   const exported: Array<number> = []
-  handle.exportSecret = async (label, context, length) => {
+  handle.exportSecret = async ({ label, context, length }) => {
     if (label === APP_TOPIC_LABEL) {
       exported.push(Number(handle.epoch))
       if (Number(handle.epoch) === epochBefore + 1) throw new Error('anchor export interrupted')
     }
-    return exportSecret(label, context, length)
+    return exportSecret({ label, context, length })
   }
   await alice.peer.commit({ build: buildRemoveCommit(alice, carolID.id) })
   await drainUntil(

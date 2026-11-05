@@ -52,7 +52,7 @@ export async function createRealBoundRecovery(
     managementFixture: (kind: 'root' | 'mbr' | 'membership') => Promise<{
       alice: OwnIdentity
       bob: OwnIdentity
-      log: Parameters<typeof publishControllerLog>[1]
+      log: Parameters<typeof publishControllerLog>[0]['log']
       creatorBinding: ControllerBinding
       binding: (iat: number) => Promise<ControllerBinding>
       member: { did: string; add: string }
@@ -61,7 +61,7 @@ export async function createRealBoundRecovery(
       denialAliases: { long: string; short: string }
       nextLog: (
         op: 'log' | 'deny' | 'deny-alias' | 'remove',
-      ) => Promise<Parameters<typeof publishControllerLog>[1]>
+      ) => Promise<Parameters<typeof publishControllerLog>[0]['log']>
       admissionBinding: (
         authority: 'effective' | 'removed' | 'unavailable' | 'foreign',
       ) => Promise<ControllerBinding>
@@ -198,7 +198,8 @@ export async function createRealBoundRecovery(
       const result =
         op === 'log'
           ? await publishControllerLog({ group: source, log })
-          : await revokeWithProof(source, {
+          : await revokeWithProof({
+              group: source,
               log,
               ...(op === 'deny' || op === 'deny-alias'
                 ? { deny: [management.deniedDID] }

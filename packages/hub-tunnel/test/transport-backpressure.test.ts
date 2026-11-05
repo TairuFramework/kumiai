@@ -28,7 +28,7 @@ describe('createHubTunnelTransport backpressure', () => {
       expect(hub.subscriberCount(localDID)).toBe(1)
 
       const total = 50
-      hub.subscribe(localDID, topicA)
+      hub.subscribe({ subscriberDID: localDID, topicID: topicA })
       for (let i = 0; i < total; i++) {
         const frame: HubFrame = {
           v: 1,

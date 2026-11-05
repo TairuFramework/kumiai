@@ -62,8 +62,8 @@ export type KeyPackagePoolStoreDeleteParams = {
  */
 export type KeyPackagePoolStore = {
   list(ownerDID: string): Promise<Array<KeyPackageRecord>>
-  put({ ownerDID, record }: KeyPackagePoolStorePutParams): Promise<void>
-  delete({ ownerDID, ref }: KeyPackagePoolStoreDeleteParams): Promise<void>
+  put(params: KeyPackagePoolStorePutParams): Promise<void>
+  delete(params: KeyPackagePoolStoreDeleteParams): Promise<void>
 }
 
 /**

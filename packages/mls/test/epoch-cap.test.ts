@@ -346,7 +346,8 @@ test('log and revoke entries still land at 33 events', async () => {
     prior: f.inception.event,
     snapshot: { ...snapshotOf({ state: f.head }), deny: [...f.head.deny, subject] },
   })
-  const revoked = await api.revokeWithProof(f.group, {
+  const revoked = await api.revokeWithProof({
+    group: f.group,
     deny: [subject],
     log: asControllerLog([f.inception, rotation]),
   })

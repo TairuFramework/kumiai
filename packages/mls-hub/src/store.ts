@@ -65,8 +65,8 @@ export type LastResortStoreDeleteParams = {
  */
 export type LastResortStore = {
   list(ownerDID: string): Promise<Array<LastResortRecord>>
-  put({ ownerDID, record }: LastResortStorePutParams): Promise<void>
-  delete({ ownerDID, ref }: LastResortStoreDeleteParams): Promise<void>
+  put(params: LastResortStorePutParams): Promise<void>
+  delete(params: LastResortStoreDeleteParams): Promise<void>
 }
 
 /**

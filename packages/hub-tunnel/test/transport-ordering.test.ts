@@ -48,7 +48,7 @@ class DelayedSubscribeHub implements MailboxHub {
 
   async subscribe({ subscriberDID, topicID, ...options }: HubBaseSubscribeParams): Promise<void> {
     await this.#subscribeGate
-    this.#inner.subscribe(subscriberDID, topicID, options)
+    this.#inner.subscribe({ subscriberDID, topicID, ...options })
     this.#live.add(`${subscriberDID}::${topicID}`)
     this.order.push('subscribe')
   }
@@ -56,11 +56,11 @@ class DelayedSubscribeHub implements MailboxHub {
   unsubscribe({ subscriberDID, topicID }: HubBaseUnsubscribeParams): void {
     this.#live.delete(`${subscriberDID}::${topicID}`)
     this.order.push('unsubscribe')
-    this.#inner.unsubscribe(subscriberDID, topicID)
+    this.#inner.unsubscribe({ subscriberDID, topicID })
   }
 
   receive({ subscriberDID, ..._options }: HubBaseReceiveParams) {
-    return this.#inner.receive(subscriberDID)
+    return this.#inner.receive({ subscriberDID })
   }
 
   async publish(params: FakeHubPublishParams): Promise<{ sequenceID: string }> {

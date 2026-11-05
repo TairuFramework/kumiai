@@ -1,4 +1,5 @@
 import type { StoredMessage } from '@kumiai/hub-protocol'
+import type { HubBaseReceiveParams } from '@kumiai/hub-tunnel'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -20,8 +21,8 @@ const payload = (text: string) =>
 class PushMetadataHub extends DurableFakeHub {
   transform: (message: StoredMessage) => StoredMessage = (message) => message
 
-  override receive(did: string) {
-    const source = super.receive(did)
+  override receive({ subscriberDID: did }: HubBaseReceiveParams) {
+    const source = super.receive({ subscriberDID: did })
     const transform = this.transform
     return {
       ack: source.ack,
@@ -105,7 +106,7 @@ describe('durable live app delivery', () => {
       hub.published.at(-1)?.sequenceID,
     ])
     expect(unwrap).toHaveBeenCalledTimes(2)
-    expect(unwrap.mock.calls.every(([, opts]) => opts?.frame != null)).toBe(true)
+    expect(unwrap.mock.calls.every(([params]) => params.frame != null)).toBe(true)
     await vi.waitFor(() => expect(hub.ackedCount('bob')).toBe(1))
     await bob.peer.dispose()
   })
@@ -192,7 +193,7 @@ describe('durable live app delivery', () => {
     await alice.peer.protocol('chat').dispatch('chat/changed', { data: { text: 'live' } })
     await vi.waitFor(() => expect(seen).toEqual([{ text: 'live' }]))
     expect(store.records.size).toBe(0)
-    expect(unwrap.mock.calls.some(([, opts]) => opts?.frame == null)).toBe(true)
+    expect(unwrap.mock.calls.some(([params]) => params.frame == null)).toBe(true)
     await alice.peer.dispose()
     await bob.peer.dispose()
   })

@@ -23,8 +23,8 @@ export type HandleAccess = {
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
   ): Promise<TValue>
   /** Must run the guard under the replacement lock, before persistence; a throw aborts. */
-  replace({ next, guard }: HandleAccessReplaceParams): Promise<void>
-  open<TValue>({ fn, persistOpened }: HandleAccessOpenParams<TValue>): Promise<TValue>
+  replace(params: HandleAccessReplaceParams): Promise<void>
+  open<TValue>(params: HandleAccessOpenParams<TValue>): Promise<TValue>
 }
 
 /** Refuses a replacement that drops lifecycle effects the live handle knows. */

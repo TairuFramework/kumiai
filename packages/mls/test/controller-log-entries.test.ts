@@ -617,7 +617,8 @@ test('an unchanged evidenced child retains its binding against the candidate reg
     prior: f.inception.event,
     snapshot: { ...snapshotOf({ state: f.head }), deny: [issuer.id] },
   })
-  const result = await api.revokeWithProof(withChild.author, {
+  const result = await api.revokeWithProof({
+    group: withChild.author,
     deny: [issuer.id],
     log: asControllerLog([f.inception, revoke]),
   })

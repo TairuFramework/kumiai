@@ -100,7 +100,7 @@ describe('dispose against an in-flight subscribe', { concurrent: false }, () => 
       subscribe: ({ subscriberDID, topicID, ...options }) => {
         if (capturingInitial) {
           initialTopics.add(topicID)
-          return fake.subscribe(subscriberDID, topicID, options)
+          return fake.subscribe({ subscriberDID, topicID, ...options })
         }
         if (subscriberDID === 'bob' && !initialTopics.has(topicID)) {
           return new Promise<void>((_resolve, reject) => {
@@ -109,10 +109,10 @@ describe('dispose against an in-flight subscribe', { concurrent: false }, () => 
             )
           })
         }
-        return fake.subscribe(subscriberDID, topicID, options)
+        return fake.subscribe({ subscriberDID, topicID, ...options })
       },
-      unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe(subscriberDID, topicID),
-      receive: ({ subscriberDID }) => fake.receive(subscriberDID),
+      unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe({ subscriberDID, topicID }),
+      receive: ({ subscriberDID }) => fake.receive({ subscriberDID }),
       fetchTopic: (params) => fake.fetchTopic(params),
     }
 
@@ -181,15 +181,15 @@ describe('dispose against a commit made afterwards', { concurrent: false }, () =
       },
       subscribe: ({ subscriberDID, topicID, ...options }) => {
         record(`subscribe:${topicID}`)
-        return fake.subscribe(subscriberDID, topicID, options)
+        return fake.subscribe({ subscriberDID, topicID, ...options })
       },
       unsubscribe: ({ subscriberDID, topicID }) => {
         record(`unsubscribe:${topicID}`)
-        return fake.unsubscribe(subscriberDID, topicID)
+        return fake.unsubscribe({ subscriberDID, topicID })
       },
       receive: ({ subscriberDID }) => {
         record('receive')
-        return fake.receive(subscriberDID)
+        return fake.receive({ subscriberDID })
       },
       fetchTopic: (params) => {
         record(`fetchTopic:${params.topicID}`)
@@ -758,10 +758,10 @@ const hubHoldingLedgerReply = (fake: FakeHub, holderDID: string): HeldReceive =>
   const hub: LogHub = {
     publish: (params) => fake.publish(params),
     subscribe: ({ subscriberDID, topicID, ...options }) =>
-      fake.subscribe(subscriberDID, topicID, options),
-    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe(subscriberDID, topicID),
+      fake.subscribe({ subscriberDID, topicID, ...options }),
+    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe({ subscriberDID, topicID }),
     receive: ({ subscriberDID }) => {
-      const inner = fake.receive(subscriberDID)
+      const inner = fake.receive({ subscriberDID })
       return subscriberDID === holderDID ? wrap(inner) : inner
     },
     fetchTopic: (params) => fake.fetchTopic(params),
@@ -1037,12 +1037,12 @@ function controllableReceiveHub(
   let returnCalls = 0
   const hub: LogHub = {
     subscribe: ({ subscriberDID, topicID, ...options }) =>
-      fake.subscribe(subscriberDID, topicID, options),
-    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe(subscriberDID, topicID),
+      fake.subscribe({ subscriberDID, topicID, ...options }),
+    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe({ subscriberDID, topicID }),
     publish: (params) => fake.publish(params),
     fetchTopic: (params) => fake.fetchTopic(params),
     receive: ({ subscriberDID }) => {
-      const inner = fake.receive(subscriberDID)
+      const inner = fake.receive({ subscriberDID })
       const iterator = inner[Symbol.asyncIterator]()
       return {
         [Symbol.asyncIterator]: () => ({

@@ -146,7 +146,7 @@ describe('retentionOf', () => {
   test('ignores retention smuggled onto a non-event', () => {
     const smuggled = {
       'room/ask': { type: 'request', retain: 'log', param: {}, result: {} },
-    } as unknown as Parameters<typeof retentionOf>[0]
+    } as unknown as Parameters<typeof retentionOf>[0]['protocol']
     expect(retentionOf({ protocol: smuggled, procedureName: 'room/ask' })).toBe('ephemeral')
   })
 })

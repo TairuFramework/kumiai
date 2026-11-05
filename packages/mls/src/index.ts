@@ -202,6 +202,7 @@ export {
   type RemovalEvidence,
   type RemoveLapsedLeavesResult,
   type RevokeBuildResult,
+  type RevokeProofInput,
   type RevokeWithProofParams,
   removalEvidence,
   removeLapsedLeaves,

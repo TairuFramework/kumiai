@@ -156,25 +156,30 @@ describe('ledger entry verification', () => {
     test('verifyLedgerEntry rejects instead of calling the token invalid', async () => {
       const identity = randomIdentity()
       const tokens = await Promise.all(
-        ['one', 'two'].map((groupID) => signLedgerEntry(identity, entry(groupID))),
+        ['one', 'two'].map((groupID) => signLedgerEntry({ identity, entry: entry(groupID) })),
       )
       const { provider, state } = flakyProvider()
-      await expect(verifyLedgerEntry(tokens[0] as string, { crypto: provider })).rejects.toBe(
-        failure,
-      )
+      await expect(
+        verifyLedgerEntry({ token: tokens[0] as string, crypto: provider }),
+      ).rejects.toBe(failure)
       // Concurrent misses share one provider call.
       const settled = await Promise.allSettled(
-        tokens.map((token) => verifyLedgerEntry(token, { crypto: provider })),
+        tokens.map((token) => verifyLedgerEntry({ token, crypto: provider })),
       )
       expect(settled).toEqual(tokens.map(() => ({ status: 'rejected', reason: failure })))
       state.failing = false
-      expect(await verifyLedgerEntry(tokens[0] as string, { crypto: provider })).not.toBeNull()
+      expect(
+        await verifyLedgerEntry({ token: tokens[0] as string, crypto: provider }),
+      ).not.toBeNull()
     })
 
     test('applyLedgerEntries keeps an authentic entry through the failure', async () => {
       const identity = randomIdentity()
-      const { group, credential } = await createGroup(identity, 'ledger-provider-failure')
-      const token = await signLedgerEntry(identity, entry(group.groupID))
+      const { group, credential } = await createGroup({
+        identity,
+        groupID: 'ledger-provider-failure',
+      })
+      const token = await signLedgerEntry({ identity, entry: entry(group.groupID) })
       const { provider, state } = flakyProvider()
       const restored = await restoreGroup({
         state: structuredClone(group.state),
@@ -583,7 +588,8 @@ describe('default provider', () => {
 
       const target = randomIdentity().id
       const denied = await rotation(seed, did, [first, settled], crypto, [target])
-      const built = await revokeWithProof(published.newGroup, {
+      const built = await revokeWithProof({
+        group: published.newGroup,
         log: asControllerLog([first, settled, denied]),
         deny: [target],
       })

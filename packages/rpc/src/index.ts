@@ -47,7 +47,6 @@ export {
   UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
 export type {
-  AppFrameStorageErrorParams,
   FrameEpochErrorParams,
   GroupCryptoExportSecretParams,
   GroupCryptoUnwrapParams,

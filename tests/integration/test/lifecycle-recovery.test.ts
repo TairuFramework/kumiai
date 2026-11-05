@@ -672,7 +672,8 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
       })
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), {
+  const reset = await revokeWithProof({
+    group: s.aliceGroup(),
     reset: true,
     log: { chain: prefix, events: [] },
   })

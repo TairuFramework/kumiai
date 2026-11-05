@@ -175,12 +175,12 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
     const readHeader = vi.spyOn(mls, 'readCommitHeader')
     const originalProcess = mls.processCommit
     let raced = false
-    mls.processCommit = async (commit, context) => {
+    mls.processCommit = async ({ commit, context }) => {
       if (!raced) {
         raced = true
         mls.adopt(mls.buildCommit())
       }
-      return originalProcess(commit, context)
+      return originalProcess({ commit, context })
     }
     const observations: Array<StrandObservation> = []
     const fetch = vi.spyOn(hub, 'fetchTopic')

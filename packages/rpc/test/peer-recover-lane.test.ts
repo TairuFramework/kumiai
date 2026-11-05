@@ -386,10 +386,11 @@ describe('recover() is a compare-and-set loop of its own', { concurrent: false }
     let raced = false
     const racingHub: LogHub = {
       subscribe: ({ subscriberDID: did, topicID, ...options }) =>
-        hub.subscribe(did, topicID, options),
-      unsubscribe: ({ subscriberDID: did, topicID }) => hub.unsubscribe(did, topicID),
+        hub.subscribe({ subscriberDID: did, topicID, ...options }),
+      unsubscribe: ({ subscriberDID: did, topicID }) =>
+        hub.unsubscribe({ subscriberDID: did, topicID }),
       fetchTopic: (params: HubFetchTopicParams) => hub.fetchTopic(params),
-      receive: ({ subscriberDID: did }) => hub.receive(did),
+      receive: ({ subscriberDID: did }) => hub.receive({ subscriberDID: did }),
       publish: async (params: HubPublishParams) => {
         if (!raced && params.topicID === commitTopic(rs) && params.retain === 'log') {
           raced = true

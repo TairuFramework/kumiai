@@ -154,7 +154,8 @@ async function ownAgents(options: SetupOptions = {}) {
 /** Publish the issuer's proof from P and deliver it to B. */
 async function afterIssuerProof(options: SetupOptions = {}) {
   const setup = await ownAgents(options)
-  const built = await revokeWithProof(setup.publisher, {
+  const built = await revokeWithProof({
+    group: setup.publisher,
     deny: [setup.issuer.id],
     log: asControllerLog(setup.log),
   })
@@ -182,7 +183,8 @@ describe('revocation cascade', () => {
     const setup = await ownAgents({ unevidenced: true })
     const childIndex = setup.publisher.findMemberLeafIndex(setup.child.id)
     expect(childIndex).toBeDefined()
-    const built = await revokeWithProof(setup.publisher, {
+    const built = await revokeWithProof({
+      group: setup.publisher,
       deny: [setup.issuer.id],
       log: asControllerLog(setup.log),
     })
@@ -209,7 +211,8 @@ describe('revocation cascade', () => {
 
   test('evidencedChildSurvivesProofAndWelcome', async () => {
     const setup = await ownAgents()
-    const built = await revokeWithProof(setup.publisher, {
+    const built = await revokeWithProof({
+      group: setup.publisher,
       deny: [setup.issuer.id],
       log: asControllerLog(setup.log),
     })
@@ -316,12 +319,12 @@ describe('revocation cascade', () => {
     expect(publisher.findMemberLeafIndex(child.id)).toBeDefined()
     expect(childHandle.findMemberLeafIndex(child.id)).toBeDefined()
     expect(
-      await revokeWithProof(publisher, { deny: [issuer.id], log: asControllerLog(log) }),
+      await revokeWithProof({ group: publisher, deny: [issuer.id], log: asControllerLog(log) }),
     ).toEqual({
       status: 'already-revoked',
     })
     expect(
-      await revokeWithProof(childHandle, { deny: [issuer.id], log: asControllerLog(log) }),
+      await revokeWithProof({ group: childHandle, deny: [issuer.id], log: asControllerLog(log) }),
     ).toEqual({
       status: 'already-revoked',
     })
@@ -350,7 +353,8 @@ describe('commit authentication of evidenced children', () => {
 
   test('survivorPublishesSecondRevocationBeforeRenewal', async () => {
     const { publisher, childHandle, bystander, log, tokens } = await afterIssuerProof()
-    const second = await revokeWithProof(childHandle, {
+    const second = await revokeWithProof({
+      group: childHandle,
       deny: [bystander.id],
       log: asControllerLog([...log, await revoke(log, bystander.id)]),
     })
@@ -382,7 +386,8 @@ describe('commit authentication of evidenced children', () => {
 
     // The same fresh leaf on the path of an otherwise valid proof commit is refused when its
     // credential is authenticated, before any later check sees it.
-    const proof = await revokeWithProof(childHandle, {
+    const proof = await revokeWithProof({
+      group: childHandle,
       deny: [bystander.id],
       log: asControllerLog([...log, await revoke(log, bystander.id)]),
     })

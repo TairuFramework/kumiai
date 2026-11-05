@@ -227,7 +227,7 @@ export type JoinGroupExternalParams = {
   options?: GroupOptions
   authenticatedData?: Uint8Array
   /** @internal Judge the attestation before any replacement-binding checks. */
-  beforeBinding?: ({ pending, source }: JoinGroupExternalParamsBeforeBindingParams) => Promise<void>
+  beforeBinding?: (params: JoinGroupExternalParamsBeforeBindingParams) => Promise<void>
 }
 
 export type JoinGroupExternalResult = {

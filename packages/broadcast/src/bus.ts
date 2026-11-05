@@ -13,13 +13,13 @@ export type BroadcastBusSubscribeParams = {
  * The hub implements this; `createMemoryBus` is the in-process fake.
  */
 export type BroadcastBus = {
-  publish({ topicID, payload }: BroadcastBusPublishParams): void | Promise<void>
+  publish(params: BroadcastBusPublishParams): void | Promise<void>
   /**
    * `ack` marks the payload durably handled so a durable hub stops redelivering it. Absent on an
    * in-process bus that never redelivers; ignorable by a subscriber that needs no durability gate.
    * A one-parameter callback stays assignable, so adding it broke nothing.
    */
-  subscribe({ topicID, onMessage }: BroadcastBusSubscribeParams): () => void
+  subscribe(params: BroadcastBusSubscribeParams): () => void
 }
 
 /**

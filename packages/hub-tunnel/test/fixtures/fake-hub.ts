@@ -2,8 +2,10 @@ import { RetentionExceededError, type StoredMessage } from '@kumiai/hub-protocol
 import { EventEmitter } from '@sozai/event'
 
 import type {
+  HubBaseReceiveParams,
+  HubBaseSubscribeParams,
+  HubBaseUnsubscribeParams,
   HubPublishParams,
-  HubSubscribeOptions,
   MailboxHubEvent,
   MailboxHubEvents,
 } from '../../src/transport.js'
@@ -78,7 +80,7 @@ export class FakeHub {
    * Throws SYNCHRONOUSLY, which `HubBase.subscribe` allows (`Promise<void> | void`): a caller that
    * only catches a rejection is as broken as one that catches nothing.
    */
-  subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
+  subscribe({ subscriberDID, topicID, ...options }: HubBaseSubscribeParams): void {
     if (options?.retention != null && options.retention > this.#maxRetention) {
       throw new RetentionExceededError(
         `Requested retention of ${options.retention}s exceeds the maximum of ${this.#maxRetention}s`,
@@ -92,7 +94,7 @@ export class FakeHub {
     set.add(subscriberDID)
   }
 
-  unsubscribe(subscriberDID: string, topicID: string): void {
+  unsubscribe({ subscriberDID, topicID }: HubBaseUnsubscribeParams): void {
     const set = this.#topics.get(topicID)
     if (set == null) return
     set.delete(subscriberDID)
@@ -128,7 +130,9 @@ export class FakeHub {
     return { sequenceID }
   }
 
-  receive(subscriberDID: string): AsyncIterable<FakeHubMessage> & { return: () => void } {
+  receive({ subscriberDID }: HubBaseReceiveParams): AsyncIterable<FakeHubMessage> & {
+    return: () => void
+  } {
     const queue: Array<FakeHubMessage> = []
     const waiters: Array<(value: IteratorResult<FakeHubMessage>) => void> = []
     let closed = false

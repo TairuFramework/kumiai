@@ -42,19 +42,13 @@ export type ConformanceGroupCryptoUnwrapParams = {
 /** The `GroupCrypto` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceGroupCrypto = {
   epoch: () => number
-  exportSecret: ({
-    label,
-    length,
-  }: ConformanceGroupCryptoExportSecretParams) =>
-    | { secret: Uint8Array; epoch: number }
-    | Promise<{ secret: Uint8Array; epoch: number }>
-  wrap: ({ bytes, ...opts }: ConformanceGroupCryptoWrapParams) => Uint8Array | Promise<Uint8Array>
-  unwrap: ({
-    bytes,
-    ...opts
-  }: ConformanceGroupCryptoUnwrapParams) =>
-    | ConformanceUnwrapResult
-    | Promise<ConformanceUnwrapResult>
+  exportSecret: (
+    params: ConformanceGroupCryptoExportSecretParams,
+  ) => { secret: Uint8Array; epoch: number } | Promise<{ secret: Uint8Array; epoch: number }>
+  wrap: (params: ConformanceGroupCryptoWrapParams) => Uint8Array | Promise<Uint8Array>
+  unwrap: (
+    params: ConformanceGroupCryptoUnwrapParams,
+  ) => ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
   frameAAD: (bytes: Uint8Array) => Uint8Array | null
   frameEpoch: (bytes: Uint8Array) => number | null
   sealEntries: (
@@ -99,10 +93,9 @@ export type GroupCryptoConformanceParams = {
    * A fresh group of `size` members sharing MLS state and nothing else. Called once per case;
    * `id` is unique per case so an implementation keyed by group id gets a clean one.
    */
-  createGroup: ({
-    size,
-    id,
-  }: GroupCryptoConformanceParamsCreateGroupParams) => Promise<ConformanceCryptoGroup>
+  createGroup: (
+    params: GroupCryptoConformanceParamsCreateGroupParams,
+  ) => Promise<ConformanceCryptoGroup>
 }
 
 /** The member at `index`, with the assertion the suite would otherwise repeat everywhere. */
@@ -158,7 +151,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
     id: string,
     run: (group: ConformanceCryptoGroup) => Promise<void>,
   ): Promise<void> => {
-    const group = await createGroup(size, id)
+    const group = await createGroup({ size, id })
     try {
       await run(group)
     } finally {

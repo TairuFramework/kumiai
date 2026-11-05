@@ -183,9 +183,9 @@ describe('recovery ordering', { concurrent: false }, () => {
     let pendingRecovery: PendingRecovery | undefined
     let captured = 0
     const exportSecret = bob.crypto.exportSecret
-    bob.crypto.exportSecret = async (label) => {
+    bob.crypto.exportSecret = async ({ label }) => {
       if (label === APP_TOPIC_LABEL) captured++
-      return exportSecret(label)
+      return exportSecret({ label })
     }
     const save = bob.anchorStore.save
     let savedPending: AnchorSlot['pending']
@@ -228,9 +228,9 @@ describe('recovery ordering', { concurrent: false }, () => {
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     let captured = 0
     const exportSecret = bob.crypto.exportSecret
-    bob.crypto.exportSecret = async (label) => {
+    bob.crypto.exportSecret = async ({ label }) => {
       if (label === APP_TOPIC_LABEL) captured++
-      return exportSecret(label)
+      return exportSecret({ label })
     }
     const save = bob.anchorStore.save
     let failResolvedSave = true
@@ -501,12 +501,12 @@ describe('recovery ordering', { concurrent: false }, () => {
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     const exportSecret = bob.crypto.exportSecret
     const exported: Array<number> = []
-    bob.crypto.exportSecret = async (label) => {
+    bob.crypto.exportSecret = async ({ label }) => {
       if (label === APP_TOPIC_LABEL) {
         exported.push(bob.mls.epoch())
         if (bob.mls.epoch() === 2) throw new Error('capture interrupted')
       }
-      return exportSecret(label)
+      return exportSecret({ label })
     }
     await expect(bob.peer.commit({ build: buildRemoveCommit(bob, 'carol') })).rejects.toThrow(
       'capture interrupted',

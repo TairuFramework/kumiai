@@ -19,11 +19,11 @@ describe('durable app rotation', () => {
     await bob.peer.protocol('chat').to('alice')
     hub.detach('bob')
     const originalExport = bob.crypto.exportSecret.bind(bob.crypto)
-    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation((label, length) => {
+    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation(({ label, length }) => {
       if (label === APP_TOPIC_LABEL && bob.crypto.epoch() === 2) {
         throw new Error('export failed')
       }
-      return originalExport(label, length)
+      return originalExport({ label, length })
     })
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toThrow(
@@ -57,12 +57,12 @@ describe('durable app rotation', () => {
       release = resolve
     })
     const originalExport = bob.crypto.exportSecret.bind(bob.crypto)
-    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation(async (label, length) => {
+    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation(async ({ label, length }) => {
       if (label === APP_TOPIC_LABEL && bob.crypto.epoch() === 2) {
         entered()
         await held
       }
-      return originalExport(label, length)
+      return originalExport({ label, length })
     })
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     const oldTopic = protocolTopic({

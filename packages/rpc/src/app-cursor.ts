@@ -34,7 +34,7 @@ export type AppCursorStoreSaveParams = {
  */
 export type AppCursorStore = {
   load(topicID: string): Promise<string | null>
-  save({ topicID, position }: AppCursorStoreSaveParams): Promise<void>
+  save(params: AppCursorStoreSaveParams): Promise<void>
 }
 
 /**

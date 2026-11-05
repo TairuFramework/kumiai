@@ -33,9 +33,10 @@ function recordingHub(hub: FakeHub, topicID: string, pulled: Array<string>): Log
   return {
     publish: (params: HubPublishParams) => hub.publish(params),
     subscribe: ({ subscriberDID: did, topicID: topic, ...options }) =>
-      hub.subscribe(did, topic, options),
-    unsubscribe: ({ subscriberDID: did, topicID: topic }) => hub.unsubscribe(did, topic),
-    receive: ({ subscriberDID: did }) => hub.receive(did),
+      hub.subscribe({ subscriberDID: did, topicID: topic, ...options }),
+    unsubscribe: ({ subscriberDID: did, topicID: topic }) =>
+      hub.unsubscribe({ subscriberDID: did, topicID: topic }),
+    receive: ({ subscriberDID: did }) => hub.receive({ subscriberDID: did }),
     fetchTopic: async (params: HubFetchTopicParams): Promise<HubFetchTopicResult> => {
       const result = await hub.fetchTopic(params)
       if (params.topicID === topicID) {

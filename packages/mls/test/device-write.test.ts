@@ -67,7 +67,7 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
       subject: issuer.id,
     }),
   ]
-  const discarded = await revokeWithProof(group, { deny: [issuer.id], log: asControllerLog(log) })
+  const discarded = await revokeWithProof({ group, deny: [issuer.id], log: asControllerLog(log) })
   if (discarded.status !== 'built') throw new Error('Missing revoke candidate')
   expect(await group.context.authService.validateCredential(credential, child.publicKey)).toBe(true)
   expect(seen).toHaveLength(0)
@@ -83,7 +83,8 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
       child.publicKey,
     ),
   ).toBe(false)
-  const winner = await revokeWithProof(fixture.joined, {
+  const winner = await revokeWithProof({
+    group: fixture.joined,
     deny: [issuer.id],
     log: asControllerLog(log),
   })

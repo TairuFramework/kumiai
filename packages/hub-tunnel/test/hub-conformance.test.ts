@@ -42,12 +42,18 @@ type KeysExact<A, B> = [keyof A] extends [keyof B]
     ? true
     : false
   : false
-type ConformanceReceiveOptions = NonNullable<Parameters<ConformanceMailboxHub['receive']>[1]>
+type ConformanceReceiveOptions = Omit<
+  Parameters<ConformanceMailboxHub['receive']>[0],
+  'subscriberDID'
+>
 type ReceiveOptionsKeysExact =
   KeysExact<HubReceiveOptions, ConformanceReceiveOptions> extends true ? true : never
 const _receiveOptionsKeysMatch: ReceiveOptionsKeysExact = true
 
-type ConformanceSubscribeOptions = NonNullable<Parameters<ConformanceMailboxHub['subscribe']>[2]>
+type ConformanceSubscribeOptions = Omit<
+  Parameters<ConformanceMailboxHub['subscribe']>[0],
+  'subscriberDID' | 'topicID'
+>
 type SubscribeOptionsKeysExact =
   KeysExact<HubSubscribeOptions, ConformanceSubscribeOptions> extends true ? true : never
 const _subscribeOptionsKeysMatch: SubscribeOptionsKeysExact = true

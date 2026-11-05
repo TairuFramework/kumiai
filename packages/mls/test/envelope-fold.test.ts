@@ -584,12 +584,17 @@ test('lifecycle envelope folds an effect-free log into the candidate registry', 
   })
   const result = await foldEnvelope({
     baseRoster: roster([]),
-    baseRegistry: await registryForLog(f.did, { chain: f.log.chain, events: [] }),
+    baseRegistry: await registryForLog({
+      controller: f.did,
+      log: { chain: f.log.chain, events: [] },
+    }),
     entries: [entry],
     groupID: GROUP_ID,
     context: { controllerID: f.did, memberController: () => f.did },
   })
   expect(result.ok).toBe(true)
   if (!result.ok) throw new Error(result.reason)
-  expect(recordedLogOf(result.registry, f.did)?.events).toEqual(f.log.events)
+  expect(recordedLogOf({ registry: result.registry, controller: f.did })?.events).toEqual(
+    f.log.events,
+  )
 })

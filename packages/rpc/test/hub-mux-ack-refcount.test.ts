@@ -173,7 +173,7 @@ describe('the mux refcounts acks across its holders', () => {
 
   test('a message that arrives before its listener is registered is not acked, and still reaches the listener once one registers', async () => {
     const hub = new DurableFakeHub()
-    hub.subscribe('bob', 'topic:inbox')
+    hub.subscribe({ subscriberDID: 'bob', topicID: 'topic:inbox' })
 
     // Held mail, published before this peer's mux even exists.
     await hub.publish({ senderDID: 'alice', topicID: 'topic:inbox', payload: payload() })

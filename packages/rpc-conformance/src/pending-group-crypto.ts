@@ -21,10 +21,9 @@ export type PendingCryptoUnwrapParams = {
 } & { expectedAAD?: Uint8Array; frame?: ConformanceAppFrameRef }
 
 export type PendingCrypto = Omit<ConformanceGroupCrypto, 'unwrap'> & {
-  unwrap({
-    bytes,
-    ...opts
-  }: PendingCryptoUnwrapParams):
+  unwrap(
+    params: PendingCryptoUnwrapParams,
+  ):
     | { payload: Uint8Array; senderDID: string }
     | Promise<{ payload: Uint8Array; senderDID: string }>
   pending: {

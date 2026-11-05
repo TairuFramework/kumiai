@@ -15,7 +15,11 @@ import {
   RevokeProofError,
   recoverySignerEligible,
 } from '@kumiai/mls'
-import type { OpenedRecoveryVerdict, PendingRecovery } from '@kumiai/rpc'
+import type {
+  OpenedRecoveryVerdict,
+  PendingRecovery,
+  PendingRecoveryConfirmationKeyParams,
+} from '@kumiai/rpc'
 
 export type RecoveryBindingRequest = {
   groupID: string
@@ -201,7 +205,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
   const { group, sourceTree, known, requestID } = params
   let tuple: BoundRecoveryCommit | undefined
   return {
-    async confirmationKey(position: string, commitDigest: string) {
+    async confirmationKey({ position, commitDigest }: PendingRecoveryConfirmationKeyParams) {
       if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
         throw new Error('Pending recovery already bound to another commit')
       tuple ??= { position, commitDigest }

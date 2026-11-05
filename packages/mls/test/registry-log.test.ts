@@ -331,7 +331,8 @@ for (const descendant of [false, true]) {
       expect((await folded(did, merged)).head.members.get(c.add)?.lease).toBe(9000)
       const before = structuredClone(recorded)
       await expect(
-        async () => await ingestControllerLog(did, recorded, { chain: [], events }),
+        async () =>
+          await ingestControllerLog({ controller: did, recorded, proof: { chain: [], events } }),
       ).rejects.toThrow(expect.objectContaining({ reason: 'not-endorsed' }))
       const result = await replay(did, [
         entry(did, 'seed', recorded),
@@ -366,9 +367,9 @@ test("removed member's concurrent counter-removal is refused even under a descen
       .applied,
   ).toContain(digestOf(renew.event))
   const before = structuredClone(recorded)
-  await expect(async () => await ingestControllerLog(did, recorded, proof)).rejects.toThrow(
-    expect.objectContaining({ reason: 'not-endorsed' }),
-  )
+  await expect(
+    async () => await ingestControllerLog({ controller: did, recorded, proof }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'not-endorsed' }))
   expect(recorded).toEqual(before)
 })
 
@@ -411,7 +412,8 @@ test('endorsement checks introduced events beyond the stored saturation prefix',
   })
   expect(result.applied.indexOf(digestOf(renew.event))).toBeGreaterThan(MAX_EPOCH_EVENTS)
   await expect(
-    async () => await ingestControllerLog(did, recorded, { chain: [], events }),
+    async () =>
+      await ingestControllerLog({ controller: did, recorded, proof: { chain: [], events } }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'not-endorsed' }))
 }, 180_000)
 
@@ -425,7 +427,11 @@ test('author removed only within the same delta passes', async () => {
     signer: { member: b },
     add: a.add,
   })
-  const ingested = await ingestControllerLog(did, log, { chain: [], events: [renew, remove] })
+  const ingested = await ingestControllerLog({
+    controller: did,
+    recorded: log,
+    proof: { chain: [], events: [renew, remove] },
+  })
   expect(ingested.introduced).toEqual(
     expect.arrayContaining([digestOf(renew.event), digestOf(remove.event)]),
   )
@@ -433,7 +439,13 @@ test('author removed only within the same delta passes', async () => {
   expect(ingested.after.head.members.get(a.add)?.removed).toBe(true)
   expect(ingested.after.head.members.get(c.add)?.lease).toBe(2000)
   expect(
-    (await ingestControllerLog(did, ingested.log, { chain: [], events: [] })).introduced,
+    (
+      await ingestControllerLog({
+        controller: did,
+        recorded: ingested.log,
+        proof: { chain: [], events: [] },
+      })
+    ).introduced,
   ).toEqual([])
 })
 
@@ -519,7 +531,12 @@ test('chain fork is refused and the prior log is kept', async () => {
   const prior = { chain: [...log.chain, left], events: [] }
   const { ingestControllerLog } = await import('../src/controller-ingest.js')
   await expect(
-    async () => await ingestControllerLog(did, prior, { chain: [...log.chain, right], events: [] }),
+    async () =>
+      await ingestControllerLog({
+        controller: did,
+        recorded: prior,
+        proof: { chain: [...log.chain, right], events: [] },
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'detached' }))
   const result = await replay(did, [
     entry(did, 'seed', prior),
@@ -561,7 +578,7 @@ test('effectDelta normalises DID denials and member effectiveness on both sides'
     deny: new Set([member.identity.id, '#other-key', 'did:key:edge']),
     members: new Map(),
   }
-  expect(effectDelta(before, after)).toEqual({
+  expect(effectDelta({ before, after })).toEqual({
     denied: ['did:key:edge'],
     removed: [{ did: normalizeDID(member.identity.id), add: member.add }],
     generation: true,

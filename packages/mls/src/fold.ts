@@ -27,12 +27,9 @@ export type LedgerReducer<TValue, TState> = {
    */
   seed(anchor: GroupAnchor): TState
   /** Is the verified issuer allowed to make this claim, given the state so far? */
-  verifyAuthority({
-    verified,
-    stateSoFar,
-  }: LedgerReducerVerifyAuthorityParams<TValue, TState>): boolean
+  verifyAuthority(params: LedgerReducerVerifyAuthorityParams<TValue, TState>): boolean
   /** Fold step: return the next state after applying an authorized claim. */
-  apply({ verified, stateSoFar }: LedgerReducerApplyParams<TValue, TState>): TState
+  apply(params: LedgerReducerApplyParams<TValue, TState>): TState
 }
 
 /**

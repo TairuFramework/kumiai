@@ -108,7 +108,7 @@ describe('makeMLSCredential', () => {
       signToken: async () => {
         throw new Error('not used')
       },
-    } as unknown as Parameters<typeof makeMLSCredential>[0]
+    } as unknown as Parameters<typeof makeMLSCredential>[0]['identity']
     expect(() => makeMLSCredential({ identity: fake })).toThrow(/longForm/i)
   })
 })

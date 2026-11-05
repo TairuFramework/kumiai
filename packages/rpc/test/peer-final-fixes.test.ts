@@ -190,7 +190,7 @@ test('a rejoin that lands on the same epoch number captures a new app anchor', a
   expect((await bob.peer.recover()).advanced).toBe(true)
   expect(await bob.mls.readEpoch()).toBe(3)
   // The forced rotation landed on the same number: the app anchor is captured again, not kept.
-  expect(exportSecret).toHaveBeenCalledWith(APP_TOPIC_LABEL)
+  expect(exportSecret).toHaveBeenCalledWith({ label: APP_TOPIC_LABEL })
 })
 
 test('an ambiguous same-number anchor record found at startup asks for confirmed recovery', async () => {
@@ -244,7 +244,7 @@ test('incomplete ledgers skip commit processing and later wakeups can retry', as
   await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
   await vi.advanceTimersByTimeAsync(50)
   await retry
-  expect(requests).toHaveBeenCalledWith(expect.any(String), 100)
+  expect(requests).toHaveBeenCalledWith({ requestID: expect.any(String), deadlineMs: 100 })
   expect(process).not.toHaveBeenCalled()
   expect(await bob.mls.readEpoch()).toBe(1)
   complete.mockResolvedValue(true)

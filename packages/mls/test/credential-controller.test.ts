@@ -161,7 +161,7 @@ test('bound constructors preserve the authenticated controller binding', async (
     parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity).controller,
   ).toEqual(controller)
   for (const construct of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
-    const bundle = await construct(identity, { controller })
+    const bundle = await construct({ identity, controller })
     expect(
       parseMLSCredentialIdentity(
         (bundle.publicPackage.leafNode.credential as { identity: Uint8Array }).identity,
@@ -186,7 +186,7 @@ test('bound constructors refuse expired and future-issued capabilities', async (
     if (controller == null) throw new Error('fixture has no controller binding')
     await expect(createGroup({ identity, groupID: 'bad-time', controller })).rejects.toThrow()
     for (const construct of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
-      await expect(construct(identity, { controller })).rejects.toThrow()
+      await expect(construct({ identity, controller })).rejects.toThrow()
     }
   }
 })
