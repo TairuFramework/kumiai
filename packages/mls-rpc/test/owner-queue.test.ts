@@ -1430,3 +1430,37 @@ test.each([false, true])(
     expect(order).toEqual(['next group', 'next device'])
   },
 )
+
+for (const context of [undefined, createAsyncLocalOwnershipContext()]) {
+  test(`memory command phases forbid device acquisition and transaction work (context=${context !== undefined})`, async () => {
+    const queues = createOwnerQueues({ ownershipContext: context })
+    await queues.run('command', group, async (entry) => {
+      expect(entry.phase).toBe('queued')
+      await entry.enter('prepare')
+      await expect(entry.enter('work')).rejects.toBeInstanceOf(PersistencePhaseError)
+      expect(() => entry.assertWrite('domain')).toThrow(PersistencePhaseError)
+      await expect(
+        entry.callback(() => queues.run('read', device, async () => 'device')),
+      ).rejects.toBeInstanceOf(ReentrantOwnershipError)
+      if (context !== undefined) {
+        await Promise.resolve()
+        await expect(
+          queues.run('combined', combined, async () => 'combined'),
+        ).rejects.toBeInstanceOf(ReentrantOwnershipError)
+      }
+      entry.settle('committed')
+      expect(entry.phase).toBe('settled')
+      expect(entry.attempt().revoked).toBe(true)
+    })
+    await expect(read(queues, 'after', [])).resolves.toBe('after')
+  })
+}
+
+test('a rolled-back memory command cannot retry into transaction work', async () => {
+  const queues = createOwnerQueues()
+  await queues.run('command', group, async (entry) => {
+    await entry.enter('prepare')
+    entry.settle('rolled-back')
+    await expect(entry.retryRolledBack()).rejects.toBeInstanceOf(PersistencePhaseError)
+  })
+})

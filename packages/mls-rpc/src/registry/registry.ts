@@ -80,6 +80,11 @@ import {
 } from './safety.js'
 import { createRegistrySeed } from './seed.js'
 import { readRecoverySource } from './source.js'
+import {
+  bindRegistrySourceExecutor,
+  createSourceExecutor,
+  releaseRegistrySourceExecutor,
+} from './source-executor.js'
 import { createRegistrySwitch } from './switch.js'
 import type {
   GroupHandleRegistry,
@@ -1014,6 +1019,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
           slot.hooks = null
           previous?.runtime.publish(null)
         }
+        releaseRegistrySourceExecutor(registry)
         liveRegistries.delete(registryBinding)
       }
     })()
@@ -1259,6 +1265,15 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   capability.failureSignal?.addEventListener('abort', onFailure, { once: true })
   observers.add(() => capability.failureSignal?.removeEventListener('abort', onFailure))
+  bindRegistrySourceExecutor(
+    registry,
+    createSourceExecutor({
+      persistence,
+      entry: capability,
+      environment: environment.recovery,
+      lifecycle: { beforeUse: start, assertCurrent: assertOpen },
+    }),
+  )
   liveRegistries.set(binding, registry)
   return registry
 }

@@ -183,3 +183,41 @@ test('retry refuses unsettled or committed outcomes', async () => {
     await expect(entry.retryRolledBack()).rejects.toBeInstanceOf(PersistencePhaseError)
   })
 })
+
+test('memory command cancellation revokes continuations and releases without a provider outcome', async () => {
+  const { sourceExecutorFixture } = await import('./fixtures/source-executor.js')
+  const { deferred } = await import('../src/runtime.js')
+  const f = await sourceExecutorFixture()
+  await f.control.admit(f.seed.key, 'source')
+  const entered = deferred<void>()
+  const late = deferred<void>()
+  const cancellation = new AbortController()
+  let authority: { assertLive(): void } | undefined
+  let effects = 0
+  const pending = f.entry.command(
+    f.seed.key.groupID,
+    async (attempt) => {
+      authority = attempt
+      entered.resolve()
+      await late.promise
+      attempt.assertLive()
+      effects++
+      return 'late'
+    },
+    { signal: cancellation.signal },
+  )
+  const rejected = expect(pending).rejects.toBeInstanceOf(PersistencePhaseError)
+  try {
+    await entered.promise
+    cancellation.abort(new Error('Command cancelled'))
+    await rejected
+    expect(() => authority?.assertLive()).toThrow(PersistencePhaseError)
+    await expect(f.persistence.groups.load(f.seed.key.groupID)).resolves.toMatchObject({
+      activeIncarnation: 1,
+    })
+  } finally {
+    late.resolve()
+  }
+  await f.flushReady()
+  expect(effects).toBe(0)
+})

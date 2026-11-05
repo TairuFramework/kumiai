@@ -18,7 +18,7 @@ export type OwnerAttempt = {
 declare const coordinatorBrand: unique symbol
 export type CoordinatorToken = { readonly [coordinatorBrand]: true }
 
-export type EntryKind = 'transition' | 'combined' | 'read'
+export type EntryKind = 'transition' | 'combined' | 'read' | 'command'
 export type EntryPhase =
   | 'queued'
   | 'prepare'
@@ -475,14 +475,15 @@ export function createOwnerQueues(options?: {
           assertLive()
           if (closing !== null) throw new PersistencePhaseError('Phase is already changing')
           const allowed =
-            (phase === 'queued' && (next === 'prepare' || (kind === 'read' && next === 'work'))) ||
-            (phase === 'prepare' && next === 'work') ||
-            (phase === 'work' && next === 'finalise') ||
-            (phase === 'finalise' && next === 'effects') ||
-            (phase === 'effects' && next === 'account') ||
-            (['prepare', 'work', 'finalise', 'effects', 'account'].includes(phase) &&
-              next === 'outcome') ||
-            (phase === 'outcome' && kind !== 'read' && (next === 'work' || next === 'ambiguous'))
+            (kind !== 'command' || (phase === 'queued' && next === 'prepare')) &&
+            ((phase === 'queued' && (next === 'prepare' || (kind === 'read' && next === 'work'))) ||
+              (phase === 'prepare' && next === 'work') ||
+              (phase === 'work' && next === 'finalise') ||
+              (phase === 'finalise' && next === 'effects') ||
+              (phase === 'effects' && next === 'account') ||
+              (['prepare', 'work', 'finalise', 'effects', 'account'].includes(phase) &&
+                next === 'outcome') ||
+              (phase === 'outcome' && kind !== 'read' && (next === 'work' || next === 'ambiguous')))
           if (!allowed) throw new PersistencePhaseError(`Cannot enter ${next} from ${phase}`)
           // Stop new reservations immediately, but let started operations finish in their phase.
           closing = tail.then(() => {
@@ -524,11 +525,15 @@ export function createOwnerQueues(options?: {
             return
           }
           assertLive()
-          if (phase !== 'outcome' && phase !== 'ambiguous') {
+          if (
+            kind === 'command' ? phase !== 'prepare' : phase !== 'outcome' && phase !== 'ambiguous'
+          ) {
             throw new PersistencePhaseError(`Cannot settle in ${phase}`)
           }
           outcome = next
           phase = 'settled'
+          if (kind === 'command')
+            currentAttempt.attempt.revoke(new PersistencePhaseError('Command settled'))
           const hooks = (next === 'committed' ? commits : rollbacks).slice()
           commits.length = 0
           rollbacks.length = 0
@@ -546,7 +551,13 @@ export function createOwnerQueues(options?: {
         },
         async retryRolledBack() {
           assertLive()
-          if (phase !== 'settled' || outcome !== 'rolled-back' || bodyFinished || closing !== null)
+          if (
+            kind === 'command' ||
+            phase !== 'settled' ||
+            outcome !== 'rolled-back' ||
+            bodyFinished ||
+            closing !== null
+          )
             throw new PersistencePhaseError('Retry requires settled rollback')
           await entry.backendSettled()
           await tail
@@ -561,7 +572,11 @@ export function createOwnerQueues(options?: {
         },
         retain(proof) {
           assertLive()
-          if (kind === 'read' || (phase !== 'outcome' && phase !== 'ambiguous')) {
+          if (
+            kind === 'read' ||
+            kind === 'command' ||
+            (phase !== 'outcome' && phase !== 'ambiguous')
+          ) {
             throw new PersistencePhaseError(`Cannot retain ${kind} in ${phase}`)
           }
           if (owned.proof !== null) return owned.proof
@@ -611,7 +626,7 @@ export function createOwnerQueues(options?: {
 
       async function cleanup(): Promise<void> {
         if (failure !== null || owned.proof !== null) return
-        if (kind === 'read') {
+        if (kind === 'read' || kind === 'command') {
           release()
           return
         }

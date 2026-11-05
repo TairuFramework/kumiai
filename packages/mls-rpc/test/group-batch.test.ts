@@ -703,3 +703,27 @@ describe('group batch arbitration', () => {
     expect(appBatch(original)).toBe(binding)
   })
 })
+
+test('memory commands leave ready control and completion ahead of the next burst', async () => {
+  const scheduler = createGroupBatchScheduler({})
+  const release = deferred<void>()
+  const order: Array<string> = []
+  const active = scheduler.schedule({ source: 'burst', kind: 'open', run: () => release.promise })
+  const offer = (source: string, kind: BatchKind) =>
+    scheduler.schedule({
+      source,
+      kind,
+      async run() {
+        order.push(source)
+      },
+    })
+  const queued = [
+    offer('burst', 'open'),
+    offer('inspect', 'accounting'),
+    offer('completion', 'completion'),
+    offer('control', 'control'),
+  ]
+  release.resolve()
+  await Promise.all([active, ...queued])
+  expect(order).toEqual(['control', 'inspect', 'completion', 'burst'])
+})

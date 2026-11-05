@@ -6,6 +6,7 @@ import type {
   GroupCondition,
 } from '@kumiai/rpc'
 
+import type { OwnerAttempt } from './owner-queue.js'
 import type {
   AppOutboxEntry,
   AppPoisonRecord,
@@ -78,6 +79,11 @@ export type FinaliseBatchResult = { consumed: number; results: Array<CertifiedFi
 
 export type EntryCapability<TTx extends GroupTransaction> = {
   assertRoot(): void
+  command<T>(
+    groupID: string,
+    work: (attempt: OwnerAttempt) => Promise<T>,
+    options?: { signal?: AbortSignal },
+  ): Promise<T>
   activity(groupID: string, excludingMutationID?: string): { generation: number; pending: number }
   failureSignal?: AbortSignal
   finaliseCertifiedAppBatch(

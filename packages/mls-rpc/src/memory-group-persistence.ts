@@ -1514,6 +1514,30 @@ export function createMemoryGroupCoordinator(params: {
     resolve,
   }
   const capability: EntryCapability<MemoryTransaction> = {
+    command(groupID, work, options) {
+      capability.assertRoot()
+      return owners.run(
+        'command',
+        { groupID, ownerDID: null },
+        async (entry) => {
+          try {
+            if (!owners.started(JSON.stringify(['group', groupID])))
+              throw new PersistencePhaseError('Command requires completed persistence startup')
+            await entry.enter('prepare')
+            const attempt = entry.attempt()
+            const value = await entry.operation(attempt, work)
+            attempt.assertLive()
+            entry.settle('committed')
+            return value
+          } catch (error) {
+            entry.attempt().revoke(error)
+            entry.release()
+            throw error
+          }
+        },
+        options,
+      )
+    },
     finaliseCertifiedApp(key, seq) {
       capability.assertRoot()
       return collectCertifiedApps({ capability, binding, key, seqs: [seq] })
