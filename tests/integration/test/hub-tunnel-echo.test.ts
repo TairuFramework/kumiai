@@ -8,6 +8,8 @@ import { describe, expect, test } from 'vitest'
 import { fixtureTopic } from './fixture-topic.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
+const flush = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms))
+
 // ---------------------------------------------------------------------------
 // Protocol
 // ---------------------------------------------------------------------------
@@ -71,14 +73,10 @@ describe('hub-tunnel echo', () => {
     const echoHandler: RequestHandler<Protocol, 'echo'> = async ({ param }) => param
     const handlers = { echo: echoHandler } as ProcedureHandlers<Protocol>
 
-    // No flush between construction and the request, unlike every sibling wire test — and that is
-    // an empirical fact, not a contract. `createHubTunnelTransport` fires `hub.subscribe`
-    // fire-and-forget (`transport.ts:214-215`), so over a real wire nothing guarantees a
-    // subscription lands before the first publish. It holds here because both subscribes are
-    // issued during construction, several awaits before `client.request` reaches the hub. Filed as
-    // a followup: `docs/agents/plans/backlog/2026-07-31-close-medium-test-gaps-residuals.md`.
     const server = serve<Protocol>({ handlers, requireAuth: false, transport: serverTransport })
     const client = new Client<Protocol>({ transport: clientTransport })
+    // A mailbox subscriber only sees later publishes, and `write` gates on its own subscribe only.
+    await flush()
 
     try {
       const result = await client.request('echo', { param: { msg: 'hello' } })
