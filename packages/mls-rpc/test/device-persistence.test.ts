@@ -8,6 +8,7 @@ import {
 import type { KeyPackageRecord, LastResortRecord } from '@kumiai/mls-hub'
 import { describe, expect, test, vi } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import { memoryGroupOwnerQueues } from '../src/memory-group-persistence.js'
 import { createOwnerQueues, type OwnerQueues } from '../src/owner-queue.js'
 import { physicalRecordKey, sealRecord } from '../src/persistence-codec.js'
@@ -473,6 +474,12 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await packageStores.ordinary.receipt(ordinary.ref)).toEqual({ groupID })
       expect(await device.groups.load(groupID)).toEqual({ ...seed.lifetime, mutationID: 'join' })
       expect(await device.groups.loadState(seed.key)).toEqual(seed.state)
+      const capability = entryCapability(device.groups)
+      if (capability === null) throw new Error('Missing group capability')
+      expect(await capability.read(groupID, (reads) => reads.metadata(1))).toMatchObject({
+        ...seed.key,
+        terminal: false,
+      })
       expect(await device.groups.loadTrust(groupID)).toEqual(seed.trust)
       await expect(packageStores.ordinary.put(ownerDID, ordinary)).rejects.toThrow('consumed')
       await packageStores.lastResort.consume(lastResort.ref, groupID)

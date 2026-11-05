@@ -2,6 +2,7 @@ import { encodeClientState, restoreGroup, signLedgerEntry } from '@kumiai/mls'
 import { asLogPosition, type RecoveryContinuation } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
+import { entryCapability } from '../src/entry-capability.js'
 import * as MlsRPC from '../src/index.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createRealGroup } from './fixtures/real-group.js'
@@ -147,6 +148,13 @@ for (const mode of ['real-mls', 'double'] as const) {
             'destination-progress',
           )
           const destinationBefore = await fixture.device.groups.ports(destination).control.load()
+          const entry = entryCapability(fixture.device.groups)
+          if (entry === null) throw new Error('Missing entry capability')
+          const terminalBefore = await entry.read(groupID, async (reads) => [
+            (await reads.metadata(1))?.terminal,
+            (await reads.metadata(2))?.terminal,
+          ])
+          expect(terminalBefore).toEqual([false, false])
           const before = await fixture.device.groups.ports(source).control.load()
           fixture.armWorkFault('finish', fault)
           const finish = (mutationID: string) =>
@@ -181,6 +189,12 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect(await fixture.device.groups.ports(destination).control.load()).toEqual(
             destinationBefore,
           )
+          expect(
+            await entry.read(groupID, async (reads) => [
+              (await reads.metadata(1))?.terminal,
+              (await reads.metadata(2))?.terminal,
+            ]),
+          ).toEqual(terminalBefore)
           await finish('finish-again')
           expect(await fixture.device.groups.ports(source).control.load()).toEqual(completed)
           fixture = await fixture.reopen()

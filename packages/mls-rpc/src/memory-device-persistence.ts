@@ -1,8 +1,11 @@
+import { bindDeviceEntryCapability, type DeviceEntryCapability } from './device-entry-capability.js'
+import { coordinatorBinding, entryCapability } from './entry-capability.js'
 import type { LegacyCommitJournalBoundary } from './legacy-control-migration.js'
 import { createMemoryGroupCoordinator, memoryGroupOwnerQueues } from './memory-group-persistence.js'
 import {
   bindMemoryOwner,
   coordinateMemoryTransaction,
+  createMemoryPrepareTransaction,
   memoryOperation,
 } from './memory-group-state.js'
 import {
@@ -273,8 +276,8 @@ export function createMemoryDevicePersistence(params: {
         createTransactionPackageStores({ tx, atRest, providerID, ownerDID, sourceID }).lastResort,
       cleanup: {
         list: memoryOperation(tx, rawCleanup.list),
-        put: memoryOperation(tx, rawCleanup.put),
-        remove: memoryOperation(tx, rawCleanup.remove),
+        put: memoryOperation(tx, rawCleanup.put, 'side'),
+        remove: memoryOperation(tx, rawCleanup.remove, 'side'),
       },
       restore: {
         load: memoryOperation(tx, unlockedRestore(tx).load),
@@ -340,6 +343,99 @@ export function createMemoryDevicePersistence(params: {
       throw new GroupStateUncertainError('Device mutation is superseded or unclassifiable')
     })
   }
+  async function transitionOwned<TValue>(
+    owned: Parameters<DevicePersistence<MemoryTransaction>['transition']>[0],
+    work: (stores: DeviceStores<MemoryTransaction>) => Promise<TValue>,
+    entry: OwnerEntry,
+  ): Promise<TValue> {
+    if (owned.group !== null && owned.group.mutationID !== owned.mutationID)
+      throw new GroupStateConflictError('Participant mutation ID mismatch')
+    let proof: Proof | undefined
+    let result!: Awaited<ReturnType<typeof work>>
+    try {
+      return await db.transact(
+        scope(owned.group?.groupID ?? null),
+        async (baseTx) => {
+          const tx = boundTx(baseTx, entry)
+          try {
+            const before = await memoryOperation(tx, () => load(tx))()
+            if (before.revision !== owned.expectedRevision)
+              throw new GroupStateConflictError('Device revision conflict')
+            const prior = proofs.get(owned.mutationID)
+            if (prior !== undefined && prior.outcome !== 'rolled-back')
+              throw new GroupStateConflictError('Mutation ID already used; resolve its proof')
+            proof = {
+              previousDevice: marker(tx, 'device-owner', ownerKey),
+              nextDevice: { revision: before.revision + 1, mutationID: owned.mutationID },
+              group:
+                owned.group === null
+                  ? null
+                  : {
+                      groupID: owned.group.groupID,
+                      previous: marker(tx, 'group-owner', groupOwnerKey(owned.group.groupID)),
+                    },
+            }
+            proofs.set(owned.mutationID, proof)
+            if (owned.group === null) {
+              result = await entry.callback(() => work(stores(tx, null)))
+              await entry.enter('finalise')
+              await entry.enter('effects')
+              await entry.enter('account')
+            } else {
+              result = await coordinator.transitionInTransaction(
+                tx,
+                owned.group,
+                async (group) => await work(stores(tx, group)),
+              )
+            }
+            const nextDevice = proof.nextDevice
+            await coordinateMemoryTransaction(tx, async (tx) => {
+              tx.rows['device-owner']?.set(ownerKey, nextDevice)
+              await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').save(
+                'current',
+                nextDevice,
+              )
+            })
+            if (entry.rollbackOnly)
+              throw new GroupStateConflictError('Transaction is rollback-only')
+            return result
+          } catch (error) {
+            entry
+              .attempt()
+              .revoke(
+                owners.failure ??
+                  new PersistencePhaseError('Transition attempt rejected', { cause: error }),
+              )
+            throw error
+          } finally {
+            if (owners.failure === null) await entry.enter('outcome')
+          }
+        },
+        {
+          onUnknown(settlement) {
+            if (proof !== undefined) {
+              proof.settlement = settlement
+              const retainedProof = proof
+              void entry.retain(() => prove(owned.mutationID, retainedProof))
+            }
+          },
+        },
+      )
+    } catch (error) {
+      if (!(error instanceof StorageOutcomeUnknownError)) {
+        if (proof !== undefined) proof.outcome = 'rolled-back'
+        throw error
+      }
+      const pending = owners.joinProof({ ownerDID }, owned.mutationID)
+      if (pending !== null && (await pending) === 'committed') return result
+      throw error
+    } finally {
+      if (proof !== undefined && proof.outcome === undefined && proof.settlement === undefined)
+        proof.outcome = 'committed'
+      if (proof?.settlement === undefined && owners.failure === null && entry.phase === 'outcome')
+        entry.settle(proof?.outcome ?? 'rolled-back')
+    }
+  }
   const device: DevicePersistence<MemoryTransaction> = {
     providerID,
     ownerDID,
@@ -351,108 +447,105 @@ export function createMemoryDevicePersistence(params: {
         owned.group === null ? 'transition' : 'combined',
         { ownerDID, groupID: owned.group?.groupID ?? null },
         async (entry) => {
-          if (owned.group !== null && owned.group.mutationID !== owned.mutationID)
-            throw new GroupStateConflictError('Participant mutation ID mismatch')
           await prepare(entry)
-          let proof: Proof | undefined
-          let result!: Awaited<ReturnType<typeof work>>
-          try {
-            return await db.transact(
-              scope(owned.group?.groupID ?? null),
-              async (baseTx) => {
-                const tx = boundTx(baseTx, entry)
-                try {
-                  const before = await memoryOperation(tx, () => load(tx))()
-                  if (before.revision !== owned.expectedRevision)
-                    throw new GroupStateConflictError('Device revision conflict')
-                  const prior = proofs.get(owned.mutationID)
-                  if (prior !== undefined && prior.outcome !== 'rolled-back')
-                    throw new GroupStateConflictError('Mutation ID already used; resolve its proof')
-                  proof = {
-                    previousDevice: marker(tx, 'device-owner', ownerKey),
-                    nextDevice: { revision: before.revision + 1, mutationID: owned.mutationID },
-                    group:
-                      owned.group === null
-                        ? null
-                        : {
-                            groupID: owned.group.groupID,
-                            previous: marker(tx, 'group-owner', groupOwnerKey(owned.group.groupID)),
-                          },
-                  }
-                  proofs.set(owned.mutationID, proof)
-                  if (owned.group === null) {
-                    result = await entry.callback(() => work(stores(tx, null)))
-                    await entry.enter('finalise')
-                    await entry.enter('effects')
-                    await entry.enter('account')
-                  } else {
-                    result = await coordinator.transitionInTransaction(
-                      tx,
-                      owned.group,
-                      async (group) => await work(stores(tx, group)),
-                    )
-                  }
-                  const nextDevice = proof.nextDevice
-                  await coordinateMemoryTransaction(tx, async (tx) => {
-                    tx.rows['device-owner']?.set(ownerKey, nextDevice)
-                    await table<Omit<DeviceRecord, 'restoreWork'>>(tx, 'device').save(
-                      'current',
-                      nextDevice,
-                    )
-                  })
-                  if (entry.rollbackOnly)
-                    throw new GroupStateConflictError('Transaction is rollback-only')
-                  return result
-                } catch (error) {
-                  entry
-                    .attempt()
-                    .revoke(
-                      owners.failure ??
-                        new PersistencePhaseError('Transition attempt rejected', { cause: error }),
-                    )
-                  throw error
-                } finally {
-                  if (owners.failure === null) await entry.enter('outcome')
-                }
-              },
-              {
-                onUnknown(settlement) {
-                  if (proof !== undefined) {
-                    proof.settlement = settlement
-                    const retainedProof = proof
-                    void entry.retain(() => prove(owned.mutationID, retainedProof))
-                  }
-                },
-              },
-            )
-          } catch (error) {
-            if (!(error instanceof StorageOutcomeUnknownError)) {
-              if (proof !== undefined) proof.outcome = 'rolled-back'
-              throw error
-            }
-            const pending = owners.joinProof({ ownerDID }, owned.mutationID)
-            if (pending !== null && (await pending) === 'committed') return result
-            throw error
-          } finally {
-            if (
-              proof !== undefined &&
-              proof.outcome === undefined &&
-              proof.settlement === undefined
-            )
-              proof.outcome = 'committed'
-            if (
-              proof?.settlement === undefined &&
-              owners.failure === null &&
-              entry.phase === 'outcome'
-            )
-              entry.settle(proof?.outcome ?? 'rolled-back')
-          }
+          return transitionOwned(owned, work, entry)
         },
         { mutationID: owned.mutationID },
       )
     },
     resolve,
   }
+  const groupCapability = entryCapability(groups)
+  const bindingIdentity = coordinatorBinding(groups)
+  if (groupCapability === null || bindingIdentity === null)
+    throw new GroupStateConflictError('Missing group coordinator binding')
+  const capability: DeviceEntryCapability<MemoryTransaction> = {
+    assertRoot: () => groupCapability.assertRoot(),
+    read(work) {
+      return owners.run('read', { ownerDID, groupID: null }, async (entry) => {
+        try {
+          await prepareBarrier(entry)
+          const tx = createMemoryPrepareTransaction({
+            rows: db.snapshot(),
+            entry,
+            owners,
+            groupID: null,
+            devicePackages: true,
+            providerID,
+          })
+          const result = await entry.callback(() => work(stores(tx, null)))
+          await entry.enter('outcome')
+          return result
+        } catch (error) {
+          entry
+            .attempt()
+            .revoke(
+              owners.failure ?? new PersistencePhaseError('Device read rejected', { cause: error }),
+            )
+          entry.release()
+          throw error
+        }
+      })
+    },
+    runCombined(request, prepare, work) {
+      // AbortSignal is a live capability, not stored data.
+      const owned = { groupID: request.groupID, mutationID: request.mutationID }
+      const signal = request.signal
+      return owners.run(
+        'combined',
+        { ownerDID, groupID: owned.groupID },
+        async (entry) => {
+          try {
+            await prepareBarrier(entry)
+            const tx = createMemoryPrepareTransaction({
+              rows: db.snapshot(),
+              entry,
+              owners,
+              groupID: owned.groupID,
+              devicePackages: true,
+              providerID,
+            })
+            const attempt = entry.attempt()
+            let cancel!: () => void
+            const cancelled = new Promise<never>((_resolve, reject) => {
+              cancel = () => reject(signal?.aborted ? signal.reason : attempt.signal.reason)
+              attempt.signal.addEventListener('abort', cancel, { once: true })
+              if (attempt.revoked) cancel()
+            })
+            const prepared = await Promise.race([
+              entry.callback(() =>
+                prepare({
+                  device: memoryOperation(tx, () => load(tx)),
+                  group: coordinator.prepareReads(entry, owned.groupID),
+                }),
+              ),
+              cancelled,
+            ]).finally(() => attempt.signal.removeEventListener('abort', cancel))
+            const change = entry.callback(() => ({
+              mutationID: owned.mutationID,
+              expectedRevision: prepared.expectedDeviceRevision,
+              group: { ...owned, expected: copyStoredValue(prepared.expected) },
+            }))
+            const value = entry.callback(() => prepared.value)
+            await entry.enter('work')
+            attempt.assertLive()
+            if (entry.rollbackOnly) throw new GroupStateConflictError('Prepare is rollback-only')
+            return await transitionOwned(change, (stores) => work(stores, value), entry)
+          } catch (error) {
+            entry
+              .attempt()
+              .revoke(
+                owners.failure ??
+                  new PersistencePhaseError('Combined prepare rejected', { cause: error }),
+              )
+            throw error
+          }
+        },
+        { mutationID: owned.mutationID, signal },
+      )
+    },
+  }
+  bindDeviceEntryCapability({ device, capability, coordinatorBinding: bindingIdentity })
   bindMemoryPackageReads(device, (work) => read((tx) => work(stores(tx, null))))
   return device
 }

@@ -26,6 +26,7 @@ import type {
 export type StateMetadata = GroupKey & {
   version: number
   deleted: boolean
+  terminal: boolean
   initialIdentity: EpochIdentity | null
 }
 export type AccountedGroupObservation = {

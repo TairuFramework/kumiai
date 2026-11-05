@@ -333,6 +333,7 @@ export type ConformanceGroupTransition = {
 export type ConformanceStateMetadata = ConformanceGroupKey & {
   version: number
   deleted: boolean
+  terminal: boolean
   initialIdentity: ConformanceEpochIdentity | null
 }
 export type ConformanceAccountedGroupObservation<Position extends string = string> = {

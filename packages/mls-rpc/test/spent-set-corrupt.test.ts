@@ -214,6 +214,11 @@ for (const mode of ['real-mls', 'double'] as const) {
             unsubscribe()
           }
           const observation = observations.at(-1)
+          expect(observation?.terminal).toBe(false)
+          expect(await capability.read(groupID, (reads) => reads.metadata(1))).toMatchObject({
+            ...key,
+            terminal: false,
+          })
           const snapshot = access.runtime.snapshot()
           const record = await f.device.groups.loadState(key)
           const trust = await f.device.groups.loadTrust(groupID)

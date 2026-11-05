@@ -347,7 +347,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await create('seeded')
       try {
         const before = await fixture.device.groups.load(groupID)
-        const state = await fixture.device.groups.loadState(key)
+        const stateRows = (await fixture.inspectRows()).state
         const trust = await fixture.device.groups.loadTrust(groupID)
         let stateSaves = 0
         let trustSaves = 0
@@ -401,7 +401,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(stateSaves).toBe(0)
         expect(trustSaves).toBe(0)
         expect(await fixture.device.groups.load(groupID)).toEqual(before)
-        expect(await fixture.device.groups.loadState(key)).toEqual(state)
+        expect((await fixture.inspectRows()).state).toEqual(stateRows)
+        await expect(fixture.device.groups.loadState(key)).rejects.toMatchObject({
+          name: 'GroupStateConflictError',
+        })
         expect(await fixture.device.groups.loadTrust(groupID)).toEqual(trust)
       } finally {
         await fixture.close()

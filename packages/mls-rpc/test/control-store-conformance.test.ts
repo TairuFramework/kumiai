@@ -171,13 +171,27 @@ function host(): ConformanceControlHost {
         })
         // Only identity is consulted by control head updates; MLS codecs are covered by crash tests.
         const identityTable = memoryRecordTable({ tx, key, atRest, namespace: 'state' })
-        if (after === null) identityTable.remove('current')
-        else
+        const metadataTable = memoryRecordTable({ tx, key, atRest, namespace: 'meta' })
+        if (after === null) {
+          identityTable.remove('current')
+          metadataTable.remove(JSON.stringify(['state-version']))
+        } else {
           await identityTable.save('current', {
             ...after,
             deleted: after.deleted ?? false,
             epochAuthenticator: after.authenticator,
+            version: (state?.version ?? 0) + 1,
+            terminal: after.terminal ?? false,
           })
+          await metadataTable.save(JSON.stringify(['state-version']), {
+            groupID: after.groupID,
+            incarnation: after.incarnation,
+            version: (state?.version ?? 0) + 1,
+            deleted: after.deleted ?? false,
+            terminal: after.terminal ?? false,
+            initialIdentity: state?.initial ?? after,
+          })
+        }
         if (write !== undefined) {
           const context: CommitOnceWriteContext | null =
             before === null

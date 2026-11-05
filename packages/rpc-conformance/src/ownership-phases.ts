@@ -2256,7 +2256,7 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
           expect(value.lifetime?.revision).toBe(seed.lifetime.revision + index + 1)
           expect(value.activeKey).toEqual(key)
           expect(value.metadata).toContainEqual(
-            expect.objectContaining({ ...key, version: value.activeVersion }),
+            expect.objectContaining({ ...key, version: value.activeVersion, terminal: false }),
           )
           expect(value.trust).toEqual(seed.trust)
           expect(value.trustStatus).toBe('readable')
@@ -2339,6 +2339,7 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
               ...key,
               incarnation: 2,
               version: installed.version + versionBump,
+              terminal: false,
             }),
           )
           const reopened = (await fixture.reopen()).device.groups

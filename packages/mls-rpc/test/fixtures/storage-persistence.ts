@@ -64,7 +64,9 @@ import type {
   DevicePackageAdapters,
   DevicePersistence,
   DeviceStores,
+  GroupKey,
   GroupPersistence,
+  GroupStateRecord,
   MemoryStoreRows,
   MemoryTransaction,
   OwnershipContextPort,
@@ -193,6 +195,10 @@ export type RegistryStorageFixture = Omit<
   armWorkFault(mutationID: string, point: 'pending'): WorkFaultControl
   armWorkFault(mutationID: string, point: Exclude<WorkFaultPoint, 'pending'>): void
   holdProof(mutationID: string): { started: Promise<void>; release(): void }
+  mutateState(
+    key: GroupKey,
+    fn: (value: GroupStateRecord & { deleted: false }) => GroupStateRecord,
+  ): Promise<void>
   mutateMetadata(
     key: { groupID: string; incarnation: number },
     fn: (value: unknown) => unknown,
@@ -693,6 +699,17 @@ export async function createStorageFixture(params: {
       const value = { started: deferred<void>(), released: deferred<void>() }
       proofHolds.set(mutationID, value)
       return { started: value.started.promise, release: () => value.released.resolve() }
+    },
+    async mutateState(key, fn) {
+      active()
+      const location = { ...key, namespace: 'state', recordID: 'current' }
+      const physicalKey = physicalRecordKey(location)
+      const bytes = ciphertext('state', physicalKey)
+      const value = decodeStoredValue(
+        await atRest.open(bytes, recordAAD(location)),
+      ) as GroupStateRecord & { deleted: false }
+      const changed = await atRest.seal(encodeStoredValue(fn(value)), recordAAD(location))
+      memoryFaults(db).forceCommittedRow('state', physicalKey, changed)
     },
     async mutateMetadata(key, fn) {
       active()

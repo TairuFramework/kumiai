@@ -1,6 +1,6 @@
 import { createCheckpointStore, createUnlockedCheckpointStore } from './checkpoint-store.js'
 import type { StateMetadata } from './entry-capability.js'
-import { belongs, cloneValue, groupNamespaces } from './memory-rows.js'
+import { belongs, cloneValue, deviceNamespaces, groupNamespaces } from './memory-rows.js'
 import type { OwnerAttempt, OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
 import {
   assertSurvivingSpentSet,
@@ -145,7 +145,8 @@ export function createMemoryPrepareTransaction(params: {
   rows: MemoryTransaction['rows']
   entry: OwnerEntry
   owners: OwnerQueues
-  groupID: string
+  groupID: string | null
+  devicePackages?: boolean
   providerID: string
 }): MemoryTransaction {
   const { entry, owners, groupID, providerID } = params
@@ -157,8 +158,11 @@ export function createMemoryPrepareTransaction(params: {
   }
   const copy = cloneValue
   const maps: MemoryTransaction['rows'] = {}
-  const scope = { groupID, devicePackages: false }
-  for (const namespace of groupNamespaces) {
+  const scope = { groupID, devicePackages: params.devicePackages ?? false }
+  const namespaces = scope.devicePackages
+    ? new Set([...groupNamespaces, ...deviceNamespaces])
+    : groupNamespaces
+  for (const namespace of namespaces) {
     const source = params.rows[namespace] ?? new Map<string, unknown>()
     const rows = new Map<string, unknown>()
     for (const [key, value] of source) {
@@ -512,7 +516,8 @@ export function createUnlockedGroupStateStores(params: {
           (value.incarnation !== incarnation ||
             !Number.isSafeInteger(value.version) ||
             value.version < 1 ||
-            typeof value.deleted !== 'boolean')
+            typeof value.deleted !== 'boolean' ||
+            typeof value.terminal !== 'boolean')
         )
           throw new GroupStateConflictError('Unreadable state version metadata')
         return value
@@ -544,9 +549,6 @@ export function createUnlockedGroupStateStores(params: {
             throw new GroupStateConflictError('Stored incarnation mismatch')
           }
           const metadata = await stateMetadata(incarnation).load()
-          // Admission diagnoses a side-record tombstone without hiding the source row.
-          if (value !== null && metadata !== null && value.deleted !== metadata.deleted)
-            return value
           return projectStateVersion(value, metadata)
         },
         async save(value) {
@@ -559,17 +561,7 @@ export function createUnlockedGroupStateStores(params: {
           if (value.deleted) {
             // Retirement needs administrative version/identity, never private ratchets.
             const previous = previousMetadata
-            if (
-              previous === null &&
-              tx.rows.state?.has(
-                physicalRecordKey({
-                  groupID,
-                  incarnation,
-                  namespace: 'state',
-                  recordID: 'current',
-                }),
-              )
-            )
+            if (previous === null)
               throw new GroupStateConflictError('Missing state version metadata')
             if (
               !Number.isSafeInteger(value.version) ||
@@ -577,6 +569,11 @@ export function createUnlockedGroupStateStores(params: {
             )
               throw new GroupStateConflictError('State version conflict')
           } else {
+            if (
+              typeof value.terminal !== 'boolean' ||
+              (previousMetadata?.terminal === true && !value.terminal)
+            )
+              throw new GroupStateConflictError('Invalid terminal state projection')
             const previous = projectStateVersion(await row.load(), previousMetadata)
             const retained = await loadTrust()
             assertStateTransition(
@@ -593,12 +590,16 @@ export function createUnlockedGroupStateStores(params: {
                 authenticator: Uint8Array.from(value.epochAuthenticator),
               }
           }
+          const terminal = value.deleted ? previousMetadata?.terminal : value.terminal
+          if (typeof terminal !== 'boolean')
+            throw new GroupStateConflictError('Missing terminal state projection')
           const stateBytes = await row.prepare(value)
           const metadataBytes = await metadata.prepare({
             groupID,
             incarnation,
             version: value.version,
             deleted: value.deleted,
+            terminal,
             initialIdentity,
           })
           row.store(stateBytes)

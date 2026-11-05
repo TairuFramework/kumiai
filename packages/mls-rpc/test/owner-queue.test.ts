@@ -1390,3 +1390,43 @@ describe('owner queues', { timeout: 2000 }, () => {
     expect(createOwnerQueues().started('group-A')).toBe(false)
   })
 })
+
+test.each([false, true])(
+  'raced Combined grant invokes no cancelled work (context=%s)',
+  async (context) => {
+    const queues = createOwnerQueues({ ownershipContext: context ? contextPort() : undefined })
+    const held = deferred<void>()
+    const entered = deferred<void>()
+    const holder = queues.run('read', group, async (entry) => {
+      entered.resolve()
+      await held.promise
+      // Grant G, then cancel before the granted entry's continuation runs.
+      entry.release()
+      cancel.abort(new Error('cancel raced grant'))
+    })
+    await entered.promise
+    const cancel = new AbortController()
+    let worked = false
+    const waiting = queues
+      .run(
+        'combined',
+        combined,
+        async (entry) => {
+          worked = true
+          await advance(entry, 'outcome')
+          entry.settle('committed')
+        },
+        { signal: cancel.signal },
+      )
+      .catch((error: unknown) => error)
+    await flush()
+    held.resolve()
+    await holder
+    expect(await waiting).toBe(cancel.signal.reason)
+    const order: Array<string> = []
+    await read(queues, 'next group', order)
+    await queues.run('read', device, async () => order.push('next device'))
+    expect(worked).toBe(false)
+    expect(order).toEqual(['next group', 'next device'])
+  },
+)

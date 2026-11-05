@@ -227,9 +227,9 @@ export function createTransactionPackageStores(params: {
     }
     return {
       list: memoryOperation(tx, raw.list),
-      put: memoryOperation(tx, raw.put),
-      delete: memoryOperation(tx, raw.delete),
-      consume: memoryOperation(tx, raw.consume),
+      put: memoryOperation(tx, raw.put, 'side'),
+      delete: memoryOperation(tx, raw.delete, 'side'),
+      consume: memoryOperation(tx, raw.consume, 'side'),
       receipt: memoryOperation(tx, raw.receipt),
     }
   }

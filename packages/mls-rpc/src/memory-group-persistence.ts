@@ -504,6 +504,8 @@ export function createMemoryGroupCoordinator(params: {
         const value = await loadMetadata(incarnation)
         if (value !== null) metadata.push(value)
       }
+      const activeMetadata =
+        lifetime?.activeIncarnation == null ? null : await loadMetadata(lifetime.activeIncarnation)
       if (administrative)
         return {
           mutationID,
@@ -524,7 +526,7 @@ export function createMemoryGroupCoordinator(params: {
           control: null,
           controlStatus: 'missing' as const,
           stateStatus: 'unobserved' as const,
-          terminal: null,
+          terminal: activeMetadata?.deleted === false ? activeMetadata.terminal : null,
         }
       let spentSetCorrupt = false
       const trustObservation = await diagnose(async () => {
@@ -547,7 +549,7 @@ export function createMemoryGroupCoordinator(params: {
       let control: AccountedGroupObservation['control'] = null
       let controlStatus: AccountedGroupObservation['controlStatus'] = 'missing'
       let stateStatus: AccountedGroupObservation['stateStatus'] = 'missing'
-      let terminal: boolean | null = null
+      const terminal = activeMetadata?.deleted === false ? activeMetadata.terminal : null
       if (activeKey !== null) {
         activeVersion = (await loadMetadata(activeKey.incarnation))?.version ?? null
         const activeStores = createUnlockedIncarnationStores({
@@ -568,7 +570,6 @@ export function createMemoryGroupCoordinator(params: {
               : state.state === null
                 ? 'null'
                 : 'readable'
-        terminal = state === null || state.deleted ? null : state.terminal
         if (state !== null && !state.deleted) {
           try {
             readState(state)
@@ -1260,6 +1261,7 @@ export function createMemoryGroupCoordinator(params: {
                       incarnation,
                       version: state.version + 1,
                       deleted: false,
+                      terminal: state.terminal,
                       initialIdentity:
                         (await raw.stateMetadata(incarnation).load())?.initialIdentity ?? null,
                     })
@@ -1745,6 +1747,7 @@ export function createMemoryGroupCoordinator(params: {
   return {
     groups,
     activate,
+    prepareReads,
     transitionInTransaction<TValue>(
       tx: MemoryTransaction,
       change: GroupTransition,

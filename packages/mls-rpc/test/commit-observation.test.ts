@@ -157,7 +157,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect(observations[0]?.[corrupt === 'state' ? 'stateStatus' : 'trustStatus']).toBe(
             'unreadable',
           )
-          if (corrupt === 'state') expect(observations[0]?.terminal).toBeNull()
+          if (corrupt === 'state') expect(observations[0]?.terminal).toBe(false)
           else expect(observations[0]?.trust).toBeNull()
         } finally {
           await fixture.close()

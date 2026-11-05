@@ -158,6 +158,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       'corrupt',
       'malformed',
       'missing-metadata',
+      'missing-terminal',
+      'malformed-terminal',
+      'conflicting-terminal',
       'missing-trust',
     ] as const)('cold %s refuses with a typed reason', async (kind) => {
       const fixture = await create(kind === 'absent' ? 'empty' : 'seeded')
@@ -191,9 +194,25 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (kind === 'malformed')
           await fixture.mutateMetadata(key, (value) => ({ ...(value as object), version: -1 }))
         if (kind === 'missing-metadata') await fixture.mutateMetadata(key, () => null)
+        if (
+          kind === 'missing-terminal' ||
+          kind === 'malformed-terminal' ||
+          kind === 'conflicting-terminal'
+        )
+          await fixture.mutateMetadata(key, (value) => {
+            const metadata = value as Record<string, unknown>
+            if (kind === 'missing-terminal') {
+              delete metadata.terminal
+              return metadata
+            }
+            return { ...metadata, terminal: kind === 'malformed-terminal' ? 'false' : true }
+          })
         if (kind === 'missing-trust') await fixture.corruptTrust(groupID)
         const reason =
-          kind === 'null' || kind === 'null-bytes' || kind === 'corrupt'
+          kind === 'null' ||
+          kind === 'null-bytes' ||
+          kind === 'corrupt' ||
+          kind === 'conflicting-terminal'
             ? 'state-unreadable'
             : kind === 'absent' || kind === 'deleted'
               ? kind

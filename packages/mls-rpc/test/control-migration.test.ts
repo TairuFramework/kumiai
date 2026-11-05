@@ -72,9 +72,17 @@ async function fixture(
     })
     await table('state').save('current', {
       ...key,
+      version: 1,
       epoch: input.source.epoch,
       terminal: input.source.terminal,
       deleted: input.source.deleted ?? false,
+    })
+    await table('meta').save(JSON.stringify(['state-version']), {
+      ...key,
+      version: 1,
+      deleted: input.source.deleted ?? false,
+      terminal: input.source.terminal,
+      initialIdentity: null,
     })
     if (withControl)
       await table('control').save('current', { snapshot: input.snapshot, mutationID: 'legacy' })
@@ -122,10 +130,21 @@ async function fixture(
         const origin = { groupID: key.groupID, incarnation }
         await memoryRecordTable({ tx, key: origin, atRest, namespace: 'state' }).save('current', {
           ...origin,
+          version: 1,
           epoch: 4,
           terminal: false,
           deleted: false,
         })
+        await memoryRecordTable({ tx, key: origin, atRest, namespace: 'meta' }).save(
+          JSON.stringify(['state-version']),
+          {
+            ...origin,
+            version: 1,
+            deleted: false,
+            terminal: false,
+            initialIdentity: null,
+          },
+        )
         await memoryRecordTable({ tx, key: origin, atRest, namespace: 'control' }).save('current', {
           snapshot,
           mutationID: 'legacy',

@@ -1448,6 +1448,7 @@ describe('registry peer recovery coordination', () => {
         }
         const metadata = await read(groupID, (reads) => reads.metadata(adopted ? 2 : 1))
         if (metadata === null) throw new Error('Missing metadata')
+        expect(metadata.terminal).toBe(false)
         const authenticator = s.recovery.candidate.state.keySchedule.epochAuthenticator
         const override = (reads: EntryReads): EntryReads => ({
           ...reads,
