@@ -1206,7 +1206,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await setup(mode, 'welcome')
       const mls = await groupMLS(fixture)
       await fixture.forceStoredGeneration(500)
-      await fixture.refreshReceive()
+      await fixture.waitForReceiveRefresh()
       const group = fixture.group
       if (group === null) throw new Error('Missing peer')
       const aad = fixture.aad('ephemeral')

@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { entryCapability } from '../src/entry-capability.js'
 import { createHandlerCompletion } from '../src/handler-completion.js'
 import { createLedgerEntrySlot } from '../src/mls.js'
+import { ReentrantOwnershipError } from '../src/persistence-errors.js'
 import { registryReceiveSlots, setReceiveBase } from '../src/registry/live-receive.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
@@ -21,6 +22,7 @@ import {
   registryLeaseSnapshot,
   setReceiveCapacity,
 } from '../src/testing.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
 import { requireValue } from './fixtures/require-value.js'
 
@@ -125,6 +127,83 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(await fixture.access().pending.list()).toEqual([])
       expect(await f.device.groups.loadState(fixture.key)).toMatchObject({ terminal: true })
     })
+    test.each([false, true])(
+      'automatic receive refresh outlives the observation owner (context=%s)',
+      async (context) => {
+        const fixture = await createRegistryLeaseFixture(
+          mode,
+          'welcome',
+          0,
+          context ? createAsyncLocalOwnershipContext() : undefined,
+        )
+        fixtures.push(fixture)
+        await fixture.drainMaintenance()
+        const input = await frame(fixture)
+        await warm(fixture)
+        const live = slot(fixture)
+        const capability = entryCapability(fixture.fixture().device.groups)
+        if (capability === null) throw new Error('Missing capability')
+        const read = capability.read.bind(capability)
+        const entered = deferred<void>()
+        const release = deferred<void>()
+        let held = false
+        vi.spyOn(capability, 'read').mockImplementation((groupID, fn) =>
+          read(groupID, async (reads) => {
+            const result = await fn(reads)
+            if (!held && live.base === null) {
+              held = true
+              entered.resolve()
+              await release.promise
+            }
+            return result
+          }),
+        )
+        const gate = gateRegistryMaintenance(fixture.fixture().registry)
+        const writing = fixture.writeElsewhere('proposal')
+        try {
+          await entered.promise
+          expect(live.base).toBeNull()
+          // The refresh timer fires while its originating read still owns the group.
+          await gate.started
+          gate.release()
+          await new Promise<void>((resolve) => setTimeout(resolve, 0))
+          expect(live.base).toBeNull()
+          release.resolve()
+          await writing
+          await fixture.waitForReceiveRefresh()
+          expect(await fixture.openEphemeral([input])).toMatchObject([
+            { kind: 'opened', payload: new Uint8Array([7]) },
+          ])
+        } finally {
+          gate.release()
+          release.resolve()
+          await writing
+        }
+      },
+    )
+    test('automatic refresh exposes ownership dispatch errors', async () => {
+      const fixture = await setup(mode)
+      await fixture.drainMaintenance()
+      await foreignWithoutRefresh(fixture, 'proposal')
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      try {
+        await expect(fixture.openEphemeral([])).rejects.toMatchObject({ reason: 'cold' })
+        await gate.started
+        const pending = [...slot(fixture).inflight]
+        expect(pending).toHaveLength(1)
+        const capability = entryCapability(fixture.fixture().device.groups)
+        if (capability === null) throw new Error('Missing capability')
+        const failure = new ReentrantOwnershipError('Refresh dispatch retained an owner')
+        vi.spyOn(capability, 'assertRoot').mockImplementationOnce(() => {
+          throw failure
+        })
+        gate.release()
+        expect(await Promise.allSettled(pending)).toEqual([{ status: 'rejected', reason: failure }])
+        expect(slot(fixture).base).toBeNull()
+      } finally {
+        gate.release()
+      }
+    })
     test('reservation keeps the receive handle; durable open rebuilds it', async () => {
       const fixture = await setup(mode)
       await warm(fixture)
@@ -160,7 +239,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         key: fixture.key,
         state: { ...record, version: record.version + 1, state: encodeClientState(handle.state) },
       })
-      await fixture.refreshReceive()
+      await fixture.waitForReceiveRefresh()
       expect(await fixture.openEphemeral([old])).toMatchObject([
         { kind: 'refused', reason: 'past-epoch' },
       ])
@@ -319,12 +398,11 @@ for (const mode of ['real-mls', 'double'] as const) {
       const hold = fixture.fixture().holdRestore(fixture.key.groupID)
       try {
         await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
-        const refreshing = slot(fixture).refresh?.()
         await hold.started
         const attempt = registryRetirement(fixture.fixture().registry).beginRetirement(fixture.key)
         attempt.settle('rolled-back')
         hold.release()
-        await refreshing
+        await fixture.waitForReceiveRefresh()
       } finally {
         hold.release()
       }
@@ -339,10 +417,9 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
         expect(fixture.providerTransactions()).toBe(before)
         expect(slot(fixture).base).toBeNull()
-        const refreshing = slot(fixture).refresh?.()
         await gate.started
         gate.release()
-        await refreshing
+        await fixture.waitForReceiveRefresh()
         expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
       } finally {
         gate.release()
@@ -368,10 +445,9 @@ for (const mode of ['real-mls', 'double'] as const) {
       const hold = fixture.fixture().holdRestore(fixture.key.groupID)
       try {
         await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
-        const refreshing = slot(fixture).refresh?.()
         await hold.started
         hold.release()
-        await refreshing
+        await fixture.waitForReceiveRefresh()
         expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
       } finally {
         hold.release()
@@ -573,7 +649,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         key: fixture.key,
         state: { ...record, version: record.version + 1, state: encodeClientState(handle.state) },
       })
-      await fixture.refreshReceive()
+      await fixture.waitForReceiveRefresh()
       expect(await fixture.openEphemeral([old])).toMatchObject([
         { kind: 'refused', reason: 'past-epoch' },
       ])
@@ -621,7 +697,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         key: fixture.key,
         state: { ...record, version: record.version + 1, state: encodeClientState(handle.state) },
       })
-      await fixture.refreshReceive()
+      await fixture.waitForReceiveRefresh()
       await fixture.openEphemeral([])
       expect(slot(fixture).consumed.closed.size).toBe(0)
     })
@@ -708,11 +784,10 @@ for (const mode of ['real-mls', 'double'] as const) {
       const hold = fixture.fixture().holdRestore(fixture.key.groupID)
       try {
         await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
-        const refreshing = slot(fixture).refresh?.()
         await hold.started
         expect(slot(fixture).base).toBeNull()
         hold.release()
-        await refreshing
+        await fixture.waitForReceiveRefresh()
         expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
       } finally {
         hold.release()
@@ -722,7 +797,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await fixture.writeElsewhere('proposal')
-      await fixture.refreshReceive()
+      await fixture.waitForReceiveRefresh()
       expect(await fixture.access().receive([input])).toMatchObject([{ kind: 'opened' }])
       await fixture.reopen()
       expect(await fixture.access().receive([input])).toMatchObject([{ kind: 'opened' }])
@@ -752,9 +827,8 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
       await fixture.dropOwner()
       expect(fixture.access().admission()).toMatchObject({ admissible: false, reason: 'lapsed' })
-      await foreignWithoutRefresh(fixture, 'receive')
-      expect(slot(fixture).base).toBeNull()
-      await fixture.refreshReceive()
+      await fixture.writeElsewhere('receive')
+      await fixture.waitForReceiveRefresh()
       expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
     })
     test('retirement refuses new receive calls', async () => {

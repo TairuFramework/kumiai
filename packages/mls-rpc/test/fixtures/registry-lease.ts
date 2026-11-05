@@ -134,9 +134,13 @@ export async function createRegistryLeaseFixture(
     restores: () => fixture.restores(),
     receiveRebuilds: () => testing.receiveRebuilds(access),
     openEphemeral: (frames: Array<ReceiveInput>) => access.receive(frames),
-    async refreshReceive() {
+    async waitForReceiveRefresh() {
       await registryLiveSend.get(access)?.accounting()
-      await registryReceiveSlots.get(access)?.refresh?.()
+      await vi.waitFor(() => {
+        const live = registryReceiveSlots.get(access)
+        if (live === undefined) throw new Error('Missing receive slot')
+        expect(live.base, 'automatic receive refresh must recover the base').not.toBeNull()
+      })
     },
     opens: (ciphertext: Uint8Array, receiver: 'local' | 'peer' = 'local') =>
       (receiver === 'local' ? localOpens : peerOpens).get(frameID('lease-opens', ciphertext)) ?? 0,
@@ -512,7 +516,7 @@ export async function createRegistryLeaseFixture(
         key,
         state: { ...saved, version: saved.version + 1, state: encodeClientState(handle.state) },
       })
-      await result.refreshReceive()
+      await result.waitForReceiveRefresh()
     },
     async blockedCallerSend() {
       const caller = await fixture.makeHandle(0, `${id}-caller`)
