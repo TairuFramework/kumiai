@@ -47,10 +47,11 @@
     "@sozai/runtime": "catalog:",
     "ts-mls": "catalog:"
   },
+  "devDependencies": {
+    "@kokuin/crypto": "catalog:",
+    "@kokuin/crypto-napi": "catalog:"
+  },
   "publishConfig": {
     "access": "public"
-  },
-  "devDependencies": {
-    "@kokuin/crypto": "catalog:"
   }
 }

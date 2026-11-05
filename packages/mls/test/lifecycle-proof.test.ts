@@ -12,6 +12,7 @@ import {
   type SignedEvent,
   snapshotOf,
 } from '@kokuin/controller'
+import { createNapiCrypto } from '@kokuin/crypto-napi'
 import { createIdentity, normalizeDID } from '@kokuin/token'
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { toB64U } from '@sozai/codec'
@@ -1318,9 +1319,11 @@ describe('controller-log deny proofs', () => {
   })
 
   test('saturated proof refused', async () => {
+    const crypto = await createNapiCrypto()
+    expect(crypto.backend).toBe('napi')
     const f = await fixture()
     const log = await saturatedLog()
-    const folded = await foldControllerLog(f.did, log)
+    const folded = await foldControllerLog(f.did, log, { crypto })
     if (!folded.ok) throw new Error(folded.reason)
     expect(folded.head.saturated).toBe(true)
     const rev = await createRevoke({
@@ -1333,9 +1336,9 @@ describe('controller-log deny proofs', () => {
     f.value.proof = { chain: [], events: [...log.events, rev] }
     f.value.effects = [{ kind: 'deny', did: target, ref: { event: digestOf(rev.event) } }]
     await expect(
-      async () => await authenticateLifecycleProof(f.did, f.entry, f.group.registry),
+      async () => await authenticateLifecycleProof(f.did, f.entry, f.group.registry, { crypto }),
     ).rejects.toThrow(expect.objectContaining({ reason: 'too-large' }))
-  }, 60_000)
+  })
 
   test('deny read from head, not states.at(-1)', async () => {
     const f = await fixture()

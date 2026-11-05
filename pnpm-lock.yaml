@@ -206,6 +206,9 @@ catalogs:
     '@kokuin/crypto':
       specifier: ^0.7.0
       version: 0.7.0
+    '@kokuin/crypto-napi':
+      specifier: ^0.7.3
+      version: 0.7.3
     '@kokuin/expo':
       specifier: ^0.7.0
       version: 0.7.0
@@ -623,6 +626,9 @@ importers:
       '@kokuin/crypto':
         specifier: 'catalog:'
         version: 0.7.0
+      '@kokuin/crypto-napi':
+        specifier: 'catalog:'
+        version: 0.7.3
 
   packages/mls-hub:
     dependencies:
@@ -1764,6 +1770,66 @@ packages:
 
   '@kokuin/controller@0.7.0':
     resolution: {integrity: sha512-lHc2HXVfnZaj10h2Z+FORr1AxXg0QMQDHeYC4QFXXTZd5EdGh0tbQz4zVgB5rfGJ0KG/LYc8geTmOXekjBzp7A==}
+
+  '@kokuin/crypto-napi-darwin-arm64@0.7.3':
+    resolution: {integrity: sha512-uW1hOh4cN3yVryQel+4sjF1FgO9xsN5ceizmYrOk2S+ixCi1931YXQ0U8uwRFN39mH4lmr75QZaRIigmubU0hQ==}
+    engines: {node: '>=22'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@kokuin/crypto-napi-darwin-x64@0.7.3':
+    resolution: {integrity: sha512-UkGM8ZLK7GY9J+6D368ywJhIj79pecYKO5s8HFwVGGofC1USdnjLSWQKosUnQh3BUidUIcC5IUMAeHuimK1cKQ==}
+    engines: {node: '>=22'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@kokuin/crypto-napi-linux-arm64-gnu@0.7.3':
+    resolution: {integrity: sha512-1yZy6UsuyBhVdLC93g0tXrMUA2v6t4HRssw2JvKpSSKX6rDP4L+3ej85QyR0IqF/30SdYOuqOZAEy7uM+O2kmw==}
+    engines: {node: '>=22'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@kokuin/crypto-napi-linux-arm64-musl@0.7.3':
+    resolution: {integrity: sha512-IkOUJUa2J/CDOCUZvsbhkV7OqGEjVW1TJFR+gjKxCxDIJ4NKFLz4b4VnOaA7I8V37yJ75QUm7kCZ/scZ5OmYkw==}
+    engines: {node: '>=22'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@kokuin/crypto-napi-linux-x64-gnu@0.7.3':
+    resolution: {integrity: sha512-V9jL5l+BzY9l1HG5AgbFmQJxzsjyRzv7wc7nhSd2T5W7dVNeLf8fWVHQMYfNwOMGZniSV7C/9Ja+GOkY3nvGoQ==}
+    engines: {node: '>=22'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@kokuin/crypto-napi-linux-x64-musl@0.7.3':
+    resolution: {integrity: sha512-J2dcGFxsObk08KY/HgtnsROgju16QwKGmnJH7dkLg3kjMmxnYn0m7f70ONq6kbZpUh7aCkbk1UQ/RBpu41fCAg==}
+    engines: {node: '>=22'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@kokuin/crypto-napi-win32-arm64-msvc@0.7.3':
+    resolution: {integrity: sha512-4FvcKrFxxfgGPHnQWD+KW3aujw/KNW4bm8zXx4XDJ3I67+OfPuARvJhDdrB7Y3zvfD8cC3H3M0RWXCSg2JvISQ==}
+    engines: {node: '>=22'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@kokuin/crypto-napi-win32-x64-msvc@0.7.3':
+    resolution: {integrity: sha512-Vw5F32hrNKCuGe3Y9qr5G1sCMwjTArOQj/v2W7cjFf/mKs9W68Sfyp00CgqbVfw473pykCqEKiuOw7Rpigy2Ow==}
+    engines: {node: '>=22'}
+    cpu: [x64]
+    os: [win32]
+
+  '@kokuin/crypto-napi@0.7.3':
+    resolution: {integrity: sha512-3/fM/ZaROU2V5STu7U2FWdQOOOOEg8NwtTNSayzZayQXSg94TTy6OUVEZN1vPs7EOBL4m6RTuwHQeRHBINAszw==}
+    engines: {node: '>=22'}
+
+  '@kokuin/crypto-node@0.7.0':
+    resolution: {integrity: sha512-OPHApzzulCpd9/5XrI0jmU1kGN1LNYsv7TDjyrRutCXXMiXjub+reyM0dp8CWXkXIywBqLDk9FcQ0MzBrRawew==}
+    engines: {node: '>=22'}
 
   '@kokuin/crypto@0.7.0':
     resolution: {integrity: sha512-PLKA4Mb171ThOcGEaS5LNn1nATwDg8Q5cMwLZlaOJ81B/rhnuilsFMQbYEoKwc5sXsHBhDO8rqM10v/R6UR2SA==}
@@ -6106,6 +6172,48 @@ snapshots:
       micro-key-producer: 0.10.2
     transitivePeerDependencies:
       - '@logtape/logtape'
+
+  '@kokuin/crypto-napi-darwin-arm64@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi-darwin-x64@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi-linux-arm64-gnu@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi-linux-arm64-musl@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi-linux-x64-gnu@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi-linux-x64-musl@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi-win32-arm64-msvc@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi-win32-x64-msvc@0.7.3':
+    optional: true
+
+  '@kokuin/crypto-napi@0.7.3':
+    dependencies:
+      '@kokuin/crypto': 0.7.0
+      '@kokuin/crypto-node': 0.7.0
+    optionalDependencies:
+      '@kokuin/crypto-napi-darwin-arm64': 0.7.3
+      '@kokuin/crypto-napi-darwin-x64': 0.7.3
+      '@kokuin/crypto-napi-linux-arm64-gnu': 0.7.3
+      '@kokuin/crypto-napi-linux-arm64-musl': 0.7.3
+      '@kokuin/crypto-napi-linux-x64-gnu': 0.7.3
+      '@kokuin/crypto-napi-linux-x64-musl': 0.7.3
+      '@kokuin/crypto-napi-win32-arm64-msvc': 0.7.3
+      '@kokuin/crypto-napi-win32-x64-msvc': 0.7.3
+
+  '@kokuin/crypto-node@0.7.0':
+    dependencies:
+      '@kokuin/crypto': 0.7.0
 
   '@kokuin/crypto@0.7.0':
     dependencies:
