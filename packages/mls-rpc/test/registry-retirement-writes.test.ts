@@ -137,7 +137,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         {
           source,
           nextIncarnation: 2,
-          switchedRejoinID,
+          ...(switchedRejoinID === undefined ? {} : { switchedRejoinID }),
           mutationID,
           at: 1234,
         },

@@ -56,6 +56,7 @@ import {
   type RegistryHandleAccess,
   type RegistryPeer,
 } from '../../../../packages/mls-rpc/src/index.js'
+import { sameStoredValue } from '../../../../packages/mls-rpc/src/memory-incarnation-stores.js'
 import {
   decodeStoredValue,
   encodeStoredValue,
@@ -439,13 +440,18 @@ export async function makeCheckpointPeer(
             value: {
               record,
               trust: recoveryTrustFor(next, key, trust),
-              checkpoint: await prepareCheckpointInstallation({
-                key,
-                handle: next,
-                mutationID,
-                stateVersion: record.version,
-                previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
-              }),
+              checkpoint:
+                record.epoch === previous.epoch &&
+                sameStoredValue(record.epochAuthenticator, previous.epochAuthenticator)
+                  ? null
+                  : await prepareCheckpointInstallation({
+                      key,
+                      handle: next,
+                      mutationID,
+                      stateVersion: record.version,
+                      previousFact:
+                        currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+                    }),
             },
           }
           return record.terminal && !previous.terminal
@@ -461,18 +467,20 @@ export async function makeCheckpointPeer(
           const target = stores.incarnation(key.incarnation)
           await target.state.save(prepared.record, write?.expected)
           await stores.trust.save(prepared.trust)
-          await stores.checkpoints.put(prepared.checkpoint)
-          if (!prepared.record.terminal)
-            await stores.checkpoints.put({
-              kind: 'publication',
-              id: `publication:${prepared.checkpoint.id}`,
-              key,
-              factID: prepared.checkpoint.id,
-              frame: null,
-              publishID: null,
-              accepted: false,
-              nextHeartbeatAt: null,
-            })
+          if (prepared.checkpoint !== null) {
+            await stores.checkpoints.put(prepared.checkpoint)
+            if (!prepared.record.terminal)
+              await stores.checkpoints.put({
+                kind: 'publication',
+                id: `publication:${prepared.checkpoint.id}`,
+                key,
+                factID: prepared.checkpoint.id,
+                frame: null,
+                publishID: null,
+                accepted: false,
+                nextHeartbeatAt: null,
+              })
+          }
 
           if (write !== undefined) await target.control.apply(write.changes, mutationID)
         },

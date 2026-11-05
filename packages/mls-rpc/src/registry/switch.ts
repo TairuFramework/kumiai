@@ -43,7 +43,11 @@ import {
   reserveFromBytes,
   restoreCaptured,
 } from './reserve.js'
-import { prepareIncarnationRetirement, retireIncarnation } from './retired.js'
+import {
+  prepareIncarnationRetirement,
+  type RetirementRequest,
+  retireIncarnation,
+} from './retired.js'
 import {
   assertRetirementDrained,
   type RegistryRetirement,
@@ -146,6 +150,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
   params: Parameters<GroupHandleRegistry['switchIncarnation']>[1],
 ) => Promise<{ key: GroupKey; reservation: Reservation | null }> {
   const { persistence, capability, retirement } = environment
+  const retirementPlans = new Map<string, RetirementRequest>()
   return async (input: GroupHandle, params) => {
     retirement.assertEntry(() => params.source.key)
     const automatic = automaticRegistrySwitches.delete(input)
@@ -153,6 +158,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     validateWrite(params.write)
     const { source, rejoinID, proof, write } = copyStoredValue(params)
     const groupID = source.key.groupID
+    const planKey = JSON.stringify([groupID, write.mutationID])
     const destination = { groupID, incarnation: source.key.incarnation + 1 }
     const capturedState = capturedRecord(captured, destination, 1)
     const candidate = await restoreCaptured(environment.cold, capturedState)
@@ -260,6 +266,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     let stopObservation = () => {}
     let hooked = false
     function settle(outcome: 'committed' | 'rolled-back'): void {
+      if (outcome === 'committed') retirementPlans.delete(planKey)
       attempt.settle(outcome)
       stopObservation()
     }
@@ -397,28 +404,33 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                 mutationID: write.mutationID,
                 restorePending: false,
               }
-              const retirement = await prepareIncarnationRetirement(reads, {
-                source: source.key,
-                nextIncarnation: destination.incarnation,
-                ...(authorisationID === undefined
-                  ? { switchedRejoinID: rejoinID }
-                  : { manualRejoinID: rejoinID }),
-                abandonedAttempts: [
-                  ...new Set(
-                    (await reads.checkpoints()).flatMap((row) =>
-                      row.kind === 'manual-recovery' &&
-                      sameStoredValue(row.key, source.key) &&
-                      row.value.stage === 'authorised' &&
-                      row.value.attempt !== null &&
-                      row.value.attempt.id !== rejoinID
-                        ? [row.value.attempt.id]
-                        : [],
+              const retirement =
+                retirementPlans.get(planKey) ??
+                (await prepareIncarnationRetirement(reads, {
+                  source: source.key,
+                  nextIncarnation: destination.incarnation,
+                  ...(authorisationID === undefined
+                    ? { switchedRejoinID: rejoinID }
+                    : { manualRejoinID: rejoinID }),
+                  abandonedAttempts: [
+                    ...new Set(
+                      (
+                        await reads.checkpoints()
+                      ).flatMap((row) =>
+                        row.kind === 'manual-recovery' &&
+                        sameStoredValue(row.key, source.key) &&
+                        row.value.stage === 'authorised' &&
+                        row.value.attempt !== null &&
+                        row.value.attempt.id !== rejoinID
+                          ? [row.value.attempt.id]
+                          : [],
+                      ),
                     ),
-                  ),
-                ],
-                mutationID: write.mutationID,
-                at: Date.now(),
-              })
+                  ],
+                  mutationID: write.mutationID,
+                  at: Date.now(),
+                }))
+              retirementPlans.set(planKey, retirement)
               const prepared = {
                 expected: {
                   revision: lifetime.revision,

@@ -531,6 +531,205 @@ for (const context of [false, true]) {
       expect(f.db.snapshot()).toEqual(before)
     })
 
+    test('alternate state writer commits the exact frozen terminal version', async () => {
+      const f = await fixture()
+      let frozen!: GroupStateRecord
+      const result = f.entry.run(
+        { groupID: f.seed.key.groupID, mutationID: 'alternate-terminal' },
+        async (reads, closing) => {
+          const prepared = await terminal(f, reads, closing)
+          frozen = structuredClone(prepared.value.state)
+          return prepared
+        },
+        async (stores, value) => {
+          await createGroupStateStores({
+            tx: stores.tx,
+            groupID: f.seed.key.groupID,
+            atRest: f.codec,
+          })
+            .state(1)
+            .save(value.state)
+        },
+      )
+      await expect(result, 'declared alternate writer commits').resolves.toBeUndefined()
+      expect(frozen.version).toBe(2)
+      expect(
+        await f.persistence.groups.loadState(f.seed.key),
+        'alternate writer must persist the exact frozen terminal record',
+      ).toEqual(frozen)
+    })
+
+    test('alternate terminal writer refuses unclosed queued control work', async () => {
+      const f = await fixture()
+      await f.entry.run(
+        { groupID: f.seed.key.groupID, mutationID: 'queued-control' },
+        async (reads) => ({ expected: await reads.lifetime(), value: undefined }),
+        async (stores) => {
+          await stores.incarnation(1).control.apply(
+            {
+              putOperations: [
+                {
+                  id: 'queued-rotation',
+                  kind: 'rotation',
+                  revokes: false,
+                  body: new Uint8Array(),
+                  seq: 1,
+                  enqueuedAt: 0,
+                  deadline: 30_000,
+                  stage: 'intent',
+                },
+              ],
+            },
+            'queued-control',
+          )
+        },
+      )
+      const before = f.db.snapshot()
+      let effects = 0
+      await expect(
+        f.entry.run(
+          { groupID: f.seed.key.groupID, mutationID: 'unclosed-terminal' },
+          (reads, closing) => terminal(f, reads, closing),
+          async (stores, value) => {
+            stores.tx.onCommit(() => effects++)
+            await createGroupStateStores({
+              tx: stores.tx,
+              groupID: f.seed.key.groupID,
+              atRest: f.codec,
+            })
+              .state(1)
+              .save(value.state)
+          },
+        ),
+        'terminal persistence requires atomic closure of queued control work',
+      ).rejects.toThrow('Source consumption requires atomic control closure')
+      expect(f.db.snapshot(), 'refused alternate writer rolls back every row').toEqual(before)
+      expect(effects).toBe(0)
+    })
+
+    test.each(['state', 'lifetime'] as const)(
+      'closing validates the final persisted %s against the frozen domain',
+      async (namespace) => {
+        const f = await fixture()
+        const before = f.db.snapshot()
+        await expect(
+          f.entry.run(
+            { groupID: f.seed.key.groupID, mutationID: 'final-domain' },
+            async (reads, closing) => {
+              const record = await reads.state(1)
+              const previous = await reads.lifetime()
+              if (record === null || record.deleted || previous === null)
+                throw new Error('Missing source')
+              const state = { ...record, terminal: true, version: record.version + 1 }
+              const lifetime = {
+                ...previous,
+                revision: previous.revision + 1,
+                mutationID: 'final-domain',
+              }
+              return closing.freeze({
+                source: f.seed.key,
+                reason: 'terminal',
+                prepared: { expected: previous, value: { state, lifetime } },
+                domain: { states: [state], lifetime },
+              })
+            },
+            async (stores, value) => {
+              await stores.incarnation(1).state.save(value.state)
+              await stores.lifetime.save(value.lifetime)
+              const address = {
+                groupID: f.seed.key.groupID,
+                incarnation: namespace === 'state' ? 1 : null,
+                namespace,
+                recordID: 'current',
+              }
+              const changed =
+                namespace === 'state'
+                  ? { ...value.state, senderHWM: value.state.senderHWM + 1 }
+                  : { ...value.lifetime, restorePending: true }
+              stores.tx.rows[namespace]?.set(
+                physicalRecordKey(address),
+                await sealRecord(f.codec, address, changed),
+              )
+            },
+          ),
+          'final persisted domain cannot differ from its declaration',
+        ).rejects.toThrow(`Persisted ${namespace} differs from frozen closing domain`)
+        expect(f.db.snapshot(), 'final domain mismatch rolls back every row').toEqual(before)
+      },
+    )
+
+    test('rollback retry retains the complete frozen persistence payload', async () => {
+      const f = await fixture()
+      await f.control.admit(f.seed.key, 'source')
+      let frozen!: Prepared<{
+        state: GroupStateRecord
+        cursor: { topicID: string; position: string }
+      }>
+      const fault = memoryFaults(f.db).rejectCommitPending()
+      const first = f.entry
+        .run(
+          { groupID: f.seed.key.groupID, mutationID: 'payload-retry' },
+          async (reads, closing) => {
+            const record = await reads.state(1)
+            if (record === null || record.deleted) throw new Error('Missing source')
+            const state = { ...record, terminal: true, version: record.version + 1 }
+            frozen = await closing.freeze({
+              source: f.seed.key,
+              reason: 'terminal',
+              prepared: {
+                expected: await reads.lifetime(),
+                value: { state, cursor: { topicID: 'saved-topic', position: '1' } },
+              },
+              domain: { states: [state], lifetime: null },
+            })
+            return frozen
+          },
+          async (stores, value) => {
+            await stores.incarnation(1).state.save(value.state)
+            await stores.incarnation(1).cursor.save(value.cursor.topicID, value.cursor.position)
+          },
+        )
+        .catch((error: unknown) => error)
+      await Promise.race([
+        fault.rejected,
+        first.then((error) => {
+          throw error
+        }),
+      ])
+      await fault.barrierWaiting
+      await fault.finish('rollback')
+      expect(await first).toMatchObject({ name: 'StorageOutcomeUnknownError' })
+      await f.control.admit(f.seed.key, 'source')
+      const retry = (position: string) =>
+        f.entry.run(
+          { groupID: f.seed.key.groupID, mutationID: 'payload-retry' },
+          (_reads, closing) =>
+            closing.freeze({
+              source: f.seed.key,
+              reason: 'terminal',
+              prepared: {
+                expected: frozen.expected,
+                value: { state: frozen.value.state, cursor: { topicID: 'saved-topic', position } },
+              },
+              domain: { states: [frozen.value.state], lifetime: null },
+            }),
+          async (stores, value) => {
+            await stores.incarnation(1).state.save(value.state)
+            await stores.incarnation(1).cursor.save(value.cursor.topicID, value.cursor.position)
+          },
+        )
+      f.transactions.mockClear()
+      const before = f.db.snapshot()
+      await expect(retry('2'), 'same mutation cannot replace its frozen cursor').rejects.toThrow()
+      expect(f.transactions.mock.calls, 'changed payload refuses before transact').toHaveLength(0)
+      expect(f.db.snapshot()).toEqual(before)
+      await expect(retry('1'), 'unchanged payload retry succeeds').resolves.toBeUndefined()
+      expect(await f.persistence.groups.loadState(f.seed.key)).toEqual(frozen.value.state)
+      expect(
+        await f.entry.read(f.seed.key.groupID, (reads) => reads.appCursor(1, 'saved-topic')),
+      ).toBe('1')
+    })
+
     test('closing declaration precedes transact and work', async () => {
       const f = await fixture()
       const binding = await f.control.admit(f.seed.key, 'source')

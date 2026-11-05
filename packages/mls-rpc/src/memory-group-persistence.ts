@@ -40,6 +40,7 @@ import {
   assertMemoryAccess,
   bindMemoryOwner,
   bindMemorySnapshot,
+  bindMemoryStateWriter,
   coordinateMemoryTransaction,
   createGroupStateStores,
   createMemoryPrepareTransaction,
@@ -935,6 +936,10 @@ export function createMemoryGroupCoordinator(params: {
                 }
               },
             }
+            bindMemoryStateWriter(
+              tx,
+              (incarnation) => unlockedStores.incarnation(incarnation).state.save,
+            )
             const stores: GroupStores<MemoryTransaction> = {
               ...unlockedStores,
               checkpoints: createCheckpointStore({ tx, groupID: request.groupID, atRest }),
@@ -1280,7 +1285,7 @@ export function createMemoryGroupCoordinator(params: {
                   }
                 }
                 if (proposedLifetime === undefined) await raw.lifetime.save(life)
-                assertClosingWrites(entry)
+                assertClosingWrites(entry, tx)
                 const outboxEvents: Array<AppStatusEvent> = []
                 if (capturedEffects.outbox !== undefined) {
                   for (const [incarnation, namespaces] of changedIncarnations(

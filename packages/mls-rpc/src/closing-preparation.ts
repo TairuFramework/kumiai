@@ -13,7 +13,7 @@ import type {
 } from './entry-capability.js'
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import type { OwnerAttempt, OwnerEntry } from './owner-queue.js'
-import { encodeStoredValue } from './persistence-codec.js'
+import { encodeStoredValue, physicalRecordKey } from './persistence-codec.js'
 import {
   DisplacedGroupHandleError,
   GroupStateConflictError,
@@ -25,6 +25,7 @@ import type {
   GroupKey,
   GroupLifetime,
   GroupStateRecord,
+  MemoryTransaction,
 } from './persistence-types.js'
 
 type Frozen = {
@@ -45,6 +46,7 @@ type Frozen = {
   captures: Map<string, Uint8Array>
   written: Set<number>
   lifetimeWritten: boolean
+  sealed: Map<string, Uint8Array>
 }
 const tokens = new WeakMap<ClosingMutation, Frozen>()
 const active = new WeakMap<OwnerAttempt, Frozen>()
@@ -53,10 +55,11 @@ type ClosingExpectation = Pick<
   'source' | 'metadata' | 'identity' | 'lifetime' | 'expected' | 'guards' | 'reason'
 > & {
   domainDigest: Uint8Array
+  valueDigest: Uint8Array
 }
 // Retain only guards and a digest across attempts, never the retired private state bytes.
 const originalExpectations = new WeakMap<object, Map<string, ClosingExpectation>>()
-function domainDigest(domain: ClosingDomain): Uint8Array {
+function persistenceDigest(value: unknown): Uint8Array {
   function sorted(value: unknown): unknown {
     if (value === null || typeof value !== 'object' || value instanceof Uint8Array) return value
     if (Array.isArray(value)) return value.map(sorted)
@@ -69,7 +72,7 @@ function domainDigest(domain: ClosingDomain): Uint8Array {
         .map((key) => [key, sorted(record[key])]),
     )
   }
-  return sha256(encodeStoredValue(sorted(domain)))
+  return sha256(encodeStoredValue(sorted(value)))
 }
 const listeners = new WeakMap<object, Set<(key: GroupKey, reason: Error) => void>>()
 
@@ -219,7 +222,8 @@ export function createClosingPreparation(params: {
           expected,
           guards,
           reason,
-          domainDigest: domainDigest(domain),
+          domainDigest: persistenceDigest(domain),
+          valueDigest: persistenceDigest(value),
         })
         let originals = originalExpectations.get(coordinator)
         if (originals === undefined) {
@@ -251,6 +255,7 @@ export function createClosingPreparation(params: {
           captures,
           written: new Set(),
           lifetimeWritten: false,
+          sealed: new Map(),
           consumed: false,
         }
         tokens.set(token, issued)
@@ -380,7 +385,17 @@ export async function revalidateClosingSource(
   )
     throw new RegistrySourceMovedError('Frozen closing source moved before submission')
 }
-export function assertClosingWrites(entry: OwnerEntry): void {
+export function captureClosingWrite(
+  entry: OwnerEntry | undefined,
+  namespace: 'state' | 'meta' | 'lifetime',
+  incarnation: number | null,
+  bytes: Uint8Array,
+): void {
+  const frozen = entry === undefined ? undefined : active.get(entry.attempt())
+  frozen?.sealed.set(JSON.stringify([namespace, incarnation]), bytes.slice())
+}
+
+export function assertClosingWrites(entry: OwnerEntry, tx: MemoryTransaction): void {
   const frozen = active.get(entry.attempt())
   if (frozen === undefined) return
   if (
@@ -388,6 +403,27 @@ export function assertClosingWrites(entry: OwnerEntry): void {
     (frozen.domain.lifetime !== null && !frozen.lifetimeWritten)
   )
     conflict('Frozen closing domain write omitted')
+  const { source, sealed } = frozen
+  function matches(namespace: string, incarnation: number | null): boolean {
+    const expected = sealed.get(JSON.stringify([namespace, incarnation]))
+    const address = {
+      groupID: source.groupID,
+      incarnation,
+      namespace,
+      recordID: namespace === 'meta' ? JSON.stringify(['state-version']) : 'current',
+    }
+    return (
+      expected !== undefined &&
+      sameStoredValue(tx.rows[namespace]?.get(physicalRecordKey(address)), expected)
+    )
+  }
+  // Compare the exact writes that passed frozen-value checks without reopening retired state.
+  for (const state of frozen.domain.states) {
+    if (!matches('state', state.incarnation) || !matches('meta', state.incarnation))
+      conflict('Persisted state differs from frozen closing domain')
+  }
+  if (frozen.domain.lifetime !== null && !matches('lifetime', null))
+    conflict('Persisted lifetime differs from frozen closing domain')
 }
 
 export function assertClosingMetadata(

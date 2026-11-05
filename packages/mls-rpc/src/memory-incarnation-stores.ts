@@ -25,6 +25,7 @@ import {
   memoryReadAdmitted,
   memoryRequired,
   memorySeal,
+  memoryStateWriter,
 } from './memory-group-state.js'
 import {
   decodeStoredValue,
@@ -659,7 +660,11 @@ export function createIncarnationStores(
       loadInitialIdentity: memoryOperation(tx, stores.state.loadInitialIdentity),
       loadMetadata: memoryOperation(tx, stores.state.loadMetadata),
       load: memoryOperation(tx, stores.state.load),
-      save: memoryOperation(tx, stores.state.save, 'domain'),
+      save: memoryStateWriter(
+        tx,
+        key.incarnation,
+        memoryOperation(tx, stores.state.save, 'domain'),
+      ),
     },
     control: {
       load: memoryOperation(tx, stores.control.load),

@@ -3,6 +3,7 @@ import {
   assertClosingLifetime,
   assertClosingMetadata,
   assertClosingState,
+  captureClosingWrite,
 } from './closing-preparation.js'
 import type { StateMetadata } from './entry-capability.js'
 import { belongs, cloneValue, deviceNamespaces, groupNamespaces } from './memory-rows.js'
@@ -53,6 +54,7 @@ type TransactionBinding = {
   changes: number
   requiredReadsAdmitted: number
   writer: CoordinatorWriter | null
+  stateWriter?: (incarnation: number) => IncarnationStores['state']['save']
   prepare: boolean
 }
 const transactionEntries = new WeakMap<MemoryTransaction['rows'], TransactionBinding>()
@@ -268,6 +270,27 @@ export function createMemoryPrepareTransaction(params: {
 
 export function memoryTransactionEntry(rows: MemoryTransaction['rows']): OwnerEntry | undefined {
   return transactionBinding(rows)?.entry
+}
+
+export function bindMemoryStateWriter(
+  tx: MemoryTransaction,
+  writer: (incarnation: number) => IncarnationStores['state']['save'],
+): void {
+  const binding = transactionBinding(tx.rows)
+  if (binding === undefined) throw new GroupStateConflictError('Missing transaction ownership')
+  binding.stateWriter = writer
+}
+
+export function memoryStateWriter(
+  tx: MemoryTransaction,
+  incarnation: number,
+  fallback: IncarnationStores['state']['save'],
+): IncarnationStores['state']['save'] {
+  // Delegate before reserving: the coordinator writer already owns one operation reservation.
+  return (...args) => {
+    const save = transactionBinding(tx.rows)?.stateWriter?.(incarnation) ?? fallback
+    return save(...args)
+  }
 }
 
 export function memoryTransactionFailureSignal(
@@ -551,7 +574,9 @@ export function createUnlockedGroupStateStores(params: {
         assertMemoryWrite(tx, 'domain')
         const row = slot<GroupLifetime>('lifetime', null)
         assertClosingLifetime(memoryTransactionEntry(tx.rows), await row.load(), value)
-        await row.save(value)
+        const bytes = await row.prepare(value)
+        row.store(bytes)
+        captureClosingWrite(memoryTransactionEntry(tx.rows), 'lifetime', null, bytes)
       },
     },
     trust,
@@ -627,6 +652,8 @@ export function createUnlockedGroupStateStores(params: {
           })
           row.store(stateBytes)
           metadata.store(metadataBytes)
+          captureClosingWrite(memoryTransactionEntry(tx.rows), 'state', incarnation, stateBytes)
+          captureClosingWrite(memoryTransactionEntry(tx.rows), 'meta', incarnation, metadataBytes)
         },
       }
     },
@@ -662,7 +689,7 @@ export function createGroupStateStores(
         loadInitialIdentity: memoryOperation(tx, state.loadInitialIdentity),
         loadMetadata: memoryOperation(tx, state.loadMetadata),
         load: memoryOperation(tx, state.load),
-        save: memoryOperation(tx, state.save, 'domain'),
+        save: memoryStateWriter(tx, incarnation, memoryOperation(tx, state.save, 'domain')),
       }
     },
   }
