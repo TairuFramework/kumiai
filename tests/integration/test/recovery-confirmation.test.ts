@@ -93,8 +93,19 @@ async function completeRecovery(recovery: ReturnType<GroupPeer<Protocols>['recov
   return completion
 }
 
-async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
+async function setup(options: { third?: boolean; deadlineMs?: number; timeoutMs?: number } = {}) {
   const hub = createWireHub()
+  const subscribes: Array<Promise<unknown>> = []
+  const connect = (identity: OwnIdentity) => {
+    const connection = hub.connect(identity)
+    const subscribe = connection.subscribe.bind(connection)
+    connection.subscribe = (...args) => {
+      const subscribed = Promise.resolve(subscribe(...args))
+      subscribes.push(subscribed)
+      return subscribed
+    }
+    return connection
+  }
   const aliceID = randomIdentity({ crypto })
   const bobID = randomIdentity({ crypto })
   let aliceGroup = (await createGroup(aliceID, 'confirmation', { crypto })).group
@@ -166,8 +177,8 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     entrySlot: createLedgerEntrySlot(),
   })
   const bobMLS = createGroupMLS({ access: bobAccess, identity: bobID, entrySlot: bobSlot })
-  const aliceConnection = hub.connect(aliceID)
-  const bobConnection = hub.connect(bobID)
+  const aliceConnection = connect(aliceID)
+  const bobConnection = connect(bobID)
   const events: Array<RecoveryEvent> = []
   const published: Array<number> = []
   const publish = bobConnection.publish.bind(bobConnection)
@@ -212,7 +223,12 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
       onStrand: (event) => {
         strands.push(event)
       },
-      recovery: { timeoutMs: 60, deadlineMs: options.deadlineMs ?? 450, getDelayMs: () => 0 },
+      // A responder is expected to answer inside this window, so a CI stall must not exhaust it.
+      recovery: {
+        timeoutMs: options.timeoutMs ?? 1000,
+        deadlineMs: options.deadlineMs ?? 450,
+        getDelayMs: () => 0,
+      },
     })
   }
   const alice = peer(aliceID, aliceAccess, aliceMLS, aliceConnection)
@@ -240,12 +256,15 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
   const carol =
     carolMLS == null || carolAccess == null
       ? undefined
-      : peer(carolID, carolAccess, carolMLS, hub.connect(carolID))
+      : peer(carolID, carolAccess, carolMLS, connect(carolID))
   cleanup.push(async () => {
     await Promise.all([alice.dispose(), bob.dispose(), carol?.dispose()])
     await hub.dispose()
   })
   await Promise.all([alice.resync(), bob.resync(), carol?.resync()])
+  // Resync does not wait for the rendezvous subscribe, and a mailbox subscriber only sees later
+  // publishes: a request sent first reaches nobody and fails as no-responder.
+  await Promise.all(subscribes)
   return {
     alice,
     bob,
@@ -273,7 +292,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
 
 test('publication keeps the old handle until a survivor confirms, then delivers at the confirmed epoch', async () => {
   controlRecoveryClock()
-  const s = await setup({ deadlineMs: 10_000 })
+  const s = await setup({ deadlineMs: 10_000, timeoutMs: 60 })
   const pause = gate()
   cleanup.push(async () => pause.release())
   const seal = s.aliceMLS.sealRecoveryVerdict.bind(s.aliceMLS)
@@ -328,7 +347,7 @@ test('publication keeps the old handle until a survivor confirms, then delivers 
 
 test('lost confirmations through the deadline leave an orphan which the next rejoin collects', async () => {
   controlRecoveryClock()
-  const s = await setup()
+  const s = await setup({ timeoutMs: 60 })
   const publish = s.aliceConnection.publish.bind(s.aliceConnection)
   let dropping = true
   let dropped = false
@@ -372,7 +391,7 @@ test('lost confirmations through the deadline leave an orphan which the next rej
 
 test('simultaneous recovery releases both lanes while a third member confirms', async () => {
   controlRecoveryClock()
-  const s = await setup({ third: true, deadlineMs: 10_000 })
+  const s = await setup({ third: true, deadlineMs: 10_000, timeoutMs: 60 })
   const pause = gate()
   cleanup.push(async () => pause.release())
   const fetch = s.bobConnection.fetchTopic.bind(s.bobConnection)
@@ -410,7 +429,7 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
 
 test('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
   controlRecoveryClock()
-  const s = await setup({ deadlineMs: 10_000 })
+  const s = await setup({ deadlineMs: 10_000, timeoutMs: 60 })
   const source = s.aliceGroup()
   const stalePort = createGroupMLS({
     access: simpleHandleAccess({ handle: () => source, adopt: () => {} }),
@@ -528,7 +547,7 @@ test('an invalid verdict envelope and a copied request for another position supp
 
 test('forged confirmations are ignored and an unknown signer refusal is advisory', async () => {
   controlRecoveryClock()
-  const s = await setup()
+  const s = await setup({ timeoutMs: 60 })
   const outsider = randomIdentity({ crypto })
   const { sealRealRecoveryVerdict } = (await import(
     new URL('../../../packages/mls-rpc/test/fixtures/real-group.ts', import.meta.url).href
@@ -650,7 +669,7 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
 
 test('confirmation requests received during another recovery preflight pull after the lane releases', async () => {
   controlRecoveryClock()
-  const s = await setup({ third: true, deadlineMs: 10_000 })
+  const s = await setup({ third: true, deadlineMs: 10_000, timeoutMs: 60 })
   const pause = gate()
   cleanup.push(async () => pause.release())
   const prepare = s.bobMLS.prepareRecovery.bind(s.bobMLS)
@@ -701,7 +720,10 @@ test.each(['policy', 'invalid'] as const)(
 test.each([false, true])(
   'a removed last-known signer is advisory with survivors silent: %s',
   async (silent) => {
-    const s = await setup({ third: true, deadlineMs: silent ? 450 : 10_000 })
+    const s = await setup({
+      third: true,
+      deadlineMs: silent ? 2000 : 10_000,
+    })
     const removedGroup = s.carolGroup()
     if (removedGroup == null || s.carol == null) throw new Error('Missing third member')
     await s.carol.dispose()
