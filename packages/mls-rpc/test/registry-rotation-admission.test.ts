@@ -16,7 +16,6 @@ import { createRegistryAppPublication } from '../src/app-publication.js'
 import { coordinatorBinding, entryCapability } from '../src/entry-capability.js'
 import { groupBatchFor } from '../src/group-batch-binding.js'
 import { createLedgerEntrySlot } from '../src/index.js'
-import { registryReceiveSlots } from '../src/registry/live-receive.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import { eligibilityOf, type Reservation } from '../src/registry/reserve.js'
 import { registrySafety } from '../src/registry/safety.js'
@@ -1207,7 +1206,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await setup(mode, 'welcome')
       const mls = await groupMLS(fixture)
       await fixture.forceStoredGeneration(500)
-      await registryLiveSend.get(fixture.access())?.accounting()
+      await fixture.refreshReceive()
       const group = fixture.group
       if (group === null) throw new Error('Missing peer')
       const aad = fixture.aad('ephemeral')
@@ -1487,10 +1486,8 @@ test.each(['real-mls', 'double'] as const)(
       if (live === undefined) throw new Error('Missing live sender')
       await live.accounting()
       const mls = await groupMLS(fixture)
-      const slot = registryReceiveSlots.get(fixture.access())
-      if (slot === undefined) throw new Error('Missing live slot')
-      // The earlier receive refresh must not repair this admission update.
-      await Promise.allSettled([...slot.inflight])
+      // Keep receive maintenance paused while updating copyless admission.
+      await gate.started
       expect(fixture.lease()).toBeNull()
       expect(mls.sendAdmission()).toMatchObject({ admissible: true })
       const record = await fixture.record()

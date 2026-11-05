@@ -1,13 +1,20 @@
 import { randomIdentity } from '@kokuin/token'
 import { vi } from 'vitest'
 
-import { entryCapability } from '../../src/entry-capability.js'
+import { coordinatorBinding, entryCapability } from '../../src/entry-capability.js'
 import { createMemoryDevicePersistence } from '../../src/memory-device-persistence.js'
 import { createMemoryTransaction } from '../../src/memory-transaction.js'
-import type { OwnershipContextPort } from '../../src/persistence-types.js'
-import { createSourceExecutor } from '../../src/registry/source-executor.js'
+import type { GroupKey, OwnershipContextPort } from '../../src/persistence-types.js'
+import {
+  registerSourceCrypto,
+  type SourceCryptoBodies,
+  sourceCryptoAdapter,
+} from '../../src/registry/source-crypto-commands.js'
+import { admitOwnedSource, createSourceExecutor } from '../../src/registry/source-executor.js'
 import { deferred } from '../../src/runtime.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
+import type { RegistryFixtureBase } from './registry.js'
+import { createStorageFixture } from './storage-persistence.js'
 import { installSeed, makeStorageSeed, nextChange } from './storage-seed.js'
 
 // A real event-loop checkpoint drains ready continuations without resolving paused work.
@@ -181,4 +188,45 @@ export async function sourceExecutorFixture(
       )
     },
   }
+}
+
+// Copy warmed data into a fresh coordinator without admitting its G scope through a root read.
+export async function freshWarmSourceFixture(params: {
+  warm: RegistryFixtureBase
+  key: GroupKey
+  bodies: SourceCryptoBodies
+  ownershipContext?: OwnershipContextPort
+}) {
+  const storage = await createStorageFixture({
+    id: params.key.groupID,
+    identity: params.warm.identity,
+    mode: 'real-mls',
+    setup: 'empty',
+    rows: await params.warm.inspectRows(),
+    ownershipContext: params.ownershipContext,
+  })
+  const persistence = storage.ports.device
+  const entry = entryCapability(persistence.groups)
+  const warmEntry = entryCapability(params.warm.device.groups)
+  const coordinator = coordinatorBinding(persistence.groups)
+  if (entry === null || warmEntry === null || coordinator === null)
+    throw new Error('Missing fresh warm fixture capabilities')
+  const source = createSourceExecutor({
+    persistence,
+    entry,
+    // Device startup is complete. This fixture isolates command enforcement of untouched G startup.
+    lifecycle: { beforeUse: async () => {}, assertCurrent() {} },
+    environment: params.warm.environment,
+  })
+  await warmEntry.read(params.key.groupID, (reads) =>
+    admitOwnedSource(source.executor, params.key, reads),
+  )
+  registerSourceCrypto(coordinator, params.key, params.bodies)
+  const adapters = sourceCryptoAdapter({
+    ...source,
+    key: params.key,
+    coordinator,
+    capability: entry,
+  })
+  return { entry, adapters, storage }
 }

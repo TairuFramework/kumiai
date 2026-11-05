@@ -22,6 +22,8 @@ import {
   ReentrantOwnershipError,
 } from '../src/persistence-errors.js'
 import { registryReceiveSlots } from '../src/registry/live-receive.js'
+import type { SourceCryptoBodies } from '../src/registry/source-crypto-commands.js'
+import * as sourceCryptoCommands from '../src/registry/source-crypto-commands.js'
 import { registrySourceExecutor } from '../src/registry/source-executor.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { deferred } from '../src/runtime.js'
@@ -39,7 +41,7 @@ import {
   registryFixtureSourceDiagnostics,
 } from './fixtures/registry.js'
 import { createRegistryCryptoGroup } from './fixtures/registry-crypto.js'
-import { flushReady } from './fixtures/source-executor.js'
+import { flushReady, freshWarmSourceFixture } from './fixtures/source-executor.js'
 import { writeSideRow } from './fixtures/storage-persistence.js'
 
 const bytes = new Uint8Array([1, 2, 3])
@@ -209,8 +211,8 @@ describe('managed crypto commands', () => {
     },
   )
 
-  test('ephemeral chunks stay memory only', async () => {
-    const group = await fixture()
+  test.each([false, true])('ephemeral chunks stay memory only (context=%s)', async (context) => {
+    const group = await fixture('real-mls', context)
     try {
       const entry = entryCapability(group.fixture().device.groups)
       if (entry === null) throw new Error('Missing entry')
@@ -232,10 +234,68 @@ describe('managed crypto commands', () => {
       const beforeCold = registryFixtureSourceDiagnostics(group.fixture()).transactionCount()
       await expect(cold.seal(bytes, opts)).rejects.toMatchObject({ reason: 'cold' })
       expect(registryFixtureSourceDiagnostics(group.fixture()).transactionCount()).toBe(beforeCold)
+      const slot = registryReceiveSlots.get(cold)
+      if (slot === undefined) throw new Error('Missing cold receive slot')
+      slot.base = null
+      slot.receive = null
+      const coldCiphertext = await group.sender.handle.encrypt(bytes)
+      await expect(
+        cold.receive([{ ciphertext: coldCiphertext, expectedAAD: opts.aad }]),
+        'cold receive must reject without inline refresh or retry',
+      ).rejects.toMatchObject({ reason: 'cold' })
+      expect(registryFixtureSourceDiagnostics(group.fixture()).transactionCount()).toBe(beforeCold)
+      gateRegistryMaintenance(group.fixture().registry).release()
+      await drainRegistryMaintenance(cold)
+      expect(
+        await cold.receive([{ ciphertext: coldCiphertext, expectedAAD: opts.aad }]),
+      ).toMatchObject([{ kind: 'opened', payload: bytes }])
     } finally {
       await group.close()
     }
   })
+
+  test.each([false, true])(
+    'synchronous crypto callback refuses nested seal (context=%s)',
+    async (context) => {
+      const group = await fixture('real-mls', context)
+      const lease = registryLeaseSnapshot(group.access())
+      if (lease === null) throw new Error('Missing sender lease')
+      const suite = lease.copy.context.cipherSuite
+      let nested: Promise<unknown> | undefined
+      lease.copy.context.cipherSuite = {
+        ...suite,
+        kdf: {
+          ...suite.kdf,
+          expand(...args) {
+            if (nested === undefined) {
+              try {
+                nested = group
+                  .access()
+                  .seal(bytes, opts)
+                  .catch((error: unknown) => error)
+              } catch (error) {
+                nested = Promise.resolve(error)
+              }
+            }
+            return suite.kdf.expand(...args)
+          },
+        },
+      }
+      try {
+        await group.access().seal(bytes, opts)
+        expect(
+          nested,
+          'the synchronous primitive callback must attempt a nested seal',
+        ).toBeDefined()
+        expect(
+          await nested,
+          'nested seal must refuse before losing the callback marker',
+        ).toBeInstanceOf(ReentrantOwnershipError)
+      } finally {
+        await group.close()
+      }
+    },
+  )
 
   test.each([false, true])(
     'warmed seal refuses device-root dependency (context=%s)',
@@ -707,6 +767,96 @@ describe('managed crypto commands', () => {
     },
   )
 
+  describe.each([false, true])('queued entry binding (context=%s)', (context) => {
+    test.each(['app.publicationSnapshot', 'app.open'] as const)(
+      '%s refuses supersession inside the owner before private reads',
+      async (command) => {
+        const group = await fixture('real-mls', context)
+        const source = registrySourceExecutor(group.fixture().registry)
+        const binding = await source.control.admit(group.key, 'source')
+        const entry = entryCapability(group.fixture().device.groups)
+        if (entry === null) throw new Error('Missing entry')
+        const aad = encodeAppAAD({ topicID: 'queued-open', intent: 'log' })
+        const ciphertext = await group.sender.handle.encrypt(bytes, { aad })
+        const input =
+          command === 'app.publicationSnapshot'
+            ? 'chat'
+            : [
+                {
+                  ciphertext,
+                  expectedAAD: aad,
+                  frame: {
+                    ...group.key,
+                    id: frameID('queued-open', ciphertext),
+                    topicID: 'queued-open',
+                    protocol: 'chat',
+                    segment: group.access().epoch(),
+                    position: '01',
+                  },
+                },
+              ]
+        const entered = deferred<void>()
+        const release = deferred<void>()
+        const queued = deferred<void>()
+        let stateReads = 0
+        const read = entry.read.bind(entry)
+        vi.spyOn(entry, 'read').mockImplementation((id, fn) => {
+          queued.resolve()
+          return read(id, (reads) => {
+            const state = reads.state.bind(reads)
+            vi.spyOn(reads, 'state').mockImplementation((n) => {
+              stateReads++
+              return state(n)
+            })
+            return fn(reads)
+          })
+        })
+        const run = entry.run.bind(entry)
+        vi.spyOn(entry, 'run').mockImplementation((request, prepare, work, effects) => {
+          queued.resolve()
+          return run(
+            request,
+            (reads, closing) => {
+              const state = reads.state.bind(reads)
+              vi.spyOn(reads, 'state').mockImplementation((n) => {
+                stateReads++
+                return state(n)
+              })
+              return prepare(reads, closing)
+            },
+            work,
+            effects,
+          )
+        })
+        const holding = entry.command(group.key.groupID, async () => {
+          entered.resolve()
+          await release.promise
+        })
+        let result: Promise<unknown> | undefined
+        try {
+          await entered.promise
+          result = source.executor
+            .execute({ binding, command, input })
+            .catch((error: unknown) => error)
+          await queued.promise
+          // Keep readable non-terminal metadata: rollback cannot revive this originating binding.
+          source.control.invalidate(
+            group.key,
+            new DisplacedGroupHandleError('Superseded while queued'),
+          )
+          release.resolve()
+          const outcome = await result
+          expect(stateReads, 'superseded entry must refuse before reads.state()').toBe(0)
+          expect(outcome).toBeInstanceOf(DisplacedGroupHandleError)
+        } finally {
+          release.resolve()
+          await Promise.allSettled([holding, result])
+          await group.close()
+        }
+      },
+    )
+  })
+
   test('cold and ownerless paths admit before private reads', async () => {
     const group = await fixture()
     try {
@@ -730,48 +880,90 @@ describe('managed crypto commands', () => {
     }
   })
 
-  test('first warmed command waits for scope startup persistence', async () => {
-    const group = await fixture()
-    const ciphertext = await group.sender.handle.encrypt(bytes)
-    const f = await group.fixture().reopen()
-    const pause = registryFixtureSourceDiagnostics(f).pauseBarrier()
-    let settled = false
-    let opening: ReturnType<typeof f.registry.access> | undefined
-    let sealing: Promise<unknown> | undefined
-    let receiving: Promise<unknown> | undefined
-    try {
-      const before = f.restores()
-      opening = f.registry.access(group.key.groupID)
-      const aad = encodeAppAAD({ topicID: 'startup', intent: 'log' })
-      sealing = opening
-        .then((access) => access.seal(bytes, { aad, intent: 'log' }))
-        .then((value) => {
-          settled = true
-          return value
+  test.each([false, true])(
+    'first warmed command waits for scope startup persistence (context=%s)',
+    async (context) => {
+      let bodies: SourceCryptoBodies | undefined
+      const register = sourceCryptoCommands.registerSourceCrypto
+      const capture = vi
+        .spyOn(sourceCryptoCommands, 'registerSourceCrypto')
+        .mockImplementation((coordinator, key, registered) => {
+          bodies = registered
+          register(coordinator, key, registered)
         })
-      receiving = opening.then((access) => access.receive([{ ciphertext, expectedAAD: opts.aad }]))
-      await pause.started
-      await flushReady()
-      expect(settled).toBe(false)
-      expect(f.restores() - before, 'no private restore before the first barrier/marker').toBe(0)
-      pause.release()
-      gateRegistryMaintenance(f.registry).release()
-      await Promise.all([sealing, receiving])
-      const access = await opening
-      await drainRegistryMaintenance(access)
-      const transactions = registryFixtureSourceDiagnostics(f).transactionCount()
-      await access.seal(bytes, opts)
-      await access.receive([
-        { ciphertext: await group.sender.handle.encrypt(bytes), expectedAAD: opts.aad },
-      ])
-      expect(registryFixtureSourceDiagnostics(f).transactionCount() - transactions).toBe(0)
-    } finally {
-      pause.release()
-      await Promise.allSettled([opening, sealing, receiving])
-      await f.close()
-      await group.close()
-    }
-  })
+      const group = await fixture('real-mls', context)
+      capture.mockRestore()
+      if (bodies === undefined) throw new Error('Missing warmed crypto bodies')
+      const f = await freshWarmSourceFixture({
+        warm: group.fixture(),
+        key: group.key,
+        bodies,
+        ...(context ? { ownershipContext: createAsyncLocalOwnershipContext() } : {}),
+      })
+      const ciphertext = await group.sender.handle.encrypt(bytes)
+      const encrypt = vi.spyOn(GroupHandle.prototype, 'encryptApplication')
+      const senderData = vi.spyOn(GroupHandle.prototype, 'readSenderData')
+      const decrypt = vi.spyOn(GroupHandle.prototype, 'decrypt')
+      const beforeRestores = group.fixture().restores()
+      // Both adapters exist before this scope has admitted any persistence entry.
+      const seal = () => f.adapters.execute('app.seal', { plaintext: bytes, ...opts })
+      const receive = () =>
+        f.adapters.execute('app.receive', [{ ciphertext, expectedAAD: opts.aad }])
+      let sealing: Promise<unknown> | undefined
+      let receiving: Promise<unknown> | undefined
+      let startup: Promise<unknown> | undefined
+      let pause: ReturnType<typeof f.storage.pauseBarrier> | undefined
+      try {
+        // Exercise the command's startup guard directly; removing it must reach a protected primitive.
+        await expect(seal()).rejects.toThrow('startup')
+        await expect(receive()).rejects.toThrow('startup')
+        expect(encrypt).not.toHaveBeenCalled()
+        expect(senderData).not.toHaveBeenCalled()
+        expect(decrypt).not.toHaveBeenCalled()
+        pause = f.storage.pauseBarrier()
+        startup = f.entry.read(group.key.groupID, async () => {})
+        await pause.started
+        let sealSettled = false
+        let receiveSettled = false
+        sealing = seal().finally(() => {
+          sealSettled = true
+        })
+        receiving = receive().finally(() => {
+          receiveSettled = true
+        })
+        void sealing.catch(() => {})
+        void receiving.catch(() => {})
+        await flushReady()
+        expect(sealSettled, 'precreated warm seal waits for startup').toBe(false)
+        expect(receiveSettled, 'precreated warm receive waits for startup').toBe(false)
+        expect(encrypt, 'no seal primitive before barrier and marker').not.toHaveBeenCalled()
+        expect(
+          senderData,
+          'no sender-data primitive before barrier and marker',
+        ).not.toHaveBeenCalled()
+        expect(decrypt, 'no decrypt primitive before barrier and marker').not.toHaveBeenCalled()
+        expect(group.fixture().restores() - beforeRestores).toBe(0)
+        pause.release()
+        await startup
+        const [sealed, received] = await Promise.all([sealing, receiving])
+        expect(sealed).toMatchObject({ ciphertext: expect.any(Uint8Array) })
+        expect(received).toMatchObject([{ kind: 'opened', payload: bytes }])
+        expect(encrypt).toHaveBeenCalledTimes(1)
+        expect(senderData).toHaveBeenCalledTimes(1)
+        expect(decrypt).toHaveBeenCalledTimes(1)
+        const next = await group.sender.handle.encrypt(bytes)
+        const transactions = f.storage.transactionCount()
+        await seal()
+        await f.adapters.execute('app.receive', [{ ciphertext: next, expectedAAD: opts.aad }])
+        expect(f.storage.transactionCount() - transactions).toBe(0)
+      } finally {
+        pause?.release()
+        await Promise.allSettled([startup, sealing, receiving])
+        await f.storage.close()
+        await group.close()
+      }
+    },
+  )
 
   test('cancelled seals burn generations without installing late progress', async () => {
     const group = await fixture()

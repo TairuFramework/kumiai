@@ -8,7 +8,7 @@ export function scheduleRegistryAccounting<TTx extends GroupTransaction>(params:
   capability: EntryCapability<TTx>
   binding: object
   key: GroupKey
-  source: 'live' | 'handoff' | 'trust'
+  source: 'live' | 'handoff' | 'trust' | 'receive'
   signal?: AbortSignal
   current(): boolean
   read(reads: EntryReads): Promise<void>

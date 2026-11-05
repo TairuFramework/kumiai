@@ -24,6 +24,7 @@ import type { createLiveSend } from './live-send.js'
 import { committedNext } from './live-send.js'
 import { readSourceAdmission } from './source-command-runtime.js'
 import { sourceCryptoScope } from './source-crypto-commands.js'
+import type { SourceBinding } from './source-executor-types.js'
 import type { RegistryHandleAccess } from './types.js'
 
 export function createPublicationPreparation<TTx extends GroupTransaction>(params: {
@@ -32,16 +33,22 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
   capability: EntryCapability<TTx>
   live: ReturnType<typeof createLiveSend<TTx>>
   assertAvailable(): void
+  assertSourceBinding(binding: SourceBinding): void
   assertCurrent(): void
   assertWorkSafety(stores: GroupStores<TTx>): Promise<void>
   resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
   diagnoseFailure(error: unknown): Promise<void>
   publish(): void
-}): Pick<RegistryHandleAccess, 'assertPublicationEntry' | 'publicationSnapshot'> & {
+}): Pick<RegistryHandleAccess, 'assertPublicationEntry'> & {
+  publicationSnapshot(
+    protocol: string,
+    binding: SourceBinding,
+  ): Promise<AppPublicationSnapshot | null>
   preparePublication(
     entry: AppOutboxEntry,
     floor: string | null,
-    expected?: AdoptionExpected,
+    expected: AdoptionExpected | undefined,
+    binding: SourceBinding,
   ): Promise<PreparedAppPublication>
 } {
   const { owner, capability, live } = params
@@ -49,7 +56,9 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
   async function snapshot(
     reads: EntryReads,
     protocol: string,
+    binding: SourceBinding,
   ): Promise<AppPublicationSnapshot | null> {
+    params.assertSourceBinding(binding)
     params.assertAvailable()
     const life = await reads.lifetime()
     await readSourceAdmission(reads, owner.key)
@@ -78,11 +87,14 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
       topicID: protocolTopic(slot.anchor.secret, slot.anchor.epoch, protocol),
     }
   }
-  async function publicationSnapshot(protocol: string): Promise<AppPublicationSnapshot | null> {
+  async function publicationSnapshot(
+    protocol: string,
+    binding: SourceBinding,
+  ): Promise<AppPublicationSnapshot | null> {
     capability.assertRoot()
     if (live.pendingProof()) return null
     try {
-      return await capability.read(owner.key.groupID, (reads) => snapshot(reads, protocol))
+      return await capability.read(owner.key.groupID, (reads) => snapshot(reads, protocol, binding))
     } catch (error) {
       if (
         error instanceof DisplacedGroupHandleError ||
@@ -96,7 +108,8 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
   async function preparePublication(
     input: AppOutboxEntry,
     floor: string | null,
-    admitted?: AdoptionExpected,
+    admitted: AdoptionExpected | undefined,
+    binding: SourceBinding,
   ): Promise<PreparedAppPublication> {
     capability.assertRoot()
     const entry = copyStoredValue(input)
@@ -118,7 +131,7 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
         await live.run(
           { groupID: owner.key.groupID, mutationID },
           async (reads) => {
-            const captured = await snapshot(reads, entry.protocol)
+            const captured = await snapshot(reads, entry.protocol, binding)
             if (
               captured === null ||
               !sameStoredValue(captured.identity, expected.identity) ||
@@ -137,7 +150,10 @@ export function createPublicationPreparation<TTx extends GroupTransaction>(param
               { ...record, state: record.state },
               entry.data,
               encodeAppAAD({ topicID: captured.topicID, intent: 'log' }),
-              sourceCryptoScope(entryReadsAttempt(reads), params.assertAvailable),
+              sourceCryptoScope(entryReadsAttempt(reads), () => {
+                params.assertSourceBinding(binding)
+                params.assertAvailable()
+              }),
             )
             assertFrameFits(sealed.sealed.ciphertext)
             const updated: AppOutboxEntry = {

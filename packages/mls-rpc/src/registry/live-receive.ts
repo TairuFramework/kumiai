@@ -59,6 +59,7 @@ export function createLiveReceive(params: {
   assertAvailable(): void
   safetyHeld(): SafetyHold
   accounting(): Promise<void>
+  waitForMaintenanceGate(signal: AbortSignal): Promise<void> | undefined
   refresh(): Promise<void>
   diagnoseFailure(error: unknown): Promise<void>
 }) {
@@ -86,6 +87,8 @@ export function createLiveReceive(params: {
         // Leave the provider's ownership context before entering a cold read.
         await new Promise<void>((resolve) => setTimeout(resolve, 0))
         try {
+          if (signal.aborted) return
+          await params.waitForMaintenanceGate(signal)
           if (signal.aborted) return
           assertAvailable()
           await params.refresh()

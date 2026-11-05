@@ -58,6 +58,7 @@ import type {
 import { untilAbort } from '../runtime.js'
 import { clearGroupCondition } from '../safety-conditions.js'
 import { assertNotTerminal } from '../terminal-admission.js'
+import { scheduleRegistryAccounting } from './accounting.js'
 import { createRegistryAppOpen } from './app-open.js'
 import { bindRegistryStreamingOpen } from './app-open-binding.js'
 import { createPublicationPreparation } from './app-publication.js'
@@ -91,6 +92,7 @@ import {
   sourceCryptoAdapter,
   sourceCryptoScope,
 } from './source-crypto-commands.js'
+import { assertCryptoBinding } from './source-executor.js'
 import type {
   SourceBinding,
   SourceExecutor,
@@ -172,7 +174,10 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     coordinator: params.binding,
     capability,
   })
+  const assertSourceBinding = (binding: SourceBinding) =>
+    assertCryptoBinding(params.source.executor, binding)
   const live = createLiveSend({
+    assertSourceBinding,
     ...params,
     assertAvailable: () => {
       params.assertAvailable()
@@ -883,6 +888,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       throw new GroupUnavailableError({ reason: 'invalid' })
   }
   const appOpen = createRegistryAppOpen({
+    assertSourceBinding,
     ...params,
     run: live.run,
     isolated,
@@ -896,19 +902,32 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     accounting: live.accounting,
     assertAvailable: assertReceiveAvailable,
     refresh: async () => {
-      await capability.read(owner.key.groupID, async (reads) => {
-        assertReceiveAvailable()
-        await params.load(reads, assertSafety)
-        assertReceiveAvailable()
+      await scheduleRegistryAccounting({
+        capability,
+        binding: params.binding,
+        key: owner.key,
+        source: 'receive',
+        signal: params.live.cancellation.signal,
+        current: () => params.live.base === null,
+        read: async (reads) => {
+          assertReceiveAvailable()
+          await params.load(reads, assertSafety)
+          assertReceiveAvailable()
+        },
       })
     },
   })
-  const publication = createPublicationPreparation({ ...params, live, assertWorkSafety })
+  const publication = createPublicationPreparation({
+    ...params,
+    live,
+    assertWorkSafety,
+    assertSourceBinding,
+  })
   registerSourceCrypto(params.binding, owner.key, {
     seal: live.sealOwned,
-    open: (input) => appOpen.openBatch(input),
-    publication: ({ entry, floor }, expected) =>
-      publication.preparePublication(entry, floor, expected),
+    open: (input, _budget, binding) => appOpen.openBatch(input, binding),
+    publication: ({ entry, floor }, expected, binding) =>
+      publication.preparePublication(entry, floor, expected, binding),
     publicationSnapshot: publication.publicationSnapshot,
     maintain: live.maintain,
     handoff: live.acceptPending,
@@ -952,22 +971,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
       } catch (error) {
         if (!(error instanceof ApplicationLeaseUnavailableError) || error.reason !== 'cold')
           throw error
-        let timer: ReturnType<typeof setTimeout> | undefined
-        try {
-          await untilAbort(
-            Promise.race([
-              receive.refresh(),
-              new Promise<void>((resolve) => {
-                timer = setTimeout(resolve, 5_000)
-              }),
-            ]),
-            signal,
-          )
-        } finally {
-          clearTimeout(timer)
-        }
-        if (params.live.base === null) throw error
-        return await commands.execute('app.receive', frames, signal)
+        void receive.refresh()
+        throw error
       }
     },
     openBatch: async (frames) => {

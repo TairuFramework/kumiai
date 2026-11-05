@@ -13,7 +13,6 @@ import {
 import {
   createControlAdoptionPort,
   createControlValidationPort,
-  createGroupCrypto,
   createGroupMLS,
   deriveEntryKey,
   deriveRecoverySecret,
@@ -48,6 +47,7 @@ import { entryCapability } from '../../../../packages/mls-rpc/src/entry-capabili
 import { createHandlerCompletion } from '../../../../packages/mls-rpc/src/handler-completion.js'
 import {
   createControlBuildPort,
+  createGroupCrypto,
   createLedgerEntrySlot,
   createPersistenceBuildSaver,
   createRecoveryContinuationPort,
@@ -181,8 +181,9 @@ export async function createCapturedRecoveryFixture(
             get key() {
               return current
             },
-            get runtime(): never {
-              throw new TypeError('unused')
+            runtime: notificationAccess?.runtime ?? {
+              snapshot: () => null,
+              onEpochChanged: () => () => {},
             },
             stateVersion: () => {
               throw new TypeError('unused')

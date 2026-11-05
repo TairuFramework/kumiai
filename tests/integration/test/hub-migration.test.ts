@@ -275,8 +275,9 @@ async function liveOwner(
         get key() {
           return current
         },
-        get runtime(): never {
-          throw new TypeError('unused')
+        runtime: notificationAccess?.runtime ?? {
+          snapshot: () => null,
+          onEpochChanged: () => () => {},
         },
         stateVersion: () => {
           throw new TypeError('unused')

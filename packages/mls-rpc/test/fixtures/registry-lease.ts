@@ -134,6 +134,10 @@ export async function createRegistryLeaseFixture(
     restores: () => fixture.restores(),
     receiveRebuilds: () => testing.receiveRebuilds(access),
     openEphemeral: (frames: Array<ReceiveInput>) => access.receive(frames),
+    async refreshReceive() {
+      await registryLiveSend.get(access)?.accounting()
+      await registryReceiveSlots.get(access)?.refresh?.()
+    },
     opens: (ciphertext: Uint8Array, receiver: 'local' | 'peer' = 'local') =>
       (receiver === 'local' ? localOpens : peerOpens).get(frameID('lease-opens', ciphertext)) ?? 0,
     async peerAccess() {
@@ -508,7 +512,7 @@ export async function createRegistryLeaseFixture(
         key,
         state: { ...saved, version: saved.version + 1, state: encodeClientState(handle.state) },
       })
-      await registryLiveSend.get(access)?.accounting()
+      await result.refreshReceive()
     },
     async blockedCallerSend() {
       const caller = await fixture.makeHandle(0, `${id}-caller`)

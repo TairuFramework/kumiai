@@ -39,6 +39,7 @@ import type { createLiveSend } from './live-send.js'
 import type { Reservation } from './reserve.js'
 import { RetainedTrustUnavailableError } from './safety.js'
 import { sourceCryptoScope } from './source-crypto-commands.js'
+import type { SourceBinding } from './source-executor-types.js'
 import type { ReadableGroupState, RegistryHandleAccess } from './types.js'
 
 function sameOccurrence(a: PreOpenAppFrameRef, b: PreOpenAppFrameRef): boolean {
@@ -72,17 +73,23 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
     eligibility: Uint8Array
   }>
   assertAvailable(): void
+  assertSourceBinding(binding: SourceBinding): void
   assertCurrent(): void
   assertSafety(): void
   assertWorkSafety(stores: GroupStores<TTx>): Promise<void>
   publish(): void
   diagnoseFailure(error: unknown): Promise<void>
-}): Pick<RegistryHandleAccess, 'openBatch' | 'pending'> & { openReady: RegistryStreamingOpen } {
+}): {
+  openBatch(inputs: Array<OpenAppInput>, binding: SourceBinding): Promise<Array<OpenAppResult>>
+  pending: RegistryHandleAccess['pending']
+  openReady: RegistryStreamingOpen
+} {
   const { owner, capability } = params
   const n = owner.key.incarnation
   async function prepare(
     inputs: Array<OpenAppInput>,
     budget?: BatchBudget,
+    binding = owner.sourceBinding,
   ): Promise<Array<OpenAppResult>> {
     capability.assertRoot()
     if (inputs.length === 0) return []
@@ -104,7 +111,11 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
           return await params.run(
             { groupID: owner.key.groupID, mutationID },
             async (reads) => {
-              const scope = sourceCryptoScope(entryReadsAttempt(reads), params.assertCurrent)
+              params.assertSourceBinding(binding)
+              const scope = sourceCryptoScope(entryReadsAttempt(reads), () => {
+                params.assertSourceBinding(binding)
+                params.assertCurrent()
+              })
               params.assertSafety()
               const { handle, source } = await params.isolated(reads, params.assertSafety)
               scope.protect(handle)
@@ -283,10 +294,13 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
       params.publish()
     }
   }
-  const result: Pick<RegistryHandleAccess, 'openBatch' | 'pending'> & {
+  const result: {
+    openBatch(inputs: Array<OpenAppInput>, binding: SourceBinding): Promise<Array<OpenAppResult>>
+    pending: RegistryHandleAccess['pending']
     openReady: RegistryStreamingOpen
   } = {
-    openBatch: (inputs: Array<OpenAppInput>) => prepare(inputs),
+    openBatch: (inputs: Array<OpenAppInput>, binding: SourceBinding) =>
+      prepare(inputs, undefined, binding),
     openReady: async (inputs: Array<OpenAppInput>, budget: BatchBudget) => {
       const results = await prepare(inputs, budget)
       if (inputs.length > 0 && results.length === 0)

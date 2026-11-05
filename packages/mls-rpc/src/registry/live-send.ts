@@ -48,6 +48,7 @@ import {
 import { readSourceAdmission } from './source-command-runtime.js'
 import type { CryptoCommands, SourceCryptoScope } from './source-crypto-commands.js'
 import { sourceCryptoScope } from './source-crypto-commands.js'
+import type { SourceBinding } from './source-executor-types.js'
 import type { GroupHandleRegistry, ReadableGroupState, RegistryHandleAccess } from './types.js'
 
 export class ApplicationLeaseUnavailableError extends Error {
@@ -182,6 +183,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   environment: ColdEnvironment
   resolve(mutationID: string): Promise<'committed' | 'rolled-back'>
   assertAvailable(): void
+  assertSourceBinding(binding: SourceBinding): void
   assertCurrent(): void
   assertWorkSafety(stores: GroupStores<TTx>): Promise<void>
   safetyHeld(): SafetyHold
@@ -746,13 +748,17 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     }
   }
   class NoReservation extends Error {}
-  async function maintain(signal: AbortSignal): Promise<void> {
+  async function maintain(signal: AbortSignal, binding: SourceBinding): Promise<void> {
     await run(
       { groupID: owner.key.groupID, mutationID: crypto.randomUUID() },
       async (reads) => {
+        params.assertSourceBinding(binding)
         params.assertAvailable()
         await readSourceAdmission(reads, owner.key)
-        const scope = sourceCryptoScope(entryReadsAttempt(reads), params.assertAvailable)
+        const scope = sourceCryptoScope(entryReadsAttempt(reads), () => {
+          params.assertSourceBinding(binding)
+          params.assertAvailable()
+        })
         const ownedEnvironment: ColdEnvironment = {
           ...environment,
           restore: async (record) =>
@@ -898,6 +904,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     const intent = opts.intent
     const signal = cancellation.signal
     const pending = (async () => {
+      capability.assertRoot()
       params.assertAvailable()
       if ((decodeAppAAD(aad)?.intent ?? 'ephemeral') !== intent)
         throw new TypeError('App AAD intent mismatch')
@@ -1088,7 +1095,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   return {
     prepareSeal,
-    maintain: () => maintain(cancellation.signal),
+    maintain: (binding: SourceBinding) => maintain(cancellation.signal, binding),
     acceptPending,
     sealOwned,
     armEncryptFault(when: 'throw-before' | 'throw-after' | 'block') {

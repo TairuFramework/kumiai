@@ -16,6 +16,7 @@ import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { deferred } from '../src/runtime.js'
 import {
   dropRegistryOwner,
+  gateRegistryMaintenance,
   receiveRebuilds,
   registryLeaseSnapshot,
   setReceiveCapacity,
@@ -159,6 +160,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         key: fixture.key,
         state: { ...record, version: record.version + 1, state: encodeClientState(handle.state) },
       })
+      await fixture.refreshReceive()
       expect(await fixture.openEphemeral([old])).toMatchObject([
         { kind: 'refused', reason: 'past-epoch' },
       ])
@@ -310,57 +312,40 @@ for (const mode of ['real-mls', 'double'] as const) {
       attempt.settle('rolled-back')
       expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
     })
-    test('cold receive wait aborts on retirement start, including immediate rollback', async () => {
+    test('cold receive refuses while independent refresh is cancelled by retirement', async () => {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await foreignWithoutRefresh(fixture, 'proposal')
       const hold = fixture.fixture().holdRestore(fixture.key.groupID)
-      const receiving = fixture.openEphemeral([input]).then(
-        () => 'opened',
-        (error: unknown) => error,
-      )
-      await hold.started
-      const attempt = registryRetirement(fixture.fixture().registry).beginRetirement(fixture.key)
-      attempt.settle('rolled-back')
       try {
-        expect(
-          await Promise.race([
-            receiving,
-            new Promise((resolve) => setTimeout(() => resolve('timed out'), 500)),
-          ]),
-        ).toMatchObject({ name: 'RegistryRetiringError' })
+        await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
+        const refreshing = slot(fixture).refresh?.()
+        await hold.started
+        const attempt = registryRetirement(fixture.fixture().registry).beginRetirement(fixture.key)
+        attempt.settle('rolled-back')
+        hold.release()
+        await refreshing
       } finally {
         hold.release()
       }
     })
-    test('cold receive waits at most five seconds for its refresh', async () => {
+    test('cold receive refuses before independent maintenance starts', async () => {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await foreignWithoutRefresh(fixture, 'proposal')
-      const hold = fixture.fixture().holdRestore(fixture.key.groupID)
-      vi.useFakeTimers()
+      const gate = gateRegistryMaintenance(fixture.fixture().registry)
+      const before = fixture.providerTransactions()
       try {
-        let result: unknown
-        const receiving = fixture
-          .openEphemeral([input])
-          .then(
-            () => 'opened',
-            (error: unknown) => error,
-          )
-          .then((value) => {
-            result = value
-            return value
-          })
-        await vi.advanceTimersByTimeAsync(1)
-        await hold.started
-        await vi.advanceTimersByTimeAsync(4_998)
-        expect(result).toBeUndefined()
-        await vi.advanceTimersByTimeAsync(1)
-        expect(result).toMatchObject({ reason: 'cold' })
-        expect(await receiving).toMatchObject({ reason: 'cold' })
+        await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
+        expect(fixture.providerTransactions()).toBe(before)
+        expect(slot(fixture).base).toBeNull()
+        const refreshing = slot(fixture).refresh?.()
+        await gate.started
+        gate.release()
+        await refreshing
+        expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
       } finally {
-        vi.useRealTimers()
-        hold.release()
+        gate.release()
       }
     })
     test.each(['control', 'cursor'] as const)(
@@ -381,10 +366,16 @@ for (const mode of ['real-mls', 'double'] as const) {
       await foreignWithoutRefresh(fixture, 'receive')
       expect(slot(fixture).base).toBeNull()
       const hold = fixture.fixture().holdRestore(fixture.key.groupID)
-      const receiving = fixture.openEphemeral([input])
-      await hold.started
-      hold.release()
-      expect(await receiving).toMatchObject([{ kind: 'opened' }])
+      try {
+        await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
+        const refreshing = slot(fixture).refresh?.()
+        await hold.started
+        hold.release()
+        await refreshing
+        expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
+      } finally {
+        hold.release()
+      }
       expect(slot(fixture).base).not.toBeNull()
     })
     test('consumed bound closes the oldest non-current epoch and refuses a full current epoch', async () => {
@@ -582,6 +573,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         key: fixture.key,
         state: { ...record, version: record.version + 1, state: encodeClientState(handle.state) },
       })
+      await fixture.refreshReceive()
       expect(await fixture.openEphemeral([old])).toMatchObject([
         { kind: 'refused', reason: 'past-epoch' },
       ])
@@ -629,6 +621,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         key: fixture.key,
         state: { ...record, version: record.version + 1, state: encodeClientState(handle.state) },
       })
+      await fixture.refreshReceive()
       await fixture.openEphemeral([])
       expect(slot(fixture).consumed.closed.size).toBe(0)
     })
@@ -705,7 +698,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         await expect(fixture.access().receive([input])).rejects.toBeInstanceOf(GroupSafetyHeldError)
       },
     )
-    test('first receive after reopen waits for its cold refresh and opens', async () => {
+    test('first cold receive after reopen refuses until independent refresh completes', async () => {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await fixture.reopen()
@@ -713,24 +706,14 @@ for (const mode of ['real-mls', 'double'] as const) {
       await foreignWithoutRefresh(fixture, 'proposal')
       expect(slot(fixture).base).toBeNull()
       const hold = fixture.fixture().holdRestore(fixture.key.groupID)
-      let finished = false
-      const receiving = fixture.openEphemeral([input]).then(
-        (results) => {
-          finished = true
-          return results
-        },
-        (error: unknown) => {
-          finished = true
-          return error
-        },
-      )
       try {
+        await expect(fixture.openEphemeral([input])).rejects.toMatchObject({ reason: 'cold' })
+        const refreshing = slot(fixture).refresh?.()
         await hold.started
-        await new Promise<void>((resolve) => setTimeout(resolve, 20))
-        expect(finished).toBe(false)
         expect(slot(fixture).base).toBeNull()
         hold.release()
-        expect(await receiving).toMatchObject([{ kind: 'opened' }])
+        await refreshing
+        expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
       } finally {
         hold.release()
       }
@@ -739,6 +722,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fixture = await setup(mode)
       const input = await frame(fixture)
       await fixture.writeElsewhere('proposal')
+      await fixture.refreshReceive()
       expect(await fixture.access().receive([input])).toMatchObject([{ kind: 'opened' }])
       await fixture.reopen()
       expect(await fixture.access().receive([input])).toMatchObject([{ kind: 'opened' }])
@@ -770,6 +754,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(fixture.access().admission()).toMatchObject({ admissible: false, reason: 'lapsed' })
       await foreignWithoutRefresh(fixture, 'receive')
       expect(slot(fixture).base).toBeNull()
+      await fixture.refreshReceive()
       expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
     })
     test('retirement refuses new receive calls', async () => {

@@ -66,13 +66,21 @@ export type SourceCryptoBodies = {
   seal(input: CryptoCommands['app.seal']['input'], scope: SourceCryptoScope): Promise<SealedApp>
   receive(input: Array<ReceiveInput>, scope: SourceCryptoScope): Promise<Array<ReceiveResult>>
   handle(scope: SourceCryptoScope): Promise<GroupHandle>
-  open(input: Array<OpenAppInput>, budget: BatchBudget): Promise<Array<OpenAppResult>>
+  open(
+    input: Array<OpenAppInput>,
+    budget: BatchBudget,
+    binding: SourceBinding,
+  ): Promise<Array<OpenAppResult>>
   publication(
     input: CryptoCommands['app.publication']['input'],
     expected: AdoptionExpected | undefined,
+    binding: SourceBinding,
   ): Promise<PreparedAppPublication>
-  publicationSnapshot(protocol: string): Promise<AppPublicationSnapshot | null>
-  maintain(): Promise<void>
+  publicationSnapshot(
+    protocol: string,
+    binding: SourceBinding,
+  ): Promise<AppPublicationSnapshot | null>
+  maintain(binding: SourceBinding): Promise<void>
   handoff(scope: SourceCryptoScope): Promise<void>
 }
 type CryptoConfiguration = { label: string; runtime: Runtime }
@@ -134,19 +142,24 @@ export async function runSourceCryptoEntry<TName extends SourceEntryCommand>(par
   let result: unknown
   switch (params.command) {
     case 'app.open':
-      result = await registration.bodies.open(input as Array<OpenAppInput>, params.budget)
+      result = await registration.bodies.open(
+        input as Array<OpenAppInput>,
+        params.budget,
+        params.binding,
+      )
       break
     case 'app.publication':
       result = await registration.bodies.publication(
         input as CryptoCommands['app.publication']['input'],
         params.expected,
+        params.binding,
       )
       break
     case 'app.publicationSnapshot':
-      result = await registration.bodies.publicationSnapshot(input as string)
+      result = await registration.bodies.publicationSnapshot(input as string, params.binding)
       break
     case 'app.maintain':
-      result = await registration.bodies.maintain()
+      result = await registration.bodies.maintain(params.binding)
       break
   }
   return result as CryptoCommands[TName]['output']
