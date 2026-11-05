@@ -816,6 +816,9 @@ importers:
       '@kokuin/controller':
         specifier: 'catalog:'
         version: 0.7.0(@logtape/logtape@2.4.2)
+      '@kokuin/crypto-napi':
+        specifier: 'catalog:'
+        version: 0.7.3
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.7.0(@logtape/logtape@2.4.2)

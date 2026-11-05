@@ -1,3 +1,4 @@
+import { createNapiCrypto } from '@kokuin/crypto-napi'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
@@ -44,7 +45,11 @@ import {
 import { drainUntil } from './fixtures/drain.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
+// Recovery windows here are tens of milliseconds, so verification has to run on the native provider.
+const crypto = createNapiCrypto()
+
 beforeAll(async () => {
+  expect(crypto.backend).toBe('napi')
   await import(new URL('../../../packages/mls/src/recovery.ts', import.meta.url).href)
 })
 
@@ -90,9 +95,9 @@ async function completeRecovery(recovery: ReturnType<GroupPeer<Protocols>['recov
 
 async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
   const hub = createWireHub()
-  const aliceID = randomIdentity()
-  const bobID = randomIdentity()
-  let aliceGroup = (await createGroup(aliceID, 'confirmation')).group
+  const aliceID = randomIdentity({ crypto })
+  const bobID = randomIdentity({ crypto })
+  let aliceGroup = (await createGroup(aliceID, 'confirmation', { crypto })).group
   const bundle = await createKeyPackageBundle(bobID)
   const { invite } = await createInvite({
     group: aliceGroup,
@@ -116,10 +121,10 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
       invite,
       welcome: added.welcomeMessage,
       keyPackageBundle: bundle,
-      options: { resolveLedgerEntries: bobSlot.resolve },
+      options: { crypto, resolveLedgerEntries: bobSlot.resolve },
     })
   ).group
-  const carolID = randomIdentity()
+  const carolID = randomIdentity({ crypto })
   let carolGroup: GroupHandle | undefined
   if (options.third) {
     const material = await createKeyPackageBundle(carolID)
@@ -138,6 +143,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
         invite: offered.invite,
         welcome: commit.welcomeMessage,
         keyPackageBundle: material,
+        options: { crypto },
       })
     ).group
   }
@@ -411,7 +417,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     identity: s.aliceID,
     entrySlot: createLedgerEntrySlot(),
   })
-  const carol = randomIdentity()
+  const carol = randomIdentity({ crypto })
   const material = await createKeyPackageBundle(carol)
   const offered = await createInvite({
     group: source,
@@ -523,7 +529,7 @@ test('an invalid verdict envelope and a copied request for another position supp
 test('forged confirmations are ignored and an unknown signer refusal is advisory', async () => {
   controlRecoveryClock()
   const s = await setup()
-  const outsider = randomIdentity()
+  const outsider = randomIdentity({ crypto })
   const { sealRealRecoveryVerdict } = (await import(
     new URL('../../../packages/mls-rpc/test/fixtures/real-group.ts', import.meta.url).href
   )) as {
@@ -598,7 +604,7 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
 test('a ratchet of the old handle while pending invalidates adoption on revalidation', async () => {
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
-  const carol = randomIdentity()
+  const carol = randomIdentity({ crypto })
   const bundle = await createKeyPackageBundle(carol)
   const offered = await createInvite({
     group: source,
@@ -787,6 +793,7 @@ test.each(['policy', 'invalid'] as const)(
         context: original.context,
         credential: original.credential,
         commitPolicy: () => 'reject',
+        crypto,
       })
       await rejector.bootstrapLedger(original.ledgerTokens)
       await guardedReplace(s.aliceAccess, rejector)
