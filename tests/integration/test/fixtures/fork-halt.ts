@@ -40,6 +40,10 @@ import { expect, vi } from 'vitest'
 
 import { createRegistryAppPublication } from '../../../../packages/mls-rpc/src/app-publication.js'
 import { createCheckpointService } from '../../../../packages/mls-rpc/src/checkpoint.js'
+import {
+  currentCheckpointFact,
+  prepareCheckpointInstallation,
+} from '../../../../packages/mls-rpc/src/checkpoint-capture.js'
 import { entryCapability } from '../../../../packages/mls-rpc/src/entry-capability.js'
 import { createHandlerCompletion } from '../../../../packages/mls-rpc/src/handler-completion.js'
 import {
@@ -68,7 +72,6 @@ import {
   type RegistryFixture,
   registryFixtureRestore,
 } from '../../../../packages/mls-rpc/test/fixtures/registry.js'
-import { writeInstallationCheckpoint } from '../../../../packages/mls-rpc/test/fixtures/storage-seed.js'
 import * as muxModule from '../../../../packages/rpc/src/hub-mux.js'
 import { createGroupPeerWithControlWalk } from '../../../../packages/rpc/src/peer.js'
 import type { EpochRuntime, EpochRuntimeParams } from '../../../../packages/rpc/src/peer-epoch.js'
@@ -416,35 +419,61 @@ export async function makeCheckpointPeer(
       const mutationID = write?.mutationID ?? crypto.randomUUID()
       await entry.run(
         { groupID: key.groupID, mutationID },
-        async (reads) => ({
-          expected: await reads.lifetime(),
-          value: { state: await reads.state(key.incarnation), trust: await reads.trust() },
-        }),
-        async (stores, previous) => {
-          if (previous.state === null || previous.state.deleted)
-            throw new Error('Missing persisted source')
-          const target = stores.incarnation(key.incarnation)
-          await target.state.save(
-            {
-              ...previous.state,
-              state: encodeClientState(next.state),
-              credential: next.credential,
-              ledger: next.ledgerTokens,
-              version: previous.state.version + 1,
-              deleted: false,
-              terminal: next.state.groupActiveState.kind === 'removedFromGroup',
-              epoch: Number(next.epoch),
-              epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
+        async (reads, closing) => {
+          const previous = await reads.state(key.incarnation)
+          const trust = await reads.trust()
+          if (previous === null || previous.deleted) throw new Error('Missing persisted source')
+          const record = {
+            ...previous,
+            state: encodeClientState(next.state),
+            credential: next.credential,
+            ledger: next.ledgerTokens,
+            version: previous.version + 1,
+            deleted: false as const,
+            terminal: next.state.groupActiveState.kind === 'removedFromGroup',
+            epoch: Number(next.epoch),
+            epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
+          }
+          const prepared = {
+            expected: await reads.lifetime(),
+            value: {
+              record,
+              trust: recoveryTrustFor(next, key, trust),
+              checkpoint: await prepareCheckpointInstallation({
+                key,
+                handle: next,
+                mutationID,
+                stateVersion: record.version,
+                previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+              }),
             },
-            write?.expected,
-          )
-          await stores.trust.save(recoveryTrustFor(next, key, previous.trust))
-          await writeInstallationCheckpoint(stores, {
-            key,
-            handle: next,
-            mutationID,
-            stateVersion: previous.state.version + 1,
-          })
+          }
+          return record.terminal && !previous.terminal
+            ? closing.freeze({
+                source: key,
+                reason: 'terminal',
+                prepared,
+                domain: { states: [record], lifetime: null },
+              })
+            : prepared
+        },
+        async (stores, prepared) => {
+          const target = stores.incarnation(key.incarnation)
+          await target.state.save(prepared.record, write?.expected)
+          await stores.trust.save(prepared.trust)
+          await stores.checkpoints.put(prepared.checkpoint)
+          if (!prepared.record.terminal)
+            await stores.checkpoints.put({
+              kind: 'publication',
+              id: `publication:${prepared.checkpoint.id}`,
+              key,
+              factID: prepared.checkpoint.id,
+              frame: null,
+              publishID: null,
+              accepted: false,
+              nextHeartbeatAt: null,
+            })
+
           if (write !== undefined) await target.control.apply(write.changes, mutationID)
         },
       )

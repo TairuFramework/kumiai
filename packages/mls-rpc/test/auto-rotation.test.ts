@@ -23,9 +23,11 @@ import { decodeStoredValue } from '../src/persistence-codec.js'
 import { listRetiredOutcomes, retireIncarnation } from '../src/registry/retired.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { registryLeaseSnapshot } from '../src/testing.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { openedDeliveryContext } from './fixtures/ownership-context.js'
 import { createTestCompletion } from './fixtures/real-group.js'
 import { createRegistryLeaseFixture } from './fixtures/registry-lease.js'
+import { requireValue } from './fixtures/require-value.js'
 import {
   buildSealedMemoryOperation,
   restoreMemoryControlHandle,
@@ -542,18 +544,28 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
             expect(owner.peer()).toBeNull()
             const groups = fixture.device.groups
             const mutationID = crypto.randomUUID()
-            await groups.transition(
+            await preparedTransition(
+              groups,
               await nextChange(groups, f.key.groupID, mutationID),
-              async (stores) => {
+              async (reads) => {
+                const lifetime = await reads.lifetime()
+                if (lifetime === null) throw new Error('Missing lifetime')
+                return {
+                  states: [seed.state],
+                  lifetime: {
+                    ...lifetime,
+                    latestIncarnation: 2,
+                    activeIncarnation: 2,
+                    revision: lifetime.revision + 1,
+                    mutationID,
+                  },
+                }
+              },
+              async (stores, closingData) => {
                 const lifetime = await stores.lifetime.load()
                 const trust = await stores.trust.load()
                 if (lifetime === null || trust === null) throw new Error('Missing source metadata')
-                await retireIncarnation(stores, {
-                  source: f.key,
-                  nextIncarnation: 2,
-                  mutationID,
-                  at: Date.now(),
-                })
+                await retireIncarnation(stores, requireValue(closingData.retirement))
                 await stores.lifetime.save({
                   ...lifetime,
                   latestIncarnation: 2,
@@ -573,6 +585,12 @@ describe.each(['real-mls', 'double'] as const)('%s auto-rotation', (mode) => {
                   mutationID,
                   stateVersion: seed.state.version,
                 })
+              },
+              {
+                source: f.key,
+                nextIncarnation: 2,
+                mutationID,
+                at: Date.now(),
               },
             )
             retirement.settle('committed')

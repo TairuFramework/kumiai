@@ -39,6 +39,7 @@ import {
   buildKeyRotation as controlBuildRotation,
 } from '../src/auto-rotation.js'
 import * as checkpoint from '../src/checkpoint.js'
+import { retirementDomain } from '../src/closing-preparation.js'
 import * as controlBuild from '../src/control-build.js'
 import * as entryCrypto from '../src/crypto.js'
 import { entryCapability } from '../src/entry-capability.js'
@@ -46,7 +47,11 @@ import { createHandlerCompletion } from '../src/handler-completion.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
 import * as coldModule from '../src/registry/cold.js'
 import * as liveSendModule from '../src/registry/live-send.js'
-import { deleteIncarnations, retireIncarnation } from '../src/registry/retired.js'
+import {
+  deleteIncarnations,
+  prepareIncarnationRetirement,
+  retireIncarnation,
+} from '../src/registry/retired.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { registrySafety } from '../src/registry/safety.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
@@ -131,8 +136,37 @@ for (const mode of ['real-mls', 'double'] as const) {
               const mutationID = crypto.randomUUID()
               return env.capability.run(
                 { groupID: env.key.groupID, mutationID },
-                async (reads) => ({ expected: await reads.lifetime(), value: null }),
-                async (stores) => {
+                async (reads, closing) => {
+                  const previous = await reads.lifetime()
+                  if (previous === null) throw new Error('Missing source')
+                  const lifetime = {
+                    ...previous,
+                    activeIncarnation: null,
+                    revision: previous.revision + 1,
+                    mutationID,
+                  }
+                  const prepared = {
+                    expected: previous,
+                    value: {
+                      lifetime,
+                      retirement: await prepareIncarnationRetirement(reads, {
+                        source: env.key,
+                        nextIncarnation: null,
+                        mutationID,
+                        at: 12,
+                      }),
+                    },
+                  }
+                  return primitive === 'clearTransport'
+                    ? prepared
+                    : closing.freeze({
+                        source: env.key,
+                        reason: 'delete',
+                        prepared,
+                        domain: await retirementDomain(reads, lifetime),
+                      })
+                },
+                async (stores, prepared) => {
                   const original = stores.incarnation
                   stores.incarnation = (incarnation) => {
                     const rows = original(incarnation)
@@ -145,22 +179,10 @@ for (const mode of ['real-mls', 'double'] as const) {
                     }
                   }
                   if (primitive === 'retirement') {
-                    await retireIncarnation(stores, {
-                      source: env.key,
-                      nextIncarnation: null,
-                      mutationID,
-                      at: 12,
-                    })
-                    const lifetime = await stores.lifetime.load()
-                    if (lifetime === null) throw new Error('Missing lifetime')
-                    await stores.lifetime.save({
-                      ...lifetime,
-                      activeIncarnation: null,
-                      revision: lifetime.revision + 1,
-                      mutationID,
-                    })
+                    await retireIncarnation(stores, prepared.retirement)
+                    await stores.lifetime.save(prepared.lifetime)
                   } else if (primitive === 'deletion')
-                    await deleteIncarnations(stores, env.key, mutationID)
+                    await deleteIncarnations(stores, env.key, prepared.lifetime)
                   else await stores.incarnation(1).clearTransport()
                 },
               )

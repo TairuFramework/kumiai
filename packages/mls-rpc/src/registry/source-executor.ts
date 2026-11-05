@@ -1,5 +1,6 @@
 import { PeerRemovedError } from '@kumiai/rpc'
 
+import { observeSourceClosure } from '../closing-preparation.js'
 import { coordinatorBinding, type EntryCapability, entryCapability } from '../entry-capability.js'
 import { groupBatchFor } from '../group-batch-binding.js'
 import { copyStoredValue } from '../memory-incarnation-stores.js'
@@ -191,6 +192,9 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
       }
     },
   }
+  observers.push(
+    observeSourceClosure(coordinator, (key, reason) => control.invalidate(key, reason)),
+  )
   const source = { executor, control }
   executorDisposals.set(source, () => {
     for (const unsubscribe of observers.splice(0)) unsubscribe()

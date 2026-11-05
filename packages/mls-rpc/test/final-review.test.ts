@@ -17,6 +17,7 @@ import type {
   MemoryTransaction,
 } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
 import {
   installSeed,
@@ -370,18 +371,32 @@ for (const mode of ['real-mls', 'double'] as const) {
       })
       const before = db.snapshot()
       await expect(
-        guarded.transition(await nextChange(groups, groupID, 'hook-retire'), async (stores) => {
-          supplied = stores
-          await stores.lifetime.save({ ...fresh.lifetime, revision: 2, mutationID: 'hook-retire' })
-          await stores.incarnation(2).state.save(fresh.state)
-          await stores.trust.save(fresh.trust)
-          await writeInstallationCheckpoint(stores, {
-            key: fresh.key,
-            confirmedTranscriptHash: fresh.confirmedTranscriptHash,
-            mutationID: 'hook-retire',
-            stateVersion: fresh.state.version,
-          })
-        }),
+        preparedTransition(
+          guarded,
+          await nextChange(groups, groupID, 'hook-retire'),
+          async (_reads) => {
+            return {
+              states: [fresh.state],
+              lifetime: { ...fresh.lifetime, revision: 2, mutationID: 'hook-retire' },
+            }
+          },
+          async (stores) => {
+            supplied = stores
+            await stores.lifetime.save({
+              ...fresh.lifetime,
+              revision: 2,
+              mutationID: 'hook-retire',
+            })
+            await stores.incarnation(2).state.save(fresh.state)
+            await stores.trust.save(fresh.trust)
+            await writeInstallationCheckpoint(stores, {
+              key: fresh.key,
+              confirmedTranscriptHash: fresh.confirmedTranscriptHash,
+              mutationID: 'hook-retire',
+              stateVersion: fresh.state.version,
+            })
+          },
+        ),
       ).rejects.toMatchObject({
         name: 'PersistencePhaseError',
         message: 'Cannot write domain in effects',
@@ -421,20 +436,37 @@ for (const mode of ['real-mls', 'double'] as const) {
           )
         } else {
           const change = await nextChange(recovered, groupID, 'retire-corrupt')
-          await recovered.transition(change, async (stores) => {
-            const life = await stores.lifetime.load()
-            if (life === null) throw new Error('Missing lifetime')
-            await stores.lifetime.save({
-              ...life,
-              revision: life.revision + 1,
-              mutationID: 'retire-corrupt',
-              activeIncarnation: null,
-            })
-            if (action === 'explicit-retire')
-              await stores
-                .incarnation(1)
-                .state.save({ ...key, version: source.version + 1, deleted: true })
-          })
+          await preparedTransition(
+            recovered,
+            change,
+            async (reads) => {
+              const life = await reads.lifetime()
+              if (life === null) throw new Error('Missing lifetime')
+              return {
+                states: [],
+                lifetime: {
+                  ...life,
+                  revision: life.revision + 1,
+                  mutationID: 'retire-corrupt',
+                  activeIncarnation: null,
+                },
+              }
+            },
+            async (stores) => {
+              const life = await stores.lifetime.load()
+              if (life === null) throw new Error('Missing lifetime')
+              await stores.lifetime.save({
+                ...life,
+                revision: life.revision + 1,
+                mutationID: 'retire-corrupt',
+                activeIncarnation: null,
+              })
+              if (action === 'explicit-retire')
+                await stores
+                  .incarnation(1)
+                  .state.save({ ...key, version: source.version + 1, deleted: true })
+            },
+          )
           expect((await recovered.load(groupID))?.activeIncarnation).toBeNull()
         }
         expect(await recovered.loadState(key)).toEqual({

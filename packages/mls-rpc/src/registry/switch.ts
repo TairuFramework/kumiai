@@ -14,6 +14,7 @@ import {
 
 import { branchAbandonmentPreparer, writeBranchAbandonment } from '../branch-history.js'
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
+import { retirementDomain } from '../closing-preparation.js'
 import type { EntryCapability } from '../entry-capability.js'
 import {
   hasActiveManualRecovery,
@@ -42,7 +43,7 @@ import {
   reserveFromBytes,
   restoreCaptured,
 } from './reserve.js'
-import { retireIncarnation } from './retired.js'
+import { prepareIncarnationRetirement, retireIncarnation } from './retired.js'
 import {
   assertRetirementDrained,
   type RegistryRetirement,
@@ -282,7 +283,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
           })
           return await capability.run(
             { groupID, mutationID: write.mutationID },
-            async (reads) => {
+            async (reads, closing) => {
               await assertRetirementDrained(reads)
               assertChoice(await reads.checkpoints())
               assertSafety(await reads.control(source.key.incarnation))
@@ -388,13 +389,45 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                   secret: await candidate.exportSecret(APP_TOPIC_LABEL, new Uint8Array(), 32),
                 },
               }
-              return {
+              const nextLifetime = {
+                ...lifetime,
+                latestIncarnation: destination.incarnation,
+                activeIncarnation: destination.incarnation,
+                revision: lifetime.revision + 1,
+                mutationID: write.mutationID,
+                restorePending: false,
+              }
+              const retirement = await prepareIncarnationRetirement(reads, {
+                source: source.key,
+                nextIncarnation: destination.incarnation,
+                ...(authorisationID === undefined
+                  ? { switchedRejoinID: rejoinID }
+                  : { manualRejoinID: rejoinID }),
+                abandonedAttempts: [
+                  ...new Set(
+                    (await reads.checkpoints()).flatMap((row) =>
+                      row.kind === 'manual-recovery' &&
+                      sameStoredValue(row.key, source.key) &&
+                      row.value.stage === 'authorised' &&
+                      row.value.attempt !== null &&
+                      row.value.attempt.id !== rejoinID
+                        ? [row.value.attempt.id]
+                        : [],
+                    ),
+                  ),
+                ],
+                mutationID: write.mutationID,
+                at: Date.now(),
+              })
+              const prepared = {
                 expected: {
                   revision: lifetime.revision,
                   activeIncarnation: lifetime.activeIncarnation,
                 },
                 value: {
                   current,
+                  nextLifetime,
+                  retirement,
                   abandonment: await branchAbandonmentPreparer(reads)({
                     source: source.key,
                     destination,
@@ -424,6 +457,12 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                   }),
                 },
               }
+              return await closing.freeze({
+                source: source.key,
+                reason: 'switch',
+                prepared,
+                domain: await retirementDomain(reads, nextLifetime, [state]),
+              })
             },
             async (stores, prepared) => {
               assertChoice(await stores.checkpoints.list())
@@ -473,28 +512,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
               assertSafety(await stores.incarnation(source.key.incarnation).control.load())
               stores.tx.onRollback(() => settle('rolled-back'))
               hooked = true
-              await retireIncarnation(stores, {
-                source: source.key,
-                nextIncarnation: destination.incarnation,
-                ...(authorisationID === undefined
-                  ? { switchedRejoinID: rejoinID }
-                  : { manualRejoinID: rejoinID }),
-                abandonedAttempts: [
-                  ...new Set(
-                    (await stores.checkpoints.list()).flatMap((row) =>
-                      row.kind === 'manual-recovery' &&
-                      sameStoredValue(row.key, source.key) &&
-                      row.value.stage === 'authorised' &&
-                      row.value.attempt !== null &&
-                      row.value.attempt.id !== rejoinID
-                        ? [row.value.attempt.id]
-                        : [],
-                    ),
-                  ),
-                ],
-                mutationID: write.mutationID,
-                at: Date.now(),
-              })
+              await retireIncarnation(stores, prepared.retirement)
               if (manual !== null && 'format' in record)
                 await saveManualRecovery(stores, {
                   ...manual,
@@ -503,14 +521,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                   mutationID: write.mutationID,
                   attempt: { ...record, stage: 'adopted', destinationKey: destination },
                 })
-              await stores.lifetime.save({
-                ...lifetime,
-                latestIncarnation: destination.incarnation,
-                activeIncarnation: destination.incarnation,
-                revision: lifetime.revision + 1,
-                mutationID: write.mutationID,
-                restorePending: false,
-              })
+              await stores.lifetime.save(prepared.nextLifetime)
               const rows = stores.incarnation(destination.incarnation)
               await rows.state.save(prepared.state)
               await stores.trust.save(prepared.trust)

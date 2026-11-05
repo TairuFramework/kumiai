@@ -22,6 +22,8 @@ import {
   prepareCheckpointInstallation,
   prepareCheckpointInstallationFromTrust,
 } from '../../src/checkpoint-capture.js'
+import { retirementDomain } from '../../src/closing-preparation.js'
+import { entryCapability } from '../../src/entry-capability.js'
 import type {
   GroupKey,
   GroupLifetime,
@@ -235,21 +237,42 @@ export async function installSeed(
   mutationID: string,
 ): Promise<void> {
   const change = await nextChange(groups, seed.key.groupID, mutationID)
-  await groups.transition(change, async (stores) => {
-    await stores.lifetime.save({
-      ...seed.lifetime,
-      revision: (change.expected?.revision ?? 0) + 1,
-      mutationID,
-    })
-    await stores.incarnation(seed.key.incarnation).state.save(seed.state)
-    await stores.trust.save(seed.trust)
-    await writeInstallationCheckpoint(stores, {
-      key: seed.key,
-      confirmedTranscriptHash: seed.confirmedTranscriptHash,
-      mutationID,
-      stateVersion: seed.state.version,
-    })
-  })
+  const capability = entryCapability(groups)
+  if (capability === null) throw new Error('Missing private entry')
+  await capability.run(
+    { groupID: seed.key.groupID, mutationID },
+    async (reads, closing) => {
+      const lifetime = {
+        ...seed.lifetime,
+        revision: (change.expected?.revision ?? 0) + 1,
+        mutationID,
+      }
+      const prepared = { expected: change.expected, value: { lifetime } }
+      const previous = await reads.lifetime()
+      if (previous === null || previous.activeIncarnation === lifetime.activeIncarnation)
+        return prepared
+      return closing.freeze({
+        source: {
+          groupID: previous.groupID,
+          incarnation: previous.activeIncarnation ?? previous.latestIncarnation,
+        },
+        reason: 'readmission',
+        prepared,
+        domain: await retirementDomain(reads, lifetime, [seed.state]),
+      })
+    },
+    async (stores, prepared) => {
+      await stores.lifetime.save(prepared.lifetime)
+      await stores.incarnation(seed.key.incarnation).state.save(seed.state)
+      await stores.trust.save(seed.trust)
+      await writeInstallationCheckpoint(stores, {
+        key: seed.key,
+        confirmedTranscriptHash: seed.confirmedTranscriptHash,
+        mutationID,
+        stateVersion: seed.state.version,
+      })
+    },
+  )
 }
 
 export async function nextChange(

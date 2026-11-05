@@ -17,6 +17,7 @@ import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RetirementAttempt } from '../src/registry/types.js'
 import { deferred } from '../src/runtime.js'
 import { gateRegistryMaintenance } from '../src/testing.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
@@ -146,8 +147,35 @@ for (const mode of ['real-mls', 'double'] as const) {
         )
         const keyB = { groupID: groupIDB, incarnation: 1 }
         await expect(
-          fixture.device.groups.transition(
+          preparedTransition(
+            fixture.device.groups,
             { groupID: groupIDB, mutationID: 'independent', expected: null },
+            async (_reads) => {
+              return {
+                states: [
+                  {
+                    ...keyB,
+                    version: 1,
+                    deleted: false,
+                    terminal: false,
+                    epoch: Number(handleB.epoch),
+                    epochAuthenticator: handleB.state.keySchedule.epochAuthenticator,
+                    state: encodeClientState(handleB.state),
+                    credential: handleB.credential,
+                    ledger: handleB.ledgerTokens,
+                    senderHWM: 0,
+                  },
+                ],
+                lifetime: {
+                  groupID: groupIDB,
+                  latestIncarnation: 1,
+                  activeIncarnation: 1,
+                  revision: 1,
+                  mutationID: 'independent',
+                  restorePending: false,
+                },
+              }
+            },
             async (stores) => {
               await stores.lifetime.save({
                 groupID: groupIDB,

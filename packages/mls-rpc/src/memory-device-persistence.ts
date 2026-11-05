@@ -505,6 +505,7 @@ export function createMemoryDevicePersistence(params: {
               devicePackages: true,
               providerID,
             })
+            const closing = coordinator.closingPreparation(entry, owned)
             const attempt = entry.attempt()
             let cancel!: () => void
             const cancelled = new Promise<never>((_resolve, reject) => {
@@ -515,10 +516,13 @@ export function createMemoryDevicePersistence(params: {
             const prepared = await Promise.race([
               Promise.resolve().then(() =>
                 entry.callback(() =>
-                  prepare({
-                    device: memoryOperation(tx, () => load(tx)),
-                    group: coordinator.prepareReads(entry, owned.groupID),
-                  }),
+                  prepare(
+                    {
+                      device: memoryOperation(tx, () => load(tx)),
+                      group: coordinator.prepareReads(entry, owned.groupID),
+                    },
+                    closing.closing,
+                  ),
                 ),
               ),
               cancelled,
@@ -528,7 +532,7 @@ export function createMemoryDevicePersistence(params: {
               expectedRevision: prepared.expectedDeviceRevision,
               group: { ...owned, expected: copyStoredValue(prepared.expected) },
             }))
-            const value = entry.callback(() => prepared.value)
+            const value = entry.callback(() => closing.consume(prepared))
             await entry.enter('work')
             attempt.assertLive()
             if (entry.rollbackOnly) throw new GroupStateConflictError('Prepare is rollback-only')

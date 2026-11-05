@@ -16,7 +16,12 @@ import {
   SendNotAdmissibleError,
 } from '@kumiai/rpc'
 
-import type { EntryCapability, EntryReads, Prepared } from '../entry-capability.js'
+import type {
+  ClosingPreparation,
+  EntryCapability,
+  EntryReads,
+  Prepared,
+} from '../entry-capability.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   GroupStateConflictError,
@@ -684,7 +689,7 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
   }
   async function run<P extends Saved, T>(
     request: { groupID: string; mutationID: string | null },
-    prepare: (reads: EntryReads) => Promise<Prepared<P>>,
+    prepare: (reads: EntryReads, closing: ClosingPreparation) => Promise<Prepared<P>>,
     work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
     effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
   ): Promise<T> {
@@ -693,10 +698,19 @@ export function createLiveSend<TTx extends GroupTransaction>(params: {
     try {
       const result = await capability.run(
         request,
-        async (reads) => {
-          const prepared = await prepare(reads)
+        async (reads, closing) => {
+          let prepared = await prepare(reads, closing)
           mutationID = prepared.mutationID ?? mutationID
           proof = register(prepared.value)
+          const value = prepared.value as { record?: ReadableGroupState }
+          if (value.record?.terminal && !owner.value.record.terminal) {
+            prepared = await closing.freeze({
+              source: owner.key,
+              reason: 'terminal',
+              prepared,
+              domain: { states: [value.record], lifetime: null },
+            })
+          }
           return prepared
         },
         work,

@@ -437,29 +437,67 @@ test('storage only removed installation retains its fact without publication', a
   if (seed.state.state === null) throw new Error('Missing state')
   const client = decodeClientState(seed.state.state)
   if (client === undefined) throw new Error('Invalid state')
-  client.ratchetTree = []
-  client.groupActiveState = { kind: 'removedFromGroup' }
-  seed.state.state = null
-  seed.state.terminal = true
-  seed.trust.signerTree = []
   const fixture = await createStorageFixture({
     id: seed.key.groupID,
     mode: 'double',
     setup: 'empty',
   })
   try {
-    await installSeed(fixture.ports.device.groups, seed, 'removed')
+    const groups = fixture.ports.device.groups
+    await installSeed(groups, seed, 'bootstrap')
+    const before = await fixture.entry().read(seed.key.groupID, (reads) => reads.checkpoints())
+    const authenticator = crypto.getRandomValues(new Uint8Array(32))
+    const state = {
+      ...seed.state,
+      state: null,
+      terminal: true,
+      version: 2,
+      epoch: 1,
+      epochAuthenticator: authenticator,
+    }
+    const trust = {
+      ...seed.trust,
+      signerTree: [],
+      installed: { ...seed.trust.installed, epoch: 1, authenticator },
+      spentEpochAuthenticators: [...seed.trust.spentEpochAuthenticators, authenticator],
+    }
+    await fixture.entry().run(
+      { groupID: seed.key.groupID, mutationID: 'removed' },
+      async (reads, closing) => {
+        const fact = await prepareCheckpointInstallationFromTrust({
+          key: seed.key,
+          trust,
+          confirmedTranscriptHash: client.groupContext.confirmedTranscriptHash,
+          mutationID: 'removed',
+          stateVersion: state.version,
+          previousFact:
+            checkpointCapture.currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+        })
+        const prepared = { expected: await reads.lifetime(), value: { state, trust, fact } }
+        return closing.freeze({
+          source: seed.key,
+          reason: 'terminal',
+          prepared,
+          domain: { states: [state], lifetime: null },
+        })
+      },
+      async (stores, prepared) => {
+        await stores.incarnation(1).state.save(prepared.state)
+        await stores.trust.save(prepared.trust)
+        await stores.checkpoints.put(prepared.fact)
+      },
+    )
     const records = await fixture.entry().read(seed.key.groupID, (reads) => reads.checkpoints())
-    expect(
-      records.filter((record) => record.kind !== 'coverage').map((record) => record.kind),
-    ).toEqual(['fact', 'branch-coverage'])
-    const fact = records[0]
-    if (fact?.kind !== 'fact') throw new Error('Missing removed installation fact')
-    expect(records.find((row) => row.kind === 'branch-coverage')).toMatchObject({
-      key: seed.key,
-      startedEpoch: seed.state.epoch,
-      startedAuthHash: decodeEpochRosterFact(fact.canonical).authHash,
-    })
+    const fact = checkpointCapture.currentCheckpointFact(records)
+    if (fact === null) throw new Error('Missing removed installation fact')
+    expect(records.filter((row) => row.kind === 'fact')).toHaveLength(2)
+    expect(records.filter((row) => row.kind === 'publication')).toEqual(
+      before.filter((row) => row.kind === 'publication'),
+    )
+    expect(records.find((row) => row.kind === 'branch-coverage')).toEqual(
+      before.find((row) => row.kind === 'branch-coverage'),
+    )
+    expect(records.some((row) => row.kind === 'publication' && row.factID === fact.id)).toBe(false)
     expect(decodeEpochRosterFact(fact.canonical)).toMatchObject({
       members: [],
       confirmedTranscriptHash: toB64U(client.groupContext.confirmedTranscriptHash),

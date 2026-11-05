@@ -267,9 +267,13 @@ test.each(
         expect(
           (await f.service().forkNotices(source.groupID)).find((row) => row.id === f.noticeID),
         ).toMatchObject({ closedAt: null })
+        await groups.ports(source).cursor.save('post-rollback-completion', '1')
         params.source = await f.local().registry.recoverySource(source.groupID)
-        await run()
-      } else expect(settled).toEqual({ value: { ...source, incarnation: 2 } })
+        await expect(run()).rejects.toThrow('Closing rollback retry source or domain moved')
+        expect(await f.local().safety().events(source)).toEqual([])
+        return
+      }
+      expect(settled).toEqual({ value: { ...source, incarnation: 2 } })
       const events = await f.local().safety().events(source)
       expect(events).toHaveLength(1)
       expect(events[0]).toMatchObject({

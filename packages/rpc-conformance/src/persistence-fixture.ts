@@ -377,7 +377,24 @@ export type ConformanceEntryReads<Position extends string = string> = {
     incarnation: number,
   ): Promise<'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'>
 }
-export type ConformancePrepared<T> = { expected: ConformanceGroupTransition['expected']; value: T }
+export type ConformanceClosingDomain = {
+  states: Array<ConformanceGroupStateRecord>
+  lifetime: ConformanceGroupLifetime | null
+}
+export type ConformanceClosingPreparation = {
+  freeze<TPrepared extends ConformancePrepared<unknown>>(request: {
+    source: ConformanceGroupKey
+    reason: 'terminal' | 'switch' | 'readmission' | 'delete' | 'successor'
+    prepared: TPrepared
+    domain: ConformanceClosingDomain
+  }): Promise<TPrepared>
+}
+export type ConformancePrepared<T> = {
+  expected: ConformanceGroupTransition['expected']
+  mutationID?: string
+  closing?: { mutationID: string }
+  value: T
+}
 export type ConformanceEntryCapability<TTx extends ConformanceGroupTransaction> = {
   finaliseCertifiedApp(key: ConformanceGroupKey, seq: number): Promise<void>
   assertRoot(): void
@@ -390,7 +407,10 @@ export type ConformanceEntryCapability<TTx extends ConformanceGroupTransaction> 
   read<T>(groupID: string, fn: (reads: ConformanceEntryReads) => Promise<T>): Promise<T>
   run<P, T>(
     request: Pick<ConformanceGroupTransition, 'groupID' | 'mutationID'>,
-    prepare: (reads: ConformanceEntryReads) => Promise<ConformancePrepared<P>>,
+    prepare: (
+      reads: ConformanceEntryReads,
+      closing: ConformanceClosingPreparation,
+    ) => Promise<ConformancePrepared<P>>,
     work: (stores: ConformanceGroupStores<TTx>, prepared: P) => Promise<T>,
   ): Promise<T>
 }

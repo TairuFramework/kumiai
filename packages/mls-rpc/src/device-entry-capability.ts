@@ -1,4 +1,4 @@
-import type { EntryReads, Prepared } from './entry-capability.js'
+import type { ClosingPreparation, EntryReads, Prepared } from './entry-capability.js'
 import type {
   DevicePersistence,
   DeviceRecord,
@@ -13,7 +13,10 @@ export type DeviceEntryCapability<TTx extends GroupTransaction> = {
   read<TValue>(work: (stores: DeviceStores<TTx>) => Promise<TValue>): Promise<TValue>
   runCombined<TPrepared, TResult>(
     request: { groupID: string; mutationID: string; signal?: AbortSignal },
-    prepare: (reads: DeviceEntryReads) => Promise<PreparedDevice<TPrepared>>,
+    prepare: (
+      reads: DeviceEntryReads,
+      closing: ClosingPreparation,
+    ) => Promise<PreparedDevice<TPrepared>>,
     work: (stores: DeviceStores<TTx>, prepared: TPrepared) => Promise<TResult>,
   ): Promise<TResult>
 }

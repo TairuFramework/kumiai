@@ -2,6 +2,8 @@ import { encodeClientState } from '@kumiai/mls'
 import { forkEventID, type GroupForkEvidence, recoveryUnavailableEventID } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { currentCheckpointFact, prepareCheckpointInstallation } from '../src/checkpoint-capture.js'
+import { retirementDomain } from '../src/closing-preparation.js'
 import {
   bindEntryCapability,
   coordinatorBinding,
@@ -31,7 +33,6 @@ import {
   registryFixtureSafety,
   registryFixtureSafetyParams,
 } from './fixtures/registry.js'
-import { writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
 function entry(fixture: RegistryFixture) {
   const value = entryCapability(fixture.device.groups)
@@ -62,7 +63,8 @@ function overrideReads(fixture: RegistryFixture, fn: (reads: EntryReads) => Entr
     capability: {
       ...capability,
       read: (groupID, read) => capability.read(groupID, (reads) => read(fn(reads))),
-      run: (request, prepare, work) => capability.run(request, (reads) => prepare(fn(reads)), work),
+      run: (request, prepare, work) =>
+        capability.run(request, (reads, closing) => prepare(fn(reads), closing), work),
     },
   })
 }
@@ -99,26 +101,59 @@ async function move(fixture: RegistryFixture, key: GroupKey, incarnation: number
   return () =>
     entry(fixture).run(
       { groupID: key.groupID, mutationID },
-      async (reads) => ({ expected: await reads.lifetime(), value: null }),
-      async (stores) => {
-        const life = await stores.lifetime.load()
+      async (reads, closing) => {
+        const life = await reads.lifetime()
         if (life === null) throw new Error('Missing lifetime')
-        if (incarnation !== key.incarnation)
-          await stores.lifetime.save({
-            ...life,
-            latestIncarnation: incarnation,
-            activeIncarnation: incarnation,
-            revision: life.revision + 1,
-            mutationID,
+        const lifetime =
+          incarnation === key.incarnation
+            ? null
+            : {
+                ...life,
+                latestIncarnation: incarnation,
+                activeIncarnation: incarnation,
+                revision: life.revision + 1,
+                mutationID,
+              }
+        const prepared = {
+          expected: life,
+          value: {
+            state: next,
+            lifetime,
+            trust: recoveryTrustFor(handle, nextKey, trust),
+            checkpoint: await prepareCheckpointInstallation({
+              key: nextKey,
+              handle,
+              mutationID,
+              stateVersion: next.version,
+              previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+            }),
+          },
+        }
+        return lifetime === null
+          ? prepared
+          : closing.freeze({
+              source: key,
+              reason: 'switch',
+              prepared,
+              domain: await retirementDomain(reads, lifetime, [next]),
+            })
+      },
+      async (stores, prepared) => {
+        if (prepared.lifetime !== null) await stores.lifetime.save(prepared.lifetime)
+        await stores.incarnation(incarnation).state.save(prepared.state)
+        await stores.trust.save(prepared.trust)
+        await stores.checkpoints.put(prepared.checkpoint)
+        if (!prepared.state.terminal)
+          await stores.checkpoints.put({
+            kind: 'publication',
+            id: `publication:${prepared.checkpoint.id}`,
+            key: nextKey,
+            factID: prepared.checkpoint.id,
+            frame: null,
+            publishID: null,
+            accepted: false,
+            nextHeartbeatAt: null,
           })
-        await stores.incarnation(incarnation).state.save(next)
-        await stores.trust.save(recoveryTrustFor(handle, nextKey, trust))
-        await writeInstallationCheckpoint(stores, {
-          key: nextKey,
-          handle,
-          mutationID,
-          stateVersion: next.version,
-        })
       },
     )
 }

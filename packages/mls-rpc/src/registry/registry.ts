@@ -10,7 +10,9 @@ import {
 
 import { finaliseAppSettlements } from '../app-settlement.js'
 import { bindRegistryCheckpoint } from '../checkpoint.js'
+import { retirementDomain } from '../closing-preparation.js'
 import { validateDevicePackages } from '../device-packages.js'
+import type { ClosingPreparation, Prepared } from '../entry-capability.js'
 import {
   type AccountedGroupObservation,
   coordinatorBinding,
@@ -889,15 +891,35 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   }
   async function deleteGroup(requestedKey: GroupKey): Promise<void> {
     const key = { ...requestedKey }
-    await retireGroup(key, 'Inactive deletion source', (stores, mutationID) =>
-      deleteIncarnations(stores, key, mutationID),
+    await retireGroup(
+      key,
+      'Inactive deletion source',
+      async (reads, closing) => {
+        const previous = await reads.lifetime()
+        if (previous === null) throw new DisplacedGroupHandleError('Inactive deletion source')
+        const mutationID = crypto.randomUUID()
+        const lifetime = {
+          ...previous,
+          activeIncarnation: null,
+          revision: previous.revision + 1,
+          mutationID,
+        }
+        return closing.freeze({
+          source: key,
+          reason: 'delete',
+          prepared: { expected: previous, mutationID, value: { lifetime } },
+          domain: await retirementDomain(reads, lifetime),
+        })
+      },
+      (stores, prepared) => deleteIncarnations(stores, key, prepared.lifetime),
     )
   }
   /** Drains source hooks and work, then runs one retiring transaction on a quiet source. */
-  async function retireGroup<TResult>(
+  async function retireGroup<P, TResult>(
     requestedKey: GroupKey,
     inactive: string,
-    work: (stores: GroupStores<TTx>, mutationID: string) => Promise<TResult>,
+    prepare: (reads: EntryReads, closing: ClosingPreparation) => Promise<Prepared<P>>,
+    work: (stores: GroupStores<TTx>, prepared: P) => Promise<TResult>,
     afterDrain?: () => Promise<void>,
   ): Promise<TResult> {
     assertOpen()
@@ -920,22 +942,24 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         await afterDrain?.()
         const activity = capability.activity(key.groupID)
         const generation = slot.generation
-        const mutationID = crypto.randomUUID()
+        let mutationID: string | undefined
         try {
           // Project displacement first; listeners dispatch only after owner release.
           stopObservation = capability.observe(key.groupID, (observation) => {
             if (observation.mutationID === mutationID) settle('committed')
           })
           return await capability.run(
-            { groupID: key.groupID, mutationID },
-            async (reads) => {
+            { groupID: key.groupID, mutationID: null },
+            async (reads, closing) => {
               const lifetime = await reads.lifetime()
               if (lifetime?.activeIncarnation !== key.incarnation)
                 throw new DisplacedGroupHandleError(inactive)
               await assertRetirementDrained(reads)
-              return { expected: lifetime, value: null }
+              const prepared = await prepare(reads, closing)
+              mutationID = prepared.mutationID
+              return prepared
             },
-            async (stores) => {
+            async (stores, prepared) => {
               const current = capability.activity(key.groupID, mutationID)
               if (
                 slot.retirement?.attempt !== attempt ||
@@ -945,7 +969,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
               )
                 throw new DeleteDrainChanged()
               stores.tx.onRollback(() => settle('rolled-back'))
-              return await work(stores, mutationID)
+              return await work(stores, prepared)
             },
           )
         } catch (error) {
@@ -1187,8 +1211,8 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
         if (!disposed) release()
       }
     },
-    retire: (key, work, afterDrain) =>
-      track(retireGroup(key, 'Inactive retirement source', work, afterDrain)),
+    retire: (key, prepare, work, afterDrain) =>
+      track(retireGroup(key, 'Inactive retirement source', prepare, work, afterDrain)),
     safetyHold: held,
     onAdmissionChanged(key, listener) {
       assertOpen()

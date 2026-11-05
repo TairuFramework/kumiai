@@ -13,6 +13,7 @@ import { assertCheckpointUpdates } from '../src/checkpoint-store.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { entryCapability } from '../src/entry-capability.js'
 import type { AppOutboxEntry, PendingAppFrame } from '../src/persistence-types.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { createForkNoticeFixture, createRegistryFixture } from './fixtures/registry.js'
@@ -328,8 +329,22 @@ for (const mode of ['real-mls', 'double'] as const) {
       test('dedicated journal refuses retired incarnations even while facts remain retained', async () => {
         const h = await setup()
         try {
-          await h.groups.transition(
+          await preparedTransition(
+            h.groups,
             await nextChange(h.groups, h.key.groupID, 'retire-journal'),
+            async (reads) => {
+              const life = await reads.lifetime()
+              if (life === null) throw new Error('Missing lifetime')
+              return {
+                states: [],
+                lifetime: {
+                  ...life,
+                  revision: life.revision + 1,
+                  mutationID: 'retire-journal',
+                  activeIncarnation: null,
+                },
+              }
+            },
             async (stores) => {
               const life = await stores.lifetime.load()
               if (life === null) throw new Error('Missing lifetime')

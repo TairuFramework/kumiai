@@ -172,6 +172,7 @@ export {
   assertCorruptStorageRecovery,
   assertLowerEpochRefused,
   assertPartialLossSpentRefused,
+  preparedStorageTransition,
   testGroupStorageConformance,
 } from './group-storage.js'
 export { testHandlerBatchingConformance } from './handler-batching.js'

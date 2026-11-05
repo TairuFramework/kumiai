@@ -2,6 +2,9 @@ import { describe, expect, test } from 'vitest'
 
 import type { ConformanceAdoptionWrite, ConformanceControlChanges } from './control-store.js'
 import type {
+  ConformanceClosingDomain,
+  ConformanceEntryCapability,
+  ConformanceEntryReads,
   ConformanceGroupPersistence,
   ConformanceGroupStateRecord,
   ConformanceGroupStores,
@@ -125,6 +128,89 @@ export async function storageSeed<TTx extends ConformanceGroupTransaction>(
   }
 }
 
+// Fixtures use the provider's private preparation seam. Public transitions cannot declare closure.
+export function preparedStorageTransition<TTx extends ConformanceGroupTransaction, TResult>(
+  entry: Pick<ConformanceEntryCapability<TTx>, 'run'>,
+  change: ConformanceGroupTransition,
+  domain: (reads: ConformanceEntryReads) => Promise<ConformanceClosingDomain>,
+  work: (stores: ConformanceGroupStores<TTx>) => Promise<TResult>,
+): Promise<TResult> {
+  return entry.run(
+    change,
+    async (reads, closing) => {
+      const plan = await domain(reads)
+      const previous = await reads.lifetime()
+      const prepared = { expected: change.expected, value: plan }
+      if (previous === null) return prepared
+      const displaced =
+        plan.lifetime !== null && plan.lifetime.activeIncarnation !== previous.activeIncarnation
+      let terminal = false
+      for (const state of plan.states)
+        if (
+          !state.deleted &&
+          state.terminal &&
+          !(await reads.metadata(state.incarnation))?.terminal
+        )
+          terminal = true
+      if (!displaced && !terminal) return prepared
+      if (displaced && previous.activeIncarnation !== null) {
+        const metadata = await reads.metadata(previous.activeIncarnation)
+        if (metadata === null) throw new Error('Missing retirement metadata')
+        if (!metadata.deleted)
+          plan.states.push({
+            groupID: change.groupID,
+            incarnation: metadata.incarnation,
+            version: metadata.version + 1,
+            deleted: true,
+          })
+      }
+      return closing.freeze({
+        source: {
+          groupID: change.groupID,
+          incarnation: previous.activeIncarnation ?? previous.latestIncarnation,
+        },
+        reason: displaced
+          ? plan.lifetime?.activeIncarnation === null
+            ? 'delete'
+            : 'readmission'
+          : 'terminal',
+        prepared,
+        domain: plan,
+      })
+    },
+    work,
+  )
+}
+export async function storageRetirementDomain(
+  reads: ConformanceEntryReads,
+  mutationID: string,
+): Promise<ConformanceClosingDomain> {
+  const lifetime = await reads.lifetime()
+  if (lifetime === null) throw new Error('Missing retirement source')
+  return {
+    states: [],
+    lifetime: { ...lifetime, activeIncarnation: null, revision: lifetime.revision + 1, mutationID },
+  }
+}
+export async function storageInstallDomain(
+  reads: ConformanceEntryReads,
+  seed: Awaited<ReturnType<typeof storageSeed>>,
+  mutationID: string,
+  incarnation = 1,
+): Promise<ConformanceClosingDomain> {
+  const previous = await reads.lifetime()
+  return {
+    states: [{ ...seed.state, incarnation, version: 1 }],
+    lifetime: {
+      ...seed.lifetime,
+      latestIncarnation: incarnation,
+      activeIncarnation: incarnation,
+      revision: (previous?.revision ?? 0) + 1,
+      mutationID,
+    },
+  }
+}
+
 export async function writeStorageInstall<TTx extends ConformanceGroupTransaction>(
   stores: ConformanceGroupStores<TTx>,
   seed: Awaited<ReturnType<typeof storageSeed>>,
@@ -236,8 +322,10 @@ export async function assertCorruptStorageRecovery<TTx extends ConformanceGroupT
     }
     expect(await restored.load(groupID)).toEqual(lifetimeBefore)
     const before = await fixture.inspectRows()
-    const installation = restored.transition(
+    const installation = preparedStorageTransition(
+      fixture.entry(),
       await storageChange(restored, groupID, 'install-corrupt'),
+      async (reads) => storageInstallDomain(reads, fresh, 'install-corrupt', 2),
       async (stores) => writeStorageInstall(stores, fresh, 'install-corrupt', 2),
     )
     if (namespace === 'state') {
@@ -309,8 +397,11 @@ export async function assertPartialLossSpentRefused<TTx extends ConformanceGroup
     const change = await storageChange(device.groups, groupID, 'reinstall')
     const before = await fixture.inspectRows()
     await expect(
-      device.groups.transition(change, async (stores) =>
-        writeStorageInstall(stores, seed, 'reinstall'),
+      preparedStorageTransition(
+        fixture.entry(),
+        change,
+        async (reads) => storageInstallDomain(reads, seed, 'reinstall'),
+        async (stores) => writeStorageInstall(stores, seed, 'reinstall'),
       ),
     ).rejects.toMatchObject({
       name: 'GroupStateConflictError',
@@ -541,8 +632,10 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           const fresh = await storageSeed(donor.ports)
           const groups = fixture.ports.device.groups
           const before = await fixture.entry().read(groupID, (reads) => reads.checkpoints())
-          await groups.transition(
+          await preparedStorageTransition(
+            fixture.entry(),
             await storageChange(groups, groupID, 'shared-install'),
+            async (reads) => storageInstallDomain(reads, fresh, 'shared-install', 2),
             (stores) => writeStorageInstall(stores, fresh, 'shared-install', 2),
           )
           const records = await fixture.entry().read(groupID, (reads) => reads.checkpoints())
@@ -895,8 +988,23 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               'meta',
               JSON.stringify([groupID, 1, JSON.stringify(['settlement', 7])]),
             )
-          await groups.transition(
+          await preparedStorageTransition(
+            fixture.entry(),
             await storageChange(groups, groupID, 'preserve-safety'),
+            async (reads) =>
+              action === 'retire'
+                ? storageInstallDomain(reads, seed, 'preserve-safety', 2)
+                : action === 'delete'
+                  ? storageRetirementDomain(reads, 'preserve-safety')
+                  : action === 'terminal'
+                    ? reads.state(1).then((state) => {
+                        if (state === null || state.deleted) throw new Error('Missing source')
+                        return {
+                          states: [{ ...state, version: state.version + 1, terminal: true }],
+                          lifetime: null,
+                        }
+                      })
+                    : Promise.resolve({ states: [], lifetime: null }),
             async (stores) => {
               const rows = stores.incarnation(1)
               if (action === 'terminal') {
@@ -1156,8 +1264,8 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         expect(evidence.applied).toContainEqual(row)
         expect(evidence.cursor).toEqual(cursor)
         await expect(
-          groups.transition(
-            await storageChange(groups, groupID, 'evidence-rollback'),
+          reopened.transition(
+            await storageChange(reopened, groupID, 'evidence-rollback'),
             async (stores) => {
               await stores
                 .incarnation(1)
@@ -1169,9 +1277,23 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             },
           ),
         ).rejects.toThrow('rollback evidence')
-        expect(await groups.readEvidence(key)).toEqual(evidence)
-        await groups.transition(
-          await storageChange(groups, groupID, 'evidence-retire'),
+        expect(await reopened.readEvidence(key)).toEqual(evidence)
+        await preparedStorageTransition(
+          fixture.entry(),
+          await storageChange(reopened, groupID, 'evidence-retire'),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            return {
+              states: [],
+              lifetime: {
+                ...life,
+                activeIncarnation: null,
+                revision: life.revision + 1,
+                mutationID: 'evidence-retire',
+              },
+            }
+          },
           async (stores) => {
             const life = await stores.lifetime.load()
             if (life === null) throw new Error('missing lifetime')
@@ -1183,7 +1305,7 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             })
           },
         )
-        expect(await groups.readEvidence(key)).toMatchObject({
+        expect(await reopened.readEvidence(key)).toMatchObject({
           source: { key, identity: null },
           terminal: false,
           applied: control.applied,
@@ -1601,8 +1723,11 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           ).rejects.toThrow()
         }
         await expect(
-          groups.transition(await storageChange(groups, groupID, 'spent'), async (stores) =>
-            writeStorageInstall(stores, seed, 'spent', 2),
+          preparedStorageTransition(
+            fixture.entry(),
+            await storageChange(groups, groupID, 'spent'),
+            async (reads) => storageInstallDomain(reads, seed, 'spent', 2),
+            async (stores) => writeStorageInstall(stores, seed, 'spent', 2),
           ),
         ).rejects.toThrow()
         expect(await fixture.inspectRows()).toEqual(before)
@@ -1644,8 +1769,23 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         const fresh = await storageSeed(donor.ports)
         const before = await fixture.inspectRows()
         await expect(
-          groups.transition(
+          preparedStorageTransition(
+            fixture.entry(),
             await storageChange(groups, groupID, 'missing-trust-install'),
+            async (reads) => {
+              const life = await reads.lifetime()
+              if (life === null) throw new Error('Missing lifetime')
+              return {
+                states: [],
+                lifetime: {
+                  ...life,
+                  latestIncarnation: 2,
+                  activeIncarnation: 2,
+                  revision: life.revision + 1,
+                  mutationID: 'missing-trust-install',
+                },
+              }
+            },
             async (stores) => {
               const life = await stores.lifetime.load()
               if (life === null) throw new Error('Missing lifetime')
@@ -1675,8 +1815,11 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
         const groups = device.groups
         const fresh = await storageSeed(donor.ports)
         await groups.ports(key).cursor.save('topic:keep', '7')
-        await groups.transition(await storageChange(groups, groupID, 'switch'), async (stores) =>
-          writeStorageInstall(stores, fresh, 'switch', 2),
+        await preparedStorageTransition(
+          fixture.entry(),
+          await storageChange(groups, groupID, 'switch'),
+          async (reads) => storageInstallDomain(reads, fresh, 'switch', 2),
+          async (stores) => writeStorageInstall(stores, fresh, 'switch', 2),
         )
         expect((await groups.loadState(key))?.deleted).toBe(true)
         expect(groups.ports(key).key).toEqual(key)
@@ -1731,8 +1874,16 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             const hooks: Array<string> = []
             const fault = fixture.rejectCommitPending()
             let settled = false
-            const operation = groups
-              .transition(change, async (stores) => {
+            const operation = preparedStorageTransition(
+              fixture.entry(),
+              change,
+              async (reads) =>
+                stage === 'absent'
+                  ? storageInstallDomain(reads, seed, 'late')
+                  : stage === 'tombstone'
+                    ? storageRetirementDomain(reads, 'late')
+                    : Promise.resolve({ states: [], lifetime: null }),
+              async (stores) => {
                 stores.tx.onCommit(() => {
                   hooks.push('commit')
                   throw new Error('contained hook')
@@ -1763,17 +1914,17 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
                 }
                 await params.writeSideRow(stores.tx, 'effect-1', utf8('effect'))
                 return 'private-result'
-              })
-              .then(
-                (value) => {
-                  settled = true
-                  return value
-                },
-                (error: unknown) => {
-                  settled = true
-                  return error
-                },
-              )
+              },
+            ).then(
+              (value) => {
+                settled = true
+                return value
+              },
+              (error: unknown) => {
+                settled = true
+                return error
+              },
+            )
             await fault.rejected
             await fault.barrierWaiting
             expect(settled).toBe(false)
@@ -1819,8 +1970,10 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
               expect((await groups.loadState(key))?.deleted).toBe(true)
               expect(await groups.loadTrust(groupID)).not.toBeNull()
               await expect(
-                groups.transition(
+                preparedStorageTransition(
+                  fixture.entry(),
                   { groupID, mutationID: 'resurrect', expected: null },
+                  async (reads) => storageInstallDomain(reads, seed, 'resurrect'),
                   async (stores) => writeStorageInstall(stores, seed, 'resurrect'),
                 ),
               ).rejects.toThrow()
@@ -1861,20 +2014,30 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
             const before = await fixture.inspectRows()
             fixture.failNext(point)
             await expect(
-              groups.transition(change, async (stores) => {
-                if (stage === 'absent') await writeStorageInstall(stores, seed, 'failed-stage')
-                else if (stage === 'tombstone') {
-                  const life = await stores.lifetime.load()
-                  if (life === null) throw new Error('Missing lifetime')
-                  await stores.lifetime.save({
-                    ...life,
-                    revision: life.revision + 1,
-                    mutationID: 'failed-stage',
-                    activeIncarnation: null,
-                  })
-                } else await stores.incarnation(1).cursor.save(topicID, '10')
-                await params.writeSideRow(stores.tx, 'effect-1', utf8('effect'))
-              }),
+              preparedStorageTransition(
+                fixture.entry(),
+                change,
+                async (reads) =>
+                  stage === 'absent'
+                    ? storageInstallDomain(reads, seed, 'failed-stage')
+                    : stage === 'tombstone'
+                      ? storageRetirementDomain(reads, 'failed-stage')
+                      : Promise.resolve({ states: [], lifetime: null }),
+                async (stores) => {
+                  if (stage === 'absent') await writeStorageInstall(stores, seed, 'failed-stage')
+                  else if (stage === 'tombstone') {
+                    const life = await stores.lifetime.load()
+                    if (life === null) throw new Error('Missing lifetime')
+                    await stores.lifetime.save({
+                      ...life,
+                      revision: life.revision + 1,
+                      mutationID: 'failed-stage',
+                      activeIncarnation: null,
+                    })
+                  } else await stores.incarnation(1).cursor.save(topicID, '10')
+                  await params.writeSideRow(stores.tx, 'effect-1', utf8('effect'))
+                },
+              ),
             ).rejects.toThrow()
             expect(await fixture.inspectRows()).toEqual(before)
             await fixture.reopen()
@@ -1895,25 +2058,35 @@ export function testGroupStorageConformance<TTx extends ConformanceGroupTransact
           const change = await storageChange(groups, groupID, 'committed-rejection')
           const hooks: Array<string> = []
           fixture.commitThenReject()
-          await groups.transition(change, async (stores) => {
-            stores.tx.onCommit(() => {
-              hooks.push('commit')
-            })
-            stores.tx.onRollback(() => {
-              hooks.push('rollback')
-            })
-            if (stage === 'absent') await writeStorageInstall(stores, seed, 'committed-rejection')
-            else if (stage === 'tombstone') {
-              const life = await stores.lifetime.load()
-              if (life === null) throw new Error('Missing lifetime')
-              await stores.lifetime.save({
-                ...life,
-                revision: life.revision + 1,
-                mutationID: 'committed-rejection',
-                activeIncarnation: null,
+          await preparedStorageTransition(
+            fixture.entry(),
+            change,
+            async (reads) =>
+              stage === 'absent'
+                ? storageInstallDomain(reads, seed, 'committed-rejection')
+                : stage === 'tombstone'
+                  ? storageRetirementDomain(reads, 'committed-rejection')
+                  : Promise.resolve({ states: [], lifetime: null }),
+            async (stores) => {
+              stores.tx.onCommit(() => {
+                hooks.push('commit')
               })
-            } else await stores.incarnation(1).cursor.save(topicID, '10')
-          })
+              stores.tx.onRollback(() => {
+                hooks.push('rollback')
+              })
+              if (stage === 'absent') await writeStorageInstall(stores, seed, 'committed-rejection')
+              else if (stage === 'tombstone') {
+                const life = await stores.lifetime.load()
+                if (life === null) throw new Error('Missing lifetime')
+                await stores.lifetime.save({
+                  ...life,
+                  revision: life.revision + 1,
+                  mutationID: 'committed-rejection',
+                  activeIncarnation: null,
+                })
+              } else await stores.incarnation(1).cursor.save(topicID, '10')
+            },
+          )
           expect(await groups.resolve(groupID, 'committed-rejection')).toBe('committed')
           expect(hooks).toEqual(['commit'])
           const reopened = await fixture.reopen()

@@ -7,6 +7,7 @@ import {
 } from '@kumiai/rpc'
 import { describe, expect, test, vi } from 'vitest'
 
+import { retirementDomain } from '../src/closing-preparation.js'
 import { openEntries, sealEntries } from '../src/crypto.js'
 import {
   bindEntryCapability,
@@ -44,7 +45,8 @@ function intercept(fixture: RegistryFixture, fn: (reads: EntryReads) => EntryRea
     capability: {
       ...capability,
       read: (id, read) => capability.read(id, (reads) => read(fn(reads))),
-      run: (request, prepare, work) => capability.run(request, (reads) => prepare(fn(reads)), work),
+      run: (request, prepare, work) =>
+        capability.run(request, (reads, closing) => prepare(fn(reads), closing), work),
     },
   })
 }
@@ -677,7 +679,33 @@ for (const mode of ['real-mls', 'double'] as const) {
                 const mutationID = crypto.randomUUID()
                 await capability.run(
                   { groupID, mutationID },
-                  async (reads) => ({ expected: await reads.lifetime(), value: null }),
+                  async (reads, closing) => {
+                    const lifetime = await reads.lifetime()
+                    if (lifetime === null) throw new Error('Missing lifetime')
+                    const next = {
+                      ...lifetime,
+                      activeIncarnation: 2,
+                      latestIncarnation: 2,
+                      revision: lifetime.revision + 1,
+                      mutationID,
+                    }
+                    const state = {
+                      ...record,
+                      ...nextKey,
+                      version: 1,
+                      epoch: 0,
+                      epochAuthenticator: handle.state.keySchedule.epochAuthenticator,
+                      state: encodeClientState(handle.state),
+                      credential: handle.credential,
+                      ledger: handle.ledgerTokens,
+                    }
+                    return closing.freeze({
+                      source: key,
+                      reason: 'switch',
+                      prepared: { expected: lifetime, value: state },
+                      domain: await retirementDomain(reads, next, [state]),
+                    })
+                  },
                   async (stores) => {
                     const lifetime = await stores.lifetime.load()
                     if (lifetime === null) throw new Error('Missing lifetime')

@@ -10,6 +10,7 @@ import type { GroupKey, GroupStateRecord } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createMemoryTransaction, gateRegistryMaintenance } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createDevicePackages } from './fixtures/device-packages.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
@@ -169,8 +170,20 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (kind === 'deleted') {
           const lifetime = await fixture.device.groups.load(groupID)
           if (lifetime === null) throw new Error('Missing lifetime')
-          await fixture.device.groups.transition(
+          await preparedTransition(
+            fixture.device.groups,
             { groupID, mutationID: 'delete-cold', expected: lifetime },
+            async (_reads) => {
+              return {
+                states: [],
+                lifetime: {
+                  ...lifetime,
+                  revision: lifetime.revision + 1,
+                  mutationID: 'delete-cold',
+                  activeIncarnation: null,
+                },
+              }
+            },
             async (stores) => {
               await stores.incarnation(1).state.save({ ...key, version: 2, deleted: true })
               await stores.lifetime.save({
@@ -822,8 +835,31 @@ for (const mode of ['real-mls', 'double'] as const) {
         afterRead = async () => {
           const lifetime = await fixture.device.groups.load(groupID)
           if (lifetime === null) throw new Error('Missing lifetime')
-          await fixture.device.groups.transition(
+          await preparedTransition(
+            fixture.device.groups,
             { groupID, mutationID: 'replace-after-read', expected: lifetime },
+            async (_reads) => {
+              return {
+                states: [
+                  {
+                    ...record,
+                    ...nextKey,
+                    version: 1,
+                    epochAuthenticator: handle.state.keySchedule.epochAuthenticator,
+                    state: encodeClientState(handle.state),
+                    credential: handle.credential,
+                    ledger: handle.ledgerTokens,
+                  },
+                ],
+                lifetime: {
+                  ...lifetime,
+                  latestIncarnation: 2,
+                  activeIncarnation: 2,
+                  revision: lifetime.revision + 1,
+                  mutationID: 'replace-after-read',
+                },
+              }
+            },
             async (stores) => {
               await stores.lifetime.save({
                 ...lifetime,

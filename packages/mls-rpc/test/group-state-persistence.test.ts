@@ -18,6 +18,7 @@ import type {
   MemoryTransaction,
 } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { installSeed, makeStorageSeed, nextChange } from './fixtures/storage-seed.js'
 
@@ -213,17 +214,44 @@ for (const mode of ['real-mls', 'double'] as const) {
         const stores = createGroupStateStores({ tx, groupID, atRest: codec })
         expect(await stores.trust.load()).toBeNull()
         expect(await stores.state(1).load()).toBeNull()
-        await stores.state(1).save(value.state)
-        await stores.trust.save(value.trust)
       })
-      await db.transact(scope, async (tx) => {
-        const stores = createGroupStateStores({ tx, groupID, atRest: codec })
-        await stores.state(1).save({ ...value.key, version: 2, deleted: true })
-        expect((await stores.trust.load())?.genesisAnchor).toEqual(value.trust.genesisAnchor)
-        await expect(stores.state(1).save({ ...value.state, version: 3 })).rejects.toThrow(
-          GroupStateConflictError,
-        )
+      const groups = createMemoryGroupPersistence({
+        db,
+        owners: createOwnerQueues(),
+        atRest: codec,
+        providerID: 'tombstone-fixture',
       })
+      await installSeed(groups, value, 'seed')
+      await preparedTransition(
+        groups,
+        await nextChange(groups, groupID, 'tombstone'),
+        async (reads) => {
+          const previous = await reads.lifetime()
+          if (previous === null) throw new Error('Missing source')
+          return {
+            states: [],
+            lifetime: {
+              ...previous,
+              activeIncarnation: null,
+              revision: previous.revision + 1,
+              mutationID: 'tombstone',
+            },
+          }
+        },
+        async (stores, domain) => {
+          if (domain.lifetime === null) throw new Error('Missing tombstone lifetime')
+          await stores.incarnation(1).state.save({ ...value.key, version: 2, deleted: true })
+          await stores.lifetime.save(domain.lifetime)
+          expect((await stores.trust.load())?.genesisAnchor).toEqual(value.trust.genesisAnchor)
+        },
+      )
+      expect(() =>
+        assertStateTransition(
+          { ...value.key, version: 2, deleted: true },
+          { ...value.state, version: 3 },
+          value.trust,
+        ),
+      ).toThrow(GroupStateConflictError)
       const nullDB = createMemoryTransaction({ rows: {} })
       await nullDB.transact(scope, async (tx) => {
         const stores = createGroupStateStores({ tx, groupID, atRest: codec })

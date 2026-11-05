@@ -8,6 +8,7 @@ import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createOwnerQueues } from '../src/owner-queue.js'
 import type { AppOutboxEntry, AppSettlementObligation, GroupKey } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createStorageFixture,
   type RegistryStorageFixture,
@@ -188,8 +189,22 @@ for (const terminal of [false, true]) {
         ).not.toHaveBeenCalled()
         const metadata = await fixture.entry().read(key.groupID, (reads) => reads.metadata(1))
         expect(metadata).toMatchObject({ ...key, deleted: false, terminal })
-        await groups.transition(
+        await preparedTransition(
+          groups,
           await nextChange(groups, key.groupID, 'tombstone'),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            return {
+              states: [],
+              lifetime: {
+                ...life,
+                activeIncarnation: null,
+                revision: life.revision + 1,
+                mutationID: 'tombstone',
+              },
+            }
+          },
           async (stores) => {
             await stores
               .incarnation(1)
@@ -281,13 +296,21 @@ for (const terminal of [false, true]) {
         const change = await nextChange(groups, key.groupID, 'delayed-flag')
         const current = await groups.loadState(key)
         if (current === null || current.deleted) throw new Error('Missing state')
-        const work = groups
-          .transition(change, async (stores) => {
+        const work = preparedTransition(
+          groups,
+          change,
+          async (_reads) => {
+            return {
+              states: [{ ...current, version: current.version + 1, terminal: true }],
+              lifetime: null,
+            }
+          },
+          async (stores) => {
             await stores
               .incarnation(1)
               .state.save({ ...current, version: current.version + 1, terminal: true })
-          })
-          .catch((error: unknown) => error)
+          },
+        ).catch((error: unknown) => error)
         await fault.rejected
         expect(observations).toHaveLength(before)
         await fault.finish(outcome)
@@ -366,8 +389,12 @@ async function terminalFixture(terminal: boolean) {
   const groups = fixture.ports.device.groups
   await installSeed(groups, seed, 'seed')
   if (terminal)
-    await groups.transition(
+    await preparedTransition(
+      groups,
       await nextChange(groups, seed.key.groupID, 'terminal'),
+      async (_reads) => {
+        return { states: [{ ...seed.state, version: 2, terminal: true }], lifetime: null }
+      },
       async (stores) => {
         await stores.incarnation(1).state.save({ ...seed.state, version: 2, terminal: true })
       },

@@ -28,6 +28,7 @@ import type {
   PersistenceEvent,
 } from '../src/persistence-types.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   installSeed,
   makeStorageSeed,
@@ -766,8 +767,22 @@ for (const mode of ['real-mls', 'double'] as const) {
       const { db, groups } = await setup()
       const before = db.snapshot()
       await expect(
-        groups.transition(
+        preparedTransition(
+          groups,
           await nextChange(groups, groupID, 'overlapping-retirement'),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            return {
+              states: [],
+              lifetime: {
+                ...life,
+                activeIncarnation: null,
+                revision: 2,
+                mutationID: 'overlapping-retirement',
+              },
+            }
+          },
           async (stores) => {
             const life = await stores.lifetime.load()
             if (life === null) throw new Error('Missing lifetime')
@@ -1173,17 +1188,34 @@ for (const mode of ['real-mls', 'double'] as const) {
         },
       })
       await expect(
-        effects.transition(await nextChange(groups, groupID, 'delete-effect'), async (stores) => {
-          const life = await stores.lifetime.load()
-          if (life === null) throw new Error('Missing lifetime')
-          await stores.lifetime.save({
-            ...life,
-            activeIncarnation: null,
-            revision: life.revision + 1,
-            mutationID: 'delete-effect',
-          })
-          return 'delete-result'
-        }),
+        preparedTransition(
+          effects,
+          await nextChange(groups, groupID, 'delete-effect'),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            return {
+              states: [],
+              lifetime: {
+                ...life,
+                activeIncarnation: null,
+                revision: life.revision + 1,
+                mutationID: 'delete-effect',
+              },
+            }
+          },
+          async (stores) => {
+            const life = await stores.lifetime.load()
+            if (life === null) throw new Error('Missing lifetime')
+            await stores.lifetime.save({
+              ...life,
+              activeIncarnation: null,
+              revision: life.revision + 1,
+              mutationID: 'delete-effect',
+            })
+            return 'delete-result'
+          },
+        ),
       ).resolves.toBe('delete-result')
       expect(committed).toEqual([key])
       const ports = groups.ports(key)
@@ -1342,16 +1374,33 @@ for (const mode of ['real-mls', 'double'] as const) {
         ),
       ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
       expect(db.snapshot()).toEqual(before)
-      await groups.transition(await nextChange(groups, groupID, 'delete'), async (stores) => {
-        const life = await stores.lifetime.load()
-        if (life === null) throw new Error('Missing lifetime')
-        await stores.lifetime.save({
-          ...life,
-          activeIncarnation: null,
-          revision: life.revision + 1,
-          mutationID: 'delete',
-        })
-      })
+      await preparedTransition(
+        groups,
+        await nextChange(groups, groupID, 'delete'),
+        async (reads) => {
+          const life = await reads.lifetime()
+          if (life === null) throw new Error('Missing lifetime')
+          return {
+            states: [],
+            lifetime: {
+              ...life,
+              activeIncarnation: null,
+              revision: life.revision + 1,
+              mutationID: 'delete',
+            },
+          }
+        },
+        async (stores) => {
+          const life = await stores.lifetime.load()
+          if (life === null) throw new Error('Missing lifetime')
+          await stores.lifetime.save({
+            ...life,
+            activeIncarnation: null,
+            revision: life.revision + 1,
+            mutationID: 'delete',
+          })
+        },
+      )
       await expect(
         groups.transition(
           { groupID, mutationID: 'tombstone-is-not-absent', expected: null },
@@ -1627,14 +1676,28 @@ for (const mode of ['real-mls', 'double'] as const) {
       next.trust.spentEpochAuthenticators.push(seed.state.epochAuthenticator)
       const change = await nextChange(groups, groupID, 'missing-trust')
       await expect(
-        groups.transition(change, async (stores) => {
-          await stores.lifetime.save({
-            ...next.lifetime,
-            revision: 2,
-            mutationID: change.mutationID,
-          })
-          await stores.incarnation(2).state.save(next.state)
-        }),
+        preparedTransition(
+          groups,
+          change,
+          async (_reads) => {
+            return {
+              states: [next.state],
+              lifetime: {
+                ...next.lifetime,
+                revision: 2,
+                mutationID: change.mutationID,
+              },
+            }
+          },
+          async (stores) => {
+            await stores.lifetime.save({
+              ...next.lifetime,
+              revision: 2,
+              mutationID: change.mutationID,
+            })
+            await stores.incarnation(2).state.save(next.state)
+          },
+        ),
       ).rejects.toThrow('co-written')
       expect(db.snapshot()).toEqual(before)
       await expect(
@@ -1686,8 +1749,17 @@ for (const mode of ['real-mls', 'double'] as const) {
       const wait = new Promise<void>((done) => {
         release = done
       })
-      const first = groups.transition(
+      const first = preparedTransition(
+        groups,
         await nextChange(groups, groupID, 'terminal-first'),
+        async (reads) => {
+          const state = await reads.state(1)
+          if (state === null || state.deleted) throw new Error('Missing state')
+          return {
+            states: [{ ...state, version: state.version + 1, terminal: true }],
+            lifetime: null,
+          }
+        },
         async (stores) => {
           entered()
           await wait

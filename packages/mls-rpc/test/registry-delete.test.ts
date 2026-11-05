@@ -30,6 +30,7 @@ import { registryRetirement } from '../src/registry/retirement.js'
 import type { GroupHandleRegistry } from '../src/registry/types.js'
 import { deferred } from '../src/runtime.js'
 import { drainRegistryMaintenance } from '../src/testing.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
@@ -37,6 +38,7 @@ import {
   registryFixtureForceOwnerMarker,
   registryFixtureRestore,
 } from './fixtures/registry.js'
+import { requireValue } from './fixtures/require-value.js'
 import { writeSideRow } from './fixtures/storage-persistence.js'
 import {
   makeStorageSeed,
@@ -266,16 +268,25 @@ for (const mode of ['real-mls', 'double'] as const) {
         options: fixture.environment.options,
       })
       const mutationID = 'switch-before-delete'
-      await fixture.device.groups.transition(
+      await preparedTransition(
+        fixture.device.groups,
         await nextChange(fixture.device.groups, groupID, mutationID),
-        async (stores) => {
-          await retireIncarnation(stores, {
-            source: key,
-            nextIncarnation: 2,
-            switchedRejoinID,
-            mutationID,
-            at: 123,
-          })
+        async (reads) => {
+          const lifetime = await reads.lifetime()
+          if (lifetime === null) throw new Error('Missing lifetime')
+          return {
+            states: [candidate.state],
+            lifetime: {
+              ...lifetime,
+              latestIncarnation: 2,
+              activeIncarnation: 2,
+              revision: lifetime.revision + 1,
+              mutationID,
+            },
+          }
+        },
+        async (stores, closingData) => {
+          await retireIncarnation(stores, requireValue(closingData.retirement))
           const lifetime = await stores.lifetime.load()
           const trust = await stores.trust.load()
           if (lifetime === null || trust === null) throw new Error('Missing source')
@@ -298,6 +309,13 @@ for (const mode of ['real-mls', 'double'] as const) {
             mutationID,
             stateVersion: candidate.state.version,
           })
+        },
+        {
+          source: key,
+          nextIncarnation: 2,
+          switchedRejoinID,
+          mutationID,
+          at: 123,
         },
       )
       return { groupID, incarnation: 2 }
@@ -538,8 +556,8 @@ for (const mode of ['real-mls', 'double'] as const) {
           run(request, prepare, work) {
             return original.run(
               request,
-              async (reads) => {
-                const value = await prepare(reads)
+              async (reads, closing) => {
+                const value = await prepare(reads, closing)
                 if (first) {
                   first = false
                   queued.resolve()

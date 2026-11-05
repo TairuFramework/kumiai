@@ -1,4 +1,7 @@
-import { testCheckpointStorageConformance } from '@kumiai/rpc-conformance'
+import {
+  preparedStorageTransition,
+  testCheckpointStorageConformance,
+} from '@kumiai/rpc-conformance'
 import { expect, test } from 'vitest'
 
 import type { MemoryTransaction } from '../src/persistence-types.js'
@@ -29,11 +32,22 @@ for (const mode of ['real-mls', 'double'] as const) {
         next.trust.spentEpochAuthenticators.push(...trust.spentEpochAuthenticators)
         const life = await groups.load('group-A')
         if (life === null) throw new Error('Missing lifetime')
-        await groups.transition(
+        await preparedStorageTransition(
+          fixture.entry(),
           {
             groupID: 'group-A',
             mutationID: 'checkpoint-retirement',
             expected: { revision: life.revision, activeIncarnation: life.activeIncarnation },
+          },
+          async (_reads) => {
+            return {
+              states: [next.state],
+              lifetime: {
+                ...next.lifetime,
+                revision: life.revision + 1,
+                mutationID: 'checkpoint-retirement',
+              },
+            }
           },
           async (stores) => {
             await stores.lifetime.save({

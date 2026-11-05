@@ -15,6 +15,7 @@ import { prepareCheckpointInstallationFromTrust } from '../src/checkpoint-captur
 import { readCheckpointCoverage } from '../src/checkpoint-store.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { inboundCommitContext } from '../src/inbound-commit.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
 import { createRegistryFixture } from './fixtures/registry.js'
@@ -604,14 +605,13 @@ test.each(['receive', 'remove'] as const)(
   },
 )
 
-test.each(['copy', 'transcript', 'mutation', 'version', 'debt', 'removed-debt'] as const)(
+test.each(['copy', 'transcript', 'mutation', 'version', 'debt'] as const)(
   'installation refuses forged %s capture',
   async (kind) => {
     const groupID = 'checkpoint-forgery'
     const fixture = await createStorageFixture({ id: groupID, mode: 'double', setup: 'empty' })
     try {
       const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 0, mode: 'double' })
-      seed.state.terminal = kind === 'removed-debt'
       const groups = fixture.ports.device.groups
       const fact = await prepareCheckpointInstallationFromTrust({
         key: seed.key,
@@ -687,3 +687,68 @@ test.each(['fact', 'coverage', 'remove', 'remove-coverage', 'debt'] as const)(
     }
   },
 )
+
+test('installation refuses forged removed-debt capture', async () => {
+  const groupID = 'checkpoint-removed-debt'
+  const fixture = await createStorageFixture({ id: groupID, mode: 'double', setup: 'empty' })
+  try {
+    const seed = await makeStorageSeed({ id: groupID, incarnation: 1, epoch: 0, mode: 'double' })
+    const groups = fixture.ports.device.groups
+    await installSeed(groups, seed, 'seed')
+    if (seed.state.state === null) throw new Error('Missing source')
+    const client = decodeClientState(seed.state.state)
+    if (client === undefined) throw new Error('Invalid source')
+    client.groupContext.epoch = 1n
+    client.keySchedule.epochAuthenticator = crypto.getRandomValues(new Uint8Array(32))
+    const record = {
+      ...seed.state,
+      version: 2,
+      epoch: 1,
+      terminal: true,
+      state: encodeClientState(client),
+      epochAuthenticator: client.keySchedule.epochAuthenticator,
+    }
+    const trust = {
+      ...seed.trust,
+      installed: { ...seed.trust.installed, epoch: 1, authenticator: record.epochAuthenticator },
+      spentEpochAuthenticators: [...seed.trust.spentEpochAuthenticators, record.epochAuthenticator],
+    }
+    const fact = await prepareCheckpointInstallationFromTrust({
+      key: seed.key,
+      trust,
+      confirmedTranscriptHash: client.groupContext.confirmedTranscriptHash,
+      mutationID: 'removed-debt',
+      stateVersion: 2,
+      previousFact:
+        (await fixture.entry().read(groupID, (reads) => reads.checkpoints())).find(
+          (row) => row.kind === 'fact',
+        )?.canonical ?? null,
+    })
+    const before = await fixture.inspectRows()
+    await expect(
+      preparedTransition(
+        groups,
+        await nextChange(groups, groupID, 'removed-debt'),
+        { states: [record], lifetime: null },
+        async (stores) => {
+          await stores.incarnation(1).state.save(record)
+          await stores.trust.save(trust)
+          await stores.checkpoints.put(fact)
+          await stores.checkpoints.put({
+            kind: 'publication',
+            id: `publication:${fact.id}`,
+            key: seed.key,
+            factID: fact.id,
+            frame: null,
+            publishID: null,
+            accepted: false,
+            nextHeartbeatAt: null,
+          })
+        },
+      ),
+    ).rejects.toThrow('Checkpoint installation cannot publish removed identity')
+    expect(await fixture.inspectRows()).toEqual(before)
+  } finally {
+    await fixture.close()
+  }
+})

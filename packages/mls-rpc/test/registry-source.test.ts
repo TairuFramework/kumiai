@@ -19,6 +19,7 @@ import {
 import type { GroupRecoveryTrust } from '../src/persistence-types.js'
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
@@ -438,8 +439,20 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (reason === 'deleted') {
           const lifetime = await fixture.device.groups.load(groupID)
           if (lifetime === null) throw new Error('Missing lifetime')
-          await fixture.device.groups.transition(
+          await preparedTransition(
+            fixture.device.groups,
             { groupID, mutationID: 'delete-source', expected: lifetime },
+            async (_reads) => {
+              return {
+                states: [],
+                lifetime: {
+                  ...lifetime,
+                  activeIncarnation: null,
+                  revision: lifetime.revision + 1,
+                  mutationID: 'delete-source',
+                },
+              }
+            },
             async (stores) => {
               await stores.incarnation(1).state.save({ ...key, version: 2, deleted: true })
               await stores.lifetime.save({

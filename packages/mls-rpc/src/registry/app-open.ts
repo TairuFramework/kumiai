@@ -216,12 +216,18 @@ export function createRegistryAppOpen<TTx extends GroupTransaction>(params: {
                 results.push(result)
               }
               if (puts.length === 0 && poisons.length === 0) throw new Noop({ results })
+              const { record, reservation, eligibility } = await params.recordFor(
+                await relinquishSend(handle),
+                value,
+              )
               return {
                 expected: lifetime,
                 mutationID,
                 value: {
                   source,
-                  ...(await params.recordFor(await relinquishSend(handle), value)),
+                  record,
+                  reservation,
+                  eligibility,
                   puts,
                   poisons,
                   results,

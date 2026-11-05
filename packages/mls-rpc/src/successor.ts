@@ -1,5 +1,6 @@
 import type { CheckpointRecord, GroupKey, ManualRecoveryRecord } from '@kumiai/rpc'
 
+import { retirementDomain } from './closing-preparation.js'
 import { coordinatorBinding } from './entry-capability.js'
 import {
   createManualRecoveryStore,
@@ -10,7 +11,7 @@ import {
 import { copyStoredValue, sameStoredValue } from './memory-incarnation-stores.js'
 import { GroupStateConflictError, ManualRecoveryUnavailableError } from './persistence-errors.js'
 import type { GroupPersistence, GroupTransaction } from './persistence-types.js'
-import { retireIncarnation } from './registry/retired.js'
+import { prepareIncarnationRetirement, retireIncarnation } from './registry/retired.js'
 import { registryRetirement } from './registry/retirement.js'
 import { registrySafety } from './registry/safety.js'
 import type { GroupHandleRegistry } from './registry/types.js'
@@ -96,48 +97,70 @@ export async function retireToSuccessor<TTx extends GroupTransaction>(params: {
   }).authoriseManualRecovery(source, { mode: 'successor', successor })
   await capability.retire(
     source,
-    async (stores, mutationID) => {
-      const records = await stores.checkpoints.list()
+    async (reads, closing) => {
+      const mutationID = crypto.randomUUID()
+      const records = await reads.checkpoints()
       const record = findManualRecovery(records, source, authorised.id)
       if (record.stage !== 'authorised' || !sameStoredValue(record.choice, authorised.choice))
         throw new GroupStateConflictError('Successor authorisation moved')
-      const lifetime = await stores.lifetime.load()
+      const lifetime = await reads.lifetime()
       if (lifetime === null) throw new GroupStateConflictError('Missing retirement lifetime')
       const at = Date.now()
-      await retireIncarnation(stores, {
-        source,
-        nextIncarnation: null,
-        // Superseded manual candidates may have been accepted; their outcome stays owed.
-        abandonedAttempts: records.flatMap((row) =>
-          row.kind === 'manual-recovery' &&
-          sameStoredValue(row.key, source) &&
-          row.value.stage === 'authorised' &&
-          row.value.attempt !== null
-            ? [row.value.attempt.id]
-            : [],
-        ),
-        mutationID,
-        at,
-      })
-      await stores.lifetime.save({
+      const nextLifetime = {
         ...lifetime,
         activeIncarnation: null,
         revision: lifetime.revision + 1,
         mutationID,
+      }
+      return closing.freeze({
+        source,
+        reason: 'successor',
+        prepared: {
+          expected: lifetime,
+          mutationID,
+          value: {
+            record,
+            lifetime: nextLifetime,
+            mutationID,
+            at,
+            retirement: await prepareIncarnationRetirement(reads, {
+              source,
+              nextIncarnation: null,
+              mutationID,
+              at,
+              abandonedAttempts: records.flatMap((row) =>
+                row.kind === 'manual-recovery' &&
+                sameStoredValue(row.key, source) &&
+                row.value.stage === 'authorised' &&
+                row.value.attempt !== null
+                  ? [row.value.attempt.id]
+                  : [],
+              ),
+            }),
+          },
+        },
+        domain: await retirementDomain(reads, nextLifetime),
       })
+    },
+    async (stores, prepared) => {
+      const current = findManualRecovery(await stores.checkpoints.list(), source, authorised.id)
+      if (!sameStoredValue(current, prepared.record))
+        throw new GroupStateConflictError('Successor authorisation moved')
+      await retireIncarnation(stores, prepared.retirement)
+      await stores.lifetime.save(prepared.lifetime)
       await saveManualRecovery(stores, {
-        ...record,
+        ...prepared.record,
         stage: 'completed',
         destination: successor,
-        mutationID,
+        mutationID: prepared.mutationID,
       })
       await saveSuccessorTombstone(stores, {
         kind: 'successor-tombstone',
-        id: `successor:${record.id}`,
+        id: `successor:${prepared.record.id}`,
         source,
         successor,
-        authorisationID: record.id,
-        retiredAt: at,
+        authorisationID: prepared.record.id,
+        retiredAt: prepared.at,
         clearedAt: null,
       })
     },

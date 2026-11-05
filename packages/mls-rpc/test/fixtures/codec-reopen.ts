@@ -29,6 +29,7 @@ import {
 import { readRecoverySource } from '../../src/registry/source.js'
 import { recoveryTrustFor } from '../../src/registry/trust.js'
 import { capturedRecord } from './captured-recovery.js'
+import { preparedTransition } from './closing.js'
 import {
   buildRealCommit,
   createRealGroup,
@@ -84,8 +85,35 @@ export async function createCodecReopenFixture(
   const fixture = await createStorageFixture({ id: `${id}-seed`, mode: 'real-mls' })
   const trust = recoveryTrustFor(source, key, null)
   trust.spentEpochAuthenticators.push(trust.installed.authenticator.slice())
-  await fixture.ports.device.groups.transition(
+  await preparedTransition(
+    fixture.ports.device.groups,
     { groupID: id, mutationID: `${mutationID}-seed`, expected: null },
+    async (_reads) => {
+      return {
+        states: [
+          {
+            ...key,
+            version: 1,
+            deleted: false,
+            terminal: false,
+            epoch: Number(source.epoch),
+            epochAuthenticator: state.keySchedule.epochAuthenticator.slice(),
+            state: encodeClientState(structuredClone(state)),
+            credential: structuredClone(source.credential),
+            ledger: source.ledgerTokens,
+            senderHWM: 16,
+          },
+        ],
+        lifetime: {
+          groupID: id,
+          latestIncarnation: 1,
+          activeIncarnation: 1,
+          revision: 1,
+          mutationID: `${mutationID}-seed`,
+          restorePending: false,
+        },
+      }
+    },
     async (stores) => {
       await stores.lifetime.save({
         groupID: id,

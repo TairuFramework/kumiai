@@ -1,4 +1,9 @@
 import { createCheckpointStore, createUnlockedCheckpointStore } from './checkpoint-store.js'
+import {
+  assertClosingLifetime,
+  assertClosingMetadata,
+  assertClosingState,
+} from './closing-preparation.js'
 import type { StateMetadata } from './entry-capability.js'
 import { belongs, cloneValue, deviceNamespaces, groupNamespaces } from './memory-rows.js'
 import type { OwnerAttempt, OwnerEntry, OwnerQueues, WriteTarget } from './owner-queue.js'
@@ -20,6 +25,7 @@ import {
 } from './persistence-guards.js'
 import type {
   AtRestCodec,
+  GroupLifetime,
   GroupRecoveryTrust,
   GroupStateRecord,
   GroupStores,
@@ -522,8 +528,16 @@ export function createUnlockedGroupStateStores(params: {
           throw new GroupStateConflictError('Unreadable state version metadata')
         return value
       },
-      save: row.save,
-      prepare: row.prepare,
+      async save(value: StateMetadata) {
+        assertMemoryWrite(tx, 'domain')
+        assertClosingMetadata(memoryTransactionEntry(tx.rows), await row.load(), value)
+        await row.save(value)
+      },
+      async prepare(value: StateMetadata) {
+        assertMemoryWrite(tx, 'domain')
+        assertClosingMetadata(memoryTransactionEntry(tx.rows), await row.load(), value)
+        return await row.prepare(value)
+      },
       store: row.store,
     }
   }
@@ -531,7 +545,15 @@ export function createUnlockedGroupStateStores(params: {
     tx,
     stateMetadata,
     checkpoints: createUnlockedCheckpointStore({ tx, groupID, atRest }),
-    lifetime: slot('lifetime', null),
+    lifetime: {
+      load: slot<GroupLifetime>('lifetime', null).load,
+      async save(value) {
+        assertMemoryWrite(tx, 'domain')
+        const row = slot<GroupLifetime>('lifetime', null)
+        assertClosingLifetime(memoryTransactionEntry(tx.rows), await row.load(), value)
+        await row.save(value)
+      },
+    },
     trust,
     state(incarnation) {
       if (!Number.isSafeInteger(incarnation) || incarnation < 1) {
@@ -557,6 +579,7 @@ export function createUnlockedGroupStateStores(params: {
             throw new GroupStateConflictError('Row incarnation mismatch')
           const metadata = stateMetadata(incarnation)
           const previousMetadata = await metadata.load()
+          assertClosingState(memoryTransactionEntry(tx.rows), previousMetadata, value)
           let initialIdentity = previousMetadata?.initialIdentity ?? null
           if (value.deleted) {
             // Retirement needs administrative version/identity, never private ratchets.

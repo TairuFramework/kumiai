@@ -12,6 +12,11 @@ import {
   openCheckpointRow,
   retainCheckpointInstallations,
 } from './checkpoint-store.js'
+import {
+  assertClosingWrites,
+  createClosingPreparation,
+  revalidateClosingSource,
+} from './closing-preparation.js'
 import { controlCompatible } from './control-compat.js'
 import { decodeControlJournal } from './control-journal.js'
 import { controlRetirementSources } from './control-write-context.js'
@@ -646,6 +651,13 @@ export function createMemoryGroupCoordinator(params: {
               atRest,
             })
             const previous = await memoryOperation(tx, raw.lifetime.load)()
+            await memoryOperation(tx, () =>
+              revalidateClosingSource(entry, {
+                lifetime: raw.lifetime.load,
+                trust: raw.trust.load,
+                metadata: (incarnation) => raw.stateMetadata(incarnation).load(),
+              }),
+            )()
             const marker = owner(tx, request.groupID)
             let change: GroupTransition
             if ('key' in request) {
@@ -1268,6 +1280,7 @@ export function createMemoryGroupCoordinator(params: {
                   }
                 }
                 if (proposedLifetime === undefined) await raw.lifetime.save(life)
+                assertClosingWrites(entry)
                 const outboxEvents: Array<AppStatusEvent> = []
                 if (capturedEffects.outbox !== undefined) {
                   for (const [incarnation, namespaces] of changedIncarnations(
@@ -1654,10 +1667,17 @@ export function createMemoryGroupCoordinator(params: {
         async (entry) => {
           try {
             await prepareBarrier(entry, owned.groupID)
-            const prepared = await entry.callback(() => prepare(prepareReads(entry, owned.groupID)))
+            const reads = prepareReads(entry, owned.groupID)
+            const closing = createClosingPreparation({
+              entry,
+              reads,
+              request: owned,
+              coordinator: binding,
+            })
+            const prepared = await entry.callback(() => prepare(reads, closing.closing))
             // Capture caller-controlled expectations before entering work. Prepared values stay opaque.
             const expected = entry.callback(() => copyStoredValue(prepared.expected))
-            const value = entry.callback(() => prepared.value)
+            const value = entry.callback(() => closing.consume(prepared))
             const mutationID = entry.callback(() => owned.mutationID ?? prepared.mutationID)
             if (
               typeof mutationID !== 'string' ||
@@ -1772,6 +1792,13 @@ export function createMemoryGroupCoordinator(params: {
     groups,
     activate,
     prepareReads,
+    closingPreparation: (entry: OwnerEntry, request: { groupID: string; mutationID: string }) =>
+      createClosingPreparation({
+        entry,
+        reads: prepareReads(entry, request.groupID),
+        request,
+        coordinator: binding,
+      }),
     transitionInTransaction<TValue>(
       tx: MemoryTransaction,
       change: GroupTransition,

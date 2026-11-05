@@ -16,6 +16,7 @@ import {
 } from './branch-history.js'
 import { checkpointPreparation } from './checkpoint-capture.js'
 import { appHoldPreparation } from './clear-hold.js'
+import { closingCheckpointPreparation } from './closing-preparation.js'
 import { manualRecoveryPreparation } from './manual-recovery.js'
 import {
   memoryOpen,
@@ -310,7 +311,11 @@ export function createCheckpointStore(
       const history =
         record.kind === 'superseded-rejoin' && supersededRejoinPrepared(record) ? record : undefined
       const condition = record.kind === 'condition' ? conditionPreparation(record) : undefined
-      const canonical = record.kind === 'fact' ? checkpointPreparation(record) : undefined
+      const canonical =
+        record.kind === 'fact'
+          ? (checkpointPreparation(record) ??
+            closingCheckpointPreparation(memoryTransactionEntry(tx.rows), record))
+          : undefined
       const journal = branchHistoryPreparation(record)
       const appHold =
         record.kind === 'app-hold' || record.kind === 'hold-history'

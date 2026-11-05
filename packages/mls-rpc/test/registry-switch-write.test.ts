@@ -822,8 +822,10 @@ for (const mode of ['real-mls', 'double'] as const) {
             expect(await s.fixture.inspectRows()).toEqual(before)
             await expect(access.read((handle) => handle.groupID)).resolves.toBe(groupID)
             await vi.waitFor(() => expect(registryLeaseSnapshot(access)).not.toBeNull())
+            const original = s.recovery.source
             s.recovery.source = await s.owner.recoverySource(groupID)
-            await expect(s.run()).resolves.toEqual(destination)
+            expect(s.recovery.source.stateVersion).toBeGreaterThan(original.stateVersion)
+            await expect(s.run()).rejects.toThrow('Closing rollback retry source or domain moved')
           }
         } finally {
           await s.fixture.close()
@@ -861,7 +863,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       }
     })
 
-    test('expectation-only movement in work has a distinct error', async () => {
+    test('work-time lifetime edits cannot replace a frozen switch plan', async () => {
       const s = await setup(mode)
       try {
         const capability = entryCapability(s.fixture.device.groups)
@@ -881,7 +883,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           }),
         )
         const before = await s.fixture.inspectRows()
-        await expect(s.run()).rejects.toMatchObject({ name: 'RegistrySourceMovedError' })
+        await expect(s.run()).rejects.toThrow('Lifetime write differs from frozen closing domain')
         expect(await s.fixture.inspectRows()).toEqual(before)
       } finally {
         await s.fixture.close()

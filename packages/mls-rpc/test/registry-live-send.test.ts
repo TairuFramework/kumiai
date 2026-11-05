@@ -242,7 +242,13 @@ for (const mode of ['real-mls', 'double'] as const) {
       const capability = entryCapability(fixture.fixture().device.groups)
       if (capability === null) throw new Error('Missing capability')
       vi.spyOn(capability, 'run').mockImplementationOnce(async (request, prepare) => {
-        await capability.read(request.groupID, prepare)
+        await capability.read(request.groupID, (reads) =>
+          prepare(reads, {
+            async freeze() {
+              throw new Error('Read cannot declare closure')
+            },
+          }),
+        )
         throw new StorageOutcomeUnknownError('Unknown write outcome')
       })
       vi.spyOn(fixture.fixture().device.groups, 'resolve').mockRejectedValue(
@@ -1385,7 +1391,13 @@ for (const mode of ['real-mls', 'double'] as const) {
       const capability = entryCapability(fixture.fixture().device.groups)
       if (capability === null) throw new Error('Missing capability')
       vi.spyOn(capability, 'run').mockImplementationOnce(async (request, prepare) => {
-        await capability.read(request.groupID, prepare)
+        await capability.read(request.groupID, (reads) =>
+          prepare(reads, {
+            async freeze() {
+              throw new Error('Read cannot declare closure')
+            },
+          }),
+        )
         throw new StorageOutcomeUnknownError('Unknown rollback')
       })
       const resolve = vi

@@ -29,6 +29,7 @@ import { registrySafety } from '../src/registry/safety.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { deferred } from '../src/runtime.js'
 import { gateRegistryMaintenance } from '../src/testing.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
@@ -694,8 +695,31 @@ for (const mode of ['real-mls', 'double'] as const) {
         const nextKey = { groupID, incarnation: 2 }
         const record = await fixture.device.groups.loadState(key)
         if (record === null || record.deleted) throw new Error('Missing state')
-        await fixture.device.groups.transition(
+        await preparedTransition(
+          fixture.device.groups,
           await nextChange(fixture.device.groups, groupID, 'displace'),
+          async (reads) => {
+            const lifetime = await reads.lifetime()
+            if (lifetime === null) throw new Error('Missing lifetime')
+            return {
+              states: [
+                {
+                  ...record,
+                  ...nextKey,
+                  version: 1,
+                  state: encodeClientState(handle.state),
+                  epochAuthenticator: handle.state.keySchedule.epochAuthenticator,
+                },
+              ],
+              lifetime: {
+                ...lifetime,
+                latestIncarnation: 2,
+                activeIncarnation: 2,
+                revision: lifetime.revision + 1,
+                mutationID: 'displace',
+              },
+            }
+          },
           async (stores) => {
             const lifetime = await stores.lifetime.load()
             if (lifetime === null) throw new Error('Missing lifetime')

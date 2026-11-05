@@ -8,6 +8,7 @@ import { describe, expect } from 'vitest'
 
 import { createPersistenceBuildSaver } from '../src/control-build.js'
 import { decodeControlJournal } from '../src/control-journal.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createRealGroup } from './fixtures/real-group.js'
 import { createControlCrashHarness } from './fixtures/storage-persistence.js'
 import {
@@ -42,8 +43,44 @@ for (const mode of ['real-mls', 'double'] as const) {
               transition === 'retire'
                 ? await makeStorageSeed({ id: h.key.groupID, incarnation: 2, epoch: 0, mode })
                 : null
-            await h.groups.transition(
+            await preparedTransition(
+              h.groups,
               await nextChange(h.groups, h.key.groupID, 'unclosed'),
+              async (reads) => {
+                const life = await reads.lifetime()
+                if (life === null) throw new Error('Missing lifetime')
+                if (destination !== null)
+                  return {
+                    states: [destination.state],
+                    lifetime: {
+                      ...life,
+                      latestIncarnation: 2,
+                      activeIncarnation: 2,
+                      revision: life.revision + 1,
+                      mutationID: 'unclosed',
+                    },
+                  }
+                const state = await reads.state(1)
+                if (state === null || state.deleted) throw new Error('Missing state')
+                const decoded = candidate === undefined ? undefined : decodeClientState(candidate)
+                return {
+                  states: [
+                    {
+                      ...state,
+                      version: state.version + 1,
+                      ...(transition === 'terminal'
+                        ? { terminal: true }
+                        : {
+                            epoch: state.epoch + 1,
+                            state: candidate ?? state.state,
+                            epochAuthenticator:
+                              decoded?.keySchedule.epochAuthenticator ?? state.epochAuthenticator,
+                          }),
+                    },
+                  ],
+                  lifetime: null,
+                }
+              },
               async (stores) => {
                 const rows = stores.incarnation(1)
                 if (destination !== null) {

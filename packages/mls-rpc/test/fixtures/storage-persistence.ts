@@ -345,7 +345,7 @@ export async function createStorageFixture(params: {
         scopes,
         async (entry) => {
           if (entry.scopes.groupID !== null) activeEntries.set(entry.scopes.groupID, entry)
-          const mutationID = entry.mutationID
+          let mutationID = entry.mutationID
           if (kind !== 'read' && mutationID !== null && nextWorkFault !== undefined) {
             if (workFaults.has(mutationID)) throw new Error('Work fault already armed')
             workFaults.set(mutationID, nextWorkFault)
@@ -369,11 +369,13 @@ export async function createStorageFixture(params: {
           }
           let first = retrying
           let restarting = false
-          entry.enter = async (phase) => {
-            if (restarting && phase === 'prepare') return
-            if (restarting && phase === 'work') restarting = false
-            await enter(phase)
-            if (phase === 'work' && mutationID !== null) {
+          const armWork = () => {
+            if (kind !== 'read' && mutationID !== null && nextWorkFault !== undefined) {
+              if (workFaults.has(mutationID)) throw new Error('Work fault already armed')
+              workFaults.set(mutationID, nextWorkFault)
+              nextWorkFault = undefined
+            }
+            if (mutationID !== null) {
               const armed = workFaults.get(mutationID)
               if (armed !== undefined) {
                 workFaults.delete(mutationID)
@@ -401,6 +403,18 @@ export async function createStorageFixture(params: {
                 else memoryFaults(database).failNext(armed.point, select)
               }
             }
+          }
+          const bindMutationID = entry.bindMutationID
+          entry.bindMutationID = (id) => {
+            bindMutationID(id)
+            mutationID = id
+            armWork()
+          }
+          entry.enter = async (phase) => {
+            if (restarting && phase === 'prepare') return
+            if (restarting && phase === 'work') restarting = false
+            await enter(phase)
+            if (phase === 'work') armWork()
             const nextSignal = entry.attempt().signal
             if (nextSignal !== attemptSignal) {
               attemptSignal?.removeEventListener('abort', clear)

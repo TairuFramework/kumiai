@@ -25,7 +25,7 @@ import type {
   RecoveryUnavailableEvent,
 } from '@kumiai/rpc'
 
-import type { EntryReads, Prepared, StateMetadata } from './entry-capability.js'
+import type { ClosingPreparation, EntryReads, Prepared, StateMetadata } from './entry-capability.js'
 
 export type OwnershipContextPort = {
   run<T>(token: object, fn: () => T): T
@@ -302,7 +302,10 @@ export type PersistenceFixture<TPorts> = {
     read<T>(groupID: string, fn: (reads: FixtureEntryReads<TPorts>) => Promise<T>): Promise<T>
     run<P, T>(
       request: Pick<GroupTransition, 'groupID' | 'mutationID'>,
-      prepare: (reads: FixtureEntryReads<TPorts>) => Promise<Prepared<P>>,
+      prepare: (
+        reads: FixtureEntryReads<TPorts>,
+        closing: ClosingPreparation,
+      ) => Promise<Prepared<P>>,
       work: (stores: FixtureGroupStores<TPorts>, prepared: P) => Promise<T>,
     ): Promise<T>
   }

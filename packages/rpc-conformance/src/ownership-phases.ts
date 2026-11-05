@@ -4,7 +4,9 @@ import {
   assertCorruptStorageRecovery,
   assertLowerEpochRefused,
   assertPartialLossSpentRefused,
+  preparedStorageTransition,
   storageChange,
+  storageInstallDomain,
   storageSeed,
   writeStorageInstall,
 } from './group-storage.js'
@@ -292,8 +294,10 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
           ] as const) {
             const groups = fixture.ports.device.groups
             await within(
-              groups.transition(
+              preparedStorageTransition(
+                fixture.entry(),
                 await within(storageChange(groups, groupID, 'install-fresh')),
+                async (reads) => storageInstallDomain(reads, fresh, 'install-fresh', 2),
                 async (stores) => {
                   await within(writeStorageInstall(stores, fresh, 'install-fresh', 2))
                 },
@@ -394,8 +398,18 @@ function runOwnershipPhasesConformance<TTx extends ConformanceGroupTransaction>(
           const groups = fixture.ports.device.groups
           const seed = await within(storageSeed(fixture.ports))
           await within(
-            groups.transition(
+            preparedStorageTransition(
+              fixture.entry(),
               await within(storageChange(groups, groupID, 'delete-effect')),
+              async (_reads) => ({
+                states: [],
+                lifetime: {
+                  ...seed.lifetime,
+                  revision: seed.lifetime.revision + 1,
+                  mutationID: 'delete-effect',
+                  activeIncarnation: null,
+                },
+              }),
               async (stores) => {
                 supplied = stores
                 const pending = await within(stores.incarnation(1).pending.list())
@@ -2037,8 +2051,22 @@ function testPreparedOwnership<TTx extends ConformanceGroupTransaction>(
         ])
         expect(await fixture.inspectRows()).toEqual(before)
         const mutationID = 'event-tombstone'
-        await groups.transition(
+        await preparedStorageTransition(
+          fixture.entry(),
           await storageChange(groups, groupID, mutationID),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            return {
+              states: [],
+              lifetime: {
+                ...life,
+                activeIncarnation: null,
+                revision: life.revision + 1,
+                mutationID,
+              },
+            }
+          },
           async (stores) => {
             const life = await stores.lifetime.load()
             const state = await stores.incarnation(1).state.load()
@@ -2319,15 +2347,32 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
         })
         try {
           const groups = fixture.ports.device.groups
-          await groups.transition(
+          await preparedStorageTransition(
+            fixture.entry(),
             await storageChange(groups, groupID, 'install-observed'),
+            async (reads) => storageInstallDomain(reads, fresh, 'install-observed', 2),
             async (stores) => {
               await writeStorageInstall(stores, fresh, 'install-observed', 2)
             },
           )
           if (terminal)
-            await groups.transition(
+            await preparedStorageTransition(
+              fixture.entry(),
               await storageChange(groups, groupID, 'terminal-observed'),
+              async (reads) => {
+                const state = await reads.state(2)
+                if (state === null || state.deleted) throw new Error('Missing state')
+                return {
+                  states: [
+                    {
+                      ...state,
+                      version: state.version + 1,
+                      terminal,
+                    },
+                  ],
+                  lifetime: null,
+                }
+              },
               async (stores) => {
                 const state = await stores.incarnation(2).state.load()
                 if (state === null || state.deleted) throw new Error('Missing active state')

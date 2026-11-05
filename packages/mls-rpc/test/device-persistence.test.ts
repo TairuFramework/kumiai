@@ -29,6 +29,7 @@ import {
   memoryFaults,
 } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createStorageFixture } from './fixtures/storage-persistence.js'
 import {
@@ -568,8 +569,22 @@ for (const mode of ['real-mls', 'double'] as const) {
           })
           expect(await device.groups.load('group-C')).toBeNull()
           expect(await receiptRead).toEqual({ groupID })
-          await device.groups.transition(
+          await preparedTransition(
+            device.groups,
             await nextChange(device.groups, groupID, 'retire'),
+            async (reads) => {
+              const life = await reads.lifetime()
+              if (life === null) throw new Error('Missing lifetime')
+              return {
+                states: [],
+                lifetime: {
+                  ...life,
+                  activeIncarnation: null,
+                  revision: life.revision + 1,
+                  mutationID: 'retire',
+                },
+              }
+            },
             async (stores) => {
               const life = await stores.lifetime.load()
               if (life === null) throw new Error('Missing lifetime')

@@ -12,7 +12,7 @@ import {
 } from '@kumiai/rpc'
 
 import { controlBuildContexts, controlRetirementSources } from '../control-write-context.js'
-import { entryCapability } from '../entry-capability.js'
+import { type EntryReads, entryCapability } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import {
   DisplacedGroupHandleError,
@@ -21,6 +21,7 @@ import {
 } from '../persistence-errors.js'
 import type {
   GroupKey,
+  GroupLifetime,
   GroupPersistence,
   GroupStores,
   GroupTransaction,
@@ -46,8 +47,9 @@ async function consumeInternalOutcomes(
 export async function deleteIncarnations<TTx extends GroupTransaction>(
   stores: GroupStores<TTx>,
   key: GroupKey,
-  mutationID: string,
+  preparedLifetime: GroupLifetime,
 ): Promise<void> {
+  const mutationID = preparedLifetime.mutationID
   const lifetime = await stores.lifetime.load()
   if (lifetime?.activeIncarnation !== key.incarnation)
     throw new DisplacedGroupHandleError('Inactive deletion source')
@@ -77,55 +79,28 @@ export async function deleteIncarnations<TTx extends GroupTransaction>(
   }
   for (let incarnation = 1; incarnation <= lifetime.latestIncarnation; incarnation++)
     await stores.incarnation(incarnation).clearTransport()
-  await stores.lifetime.save({
-    ...lifetime,
-    activeIncarnation: null,
-    revision: lifetime.revision + 1,
-    mutationID,
-  })
+  await stores.lifetime.save(preparedLifetime)
 }
 
-/** The caller drains source hooks before entering this transaction and saves the new lifetime after.
- * A null destination retires the source to a successor tombstone instead of a next incarnation. */
-export async function retireIncarnation<TTx extends GroupTransaction>(
-  stores: GroupStores<TTx>,
-  params: {
-    source: GroupKey
-    nextIncarnation: number | null
-    switchedRejoinID?: string
-    manualRejoinID?: string
-    /** Manual candidates outside control whose acceptance stays unknown. */
-    abandonedAttempts?: Array<string>
-    mutationID: string
-    at: number
-  },
-): Promise<void> {
-  const { source, nextIncarnation, switchedRejoinID, manualRejoinID, mutationID, at } = params
-  if (nextIncarnation === null && (switchedRejoinID !== undefined || manualRejoinID !== undefined))
-    throw new GroupStateConflictError('Successor retirement adopts no rejoin')
-  const lifetime = await stores.lifetime.load()
-  if (lifetime?.activeIncarnation !== source.incarnation)
-    throw new DisplacedGroupHandleError('Inactive retirement source')
-  if (
-    stores.tx.groupID !== source.groupID ||
-    lifetime.groupID !== source.groupID ||
-    (nextIncarnation !== null && nextIncarnation !== lifetime.latestIncarnation + 1)
-  )
-    throw new GroupStateConflictError('Retirement destination mismatch')
+type RetirementPlan = {
+  control: ControlSnapshot
+  changes: ControlChanges
+  outbox: Awaited<ReturnType<EntryReads['outbox']>>
+}
+export type RetirementRequest = {
+  source: GroupKey
+  nextIncarnation: number | null
+  switchedRejoinID?: string
+  manualRejoinID?: string
+  /** Manual candidates outside control whose acceptance stays unknown. */
+  abandonedAttempts?: Array<string>
+  mutationID: string
+  at: number
+} & { prepared?: RetirementPlan }
 
-  const rows = stores.incarnation(source.incarnation)
-  if ((await rows.pending.list()).length !== 0)
-    throw new GroupControlUnsettledError('Opened application records prevent retirement')
-  const control = await rows.control.load()
+function retirementChanges(control: ControlSnapshot, params: RetirementRequest): ControlChanges {
+  const { source, nextIncarnation, switchedRejoinID, manualRejoinID, at } = params
   const rejoin = control.rejoin
-  if (
-    switchedRejoinID !== undefined &&
-    (rejoin?.id !== switchedRejoinID ||
-      rejoin.stage !== 'confirmed' ||
-      !sameStoredValue(rejoin.source.key, source))
-  )
-    throw new GroupStateConflictError('Retirement requires matching confirmed rejoin')
-
   const abandoned = control.operations
   const outcomes: Array<Outcome> = abandoned.map(({ id }) => ({
     id,
@@ -162,6 +137,63 @@ export async function retireIncarnation<TTx extends GroupTransaction>(
   changes.putOutcomes = [...(closure.putOutcomes ?? []), ...outcomes].filter(
     ({ id }) => !control.outcomes.some((row) => row.id === id),
   )
+  return changes
+}
+export async function prepareIncarnationRetirement(
+  reads: EntryReads,
+  params: RetirementRequest,
+): Promise<RetirementRequest> {
+  const control = await reads.control(params.source.incarnation)
+  return {
+    ...params,
+    prepared: {
+      control,
+      changes: retirementChanges(control, params),
+      outbox: await reads.outbox(params.source.incarnation),
+    },
+  }
+}
+
+/** The caller drains source hooks before entering this transaction and saves the new lifetime after.
+ * A null destination retires the source to a successor tombstone instead of a next incarnation. */
+export async function retireIncarnation<TTx extends GroupTransaction>(
+  stores: GroupStores<TTx>,
+  params: RetirementRequest,
+): Promise<void> {
+  const { source, nextIncarnation, switchedRejoinID, manualRejoinID, mutationID } = params
+  if (nextIncarnation === null && (switchedRejoinID !== undefined || manualRejoinID !== undefined))
+    throw new GroupStateConflictError('Successor retirement adopts no rejoin')
+  const lifetime = await stores.lifetime.load()
+  if (lifetime?.activeIncarnation !== source.incarnation)
+    throw new DisplacedGroupHandleError('Inactive retirement source')
+  if (
+    stores.tx.groupID !== source.groupID ||
+    lifetime.groupID !== source.groupID ||
+    (nextIncarnation !== null && nextIncarnation !== lifetime.latestIncarnation + 1)
+  )
+    throw new GroupStateConflictError('Retirement destination mismatch')
+
+  const rows = stores.incarnation(source.incarnation)
+  if ((await rows.pending.list()).length !== 0)
+    throw new GroupControlUnsettledError('Opened application records prevent retirement')
+  const control = await rows.control.load()
+  const rejoin = control.rejoin
+  if (
+    switchedRejoinID !== undefined &&
+    (rejoin?.id !== switchedRejoinID ||
+      rejoin.stage !== 'confirmed' ||
+      !sameStoredValue(rejoin.source.key, source))
+  )
+    throw new GroupStateConflictError('Retirement requires matching confirmed rejoin')
+
+  if (params.prepared === undefined)
+    throw new GroupStateConflictError('Retirement requires a prepared control plan')
+  const changes = params.prepared.changes
+  if (
+    !sameStoredValue(control, params.prepared.control) ||
+    !sameStoredValue(await rows.outbox.list(), params.prepared.outbox)
+  )
+    throw new GroupStateConflictError('Prepared retirement source moved')
   if (control.forkRecoveryAttempt != null)
     recoveryCompletionContexts.set(stores.tx, {
       key: source,

@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'vitest'
 
-import { scanSealed, storageChange, storageSeed, writeStorageInstall } from './group-storage.js'
+import {
+  preparedStorageTransition,
+  scanSealed,
+  storageChange,
+  storageSeed,
+  writeStorageInstall,
+} from './group-storage.js'
 import type {
   ConformanceDeviceStores,
   ConformanceGroupTransaction,
@@ -332,8 +338,22 @@ export function testDeviceStorageConformance<TTx extends ConformanceGroupTransac
         expect(await reopened.packageStores(sourceID).lastResort.list(device.ownerDID)).toEqual(
           retained,
         )
-        await reopened.device.groups.transition(
+        await preparedStorageTransition(
+          fixture.entry(),
           await storageChange(reopened.device.groups, groupID, 'retire'),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            return {
+              states: [],
+              lifetime: {
+                ...life,
+                activeIncarnation: null,
+                revision: life.revision + 1,
+                mutationID: 'retire',
+              },
+            }
+          },
           async (stores) => {
             const life = await stores.lifetime.load()
             if (life === null) throw new Error('Missing lifetime')

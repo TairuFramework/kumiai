@@ -13,6 +13,7 @@ import type {
 } from '../src/persistence-types.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { retireIncarnation } from '../src/registry/retired.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
@@ -20,6 +21,7 @@ import {
   registryFixtureRestore,
   registryFixtureRetirement,
 } from './fixtures/registry.js'
+import { requireValue } from './fixtures/require-value.js'
 import {
   makeStorageSeed,
   nextChange,
@@ -104,19 +106,42 @@ for (const mode of ['real-mls', 'double'] as const) {
       await stores.incarnation(2).anchor.save(null)
       await stores.incarnation(2).cursor.save('new-topic', '0')
     }
-    async function switchSource(fixture: RegistryFixtureBase, switchedRejoinID?: string) {
+    async function switchSource(
+      fixture: RegistryFixtureBase,
+      switchedRejoinID?: string,
+      suppliedCandidate?: Awaited<ReturnType<typeof destination>>,
+    ) {
       const groups = fixture.device.groups
-      const candidate = await destination(fixture)
-      await groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
-        await retireIncarnation(stores, {
+      const candidate = suppliedCandidate ?? (await destination(fixture))
+      await preparedTransition(
+        groups,
+        await nextChange(groups, groupID, mutationID),
+        async (reads) => {
+          const life = await reads.lifetime()
+          if (life === null) throw new Error('Missing lifetime')
+          return {
+            states: [candidate.state],
+            lifetime: {
+              ...life,
+              latestIncarnation: 2,
+              activeIncarnation: 2,
+              revision: life.revision + 1,
+              mutationID,
+            },
+          }
+        },
+        async (stores, closingData) => {
+          await retireIncarnation(stores, requireValue(closingData.retirement))
+          await install(stores, candidate)
+        },
+        {
           source,
           nextIncarnation: 2,
           switchedRejoinID,
           mutationID,
           at: 1234,
-        })
-        await install(stores, candidate)
-      })
+        },
+      )
     }
 
     test('retirement writes before pointer change', async () => {
@@ -127,13 +152,32 @@ for (const mode of ['real-mls', 'double'] as const) {
         const candidate = await destination(fixture)
         const before = await fixture.inspectRows()
         await expect(
-          groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
-            await install(stores, candidate)
-            await retireIncarnation(stores, { source, nextIncarnation: 2, mutationID, at: 1234 })
-          }),
+          preparedTransition(
+            groups,
+            await nextChange(groups, groupID, mutationID),
+            async (reads) => {
+              const life = await reads.lifetime()
+              if (life === null) throw new Error('Missing lifetime')
+              return {
+                states: [candidate.state],
+                lifetime: {
+                  ...life,
+                  latestIncarnation: 2,
+                  activeIncarnation: 2,
+                  revision: life.revision + 1,
+                  mutationID,
+                },
+              }
+            },
+            async (stores, closingData) => {
+              await install(stores, candidate)
+              await retireIncarnation(stores, requireValue(closingData.retirement))
+            },
+            { source, nextIncarnation: 2, mutationID, at: 1234 },
+          ),
         ).rejects.toMatchObject({ name: 'DisplacedGroupHandleError' })
         expect(await fixture.inspectRows()).toEqual(before)
-        await switchSource(fixture)
+        await switchSource(fixture, undefined, candidate)
         expect(await groups.loadState(source)).toMatchObject({ deleted: true })
         expect(await groups.ports(source).outbox.list()).toEqual([])
         expect(await groups.ports(source).outbox.events()).toEqual([failed(entry(1))])
@@ -151,9 +195,15 @@ for (const mode of ['real-mls', 'double'] as const) {
         const before = await fixture.inspectRows()
         const groups = fixture.device.groups
         await expect(
-          groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
-            await retireIncarnation(stores, { source, nextIncarnation: 2, mutationID, at: 1234 })
-          }),
+          preparedTransition(
+            groups,
+            await nextChange(groups, groupID, mutationID),
+            { states: [], lifetime: null },
+            async (stores, closingData) => {
+              await retireIncarnation(stores, requireValue(closingData.retirement))
+            },
+            { source, nextIncarnation: 2, mutationID, at: 1234 },
+          ),
         ).rejects.toMatchObject({ name: 'GroupStateConflictError' })
         expect(await fixture.inspectRows()).toEqual(before)
       } finally {
@@ -561,16 +611,35 @@ for (const mode of ['real-mls', 'double'] as const) {
         await fixture.installRows({ key: source, control: { putOutcomes: [owed] } })
         const candidate = await destination(fixture)
         const groups = fixture.device.groups
-        await groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
-          await retireIncarnation(stores, {
+        await preparedTransition(
+          groups,
+          await nextChange(groups, groupID, mutationID),
+          async (reads) => {
+            const life = await reads.lifetime()
+            if (life === null) throw new Error('Missing lifetime')
+            return {
+              states: [candidate.state],
+              lifetime: {
+                ...life,
+                latestIncarnation: 2,
+                activeIncarnation: 2,
+                revision: life.revision + 1,
+                mutationID,
+              },
+            }
+          },
+          async (stores, closingData) => {
+            await retireIncarnation(stores, requireValue(closingData.retirement))
+            await install(stores, candidate)
+          },
+          {
             source,
             nextIncarnation: 2,
             abandonedAttempts: [owed.id, owed.id],
             mutationID,
             at: 1234,
-          })
-          await install(stores, candidate)
-        })
+          },
+        )
         fixture = await fixture.reopen()
         expect((await fixture.device.groups.ports(source).control.load()).outcomes).toEqual([owed])
       } finally {
@@ -687,25 +756,44 @@ for (const mode of ['real-mls', 'double'] as const) {
         const candidate = await destination(fixture)
         const groups = fixture.device.groups
         await expect(
-          groups.transition(await nextChange(groups, groupID, mutationID), async (stores) => {
-            await retireIncarnation(stores, {
+          preparedTransition(
+            groups,
+            await nextChange(groups, groupID, mutationID),
+            async (reads) => {
+              const life = await reads.lifetime()
+              if (life === null) throw new Error('Missing lifetime')
+              return {
+                states: [candidate.state],
+                lifetime: {
+                  ...life,
+                  latestIncarnation: 2,
+                  activeIncarnation: 2,
+                  revision: life.revision + 1,
+                  mutationID,
+                },
+              }
+            },
+            async (stores, closingData) => {
+              await retireIncarnation(stores, requireValue(closingData.retirement))
+              expect(await stores.incarnation(1).outbox.list()).toEqual([])
+              expect((await stores.incarnation(1).control.load()).rejoin?.stage).toBe('adopted')
+              await install(stores, candidate)
+              throw new Error('Installation interrupted')
+            },
+            {
               source,
               nextIncarnation: 2,
               switchedRejoinID: record.id,
               mutationID,
               at: 1234,
-            })
-            expect(await stores.incarnation(1).outbox.list()).toEqual([])
-            expect((await stores.incarnation(1).control.load()).rejoin?.stage).toBe('adopted')
-            await install(stores, candidate)
-            throw new Error('Installation interrupted')
-          }),
+            },
+          ),
         ).rejects.toThrow('Installation interrupted')
         expect(await fixture.inspectRows()).toEqual(before)
         expect(await groups.loadState({ groupID, incarnation: 2 })).toBeNull()
         expect(await groups.ports(source).outbox.events()).toEqual([])
         fixture.armWorkFault(mutationID, 'before-commit')
-        await expect(switchSource(fixture, record.id)).rejects.toThrow(
+        await expect(switchSource(fixture, record.id, candidate)).rejects.toThrow(
           'Injected before-commit failure',
         )
         expect(await fixture.inspectRows()).toEqual(before)

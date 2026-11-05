@@ -9,12 +9,14 @@ import {
   retireIncarnation,
   serveRetiredObligations,
 } from '../src/registry/retired.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
   registryFixtureMutateControl,
   registryFixtureRestore,
 } from './fixtures/registry.js'
+import { requireValue } from './fixtures/require-value.js'
 import {
   makeStorageSeed,
   nextChange,
@@ -46,32 +48,51 @@ async function retire(fixture: RegistryFixtureBase, mode: 'real-mls' | 'double')
     options: fixture.environment.options,
   })
   const mutationID = 'retirement'
-  await groups.transition(await nextChange(groups, key.groupID, mutationID), async (stores) => {
-    const lifetime = await stores.lifetime.load()
-    if (lifetime === null) throw new Error('Missing lifetime')
-    await retireIncarnation(stores, { source: key, nextIncarnation: 2, mutationID, at: 12 })
-    await stores.lifetime.save({
-      ...lifetime,
-      latestIncarnation: 2,
-      activeIncarnation: 2,
-      revision: lifetime.revision + 1,
-      mutationID,
-    })
-    await stores.incarnation(2).state.save(seed.state)
-    const trust = await stores.trust.load()
-    if (trust === null) throw new Error('Missing trust')
-    await stores.trust.save({
-      ...seed.trust,
-      genesisAnchor: trust.genesisAnchor,
-      spentEpochAuthenticators: trust.spentEpochAuthenticators,
-    })
-    await writeInstallationCheckpoint(stores, {
-      key: seed.key,
-      confirmedTranscriptHash: seed.confirmedTranscriptHash,
-      mutationID,
-      stateVersion: seed.state.version,
-    })
-  })
+  await preparedTransition(
+    groups,
+    await nextChange(groups, key.groupID, mutationID),
+    async (reads) => {
+      const lifetime = await reads.lifetime()
+      if (lifetime === null) throw new Error('Missing lifetime')
+      return {
+        states: [seed.state],
+        lifetime: {
+          ...lifetime,
+          latestIncarnation: 2,
+          activeIncarnation: 2,
+          revision: lifetime.revision + 1,
+          mutationID,
+        },
+      }
+    },
+    async (stores, closingData) => {
+      const lifetime = await stores.lifetime.load()
+      if (lifetime === null) throw new Error('Missing lifetime')
+      await retireIncarnation(stores, requireValue(closingData.retirement))
+      await stores.lifetime.save({
+        ...lifetime,
+        latestIncarnation: 2,
+        activeIncarnation: 2,
+        revision: lifetime.revision + 1,
+        mutationID,
+      })
+      await stores.incarnation(2).state.save(seed.state)
+      const trust = await stores.trust.load()
+      if (trust === null) throw new Error('Missing trust')
+      await stores.trust.save({
+        ...seed.trust,
+        genesisAnchor: trust.genesisAnchor,
+        spentEpochAuthenticators: trust.spentEpochAuthenticators,
+      })
+      await writeInstallationCheckpoint(stores, {
+        key: seed.key,
+        confirmedTranscriptHash: seed.confirmedTranscriptHash,
+        mutationID,
+        stateVersion: seed.state.version,
+      })
+    },
+    { source: key, nextIncarnation: 2, mutationID, at: 12 },
+  )
 }
 
 for (const mode of ['real-mls', 'double'] as const) {

@@ -5,7 +5,12 @@ import {
   type SafetyHold,
 } from '@kumiai/rpc'
 
-import type { EntryCapability, EntryReads } from '../entry-capability.js'
+import type {
+  ClosingPreparation,
+  EntryCapability,
+  EntryReads,
+  Prepared,
+} from '../entry-capability.js'
 import { assertSurvivingSpentSet, isStoredOpenFailure } from '../persistence-codec.js'
 import {
   GroupStateConflictError,
@@ -46,9 +51,10 @@ export type RegistrySafetyCapability<TTx extends GroupTransaction> = RegistryCon
     evidence: null,
   ): Promise<void>
   /** Authorised retirement: drains source hooks, then runs `work` once the source is quiet. */
-  retire<TResult>(
+  retire<P, TResult>(
     key: GroupKey,
-    work: (stores: GroupStores<TTx>, mutationID: string) => Promise<TResult>,
+    prepare: (reads: EntryReads, closing: ClosingPreparation) => Promise<Prepared<P>>,
+    work: (stores: GroupStores<TTx>, prepared: P) => Promise<TResult>,
     afterDrain?: () => Promise<void>,
   ): Promise<TResult>
 }

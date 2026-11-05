@@ -726,20 +726,37 @@ async function assemble(
       // Fixture writes bypass production-call instrumentation.
       await capability.run(
         { groupID: setup.key.groupID, mutationID },
-        async (reads) => {
+        async (reads, closing) => {
           const lifetime = await reads.lifetime()
-          return { expected: lifetime, value: lifetime === null }
-        },
-        async (stores, missing) => {
-          if (missing)
-            await stores.lifetime.save({
-              groupID: setup.key.groupID,
-              latestIncarnation: setup.key.incarnation,
-              activeIncarnation: setup.key.incarnation,
-              revision: 1,
-              mutationID,
-              restorePending: false,
+          const initial =
+            lifetime === null
+              ? {
+                  groupID: setup.key.groupID,
+                  latestIncarnation: setup.key.incarnation,
+                  activeIncarnation: setup.key.incarnation,
+                  revision: 1,
+                  mutationID,
+                  restorePending: false,
+                }
+              : null
+          const prepared = { expected: lifetime, value: { lifetime: initial, setup } }
+          if (
+            setup.state !== undefined &&
+            !setup.state.deleted &&
+            setup.state.terminal &&
+            !(await reads.metadata(setup.key.incarnation))?.terminal
+          )
+            return closing.freeze({
+              source: setup.key,
+              reason: 'terminal',
+              prepared,
+              domain: { states: [setup.state], lifetime: null },
             })
+          return prepared
+        },
+        async (stores, prepared) => {
+          const { setup } = prepared
+          if (prepared.lifetime !== null) await stores.lifetime.save(prepared.lifetime)
           const target = stores.incarnation(setup.key.incarnation)
           if (setup.state !== undefined) await target.state.save(setup.state)
           if (setup.trust !== undefined) await stores.trust.save(setup.trust)
@@ -911,8 +928,8 @@ async function assemble(
       run: (request, prepare, work, effects) => {
         return capability.run(
           request,
-          async (reads) => {
-            const prepared = await prepare(faultReads(reads))
+          async (reads, closing) => {
+            const prepared = await prepare(faultReads(reads), closing)
             const fault = beforeWork
             beforeWork = undefined
             await fault?.()

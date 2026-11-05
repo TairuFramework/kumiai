@@ -12,6 +12,7 @@ import {
   memoryFaults,
 } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createStorageFixture, writeSideRow } from './fixtures/storage-persistence.js'
 import { storageTranscript, writeInstallationCheckpoint } from './fixtures/storage-seed.js'
 
@@ -381,8 +382,22 @@ test('missing retained trust refuses installation while a safety event can still
     expect(await reopened.device.groups.loadTrust('group-A')).toBeNull()
     const before = await fixture.inspectRows()
     await expect(
-      reopened.device.groups.transition(
+      preparedTransition(
+        reopened.device.groups,
         await nextChange(reopened.device.groups, 'group-A', 'install'),
+        async (reads) => {
+          const life = await reads.lifetime()
+          return {
+            states: [{ ...fresh.state, incarnation: 2, version: 1 }],
+            lifetime: {
+              ...fresh.lifetime,
+              latestIncarnation: 2,
+              activeIncarnation: 2,
+              revision: (life?.revision ?? 0) + 1,
+              mutationID: 'install',
+            },
+          }
+        },
         async (stores) => writeStorageInstall(stores, fresh, 'install', 2),
       ),
     ).rejects.toThrow()
@@ -572,15 +587,27 @@ for (const mode of ['real-mls', 'double'] as const) {
       const fault = fixture.rejectCommitPending()
       try {
         const seed = await storageSeed(donor.ports.device.groups)
-        const install = groups
-          .transition(
-            { groupID: 'group-A', mutationID: 'pending-reopen', expected: null },
-            async (stores) => writeStorageInstall(stores, seed, 'pending-reopen', 1),
-          )
-          .then(
-            (value) => value,
-            (error: unknown) => error,
-          )
+        const install = preparedTransition(
+          groups,
+          { groupID: 'group-A', mutationID: 'pending-reopen', expected: null },
+          async (reads) => {
+            const life = await reads.lifetime()
+            return {
+              states: [{ ...seed.state, incarnation: 1, version: 1 }],
+              lifetime: {
+                ...seed.lifetime,
+                latestIncarnation: 1,
+                activeIncarnation: 1,
+                revision: (life?.revision ?? 0) + 1,
+                mutationID: 'pending-reopen',
+              },
+            }
+          },
+          async (stores) => writeStorageInstall(stores, seed, 'pending-reopen', 1),
+        ).then(
+          (value) => value,
+          (error: unknown) => error,
+        )
         await fault.rejected
         await fault.barrierWaiting
         let reopened = false

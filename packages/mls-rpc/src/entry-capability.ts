@@ -69,9 +69,21 @@ export type EntryReads = {
     incarnation: number,
   ): Promise<'missing' | 'null' | 'deleted' | 'readable' | 'unreadable'>
 }
+export type ClosingReason = 'terminal' | 'switch' | 'readmission' | 'delete' | 'successor'
+export type ClosingMutation = { mutationID: string }
+export type ClosingDomain = { states: Array<GroupStateRecord>; lifetime: GroupLifetime | null }
+export type ClosingPreparation = {
+  freeze<TPrepared extends Prepared<unknown>>(request: {
+    source: GroupKey
+    reason: ClosingReason
+    prepared: TPrepared
+    domain: ClosingDomain
+  }): Promise<TPrepared>
+}
 export type Prepared<T> = {
   expected: GroupTransition['expected']
   mutationID?: string
+  closing?: ClosingMutation
   value: T
 }
 export type CertifiedFinalisationResult = { seq: number; status: 'published' | 'already-complete' }
@@ -102,7 +114,7 @@ export type EntryCapability<TTx extends GroupTransaction> = {
   run<P, T>(
     // Null binds the ID supplied by prepare before any work write.
     request: { groupID: string; mutationID: string | null },
-    prepare: (reads: EntryReads) => Promise<Prepared<P>>,
+    prepare: (reads: EntryReads, closing: ClosingPreparation) => Promise<Prepared<P>>,
     work: (stores: GroupStores<TTx>, prepared: P) => Promise<T>,
     effects?: (stores: GroupStores<TTx>, prepared: P, result: T) => Promise<void>,
   ): Promise<T>

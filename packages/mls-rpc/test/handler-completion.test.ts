@@ -10,6 +10,7 @@ import {
 } from '@kumiai/rpc'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { retirementDomain } from '../src/closing-preparation.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { groupBatchFor } from '../src/group-batch-binding.js'
 import { createHandlerCompletion, handlerCompletionForEntry } from '../src/handler-completion.js'
@@ -670,7 +671,7 @@ for (const mode of ['real-mls', 'double'] as const)
             f.capability.run = (request, prepare, work, effects) =>
               run(
                 request,
-                (reads) =>
+                (reads, closing) =>
                   prepare(
                     phase === 'prepare'
                       ? {
@@ -682,6 +683,7 @@ for (const mode of ['real-mls', 'double'] as const)
                           },
                         }
                       : reads,
+                    closing,
                   ),
                 (stores, prepared) => work(phase === 'work' ? wrap(stores) : stores, prepared),
                 (stores, prepared, result) =>
@@ -1044,16 +1046,19 @@ for (const mode of ['real-mls', 'double'] as const)
           f.capability.run = (request, prepare, work, effects) =>
             run(
               request,
-              async (reads) => {
+              async (reads, closing) => {
                 const batch: Array<string> = []
                 stagedReads.push(batch)
-                return prepare({
-                  ...reads,
-                  async appFrame(incarnation, id) {
-                    batch.push(id)
-                    return reads.appFrame(incarnation, id)
+                return prepare(
+                  {
+                    ...reads,
+                    async appFrame(incarnation, id) {
+                      batch.push(id)
+                      return reads.appFrame(incarnation, id)
+                    },
                   },
-                })
+                  closing,
+                )
               },
               work,
               effects,
@@ -1120,32 +1125,38 @@ for (const mode of ['real-mls', 'double'] as const)
             f.capability.run = (request, prepare, work, effects) =>
               run(
                 request,
-                async (reads) => {
+                async (reads, closing) => {
                   const batch: Array<string> = []
                   batches.push(batch)
-                  return prepare({
-                    ...reads,
-                    async appFrame(incarnation, id) {
-                      batch.push(id)
-                      const value = await reads.appFrame(incarnation, id)
-                      clock += maxWorkMs
-                      if (ready === undefined)
-                        ready = groupBatchFor(f.binding, f.key.groupID).schedule({
-                          source: 'ready-clock-peer',
-                          kind: 'completion',
-                          async run() {
-                            order.push('peer')
-                            await run(
-                              { groupID: f.key.groupID, mutationID: crypto.randomUUID() },
-                              async (reads) => ({ expected: await reads.lifetime(), value: null }),
-                              async (stores) =>
-                                writeSideRow(stores.tx, 'clock-peer', new Uint8Array([9])),
-                            )
-                          },
-                        })
-                      return value
+                  return prepare(
+                    {
+                      ...reads,
+                      async appFrame(incarnation, id) {
+                        batch.push(id)
+                        const value = await reads.appFrame(incarnation, id)
+                        clock += maxWorkMs
+                        if (ready === undefined)
+                          ready = groupBatchFor(f.binding, f.key.groupID).schedule({
+                            source: 'ready-clock-peer',
+                            kind: 'completion',
+                            async run() {
+                              order.push('peer')
+                              await run(
+                                { groupID: f.key.groupID, mutationID: crypto.randomUUID() },
+                                async (reads) => ({
+                                  expected: await reads.lifetime(),
+                                  value: null,
+                                }),
+                                async (stores) =>
+                                  writeSideRow(stores.tx, 'clock-peer', new Uint8Array([9])),
+                              )
+                            },
+                          })
+                        return value
+                      },
                     },
-                  })
+                    closing,
+                  )
                 },
                 work,
                 async (stores, prepared, result) => {
@@ -1302,7 +1313,23 @@ for (const mode of ['real-mls', 'double'] as const)
           const mutationID = crypto.randomUUID()
           await f.capability.run(
             { groupID: f.key.groupID, mutationID },
-            async (reads) => ({ expected: await reads.lifetime(), value: undefined }),
+            async (reads, closing) => {
+              const lifetime = await reads.lifetime()
+              if (lifetime === null) throw new Error('Missing source')
+              const next = {
+                ...lifetime,
+                activeIncarnation: 2,
+                latestIncarnation: 2,
+                revision: lifetime.revision + 1,
+                mutationID,
+              }
+              return closing.freeze({
+                source: f.key,
+                reason: 'switch',
+                prepared: { expected: lifetime, value: undefined },
+                domain: await retirementDomain(reads, next, [successor.state]),
+              })
+            },
             async (stores) => {
               const life = await stores.lifetime.load()
               if (life === null) throw new Error('Missing lifetime')

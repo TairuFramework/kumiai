@@ -12,6 +12,7 @@ import type { GroupLifetime, MemoryTransaction, PackageUse } from '../src/persis
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { seedAdmission } from '../src/registry/seed.js'
 import { deferred } from '../src/runtime.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createRegistryFixture,
   type RegistryFixtureBase,
@@ -308,8 +309,20 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         const lifetime = await fixture.device.groups.load(groupID)
         if (lifetime === null) throw new Error('Missing lifetime')
-        await fixture.device.groups.transition(
+        await preparedTransition(
+          fixture.device.groups,
           { groupID, mutationID: 'delete-source', expected: lifetime },
+          async (_reads) => {
+            return {
+              states: [],
+              lifetime: {
+                ...lifetime,
+                revision: lifetime.revision + 1,
+                mutationID: 'delete-source',
+                activeIncarnation: null,
+              },
+            }
+          },
           async (stores) => {
             await stores.lifetime.save({
               ...lifetime,
@@ -397,7 +410,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         await expect(
           registry(fixture).seed(await fixture.makeHandle(2), { replace: true, packageUse }),
-        ).rejects.toMatchObject(refused('invalid-active-metadata'))
+        ).rejects.toThrow('Frozen closing source moved before submission')
         expect(stateSaves).toBe(0)
         expect(trustSaves).toBe(0)
         expect(await fixture.device.groups.load(groupID)).toEqual(before)
@@ -454,7 +467,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         })
         await expect(
           owner.seed(await fixture.makeHandle(2), { replace: true, packageUse }),
-        ).rejects.toThrow('Seed admission moved')
+        ).rejects.toThrow('Frozen closing source moved before submission')
         await entry(fixture).read('group-B', async (reads) => {
           expect(await reads.lifetime()).toMatchObject({ groupID: 'group-B', activeIncarnation: 1 })
         })

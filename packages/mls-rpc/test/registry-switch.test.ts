@@ -34,6 +34,7 @@ import {
   gateRegistryMaintenance,
   restoreCommittedSender,
 } from '../src/testing.js'
+import { preparedTransition } from './fixtures/closing.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
@@ -700,8 +701,22 @@ for (const mode of ['real-mls', 'double'] as const) {
         expect(await s.fixture.inspectRows()).toEqual(before)
         // Replay is still owed after the installed incarnation is retired.
         const groups = s.fixture.device.groups
-        await groups.transition(
+        await preparedTransition(
+          groups,
           await nextChange(groups, groupID, 'delete-destination'),
+          async (reads) => {
+            const lifetime = await reads.lifetime()
+            if (lifetime === null) throw new Error('Missing lifetime')
+            return {
+              states: [],
+              lifetime: {
+                ...lifetime,
+                activeIncarnation: null,
+                revision: lifetime.revision + 1,
+                mutationID: 'delete-destination',
+              },
+            }
+          },
           async (stores) => {
             const lifetime = await stores.lifetime.load()
             if (lifetime === null) throw new Error('Missing lifetime')
@@ -975,8 +990,17 @@ for (const mode of ['real-mls', 'double'] as const) {
       try {
         await run(s)
         const groups = s.fixture.device.groups
-        await groups.transition(
+        await preparedTransition(
+          groups,
           await nextChange(groups, groupID, 'self-removal'),
+          async (reads) => {
+            const state = await reads.state(2)
+            if (state === null || state.deleted) throw new Error('Missing state')
+            return {
+              states: [{ ...state, version: state.version + 1, terminal: true }],
+              lifetime: null,
+            }
+          },
           async (stores) => {
             const rows = stores.incarnation(2)
             const state = await rows.state.load()

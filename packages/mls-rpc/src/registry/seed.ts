@@ -3,6 +3,7 @@ import { judgeWelcomeAdmission } from '@kumiai/mls-hub'
 import type { SafetyHold } from '@kumiai/rpc'
 
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
+import { retirementDomain } from '../closing-preparation.js'
 import type { EntryCapability, EntryReads, StateMetadata } from '../entry-capability.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
 import { assertSurvivingSpentSet, isStoredOpenFailure } from '../persistence-codec.js'
@@ -30,7 +31,7 @@ import {
   reserveFromBytes,
   restoreCaptured,
 } from './reserve.js'
-import { retireIncarnation } from './retired.js'
+import { prepareIncarnationRetirement, retireIncarnation } from './retired.js'
 import {
   assertRetirementDrained,
   type RegistryRetirement,
@@ -304,7 +305,7 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
           })
           const result = await params.capability.run(
             { groupID, mutationID },
-            async (reads) => {
+            async (reads, closing) => {
               if (source !== null) await assertRetirementDrained(reads)
               const current = await readAdmission(reads, params.held)
               recheck(current)
@@ -327,11 +328,29 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
                 ledger: captured.ledgerTokens,
                 senderHWM: reserved.senderHWM,
               }
-              return {
+              const lifetime = {
+                groupID,
+                latestIncarnation: key.incarnation,
+                activeIncarnation: key.incarnation,
+                revision: (current.lifetime?.revision ?? 0) + 1,
+                mutationID,
+                restorePending: false,
+              }
+              const prepared = {
                 expected: current.lifetime,
                 value: {
                   // Staged for the later combined package-install boundary; no provider package hook here.
                   packageUse,
+                  retirement:
+                    source === null
+                      ? null
+                      : await prepareIncarnationRetirement(reads, {
+                          source,
+                          nextIncarnation: key.incarnation,
+                          mutationID,
+                          at: Date.now(),
+                        }),
+                  lifetime,
                   checkpoint: await prepareCheckpointInstallation({
                     key,
                     handle: installed,
@@ -351,6 +370,14 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
                   trust: recoveryTrustFor(installed, key, current.trust),
                 },
               }
+              return source === null
+                ? prepared
+                : await closing.freeze({
+                    source,
+                    reason: 'readmission',
+                    prepared,
+                    domain: await retirementDomain(reads, lifetime, [record]),
+                  })
             },
             async (stores, prepared) => {
               const current = await readAdmission(
@@ -366,21 +393,9 @@ export function createRegistrySeed<TTx extends GroupTransaction>(params: {
               recheck(current)
               stores.tx.onRollback(() => settle('rolled-back'))
               hooked = true
-              if (decision === 'readmit' && source !== null)
-                await retireIncarnation(stores, {
-                  source,
-                  nextIncarnation: key.incarnation,
-                  mutationID,
-                  at: Date.now(),
-                })
-              await stores.lifetime.save({
-                groupID,
-                latestIncarnation: key.incarnation,
-                activeIncarnation: key.incarnation,
-                revision: (current.lifetime?.revision ?? 0) + 1,
-                mutationID,
-                restorePending: false,
-              })
+              if (decision === 'readmit' && prepared.retirement !== null)
+                await retireIncarnation(stores, prepared.retirement)
+              await stores.lifetime.save(prepared.lifetime)
               const rows = stores.incarnation(key.incarnation)
               await rows.state.save(prepared.record)
               await stores.trust.save(prepared.trust)

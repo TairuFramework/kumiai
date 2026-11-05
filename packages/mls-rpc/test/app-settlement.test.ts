@@ -31,6 +31,7 @@ import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { createRegistryGroupMLS } from '../src/registry-group-mls.js'
 import { gateRegistryMaintenance } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import {
   createRegistryFixture,
@@ -184,16 +185,33 @@ async function hold(fixture: RegistryStorageFixture, key: GroupKey, kind: (typeo
 async function retire(fixture: RegistryStorageFixture, key: GroupKey) {
   const groups = fixture.ports.device.groups
   const change = await nextChange(groups, key.groupID, crypto.randomUUID())
-  await groups.transition(change, async (stores) => {
-    const lifetime = await stores.lifetime.load()
-    if (lifetime === null) throw new Error('Missing lifetime')
-    await stores.lifetime.save({
-      ...lifetime,
-      activeIncarnation: null,
-      revision: lifetime.revision + 1,
-      mutationID: change.mutationID,
-    })
-  })
+  await preparedTransition(
+    groups,
+    change,
+    async (reads) => {
+      const lifetime = await reads.lifetime()
+      if (lifetime === null) throw new Error('Missing lifetime')
+      return {
+        states: [],
+        lifetime: {
+          ...lifetime,
+          activeIncarnation: null,
+          revision: lifetime.revision + 1,
+          mutationID: change.mutationID,
+        },
+      }
+    },
+    async (stores) => {
+      const lifetime = await stores.lifetime.load()
+      if (lifetime === null) throw new Error('Missing lifetime')
+      await stores.lifetime.save({
+        ...lifetime,
+        activeIncarnation: null,
+        revision: lifetime.revision + 1,
+        mutationID: change.mutationID,
+      })
+    },
+  )
 }
 
 for (const mode of ['real-mls', 'double'] as const) {
@@ -221,8 +239,15 @@ for (const mode of ['real-mls', 'double'] as const) {
               const groups = fixture.ports.device.groups
               const source = await groups.loadState(key)
               if (source === null || source.deleted) throw new Error('Missing source')
-              await groups.transition(
+              await preparedTransition(
+                groups,
                 await nextChange(groups, key.groupID, crypto.randomUUID()),
+                async (_reads) => {
+                  return {
+                    states: [{ ...source, version: source.version + 1, terminal: true }],
+                    lifetime: null,
+                  }
+                },
                 async (stores) => {
                   await stores
                     .incarnation(1)
@@ -1105,16 +1130,33 @@ for (const mode of ['real-mls', 'double'] as const) {
       await certifyRegistry(fixture, key)
       const groups = fixture.device.groups
       const change = await nextChange(groups, key.groupID, 'retire-before-restart')
-      await groups.transition(change, async (stores) => {
-        const lifetime = await stores.lifetime.load()
-        if (lifetime === null) throw new Error('Missing lifetime')
-        await stores.lifetime.save({
-          ...lifetime,
-          activeIncarnation: null,
-          revision: lifetime.revision + 1,
-          mutationID: change.mutationID,
-        })
-      })
+      await preparedTransition(
+        groups,
+        change,
+        async (reads) => {
+          const lifetime = await reads.lifetime()
+          if (lifetime === null) throw new Error('Missing lifetime')
+          return {
+            states: [],
+            lifetime: {
+              ...lifetime,
+              activeIncarnation: null,
+              revision: lifetime.revision + 1,
+              mutationID: change.mutationID,
+            },
+          }
+        },
+        async (stores) => {
+          const lifetime = await stores.lifetime.load()
+          if (lifetime === null) throw new Error('Missing lifetime')
+          await stores.lifetime.save({
+            ...lifetime,
+            activeIncarnation: null,
+            revision: lifetime.revision + 1,
+            mutationID: change.mutationID,
+          })
+        },
+      )
       fixture = await fixture.reopen()
       const coordinator = entryCapability(fixture.device.groups)
       const registry = fixture.registry

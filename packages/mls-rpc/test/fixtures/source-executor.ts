@@ -87,6 +87,7 @@ export async function sourceExecutorFixture(
   return {
     ...source,
     environment,
+    codec,
     seed,
     db,
     persistence,
@@ -143,24 +144,41 @@ export async function sourceExecutorFixture(
         return
       }
       const request = await nextChange(persistence.groups, seed.key.groupID, mutationID)
-      await persistence.groups.transition(request, async (stores) => {
-        if (change === 'restore') {
-          const lifetime = await stores.lifetime.load()
-          if (lifetime === null) throw new Error('Missing lifetime')
-          await stores.lifetime.save({
-            ...lifetime,
-            restorePending: true,
-            revision: lifetime.revision + 1,
-            mutationID,
-          })
-        } else {
-          const state = await stores.incarnation(1).state.load()
+      await entry.run(
+        { groupID: seed.key.groupID, mutationID },
+        async (reads, closing) => {
+          const state = await reads.state(1)
           if (state === null || state.deleted) throw new Error('Missing source')
-          await stores
-            .incarnation(1)
-            .state.save({ ...state, version: state.version + 1, terminal: change === 'terminal' })
-        }
-      })
+          const prepared = {
+            expected: request.expected,
+            value: {
+              state: { ...state, version: state.version + 1, terminal: change === 'terminal' },
+            },
+          }
+          return change === 'terminal'
+            ? await closing.freeze({
+                source: seed.key,
+                reason: 'terminal',
+                prepared,
+                domain: { states: [prepared.value.state], lifetime: null },
+              })
+            : prepared
+        },
+        async (stores, prepared) => {
+          if (change === 'restore') {
+            const lifetime = await stores.lifetime.load()
+            if (lifetime === null) throw new Error('Missing lifetime')
+            await stores.lifetime.save({
+              ...lifetime,
+              restorePending: true,
+              revision: lifetime.revision + 1,
+              mutationID,
+            })
+          } else {
+            await stores.incarnation(1).state.save(prepared.state)
+          }
+        },
+      )
     },
   }
 }

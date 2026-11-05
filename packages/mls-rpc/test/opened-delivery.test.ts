@@ -27,6 +27,7 @@ import type { GroupKey, MemoryTransaction, PendingAppFrame } from '../src/persis
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { registryRetirement } from '../src/registry/retirement.js'
 import { retireToSuccessor } from '../src/successor.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import { createRegistryFixture, registryFixtureForceOwnerMarker } from './fixtures/registry.js'
 import { startLeaseRotationPeer } from './fixtures/registry-lease-rotation.js'
@@ -311,8 +312,20 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           const lifetime = await env.fixture.device.groups.load(env.key.groupID)
           if (lifetime === null) throw new Error('Missing lifetime')
           const mutationID = crypto.randomUUID()
-          await env.fixture.device.groups.transition(
+          await preparedTransition(
+            env.fixture.device.groups,
             { groupID: env.key.groupID, mutationID, expected: lifetime },
+            async (_reads) => {
+              return {
+                states: [],
+                lifetime: {
+                  ...lifetime,
+                  revision: lifetime.revision + 1,
+                  activeIncarnation: null,
+                  mutationID,
+                },
+              }
+            },
             async (stores) => {
               await stores.lifetime.save({
                 ...lifetime,
@@ -325,12 +338,20 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
         } else if (state === 'terminal') {
           await env.capability.run(
             { groupID: env.key.groupID, mutationID: crypto.randomUUID() },
-            async (reads) => ({ expected: await reads.lifetime(), value: await reads.state(1) }),
+            async (reads, closing) => {
+              const source = await reads.state(1)
+              if (source === null || source.deleted) throw new Error('Missing source')
+              const state = { ...source, version: source.version + 1, terminal: true }
+              return closing.freeze({
+                source: env.key,
+                reason: 'terminal',
+                prepared: { expected: await reads.lifetime(), value: state },
+                domain: { states: [state], lifetime: null },
+              })
+            },
             async (stores, source) => {
               if (source === null || source.deleted) throw new Error('Missing source')
-              await stores
-                .incarnation(1)
-                .state.save({ ...source, version: source.version + 1, terminal: true })
+              await stores.incarnation(1).state.save(source)
             },
           )
         } else await env.fixture.corruptState(env.key, 'unreadable')
@@ -360,8 +381,20 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
           const lifetime = await env.fixture.device.groups.load(env.key.groupID)
           if (lifetime === null) throw new Error('Missing lifetime')
           const mutationID = crypto.randomUUID()
-          await env.fixture.device.groups.transition(
+          await preparedTransition(
+            env.fixture.device.groups,
             { groupID: env.key.groupID, mutationID, expected: lifetime },
+            async (_reads) => {
+              return {
+                states: [],
+                lifetime: {
+                  ...lifetime,
+                  activeIncarnation: null,
+                  revision: lifetime.revision + 1,
+                  mutationID,
+                },
+              }
+            },
             async (stores) => {
               await stores.lifetime.save({
                 ...lifetime,

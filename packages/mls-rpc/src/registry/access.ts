@@ -646,6 +646,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
     params.assertAvailable()
     assertSafety()
     const fallbackMutationID = crypto.randomUUID()
+    let mutationResult: { value: Awaited<ReturnType<typeof fn>> } | undefined
     let noopResult: { value: Awaited<ReturnType<typeof fn>> } | undefined
     try {
       return await live.run(
@@ -772,10 +773,11 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           }
           if (record === undefined || trust === undefined || eligibility === undefined)
             throw new Error('Mutation state was not staged')
+          mutationResult = { value: result }
           return {
             expected: lifetime,
             mutationID,
-            value: { result, record, trust, write, source, checkpoint, reservation, eligibility },
+            value: { record, trust, write, source, checkpoint, reservation, eligibility },
           }
         },
         async (stores, prepared) => {
@@ -800,7 +802,8 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
           } finally {
             controlBuildContexts.delete(stores.tx)
           }
-          return prepared.result
+          if (mutationResult === undefined) throw new Error('Missing prepared mutation result')
+          return mutationResult.value
         },
       )
     } catch (error) {
@@ -915,6 +918,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
         kind: 'control',
         signal: input.signal,
         run: async (budget) => {
+          let preparedResult: { value: Awaited<ReturnType<typeof input.prepare>> } | undefined
           try {
             return await live.run(
               { groupID: owner.key.groupID, mutationID: null },
@@ -1166,11 +1170,11 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
                 } finally {
                   active = false
                 }
+                preparedResult = { value: result }
                 return {
                   expected: lifetime,
                   mutationID,
                   value: {
-                    result,
                     source,
                     originalControl,
                     originalAnchor,
@@ -1239,8 +1243,9 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
                 } finally {
                   controlBuildContexts.delete(stores.tx)
                 }
+                if (preparedResult === undefined) throw new Error('Missing prepared control result')
                 return {
-                  value: prepared.result,
+                  value: preparedResult.value,
                   epoch: prepared.record.epoch,
                   control: copyStoredValue(prepared.snapshot),
                   anchor: copyStoredValue(prepared.anchor),

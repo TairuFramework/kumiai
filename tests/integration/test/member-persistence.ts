@@ -1,8 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { decodeClientState, type GroupHandle } from '@kumiai/mls'
+import { normalizeDID } from '@kokuin/token'
+import { decodeClientState, decodeEpochRosterFact, type GroupHandle } from '@kumiai/mls'
 import type { MemoryTransaction, PendingAppFrame } from '@kumiai/mls-rpc'
 import type { AppCursorStore, HandlerCompletion } from '@kumiai/rpc'
 
+import {
+  currentCheckpointFact,
+  prepareCheckpointInstallationFromTrust,
+} from '../../../packages/mls-rpc/src/checkpoint-capture.js'
 import { entryCapability } from '../../../packages/mls-rpc/src/entry-capability.js'
 import { createHandlerCompletion } from '../../../packages/mls-rpc/src/handler-completion.js'
 import { physicalRecordKey, sealRecord } from '../../../packages/mls-rpc/src/persistence-codec.js'
@@ -14,7 +19,6 @@ import {
   memoryFaults,
 } from '../../../packages/mls-rpc/src/testing.js'
 import { createDeterministicAtRestCodec } from '../../../packages/mls-rpc/test/fixtures/at-rest.js'
-import { writeInstallationCheckpoint } from '../../../packages/mls-rpc/test/fixtures/storage-seed.js'
 import type { MemoryHostTransaction } from '../../../packages/rpc/test/fixtures/host-db.js'
 import type { StateStore } from './app-lane-e2e.js'
 
@@ -56,19 +60,32 @@ export function createMemberPersistence(base: StateStore, initial: GroupHandle):
   type Commit = Parameters<Parameters<MemoryHostTransaction>[1]>[0]
   const transact = async (work: Parameters<MemoryHostTransaction>[1]) => {
     const mutationID = crypto.randomUUID()
+    let publish: (() => void) | undefined
     return await entry.run(
       { groupID: key.groupID, mutationID },
-      async (reads) => ({
-        expected: await reads.lifetime(),
-        value: {
-          previous: await reads.state(key.incarnation),
-          trust: await reads.trust(),
-        },
-      }),
-      async (stores, { previous, trust }) => {
+      async (reads, closing) => {
+        const lifetime = await reads.lifetime()
+        const previous = await reads.state(key.incarnation)
+        const retained = await reads.trust()
         if (previous?.deleted) throw new Error('Deleted member state')
         const context = writes.getStore()
-        const commit: Commit = async (journal, publish) => {
+        type Plan = {
+          record: Exclude<typeof previous, null | { deleted: true }> | null
+          trust: typeof retained
+          checkpoint: Awaited<ReturnType<typeof prepareCheckpointInstallationFromTrust>> | null
+          signable: boolean
+          journal: Parameters<Commit>[0] | null
+          pending: PendingAppFrame | null
+        }
+        let plan: Plan = {
+          record: null,
+          trust: null,
+          checkpoint: null,
+          signable: false,
+          journal: null,
+          pending: null,
+        }
+        const result = await work(async (journal, publication) => {
           const saved =
             journal.state === null
               ? null
@@ -82,8 +99,72 @@ export function createMemberPersistence(base: StateStore, initial: GroupHandle):
           const currentLedger =
             context?.record === undefined ? (saved?.ledger ?? previous?.ledger) : previous?.ledger
           if (currentLedger === undefined) throw new Error('Missing member ledger')
-          const rows = stores.incarnation(key.incarnation)
-          if (previous === null) {
+          const epoch = Number(client.groupContext.epoch)
+          const version = (previous?.version ?? 0) + 1
+          const record =
+            previous === null || journal.version !== base.database.currentVersion('state')
+              ? {
+                  ...key,
+                  version,
+                  deleted: false as const,
+                  terminal: client.groupActiveState.kind === 'removedFromGroup',
+                  epoch,
+                  epochAuthenticator: client.keySchedule.epochAuthenticator.slice(),
+                  state,
+                  credential: initial.credential,
+                  ledger: currentLedger,
+                  senderHWM: previous?.epoch === epoch ? previous.senderHWM : 0,
+                }
+              : null
+          const handle = context?.handle
+          const trust =
+            handle !== undefined && (retained === null || retained.installed.epoch !== epoch)
+              ? recoveryTrustFor(handle, key, retained)
+              : null
+          let checkpoint: Plan['checkpoint'] = null
+          if (previous === null || previous.epoch !== epoch) {
+            const installed = trust ?? retained
+            if (installed === null) throw new Error('Missing installed trust')
+            checkpoint = await prepareCheckpointInstallationFromTrust({
+              key,
+              trust: installed,
+              confirmedTranscriptHash: client.groupContext.confirmedTranscriptHash,
+              mutationID,
+              stateVersion: version,
+              previousFact: currentCheckpointFact(await reads.checkpoints())?.canonical ?? null,
+            })
+          }
+          journal.state = new TextEncoder().encode(
+            JSON.stringify({ state: Array.from(state), ledger: currentLedger }),
+          )
+          plan = {
+            record,
+            trust,
+            checkpoint,
+            journal,
+            pending: context?.record ?? null,
+            signable:
+              checkpoint !== null &&
+              decodeEpochRosterFact(checkpoint.canonical).members.some(
+                (member) => member.signerDID === normalizeDID(initial.credential.id),
+              ),
+          }
+          publish = publication
+        })
+        const prepared = { expected: lifetime, value: { ...plan, result } }
+        return plan.record?.terminal && previous !== null && !previous.terminal
+          ? closing.freeze({
+              source: key,
+              reason: 'terminal',
+              prepared,
+              domain: { states: [plan.record], lifetime: null },
+            })
+          : prepared
+      },
+      async (stores, plan) => {
+        const rows = stores.incarnation(key.incarnation)
+        if (plan.record !== null) {
+          if ((await stores.lifetime.load()) === null)
             await stores.lifetime.save({
               ...key,
               activeIncarnation: key.incarnation,
@@ -92,46 +173,37 @@ export function createMemberPersistence(base: StateStore, initial: GroupHandle):
               mutationID,
               restorePending: false,
             })
-          }
-          const epoch = Number(client.groupContext.epoch)
-          const version = (previous?.version ?? 0) + 1
-          if (previous === null || journal.version !== base.database.currentVersion('state'))
-            await rows.state.save({
-              ...key,
-              version,
-              deleted: false,
-              terminal: client.groupActiveState.kind === 'removedFromGroup',
-              epoch,
-              epochAuthenticator: client.keySchedule.epochAuthenticator.slice(),
-              state,
-              credential: initial.credential,
-              ledger: currentLedger,
-              senderHWM: previous?.epoch === epoch ? previous.senderHWM : 0,
-            })
-          const handle = context?.handle
-          if (handle !== undefined && (trust === null || trust.installed.epoch !== epoch))
-            await stores.trust.save(recoveryTrustFor(handle, key, trust))
-          if (previous === null || previous.epoch !== epoch)
-            await writeInstallationCheckpoint(stores, {
+          await rows.state.save(plan.record)
+        }
+        if (plan.trust !== null) await stores.trust.save(plan.trust)
+        if (plan.checkpoint !== null) {
+          await stores.checkpoints.put(plan.checkpoint)
+          if (plan.signable)
+            await stores.checkpoints.put({
+              kind: 'publication',
+              id: `publication:${plan.checkpoint.id}`,
               key,
-              confirmedTranscriptHash: client.groupContext.confirmedTranscriptHash,
-              mutationID,
-              stateVersion: version,
+              factID: plan.checkpoint.id,
+              frame: null,
+              publishID: null,
+              accepted: false,
+              nextHeartbeatAt: null,
             })
-          if (context?.record !== undefined) await rows.pending.put([context.record])
-          journal.state = new TextEncoder().encode(
-            JSON.stringify({ state: Array.from(state), ledger: currentLedger }),
-          )
+        }
+        if (plan.pending !== null) await rows.pending.put([plan.pending])
+        if (plan.journal !== null) {
           const hostRows = stores.tx.rows['host-journal']
           if (hostRows === undefined) throw new Error('Missing host journal namespace')
           const address = { ...key, namespace: 'host-journal', recordID: 'state' }
-          hostRows.set(physicalRecordKey(address), await sealRecord(atRest, address, journal))
+          hostRows.set(physicalRecordKey(address), await sealRecord(atRest, address, plan.journal))
+          if (publish === undefined) throw new Error('Missing publication callback')
           stores.tx.onCommit(publish)
         }
-        return await work(commit)
+        return plan.result
       },
     )
   }
+
   base.database.bindTransactions(async (storageID, work) => {
     if (storageID !== 'state') throw new Error('Unexpected member storage identity')
     if (writes.getStore()?.initialising !== true) await ready

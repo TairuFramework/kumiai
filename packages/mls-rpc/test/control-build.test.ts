@@ -43,6 +43,7 @@ import {
   ReentrantOwnershipError,
 } from '../src/persistence-errors.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createRealGroup, type RealMember } from './fixtures/real-group.js'
 import {
   installSeed,
@@ -729,26 +730,43 @@ test.each(['putOperations', 'putOutcomes'] as const)(
     const before = host.db.snapshot()
     const change = await nextChange(host.groups, host.key.groupID, 'retire-with-writes')
     await expect(
-      host.groups.transition(change, async (stores) => {
-        const life = await stores.lifetime.load()
-        if (life === null) throw new Error('Missing lifetime')
-        await stores.lifetime.save({
-          ...life,
-          activeIncarnation: null,
-          revision: life.revision + 1,
-          mutationID: change.mutationID,
-        })
-        await stores.incarnation(1).control.apply(
-          {
-            commitOnce: null,
-            [field]:
-              field === 'putOperations'
-                ? [intent]
-                : [{ id: 'bad', opID: null, at: 1, kind: 'unknown' }],
-          },
-          change.mutationID,
-        )
-      }),
+      preparedTransition(
+        host.groups,
+        change,
+        async (reads) => {
+          const life = await reads.lifetime()
+          if (life === null) throw new Error('Missing lifetime')
+          return {
+            states: [],
+            lifetime: {
+              ...life,
+              activeIncarnation: null,
+              revision: life.revision + 1,
+              mutationID: change.mutationID,
+            },
+          }
+        },
+        async (stores) => {
+          const life = await stores.lifetime.load()
+          if (life === null) throw new Error('Missing lifetime')
+          await stores.lifetime.save({
+            ...life,
+            activeIncarnation: null,
+            revision: life.revision + 1,
+            mutationID: change.mutationID,
+          })
+          await stores.incarnation(1).control.apply(
+            {
+              commitOnce: null,
+              [field]:
+                field === 'putOperations'
+                  ? [intent]
+                  : [{ id: 'bad', opID: null, at: 1, kind: 'unknown' }],
+            },
+            change.mutationID,
+          )
+        },
+      ),
     ).rejects.toMatchObject({ name: 'DisplacedGroupHandleError' })
     expect(host.db.snapshot()).toEqual(before)
   },
@@ -758,17 +776,34 @@ test('owning retirement releases only its retained slot', async () => {
   const host = await setup()
   expect((await host.make().prepareBuild(intent, host.frame)).kind).toBe('saved')
   const change = await nextChange(host.groups, host.key.groupID, 'retire')
-  await host.groups.transition(change, async (stores) => {
-    const life = await stores.lifetime.load()
-    if (life === null) throw new Error('Missing lifetime')
-    await stores.lifetime.save({
-      ...life,
-      activeIncarnation: null,
-      revision: life.revision + 1,
-      mutationID: change.mutationID,
-    })
-    await stores.incarnation(1).control.apply({ commitOnce: null }, change.mutationID)
-  })
+  await preparedTransition(
+    host.groups,
+    change,
+    async (reads) => {
+      const life = await reads.lifetime()
+      if (life === null) throw new Error('Missing lifetime')
+      return {
+        states: [],
+        lifetime: {
+          ...life,
+          activeIncarnation: null,
+          revision: life.revision + 1,
+          mutationID: change.mutationID,
+        },
+      }
+    },
+    async (stores) => {
+      const life = await stores.lifetime.load()
+      if (life === null) throw new Error('Missing lifetime')
+      await stores.lifetime.save({
+        ...life,
+        activeIncarnation: null,
+        revision: life.revision + 1,
+        mutationID: change.mutationID,
+      })
+      await stores.incarnation(1).control.apply({ commitOnce: null }, change.mutationID)
+    },
+  )
   await expect(
     host.groups.transition(
       await nextChange(host.groups, host.key.groupID, 'plain-retired'),
@@ -790,17 +825,34 @@ test('owning retirement closes the current build while preserving independent ob
   }
   await host.control.apply({ putWelcomes: [obligation] }, 'owed')
   const change = await nextChange(host.groups, host.key.groupID, 'retire-source')
-  await host.groups.transition(change, async (stores) => {
-    const life = await stores.lifetime.load()
-    if (life === null) throw new Error('Missing lifetime')
-    await stores.lifetime.save({
-      ...life,
-      activeIncarnation: null,
-      revision: life.revision + 1,
-      mutationID: change.mutationID,
-    })
-    await stores.incarnation(1).control.apply({ commitOnce: null }, change.mutationID)
-  })
+  await preparedTransition(
+    host.groups,
+    change,
+    async (reads) => {
+      const life = await reads.lifetime()
+      if (life === null) throw new Error('Missing lifetime')
+      return {
+        states: [],
+        lifetime: {
+          ...life,
+          activeIncarnation: null,
+          revision: life.revision + 1,
+          mutationID: change.mutationID,
+        },
+      }
+    },
+    async (stores) => {
+      const life = await stores.lifetime.load()
+      if (life === null) throw new Error('Missing lifetime')
+      await stores.lifetime.save({
+        ...life,
+        activeIncarnation: null,
+        revision: life.revision + 1,
+        mutationID: change.mutationID,
+      })
+      await stores.incarnation(1).control.apply({ commitOnce: null }, change.mutationID)
+    },
+  )
   expect((await host.control.load()).commitOnce).toBeNull()
   expect((await host.control.load()).welcomes).toEqual([obligation])
 })

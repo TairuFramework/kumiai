@@ -237,19 +237,26 @@ for (const mode of ['real-mls', 'double'] as const) {
                 run: (request, prepare, work) =>
                   capability.entry.run(
                     request,
-                    (reads) =>
-                      prepare({
-                        ...reads,
-                        checkpoints: async () =>
-                          (await reads.checkpoints()).map((row) => {
-                            if (row.kind !== 'app-hold') return row
-                            if (field === 'key') return { ...row, key: { ...key, incarnation: 2 } }
-                            if (field === 'producer')
-                              return { ...row, producer: 'internal' } as unknown as CheckpointRecord
-                            if (field === 'event') return { ...row, eventID: 'another-event' }
-                            return { ...row, reportMutationID: 'another-report' }
-                          }),
-                      }),
+                    (reads, closing) =>
+                      prepare(
+                        {
+                          ...reads,
+                          checkpoints: async () =>
+                            (await reads.checkpoints()).map((row) => {
+                              if (row.kind !== 'app-hold') return row
+                              if (field === 'key')
+                                return { ...row, key: { ...key, incarnation: 2 } }
+                              if (field === 'producer')
+                                return {
+                                  ...row,
+                                  producer: 'internal',
+                                } as unknown as CheckpointRecord
+                              if (field === 'event') return { ...row, eventID: 'another-event' }
+                              return { ...row, reportMutationID: 'another-report' }
+                            }),
+                        },
+                        closing,
+                      ),
                     work,
                   ),
               },

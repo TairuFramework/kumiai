@@ -9,6 +9,7 @@ import { ReentrantOwnershipError } from '../src/persistence-errors.js'
 import type { MemoryTransaction, TransactionalGroupEffects } from '../src/persistence-types.js'
 import { registryLiveSend } from '../src/registry/live-send.js'
 import { registryRetirement } from '../src/registry/retirement.js'
+import { preparedTransition } from './fixtures/closing.js'
 import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import {
   createRegistryFixture,
@@ -340,7 +341,8 @@ for (const mode of ['real-mls', 'double'] as const) {
               const life = certificationLife
               if (life == null) throw new Error('Missing certification lifetime')
               const mutationID = crypto.randomUUID()
-              retiring = f.fixture.device.groups.transition(
+              retiring = preparedTransition(
+                f.fixture.device.groups,
                 {
                   groupID: f.key.groupID,
                   mutationID,
@@ -348,6 +350,17 @@ for (const mode of ['real-mls', 'double'] as const) {
                     revision: life.revision + 1,
                     activeIncarnation: life.activeIncarnation,
                   },
+                },
+                async (_reads) => {
+                  return {
+                    states: [],
+                    lifetime: {
+                      ...life,
+                      revision: life.revision + 2,
+                      mutationID,
+                      activeIncarnation: null,
+                    },
+                  }
                 },
                 async (stores) => {
                   await stores.lifetime.save({
@@ -435,8 +448,20 @@ for (const mode of ['real-mls', 'double'] as const) {
               const retirement = f.fixture.device.groups.load(f.key.groupID).then(async (life) => {
                 if (life === null) throw new Error('Missing lifetime')
                 const mutationID = crypto.randomUUID()
-                await f.fixture.device.groups.transition(
+                await preparedTransition(
+                  f.fixture.device.groups,
                   { groupID: f.key.groupID, mutationID, expected: life },
+                  async (_reads) => {
+                    return {
+                      states: [],
+                      lifetime: {
+                        ...life,
+                        revision: life.revision + 1,
+                        mutationID,
+                        activeIncarnation: null,
+                      },
+                    }
+                  },
                   async (stores) => {
                     await stores.lifetime.save({
                       ...life,
@@ -530,27 +555,37 @@ for (const mode of ['real-mls', 'double'] as const) {
               .catch((error: unknown) => error)
             await (fault?.rejected ?? known?.mutationID)
             const mutationID = crypto.randomUUID()
-            const queued = f.fixture.device.groups
-              .transition(
-                {
-                  groupID: f.key.groupID,
-                  mutationID,
-                  expected: {
-                    revision: life.revision + 1,
-                    activeIncarnation: life.activeIncarnation,
-                  },
+            const queued = preparedTransition(
+              f.fixture.device.groups,
+              {
+                groupID: f.key.groupID,
+                mutationID,
+                expected: {
+                  revision: life.revision + 1,
+                  activeIncarnation: life.activeIncarnation,
                 },
-                async (stores) => {
-                  order.push('retirement-acquired')
-                  await stores.lifetime.save({
+              },
+              async (_reads) => {
+                return {
+                  states: [],
+                  lifetime: {
                     ...life,
                     revision: life.revision + 2,
                     mutationID,
                     activeIncarnation: null,
-                  })
-                },
-              )
-              .catch((error: unknown) => error)
+                  },
+                }
+              },
+              async (stores) => {
+                order.push('retirement-acquired')
+                await stores.lifetime.save({
+                  ...life,
+                  revision: life.revision + 2,
+                  mutationID,
+                  activeIncarnation: null,
+                })
+              },
+            ).catch((error: unknown) => error)
             await fault?.finish('rollback')
             expect(await pending).toEqual({ recorded: true })
             expect(await queued).toBeUndefined()
@@ -720,7 +755,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           f.capability.run = (request, prepare, work) =>
             run(
               request,
-              async (reads) => {
+              async (reads, closing) => {
                 if (first) {
                   first = false
                   if (timing === 'after-await') await Promise.resolve()
@@ -741,7 +776,7 @@ for (const mode of ['real-mls', 'double'] as const) {
                   expect(outcome).toMatchObject({ name: 'ReentrantOwnershipError' })
                   expect(accounting).not.toHaveBeenCalled()
                 }
-                return await prepare(reads)
+                return await prepare(reads, closing)
               },
               work,
             )
