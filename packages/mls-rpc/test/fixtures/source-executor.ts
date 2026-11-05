@@ -95,6 +95,15 @@ export async function sourceExecutorFixture(
     opens,
     transactions,
     flushReady,
+    reopenPersistence() {
+      return createMemoryDevicePersistence({
+        db: createMemoryTransaction({ rows: db.snapshot() }),
+        atRest,
+        ownerDID: identity.id,
+        providerID: persistence.providerID,
+        ...options,
+      })
+    },
     unreadable(namespace?: string) {
       unreadable = namespace
     },

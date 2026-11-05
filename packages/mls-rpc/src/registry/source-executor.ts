@@ -25,7 +25,6 @@ import type {
 import type { RecoveryEnvironment } from './validation.js'
 
 type SourceCell = {
-  groupID: string
   generation: number
   key: GroupKey | null
   projection: SourceAdmission | null
@@ -34,7 +33,14 @@ type SourceCell = {
 type Executor = { executor: SourceExecutor; control: SourceExecutorControl }
 const registryExecutors = new WeakMap<object, Executor>()
 const executorDisposals = new WeakMap<Executor, () => void>()
-const coordinatorGenerations = new WeakMap<object, Map<string, number>>()
+// Bindings can outlive coordinators, including when sealed persistence is reopened.
+let sourceGeneration = 0
+
+function nextGeneration(): number {
+  if (sourceGeneration === Number.MAX_SAFE_INTEGER)
+    throw new GroupStateConflictError('Source lifecycle generation exhausted')
+  return ++sourceGeneration
+}
 
 export function bindRegistrySourceExecutor(registry: object, source: Executor): void {
   registryExecutors.set(registry, source)
@@ -62,17 +68,6 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
     throw new GroupStateConflictError('Source executor requires the registered coordinator')
   const cells = new Map<string, SourceCell>()
   const observers: Array<() => void> = []
-  let generations = coordinatorGenerations.get(coordinator)
-  if (generations === undefined) {
-    generations = new Map()
-    coordinatorGenerations.set(coordinator, generations)
-  }
-  const sharedGenerations = generations
-  function nextGeneration(groupID: string): number {
-    const generation = (sharedGenerations.get(groupID) ?? 0) + 1
-    sharedGenerations.set(groupID, generation)
-    return generation
-  }
   function assertRoot(): void {
     entry.assertRoot()
     lifecycle.assertCurrent()
@@ -81,8 +76,7 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
     let cell = cells.get(groupID)
     if (cell !== undefined) return cell
     cell = {
-      groupID,
-      generation: nextGeneration(groupID),
+      generation: nextGeneration(),
       key: null,
       projection: null,
       reason: null,
@@ -106,7 +100,7 @@ export function createSourceExecutor<TTx extends GroupTransaction>(params: {
     return cell
   }
   function close(cell: SourceCell, reason: Error): void {
-    cell.generation = nextGeneration(cell.groupID)
+    cell.generation = nextGeneration()
     cell.key = null
     cell.projection = null
     cell.reason = reason

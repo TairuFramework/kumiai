@@ -217,6 +217,53 @@ describe('owned source commands', () => {
     ).rejects.toBeInstanceOf(DisplacedGroupHandleError)
   })
 
+  test('reopened registries never revive invalidated bindings or copied results', async () => {
+    const f = await sourceExecutorFixture()
+    const unexpected = async (): Promise<never> => {
+      throw new Error('Inspect must not restore private state')
+    }
+    const openRegistry = (persistence: typeof f.persistence) => {
+      return createGroupHandleRegistry({
+        persistence,
+        providerID: persistence.providerID,
+        packages: createDevicePackages(persistence),
+        recovery: f.environment,
+        restore: unexpected,
+        restoreCandidate: unexpected,
+      })
+    }
+    const registry = openRegistry(f.persistence)
+    const original = registrySourceExecutor(registry)
+    const binding = await original.control.admit(f.seed.key, 'source')
+    const result = structuredClone(
+      await original.executor.execute({ binding, command: 'source.inspect', input: undefined }),
+    )
+    original.control.invalidate(f.seed.key, new DisplacedGroupHandleError('Superseded'))
+    expect(() => original.control.assertCurrent(binding)).toThrow(DisplacedGroupHandleError)
+    await registry.dispose()
+
+    const reopened = f.reopenPersistence()
+    expect(coordinatorBinding(reopened.groups)).not.toBe(coordinatorBinding(f.persistence.groups))
+    const replacement = openRegistry(reopened)
+    try {
+      const fresh = registrySourceExecutor(replacement)
+      const admitted = await fresh.control.admit(f.seed.key, 'source')
+      await expect(
+        fresh.executor.execute({ binding: admitted, command: 'source.inspect', input: undefined }),
+      ).resolves.toMatchObject({ value: { key: f.seed.key, stateVersion: 1 } })
+      for (const stale of [binding, result.binding]) {
+        await expect(
+          fresh.executor.execute({ binding: stale, command: 'source.inspect', input: undefined }),
+        ).rejects.toBeInstanceOf(DisplacedGroupHandleError)
+        expect(() => fresh.control.assertCurrent(stale)).toThrow(DisplacedGroupHandleError)
+      }
+      expect(admitted.generation).toBeGreaterThan(binding.generation)
+      fresh.control.assertCurrent(admitted)
+    } finally {
+      await replacement.dispose()
+    }
+  })
+
   test('settled metadata invalidates the projection before another memory command', async () => {
     const f = await sourceExecutorFixture()
     const old = await inspect(f)
