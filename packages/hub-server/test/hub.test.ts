@@ -213,13 +213,15 @@ describe('hub replay protection across restarts', () => {
     const cache = new MemoryReplayCache()
     const replay = { cache, enabled: false, rejectStale: false } as HubReplayOptions
     const message = await clientIdentity.signToken({
-      typ: 'request',
-      aud: hubIdentity.id,
-      prc: 'hub/v1/subscribe',
-      rid: 'replay-request',
-      prm: { topicID: TOPIC },
-      jti: crypto.randomUUID(),
-      exp: Math.floor(Date.now() / 1000) + 300,
+      payload: {
+        typ: 'request',
+        aud: hubIdentity.id,
+        prc: 'hub/v1/subscribe',
+        rid: 'replay-request',
+        prm: { topicID: TOPIC },
+        jti: crypto.randomUUID(),
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
     })
 
     const signedMessage = message as unknown as AnyClientMessageOf<HubProtocol>
@@ -240,13 +242,15 @@ describe('hub replay protection across restarts', () => {
     const clientIdentity = randomIdentity()
     const cache = new MemoryReplayCache()
     const message = await clientIdentity.signToken({
-      typ: 'request',
-      aud: hubIdentity.id,
-      prc: 'hub/v1/subscribe',
-      rid: 'replay-request',
-      prm: { topicID: TOPIC },
-      jti: crypto.randomUUID(),
-      exp: Math.floor(Date.now() / 1000) + 300,
+      payload: {
+        typ: 'request',
+        aud: hubIdentity.id,
+        prc: 'hub/v1/subscribe',
+        rid: 'replay-request',
+        prm: { topicID: TOPIC },
+        jti: crypto.randomUUID(),
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
     })
 
     const signedMessage = message as unknown as AnyClientMessageOf<HubProtocol>
@@ -270,13 +274,15 @@ describe('hub replay protection across restarts', () => {
     const hubIdentity = randomIdentity()
     const clientIdentity = randomIdentity()
     const message = await clientIdentity.signToken({
-      typ: 'request',
-      aud: hubIdentity.id,
-      prc: 'hub/v1/subscribe',
-      rid: 'replay-request',
-      prm: { topicID: TOPIC },
-      jti: crypto.randomUUID(),
-      exp: Math.floor(Date.now() / 1000) + 300,
+      payload: {
+        typ: 'request',
+        aud: hubIdentity.id,
+        prc: 'hub/v1/subscribe',
+        rid: 'replay-request',
+        prm: { topicID: TOPIC },
+        jti: crypto.randomUUID(),
+        exp: Math.floor(Date.now() / 1000) + 300,
+      },
     })
 
     const signedMessage = message as unknown as AnyClientMessageOf<HubProtocol>

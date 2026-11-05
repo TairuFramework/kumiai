@@ -30,8 +30,8 @@ import {
   lifecycleGroup,
 } from './fixtures/lifecycle-ledger.js'
 
-test('mixed history gains a distinct denial every fourth event', () => {
-  const folded = foldChain(controllerID, buildLog(13, agent(71).id, true))
+test('mixed history gains a distinct denial every fourth event', async () => {
+  const folded = await foldChain(controllerID, await buildLog(13, agent(71).id, true))
   expect(folded.ok).toBe(true)
   if (!folded.ok) throw new Error(folded.reason)
   expect(folded.states.map((state) => state.deny.size)).toEqual([
@@ -46,19 +46,19 @@ test('measures signed controller history and repeated copies', async () => {
 }, 180_000)
 
 test('historyCountsUtf8AndEveryCopy', async () => {
-  const rotation = createRotate({
+  const rotation = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: '組合 café 🚀',
   })
   const prefix = [inception, rotation]
   const alice = agent(41)
   const initial = await lifecycleGroup(prefix)
   const added = await addMember(initial.group, agent(51), await bindingFor(agent(51), prefix))
-  const revoke = revokeChain({
+  const revoke = await revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
@@ -66,7 +66,7 @@ test('historyCountsUtf8AndEveryCopy', async () => {
     subject: agent(61).id,
   })
   const oldProof = [...prefix, revoke]
-  const resetPrefix = [inception, createReset(controllerSeed, 0, 1)]
+  const resetPrefix = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
   const entries: Array<VerifiedLedgerEntry> = []
   const tokens: Array<string> = []
   for (const value of [
@@ -164,7 +164,7 @@ test('history counts every proof copy', async () => {
 test('history does not shrink after a settlement', async () => {
   const { seed, did, log, head, inception } = await buildEpoch({ members: 1 })
   const seedEntry = logEntry(did, 'seed', log)
-  const rotate = createRotate({
+  const rotate = await createRotate({
     seed,
     profile: 0,
     did,
@@ -177,7 +177,7 @@ test('history does not shrink after a settlement', async () => {
     },
   })
   const entries = [seedEntry, logEntry(did, 'log', { chain: [rotate], events: [] })]
-  const state = foldControl(
+  const state = await foldControl(
     entries.map((verified, index) => ({ verified, entryID: String(index) })),
     { creatorDID: did, controller: did, version: 1 },
     'history-log',
@@ -202,7 +202,7 @@ test('P2 workload fits the horizon held once', async () => {
     ...deltas.map((proof) => logEntry(did, 'log', proof)),
   ]
   const drops: Array<FoldDrop> = []
-  const state = foldControl(
+  const state = await foldControl(
     entries.map((verified, index) => ({ verified, entryID: String(index) })),
     { creatorDID: did, controller: did, version: 1 },
     'history-log',

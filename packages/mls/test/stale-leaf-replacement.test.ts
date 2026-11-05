@@ -385,7 +385,7 @@ test('two leaves for the admitted DID are refused as ambiguous', async () => {
   if (carolIndex == null) throw new Error('Missing leaf')
   const tree = author.state.ratchetTree.slice()
   tree[carolIndex * 2] = tree[staleIndex * 2]
-  const duplicated = deriveGroup(author, { ...author.state, ratchetTree: tree })
+  const duplicated = await deriveGroup(author, { ...author.state, ratchetTree: tree })
   expect(leavesOf(duplicated, bob.id)).toHaveLength(2)
   const bundle = await rawBundle(
     author,
@@ -406,15 +406,19 @@ test('two leaves for the admitted DID are refused as ambiguous', async () => {
 
 async function staleMembership() {
   const f = await staleGroup()
-  const folded = foldLog(controllerID, { chain: [inception], events: [] })
+  const folded = await foldLog({ did: controllerID, input: { chain: [inception], events: [] } })
   if (!folded.ok) throw new Error(folded.reason)
-  const add = createAdd({
+  const add = await createAdd({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     head: folded.head,
     parents: [folded.head.epoch],
-    member: { did: f.bob.id, key: encodeKey(f.bob.publicKey, 'EdDSA'), lease: 1000 },
+    member: {
+      did: f.bob.id,
+      key: encodeKey({ publicKey: f.bob.publicKey, alg: 'EdDSA' }),
+      lease: 1000,
+    },
   })
   await f.author.applyLedgerEntries([
     await signLedgerEntry(f.identity, {

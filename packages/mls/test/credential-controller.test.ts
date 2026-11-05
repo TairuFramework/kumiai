@@ -89,7 +89,7 @@ test('bindingOfDID returns the membership form', async () => {
       ? { ...node, leaf: { ...node.leaf, credential: makeMLSCredential(identity, controller) } }
       : node,
   )
-  const bound = deriveGroup(group, { ...group.state, ratchetTree })
+  const bound = await deriveGroup(group, { ...group.state, ratchetTree })
   expect(bound.bindingOfDID(identity.id)).toEqual({
     controller: controller.id,
     prefix: [],

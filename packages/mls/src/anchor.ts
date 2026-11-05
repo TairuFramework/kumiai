@@ -149,7 +149,9 @@ export function controlCapabilities(): Capabilities {
   return { ...base, extensions: [...extensions] }
 }
 
-function findAnchorExtension(handle: GroupHandle): GroupContextExtension | undefined {
+function findAnchorExtension(
+  handle: Pick<GroupHandle, 'state'>,
+): GroupContextExtension | undefined {
   return handle.state.groupContext.extensions.find(
     (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
   )
@@ -179,7 +181,7 @@ export function readGroupAnchorExtension(handle: GroupHandle): GroupContextExten
  * so this returns a non-null anchor and the member joins. Only the payload a v1 build cannot
  * interpret is withheld.
  */
-export function readGroupAnchor(handle: GroupHandle): GroupAnchor | null {
+export function readGroupAnchor(handle: Pick<GroupHandle, 'state'>): GroupAnchor | null {
   const extension = findAnchorExtension(handle)
   if (extension == null) {
     return null

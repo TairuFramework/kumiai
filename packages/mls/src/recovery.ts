@@ -332,7 +332,7 @@ function recoveryAAD(
 export async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
   try {
-    verified = await verifyToken<RecoveryRequest>(token)
+    verified = await verifyToken<RecoveryRequest>({ token: token })
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new RecoveryRequestError('unverified', 'recovery request signature did not verify', {
@@ -413,17 +413,15 @@ export async function createRecoveryRequest(
   const ephemeralPublicKey = await hpke.exportPublicKey(keyPair.publicKey)
   const ephemeralPrivateKey = await hpke.exportPrivateKey(keyPair.privateKey)
 
-  const signed = await identity.signToken<RecoveryRequest>(
-    {
+  const signed = await identity.signToken<RecoveryRequest>({
+    payload: {
       type: RECOVERY_REQUEST_TYPE,
       groupID: group.groupID,
       requestID,
       ephemeralKey: encodeMultibase(ephemeralPublicKey),
     },
-    // Self-verifying offline: a responder must not need a DID resolver to check
-    // the signature of a peer it has never resolved.
-    { embedLongForm: true },
-  )
+    embedLongForm: true,
+  })
 
   return { request: stringifyToken(signed), ephemeralPublicKey, ephemeralPrivateKey }
 }
@@ -563,18 +561,16 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
   const ledger =
     group.anchor.controller == null ? undefined : encodeLedgerTokens(await group.getLedger())
 
-  const signed = await identity.signToken<ResponderAttestation>(
-    {
+  const signed = await identity.signToken<ResponderAttestation>({
+    payload: {
       type: RECOVERY_GROUPINFO_TYPE,
       groupID: verified.groupID,
       requestID: verified.requestID,
       groupInfoDigest: encodeMultibase(sha256(groupInfo)),
       ...(ledger == null ? {} : { ledgerDigest: encodeMultibase(sha256(ledger)) }),
     },
-    // Self-verifying offline: the healing peer must check the signature without
-    // resolving the responder.
-    { embedLongForm: true },
-  )
+    embedLongForm: true,
+  })
 
   const plaintext = frameAttestedGroupInfo(stringifyToken(signed), groupInfo, ledger)
   return await sealToRequest({ kind: GROUP_INFO_REPLY, group, request, plaintext })
@@ -619,7 +615,7 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
   const { attestation, group, requestID, groupInfo, ledger } = params
   let verified: Awaited<ReturnType<typeof verifyToken<ResponderAttestation>>>
   try {
-    verified = await verifyToken<ResponderAttestation>(attestation)
+    verified = await verifyToken<ResponderAttestation>({ token: attestation })
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new SealedGroupInfoError(

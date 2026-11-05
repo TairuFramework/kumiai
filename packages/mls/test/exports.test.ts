@@ -36,14 +36,14 @@ test('removal evidence and survivor targets are available through the package en
   const { did, log, members } = await buildEpoch({ members: 1 })
   const member = members[0]
   if (member == null) throw new Error('Missing member')
-  const evidence: RemovalEvidence | undefined = removalEvidence(did, log, member.add)
+  const evidence: RemovalEvidence | undefined = await removalEvidence(did, log, member.add)
   expect(evidence).toBeUndefined()
   expect(survivorTargets).toEqual(expect.any(Function))
 })
 
 test('controller log helpers are available through the package entry point', async () => {
   const { did, log } = await buildEpoch({ members: 0 })
-  const ingested = ingestControllerLog(did, undefined, log)
+  const ingested = await ingestControllerLog(did, undefined, log)
   const after: FoldOk = ingested.after
   expect(after.ok).toBe(true)
   expect(effectDelta(undefined, after.head)).toEqual({
@@ -52,7 +52,7 @@ test('controller log helpers are available through the package entry point', asy
     generation: false,
   })
 
-  const registry = registryForLog(did, log)
+  const registry = await registryForLog(did, log)
   const projection: ControllerProjection | undefined = registry.controllers.get(did)
   expect(projection?.recordedLog).toEqual(log)
   expect(recordedLogOf(registry, did)).toEqual(log)
@@ -62,13 +62,13 @@ test('member authority and effect helpers are available through the package entr
   const { did, log, members } = await buildEpoch({ members: 1 })
   const member = members[0]
   if (member == null) throw new Error('Missing member')
-  const registry = registryForLog(did, log)
+  const registry = await registryForLog(did, log)
   const leaf: LeafRef = {
     did: member.did,
     leafKey: member.identity.publicKey,
     binding: { id: did, prefix: log.chain, member: { add: member.add, g: 0 }, iat: 100 },
   }
-  const status: MemberRootStatus = memberRootStatus(registry, did, {
+  const status: MemberRootStatus = await memberRootStatus(registry, did, {
     kind: 'member',
     did: member.did,
     add: member.add,
@@ -76,13 +76,14 @@ test('member authority and effect helpers are available through the package entr
   })
   expect(status.status).toBe('effective')
   const slot: EvidenceSlot = 'membership'
-  expect(effectiveAuthorityOf(leaf, registry, did)).toMatchObject({ slot })
-  expect(memberDropIndices(did, log.chain, member.add)).toEqual([])
-  expect(claimsFor(did, undefined, log, 0)).toEqual([])
-  expect(() =>
-    effectOf(did, log, { kind: 'deny', did: member.did, ref: { chainIndex: 0 } }, 0),
-  ).toThrow(expect.objectContaining({ reason: 'no-rev' }))
-  expect(cascadeOf([{ ...leaf, leafIndex: 0 }], [], registry, registry, did)).toEqual({
+  expect(await effectiveAuthorityOf(leaf, registry, did)).toMatchObject({ slot })
+  expect(await memberDropIndices(did, log.chain, member.add)).toEqual([])
+  expect(await claimsFor(did, undefined, log, 0)).toEqual([])
+  await expect(
+    async () =>
+      await effectOf(did, log, { kind: 'deny', did: member.did, ref: { chainIndex: 0 } }, 0),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'no-rev' }))
+  expect(await cascadeOf([{ ...leaf, leafIndex: 0 }], [], registry, registry, did)).toEqual({
     revoked: [],
     removed: [],
     removeLeafIndices: [],
@@ -95,9 +96,9 @@ test('proof sizing is available through the package entry point', () => {
 
 test('epoch cap helpers are available through the package entry point', async () => {
   const { log } = await buildEpoch({ members: 0, revokes: SETTLE_PROMPT_EPOCH_EVENTS })
-  expect(epochEventCount(log)).toBe(24)
-  expect(settleAdvisory(log)).toBe('prompt')
-  expect(epochEventCount(log)).toBeLessThan(MAX_EPOCH_EVENTS_FOR_LEAVES)
+  expect(await epochEventCount(log)).toBe(24)
+  expect(await settleAdvisory(log)).toBe('prompt')
+  expect(await epochEventCount(log)).toBeLessThan(MAX_EPOCH_EVENTS_FOR_LEAVES)
 })
 
 test('registry controller resolution is available through the package entry point', async () => {
@@ -106,9 +107,11 @@ test('registry controller resolution is available through the package entry poin
   const resolver = createRegistryControllerResolver({
     controllerID: did,
     prefix: log.chain,
-    registry: registryForLog(did, log),
+    registry: await registryForLog(did, log),
   })
-  await expect(resolver.frozen().resolve(did, {})).resolves.toMatchObject({ alg: 'EdDSA' })
+  await expect(resolver.frozen().resolve({ did: did, header: {} })).resolves.toMatchObject({
+    alg: 'EdDSA',
+  })
 })
 
 test('judging context is available through the package entry point', () => {

@@ -13,7 +13,7 @@ export type HandleAccess = {
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
   ): Promise<TValue>
   /** Must run the guard under the replacement lock, before persistence; a throw aborts. */
-  replace(next: GroupHandle, guard: (live: GroupHandle) => void): Promise<void>
+  replace(next: GroupHandle, guard: (live: GroupHandle) => Promise<void>): Promise<void>
   open<TValue>(
     fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
     persistOpened: PersistOpened,
@@ -21,10 +21,11 @@ export type HandleAccess = {
 }
 
 /** Refuses a replacement that drops lifecycle effects the live handle knows. */
-export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => void {
-  return (live) => {
+export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => Promise<void> {
+  return async (live) => {
     const controller = live.anchor.controller
-    if (controller != null) assertRetainsKnownEffects(controller, live.registry, next.registry)
+    if (controller != null)
+      await assertRetainsKnownEffects(controller, live.registry, next.registry)
   }
 }
 
@@ -36,8 +37,8 @@ export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => v
 export async function guardedReplace(access: HandleAccess, next: GroupHandle): Promise<void> {
   const guard = retainsKnownEffects(next)
   let ran = false
-  await access.replace(next, (live) => {
-    guard(live)
+  await access.replace(next, async (live) => {
+    await guard(live)
     ran = true
   })
   if (!ran) throw new Error('HandleAccess.replace did not run its guard')
@@ -88,7 +89,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       }),
     replace: (next, guard) =>
       serialise(async () => {
-        guard(params.handle())
+        await guard(params.handle())
         await save(next)
         await params.adopt(next)
         publishedAdmission = next.sendAdmission()

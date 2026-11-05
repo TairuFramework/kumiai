@@ -112,10 +112,10 @@ export async function sealRecoveryVerdict(params: SealRecoveryVerdictParams): Pr
     verdict.requestID !== verified.requestID
   )
     throw new Error('Recovery verdict does not bind the signed request')
-  const token = await identity.signToken(
-    { ...verdict, type: VERDICT_TYPE },
-    { embedLongForm: true },
-  )
+  const token = await identity.signToken({
+    payload: { ...verdict, type: VERDICT_TYPE },
+    embedLongForm: true,
+  })
   // A refusal can answer an agent whose leaf the responder no longer holds.
   return await sealToRequest({
     kind: VERDICT_REPLY,
@@ -137,7 +137,7 @@ export async function openRecoveryVerdict(
     requestID,
     ephemeralPrivateKey,
   })
-  const token = await verifyToken(new TextDecoder().decode(plaintext))
+  const token = await verifyToken({ token: new TextDecoder().decode(plaintext) })
   if (
     !isVerifiedToken(token) ||
     token.payload.type !== VERDICT_TYPE ||
@@ -165,7 +165,9 @@ export type RecoverySignerEligibleParams = {
   now?: number
 }
 
-export function recoverySignerEligible(params: RecoverySignerEligibleParams): boolean {
+export async function recoverySignerEligible(
+  params: RecoverySignerEligibleParams,
+): Promise<boolean> {
   const { group, registry, signer, now = Date.now() / 1000 } = params
   const controller = group.anchor.controller
   if (controller == null) return false
@@ -182,18 +184,18 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
         registry.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
     )
       return false
-    const folded = foldChain(controller, binding.prefix)
+    const folded = await foldChain(controller, binding.prefix)
     const projection = registry.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
     const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
-    const authority = effectiveAuthorityOf(
+    const authority = await effectiveAuthorityOf(
       { did: signer, binding: bound, leafKey: binding.leafKey },
       registry,
       controller,
     )
     if ('status' in authority) return false
     if (binding.member != null && authority.slot === 'membership') {
-      const status = memberRootStatus(registry, controller, {
+      const status = await memberRootStatus(registry, controller, {
         kind: 'member',
         did: signer,
         add: binding.member.add,
@@ -206,9 +208,9 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
       )
         return false
     }
-    const expiry = leafExpiry(bound, registry, controller)
+    const expiry = await leafExpiry(bound, registry, controller)
     if (expiry == null) return false
-    const time = attestedTreeTime(group.state.ratchetTree, registry, controller)
+    const time = await attestedTreeTime(group.state.ratchetTree, registry, controller)
     return expiry >= Math.max(time, now - 300)
   } catch {
     return false

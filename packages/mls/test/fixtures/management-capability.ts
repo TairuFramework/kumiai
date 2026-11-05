@@ -35,23 +35,26 @@ export async function buildManagementCapability(
 ): Promise<ManagementCapability> {
   const controllerSeed = options.controllerSeed ?? new Uint8Array(32).fill(31)
   const profile = options.profile ?? 0
-  const inception = createInception(controllerSeed, profile)
+  const inception = await createInception({ seed: controllerSeed, profile: profile })
   const controllerID = didFromInception(inception.event)
-  const controller = createControllerIdentity({
+  const controller = await createControllerIdentity({
     seed: controllerSeed,
     profile,
     log: asControllerLog([inception]),
   })
 
-  const token = await createCapability(controller, {
-    sub: controllerID,
-    aud: options.managerDID,
-    act: 'manage',
-    res: 'kumiai/devices',
-    iat: now(),
-    exp: now() + 3600,
-    cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: options.managerKey }),
-    ...options.capabilityOverrides,
+  const token = await createCapability({
+    signer: controller,
+    payload: {
+      sub: controllerID,
+      aud: options.managerDID,
+      act: 'manage',
+      res: 'kumiai/devices',
+      iat: now(),
+      exp: now() + 3600,
+      cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: options.managerKey }),
+      ...options.capabilityOverrides,
+    },
   })
 
   return { capability: stringifyToken(token), controllerID, prefix: [inception] }

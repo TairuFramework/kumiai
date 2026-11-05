@@ -53,7 +53,7 @@ const fixture = (await import(
   inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
-  resetPrefix: () => ControllerBinding['prefix']
+  resetPrefix: () => Promise<ControllerBinding['prefix']>
   oversizedBinding: (identity: OwnIdentity, iat: number, exp: number) => Promise<ControllerBinding>
   timedBinding: (params: {
     identity: OwnIdentity
@@ -620,7 +620,7 @@ test('a delegated replacement that lowers tree time requires renewal before requ
 test('a generation floor in the reply ledger prevents publication of a cached pre-reset binding', async () => {
   const host = vi.fn(async () => null)
   const s = await setup(host)
-  const prefix = fixture.resetPrefix()
+  const prefix = await fixture.resetPrefix()
   const replacement = await joinGroupExternal({
     identity: s.bob,
     groupInfo: (await exportGroupInfo({ group: s.aliceGroup() })).groupInfo,
@@ -779,7 +779,7 @@ async function ineligibleReply(s: Setup, kind: 'leafless' | 'revoked' | 'issuer'
       status: 'revoked',
     })
   }
-  const handle = new GroupHandle({
+  const handle = await GroupHandle.create({
     state: s.aliceGroup().state,
     context: s.aliceGroup().context,
     credential: { id: identity.id, groupID: s.aliceGroup().groupID },

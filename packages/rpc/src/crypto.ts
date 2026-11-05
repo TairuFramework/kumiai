@@ -374,7 +374,7 @@ export type PendingRecovery = {
   /** Bind judgement to the published tuple and derive from the speculative epoch. */
   confirmationKey(position: string, commitDigest: string): Promise<Uint8Array>
   /** Call after confirmationKey resolves. Failed bindings or signer gates are advisory. */
-  judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory'
+  judgeVerdict(opened: OpenedRecoveryVerdict): Promise<'authoritative' | 'advisory'>
   /** The external-commit bytes, framed at the epoch the sealed GroupInfo described. */
   commit: Uint8Array
   /**

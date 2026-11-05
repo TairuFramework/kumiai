@@ -55,20 +55,16 @@ export async function signLedgerEntry(
   identity: SigningIdentity,
   entry: LedgerEntry,
 ): Promise<string> {
-  const signed = await identity.signToken(
-    {
+  const signed = await identity.signToken({
+    payload: {
       type: entry.type,
       groupID: entry.groupID,
       subject: entry.subject,
       value: entry.value,
       ...(entry.ord === undefined ? {} : { ord: entry.ord }),
     },
-    // Embed the long-form DID so each entry is self-verifying offline: the
-    // ledger is the source of truth and receivers fold it long after first
-    // contact, when the author's DID document may no longer be cached. No-op
-    // for did:key (long form === id).
-    { embedLongForm: true },
-  )
+    embedLongForm: true,
+  })
   return stringifyToken(signed)
 }
 
@@ -87,7 +83,7 @@ export async function verifyLedgerEntry<TValue = unknown>(
 ): Promise<VerifiedLedgerEntry<TValue> | null> {
   let verified: Awaited<ReturnType<typeof verifyToken<LedgerEntry<TValue>>>>
   try {
-    verified = await verifyToken<LedgerEntry<TValue>>(token)
+    verified = await verifyToken<LedgerEntry<TValue>>({ token: token })
   } catch {
     return null
   }

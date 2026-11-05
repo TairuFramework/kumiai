@@ -266,11 +266,11 @@ export function isLifecycleDeviceValue(value: DeviceValue): boolean {
  * is the acceptance pipeline's job (a self-register leaf attestation, or a management capability),
  * never the fold's. Lifecycle effects replay recorded DIDs without consulting a later tree.
  */
-export function registryApply(
+export async function registryApply(
   verified: VerifiedLedgerEntry<DeviceValue>,
   state: DeviceRegistry,
   controllerID?: string,
-): DeviceRegistry {
+): Promise<DeviceRegistry> {
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
   const devices = new Map(state.devices)
@@ -291,7 +291,7 @@ export function registryApply(
         const folded =
           previous.recordedLog == null
             ? undefined
-            : foldControllerLog(controller, previous.recordedLog)
+            : await foldControllerLog(controller, previous.recordedLog)
         // Only an effective incarnation attests; the head also holds removed and denied ones.
         const member = folded?.ok
           ? [...folded.head.members.values()].find(
@@ -313,13 +313,13 @@ export function registryApply(
         })
       }
     } else {
-      const effect = authenticateLifecycleProof(controller, verified, state)
+      const effect = await authenticateLifecycleProof(controller, verified, state)
       let projection = {
         ...previous,
         recordedLog: effect.recordedLog,
         genFloor: effect.genFloor,
       }
-      if (value.op === 'seed') projection = seedEffects(controller, devices, projection)
+      if (value.op === 'seed') projection = await seedEffects(controller, devices, projection)
       controllers.set(controller, projection)
       const resetRef = effect.resetRef
       const denials = new Map(
@@ -361,8 +361,8 @@ export function registryApply(
         if (!('event' in member.proofRef)) continue
         const chain = effect.recordedLog.chain
         const index =
-          memberDropIndices(controller, chain, add).at(-1) ??
-          memberTombstoneIndices(controller, chain, add, member.did).at(-1)
+          (await memberDropIndices(controller, chain, add)).at(-1) ??
+          (await memberTombstoneIndices(controller, chain, add, member.did)).at(-1)
         if (index != null) removedMembers.set(add, { ...member, proofRef: { chainIndex: index } })
       }
       const survivorGrants = new Map(projection.survivorGrants)
@@ -373,10 +373,8 @@ export function registryApply(
       for (const [did, held] of devices) {
         if (held.controller !== controller || held.proofRef == null || !('event' in held.proofRef))
           continue
-        const index = revokeIndices(
-          controller,
-          effect.recordedLog.chain,
-          held.cascadedFrom ?? did,
+        const index = (
+          await revokeIndices(controller, effect.recordedLog.chain, held.cascadedFrom ?? did)
         ).at(-1)
         if (index != null) devices.set(did, { ...held, proofRef: { chainIndex: index } })
       }
@@ -441,10 +439,10 @@ export function isResetOnly(record: DeviceRecord): boolean {
 }
 
 /** Structural admission exception. Callers still authenticate the capability and holder grant. */
-export function mayReadmitResetDevice(
+export async function mayReadmitResetDevice(
   registry: DeviceRegistry,
   parsed: MLSCredentialIdentity,
-): boolean {
+): Promise<boolean> {
   const record = registry.devices.get(normalizeDID(parsed.id))
   const binding = parsed.controller
   if (
@@ -454,7 +452,7 @@ export function mayReadmitResetDevice(
     normalizeDID(binding.id) !== record.controller
   )
     return false
-  const folded = foldChain(binding.id, binding.prefix)
+  const folded = await foldChain(binding.id, binding.prefix)
   return (
     folded.ok &&
     (folded.states.at(-1)?.gen ?? 0) >= (registry.controllers.get(record.controller)?.genFloor ?? 0)
@@ -481,22 +479,26 @@ export function recordedLogOf(
   return registry.controllers.get(normalizeDID(controller))?.recordedLog
 }
 
-export function assertRetainsKnownEffects(
+export async function assertRetainsKnownEffects(
   controller: string,
   known: DeviceRegistry,
   candidate: DeviceRegistry,
-): void {
+): Promise<void> {
   const did = normalizeDID(controller)
   const held = known.controllers.get(did)
   const offered = candidate.controllers.get(did)
-  const before = held?.recordedLog == null ? undefined : foldControllerLog(did, held.recordedLog)
+  const before =
+    held?.recordedLog == null ? undefined : await foldControllerLog(did, held.recordedLog)
   const after =
-    offered?.recordedLog == null ? undefined : foldControllerLog(did, offered.recordedLog)
+    offered?.recordedLog == null ? undefined : await foldControllerLog(did, offered.recordedLog)
   if (before?.ok && (!after?.ok || after.head.saturated))
     throw new RecoveryKnowledgeError('epoch-event')
   if (held?.recordedLog != null && offered?.recordedLog != null) {
-    const branches = resolveBranches(did, [held.recordedLog.chain, offered.recordedLog.chain])
-    const winner = branches.ok ? foldChain(did, branches.winner) : undefined
+    const branches = await resolveBranches({
+      did: did,
+      chains: [held.recordedLog.chain, offered.recordedLog.chain],
+    })
+    const winner = branches.ok ? await foldChain(did, branches.winner) : undefined
     if (!winner?.ok || (after?.ok && after.head.epoch !== winner.head.epoch))
       throw new RecoveryKnowledgeError('forked')
   }
@@ -539,10 +541,13 @@ export function assertRetainsKnownEffects(
   }
 }
 
-export function registryForLog(controller: string, log: ControllerLog): DeviceRegistry {
-  const { log: recordedLog, after } = ingestControllerLog(controller, undefined, log)
+export async function registryForLog(
+  controller: string,
+  log: ControllerLog,
+): Promise<DeviceRegistry> {
+  const { log: recordedLog, after } = await ingestControllerLog(controller, undefined, log)
   const devices = new Map<string, DeviceRecord>()
-  const projection = seedEffects(normalizeDID(controller), devices, {
+  const projection = await seedEffects(normalizeDID(controller), devices, {
     ...controllerProjection(),
     recordedLog,
     genFloor: after.head.gen,
@@ -553,16 +558,16 @@ export function registryForLog(controller: string, log: ControllerLog): DeviceRe
   }
 }
 
-function seedEffects(
+async function seedEffects(
   controller: string,
   devices: Map<string, DeviceRecord>,
   projection: ControllerProjection & { recordedLog: ControllerLog },
-): ControllerProjection & { recordedLog: ControllerLog } {
+): Promise<ControllerProjection & { recordedLog: ControllerLog }> {
   const log = projection.recordedLog
-  const folded = foldControllerLog(controller, log)
+  const folded = await foldControllerLog(controller, log)
   if (!folded.ok) throw new RevokeProofError('effects-mismatch')
   const removedMembers = new Map(projection.removedMembers)
-  for (const claim of claimsFor(controller, undefined, log, 0)) {
+  for (const claim of await claimsFor(controller, undefined, log, 0)) {
     if (claim.kind === 'deny') {
       devices.set(normalizeDID(claim.did), { controller, status: 'revoked', proofRef: claim.ref })
     } else {
@@ -621,12 +626,12 @@ export function authority(registry: DeviceRegistry, issuer: string): string {
  * and must not empty the admin set. Every other type, a groupID mismatch, or a malformed value is
  * dropped (never thrown), routed through `onDrop` exactly as {@link foldRoster}.
  */
-export function foldControl(
+export async function foldControl(
   entries: Array<FoldInput>,
   anchor: GroupAnchor,
   groupID: string,
   onDrop?: (drop: FoldDrop) => void,
-): { roster: RosterState; registry: DeviceRegistry } {
+): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
   let roster = roleReducer.seed(anchor)
   let registry = registrySeed()
   for (const [position, { verified, entryID }] of entries.entries()) {
@@ -650,7 +655,7 @@ export function foldControl(
       }
       try {
         if (entry.value.op === 'seed' && position !== 0) throw new RevokeProofError('detached')
-        registry = registryApply(
+        registry = await registryApply(
           { issuer, entry: { ...entry, value: entry.value } },
           registry,
           anchor.controller,

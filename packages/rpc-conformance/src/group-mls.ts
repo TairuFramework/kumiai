@@ -82,7 +82,7 @@ export type ConformancePendingRecovery = {
   epoch: number
   markBindingUnusable: () => void
   confirmationKey: (position: string, commitDigest: string) => Promise<Uint8Array>
-  judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => 'authoritative' | 'advisory'
+  judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => Promise<'authoritative' | 'advisory'>
   commit: Uint8Array
   onAccepted: () => Promise<void>
 }
@@ -1028,10 +1028,12 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await bob.mls.openRecoveryVerdict(reply, 'verdict')).toBeNull()
           expect(await bob.mls.openSealedLedger(sealed, 'verdict')).toBeNull()
           if (opened == null) throw new Error('No opened verdict')
-          expect(pending.judgeVerdict(opened)).toBe('authoritative')
-          expect(pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe('advisory')
+          expect(await pending.judgeVerdict(opened)).toBe('authoritative')
+          expect(await pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe(
+            'advisory',
+          )
           expect(
-            pending.judgeVerdict({ ...opened, verdict: { ...verdict, position: 'other' } }),
+            await pending.judgeVerdict({ ...opened, verdict: { ...verdict, position: 'other' } }),
           ).toBe('advisory')
         })
       })

@@ -74,7 +74,7 @@ function isRoleValue(value: unknown): value is GroupPermission {
  * subsumes `kumiai.role`'s own authority rule. State-so-far, not a pre-commit
  * snapshot, so an envelope of `[promote Bob, entry-issued-by-Bob]` is accepted.
  */
-export function foldEnvelope(params: FoldEnvelopeParams): EnvelopeFoldResult {
+export async function foldEnvelope(params: FoldEnvelopeParams): Promise<EnvelopeFoldResult> {
   const { baseRoster, baseRegistry, entries, groupID, context } = params
   let workingRoster: RosterState = { roles: new Map(baseRoster.roles) }
   let workingRegistry: DeviceRegistry = {
@@ -107,7 +107,7 @@ export function foldEnvelope(params: FoldEnvelopeParams): EnvelopeFoldResult {
         return { ok: false, reason: 'device operation is not allowed in this group', entryID }
       }
       try {
-        workingRegistry = registryApply(
+        workingRegistry = await registryApply(
           { issuer, entry: { ...entry, value } },
           workingRegistry,
           context?.controllerID,

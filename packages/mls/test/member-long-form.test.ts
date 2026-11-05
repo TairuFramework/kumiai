@@ -10,8 +10,8 @@ import {
 } from '../src/group.js'
 
 /** A did:peer:4 identity carrying the signing and agreement keys a real member holds. */
-function peer4Identity() {
-  return createIdentity({
+async function peer4Identity() {
+  return await createIdentity({
     keys: [
       { purpose: 'sig', alg: 'EdDSA' },
       { purpose: 'kem', alg: 'X25519' },

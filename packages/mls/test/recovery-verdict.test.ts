@@ -27,7 +27,7 @@ test.each(['missing', 'failed'] as const)(
   'recovery refuses a %s candidate fold when the known controller has folded state',
   async (kind) => {
     const f = await buildEpoch({ members: 1 })
-    const known = registryForLog(f.did, { chain: f.log.chain, events: [] })
+    const known = await registryForLog(f.did, { chain: f.log.chain, events: [] })
     const projection = known.controllers.get(f.did)
     const member = f.members[0]
     if (projection == null || member == null) throw new Error('Missing controller or member')
@@ -38,22 +38,24 @@ test.each(['missing', 'failed'] as const)(
           f.did,
           {
             ...projection,
-            attestations: new Map([[encodeKey(member.identity.publicKey, 'EdDSA'), 1200]]),
+            attestations: new Map([
+              [encodeKey({ publicKey: member.identity.publicKey, alg: 'EdDSA' }), 1200],
+            ]),
           },
         ],
       ]),
     }
     const invalid = { ...f.log, events: Array(MAX_LOG_EVENTS + 1).fill(f.log.events[0]) }
-    expect(foldLog(f.did, invalid).ok).toBe(false)
+    expect((await foldLog({ did: f.did, input: invalid })).ok).toBe(false)
     const candidate =
       kind === 'missing'
         ? registrySeed()
         : { ...known, controllers: new Map([[f.did, { ...projection, recordedLog: invalid }]]) }
-    expect(() => assertRetainsKnownEffects(f.did, held, candidate)).toThrow(
-      new RecoveryKnowledgeError('epoch-event'),
-    )
-    expect(() => assertRetainsKnownEffects(f.did, registrySeed(), candidate)).not.toThrow()
-    expect(() => assertRetainsKnownEffects(f.did, candidate, candidate)).not.toThrow()
+    await expect(
+      async () => await assertRetainsKnownEffects(f.did, held, candidate),
+    ).rejects.toThrow(new RecoveryKnowledgeError('epoch-event'))
+    await expect(assertRetainsKnownEffects(f.did, registrySeed(), candidate)).resolves.not.toThrow()
+    await expect(assertRetainsKnownEffects(f.did, candidate, candidate)).resolves.not.toThrow()
   },
 )
 
@@ -62,14 +64,14 @@ test('recovery refuses a saturated candidate even when the known epoch has no ap
   const candidate = await saturatedRegistry()
   const [did, projection] = [...candidate.controllers][0] ?? []
   if (did == null || projection?.recordedLog == null) throw new Error('Missing saturated log')
-  const folded = foldLog(did, projection.recordedLog)
+  const folded = await foldLog({ did: did, input: projection.recordedLog })
   if (!folded.ok) throw new Error(folded.reason)
   expect(folded.head.saturated).toBe(true)
-  const known = registryForLog(did, { chain: projection.recordedLog.chain, events: [] })
-  expect(() => assertRetainsKnownEffects(did, known, candidate)).toThrow(
+  const known = await registryForLog(did, { chain: projection.recordedLog.chain, events: [] })
+  await expect(async () => await assertRetainsKnownEffects(did, known, candidate)).rejects.toThrow(
     new RecoveryKnowledgeError('epoch-event'),
   )
-  expect(() => assertRetainsKnownEffects(did, registrySeed(), candidate)).not.toThrow()
+  await expect(assertRetainsKnownEffects(did, registrySeed(), candidate)).resolves.not.toThrow()
 }, 60_000)
 
 test('member-rooted signer judged on the candidate registry', async () => {
@@ -87,22 +89,25 @@ test('member-rooted signer judged on the candidate registry', async () => {
     iat: 9000,
   })
   own.leaf.signaturePublicKey = member.identity.publicKey
-  const known = registryForLog(f.did, f.log)
+  const known = await registryForLog(f.did, f.log)
   const params = { group, registry: known, signer: normalizeDID(member.did), now: 500 }
-  expect(recoverySignerEligible(params)).toBe(true)
-  const removed = createRemove({
+  expect(await recoverySignerEligible(params)).toBe(true)
+  const removed = await createRemove({
     did: f.did,
     head: f.head,
-    parents: epochHeads(f.did, f.log),
+    parents: await epochHeads({ did: f.did, log: f.log }),
     signer: f.root,
     add: member.add,
   })
-  const removedRegistry = registryForLog(f.did, { ...f.log, events: [...f.log.events, removed] })
-  expect(recoverySignerEligible({ ...params, registry: removedRegistry })).toBe(false)
+  const removedRegistry = await registryForLog(f.did, {
+    ...f.log,
+    events: [...f.log.events, removed],
+  })
+  expect(await recoverySignerEligible({ ...params, registry: removedRegistry })).toBe(false)
 
-  expect(recoverySignerEligible({ ...params, now: 1301 })).toBe(false)
+  expect(await recoverySignerEligible({ ...params, now: 1301 })).toBe(false)
   expect(
-    recoverySignerEligible({ ...params, registry: { ...known, controllers: new Map() } }),
+    await recoverySignerEligible({ ...params, registry: { ...known, controllers: new Map() } }),
   ).toBe(false)
 })
 
@@ -202,7 +207,7 @@ test('external replacement reports denied subjects as invalid and tree-time regr
     identity: bob,
     binding: await timedBinding({ identity: bob, iat: 110, exp: 200 }),
   })
-  const revoke = revokeChain({
+  const revoke = await revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
@@ -254,7 +259,7 @@ test('opening checks signature, token kind and signed bindings even inside a val
     { position: 5 },
   ]) {
     const token = stringifyToken(
-      await identity.signToken({ ...base, ...change }, { embedLongForm: true }),
+      await identity.signToken({ payload: { ...base, ...change }, embedLongForm: true }),
     )
     const sealed = await sealToRequest({
       kind,
@@ -271,7 +276,7 @@ test('opening checks signature, token kind and signed bindings even inside a val
       }),
     ).rejects.toThrow()
   }
-  const signed = stringifyToken(await identity.signToken(base, { embedLongForm: true }))
+  const signed = stringifyToken(await identity.signToken({ payload: base, embedLongForm: true }))
   const parts = signed.split('.')
   const signature = Buffer.from(parts[2] as string, 'base64url')
   signature[0] = (signature[0] as number) ^ 1
@@ -302,18 +307,20 @@ test('recovery eligibility uses attestedTreeTime over the known registry', async
     controller: { id: f.did, prefix: f.log.chain, member: { add: b.add, g: 0 }, iat: 100 },
     controllerLog: f.log,
   })
-  const known = registryForLog(f.did, f.log)
+  const known = await registryForLog(f.did, f.log)
   const projection = known.controllers.get(f.did)
   if (projection == null) throw new Error('Missing projection')
-  const attestations = new Map([[encodeKey(a.identity.publicKey, 'EdDSA'), 1200]])
+  const attestations = new Map([
+    [encodeKey({ publicKey: a.identity.publicKey, alg: 'EdDSA' }), 1200],
+  ])
   const params = {
     group,
     registry: { ...known, controllers: new Map([[f.did, { ...projection, attestations }]]) },
     signer: b.identity.id,
     now: 500,
   }
-  expect(recoverySignerEligible(params)).toBe(true)
-  attestations.set(encodeKey(b.identity.publicKey, 'EdDSA'), 1100)
-  expect(recoverySignerEligible(params)).toBe(false)
-  expect(recoverySignerEligible({ ...params, registry: known })).toBe(true)
+  expect(await recoverySignerEligible(params)).toBe(true)
+  attestations.set(encodeKey({ publicKey: b.identity.publicKey, alg: 'EdDSA' }), 1100)
+  expect(await recoverySignerEligible(params)).toBe(false)
+  expect(await recoverySignerEligible({ ...params, registry: known })).toBe(true)
 })

@@ -5,7 +5,12 @@ import {
   digestOf,
   type SignedEvent,
 } from '@kokuin/controller'
-import { type DIDMethodResolver, type MemberQuery, normalizeDID } from '@kokuin/token'
+import {
+  type DIDMethodResolver,
+  type DIDMethodResolverResolveMemberParams,
+  type MemberQuery,
+  normalizeDID,
+} from '@kokuin/token'
 
 import { asControllerLog, hasChainRevoke } from './controller-log.js'
 import { type DeviceRegistry, denySetOf, recordedLogOf } from './registry.js'
@@ -60,11 +65,11 @@ export function createRegistryControllerResolver(params: {
       ...(params.registry == null
         ? {}
         : {
-            async resolveMember(did: string, query: MemberQuery) {
-              if (normalizeDID(did) !== controller) throw new Error(`Unknown DID: ${did}`)
+            async resolveMember({ subject, member: query }: DIDMethodResolverResolveMemberParams) {
+              if (normalizeDID(subject) !== controller) throw new Error(`Unknown DID: ${subject}`)
               if (prefixRelation(recorded, params.prefix) !== 'contained')
                 throw new Error('Recorded controller log does not contain the leaf prefix')
-              const member = await members.resolveMember?.(did, query)
+              const member = await members.resolveMember?.({ subject, member: query })
               if (member == null) throw new Error('Controller member resolution is unavailable')
               return member
             },

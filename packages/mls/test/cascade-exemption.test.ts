@@ -41,14 +41,20 @@ import {
 } from './fixtures/lifecycle-pipeline.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
-function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
-  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
+async function revoke(log: Array<SignedEvent>, subject: string): Promise<SignedEvent> {
+  return await revokeChain({
+    seed: controllerSeed,
+    profile: 0,
+    did: controllerID,
+    chain: log,
+    subject,
+  })
 }
 
 async function parentGrant(identity: OwnIdentity, iat: number): Promise<string> {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const grant = await mintTrustedGrant({
-    signer: createControllerIdentity({
+    signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
       log: asControllerLog([inception]),
@@ -114,11 +120,11 @@ async function ownAgents(options: SetupOptions = {}) {
     issuer,
     parent,
   })
-  const log = [inception, revoke([inception], issuer.id)]
+  const log = [inception, await revoke([inception], issuer.id)]
   if (options.unevidenced) {
     const added = await rawAdd(withBystander.author, child, withoutHolderEvidence(childBinding))
     return {
-      publisher: deriveGroup(withBystander.author, added.result.newState),
+      publisher: await deriveGroup(withBystander.author, added.result.newState),
       childHandle: undefined,
       bystanderHandle: withBystander.joined,
       identity,
@@ -283,7 +289,7 @@ describe('revocation cascade', () => {
       proposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: issuerIndex } }],
       tokens: [token],
     })
-    const forgedGroup = deriveGroup(setup.publisher, forged.newState)
+    const forgedGroup = await deriveGroup(setup.publisher, forged.newState)
     await forgedGroup.applyLedgerEntries([token])
     expect(forgedGroup.registry.devices.get(setup.issuer.id)?.status).toBe('revoked')
     expect(forgedGroup.findMemberLeafIndex(setup.child.id)).toBeDefined()
@@ -340,7 +346,7 @@ describe('commit authentication of evidenced children', () => {
     const { publisher, childHandle, bystander, log, tokens } = await afterIssuerProof()
     const second = await revokeWithProof(childHandle, {
       deny: [bystander.id],
-      log: asControllerLog([...log, revoke(log, bystander.id)]),
+      log: asControllerLog([...log, await revoke(log, bystander.id)]),
     })
     expect(second.status).toBe('built')
     if (second.status !== 'built') throw new Error('Missing second proof')
@@ -372,7 +378,7 @@ describe('commit authentication of evidenced children', () => {
     // credential is authenticated, before any later check sees it.
     const proof = await revokeWithProof(childHandle, {
       deny: [bystander.id],
-      log: asControllerLog([...log, revoke(log, bystander.id)]),
+      log: asControllerLog([...log, await revoke(log, bystander.id)]),
     })
     if (proof.status !== 'built') throw new Error('Missing second proof')
     const bystanderIndex = childHandle.findMemberLeafIndex(bystander.id)
@@ -471,7 +477,7 @@ describe('groups whose anchor names no controller', () => {
       enacted: [register],
       requireAdmin: false,
     })
-    const publisher = deriveGroup(withChild.author, registered.newState)
+    const publisher = await deriveGroup(withChild.author, registered.newState)
     await publisher.applyLedgerEntries([register])
     await publishLedger(tokens, publisher)
     await withChild.joined.processMessage(encode(mlsMessageEncoder, registered.commit))
@@ -499,7 +505,7 @@ describe('groups whose anchor names no controller', () => {
       proposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: issuerIndex } }],
       tokens: entries,
     })
-    const after = deriveGroup(publisher, revoked.newState)
+    const after = await deriveGroup(publisher, revoked.newState)
     await after.applyLedgerEntries(entries)
     const childAfter = await lowLevelApply(
       withChild.joined,
@@ -592,7 +598,7 @@ describe('renewal order', () => {
 
   test('directCLeafReplacementKeepsOtherChecks', async () => {
     const { childHandle, child } = await afterIssuerProof()
-    const controller = createControllerIdentity({
+    const controller = await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
       log: asControllerLog([inception]),
@@ -602,13 +608,15 @@ describe('renewal order', () => {
       prefix: [inception],
       capability: stringifyToken(
         await controller.signToken({
-          sub: controllerID,
-          aud: child.id,
-          act: 'authenticate',
-          res: 'kumiai/mls-leaf',
-          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: agent(99).publicKey }),
-          iat: 105,
-          exp: 200,
+          payload: {
+            sub: controllerID,
+            aud: child.id,
+            act: 'authenticate',
+            res: 'kumiai/mls-leaf',
+            cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: agent(99).publicKey }),
+            iat: 105,
+            exp: 200,
+          },
         }),
       ),
     }
@@ -617,9 +625,9 @@ describe('renewal order', () => {
     })
 
     const otherSeed = new Uint8Array(32).fill(32)
-    const otherInception = createInception(otherSeed, 0)
+    const otherInception = await createInception({ seed: otherSeed, profile: 0 })
     const otherID = didFromInception(otherInception.event)
-    const other = createControllerIdentity({
+    const other = await createControllerIdentity({
       seed: otherSeed,
       profile: 0,
       log: asControllerLog([otherInception]),
@@ -629,13 +637,15 @@ describe('renewal order', () => {
       prefix: [otherInception],
       capability: stringifyToken(
         await other.signToken({
-          sub: otherID,
-          aud: child.id,
-          act: 'authenticate',
-          res: 'kumiai/mls-leaf',
-          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: child.publicKey }),
-          iat: 105,
-          exp: 200,
+          payload: {
+            sub: otherID,
+            aud: child.id,
+            act: 'authenticate',
+            res: 'kumiai/mls-leaf',
+            cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: child.publicKey }),
+            iat: 105,
+            exp: 200,
+          },
         }),
       ),
     }

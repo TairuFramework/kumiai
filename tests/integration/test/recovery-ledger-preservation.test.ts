@@ -44,7 +44,7 @@ const fixture = (await import(
   inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
-  resetPrefix: () => ControllerBinding['prefix']
+  resetPrefix: () => Promise<ControllerBinding['prefix']>
   oversizedBinding: (identity: OwnIdentity, iat: number, exp: number) => Promise<ControllerBinding>
   timedBinding: (params: {
     identity: OwnIdentity
@@ -174,7 +174,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
   const revoked = fixture.agent(81)
-  const rev = revokeChain({
+  const rev = await revokeChain({
     seed: ledger.controllerSeed,
     profile: 0,
     did: fixture.controllerID,
@@ -187,7 +187,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   })
   if (revoke.status !== 'built') throw new Error('Expected revoke')
   s.installAlice(revoke.result.newGroup)
-  const prefix = fixture.resetPrefix()
+  const prefix = await fixture.resetPrefix()
   const replacement = await joinGroupExternal({
     identity: s.bob,
     groupInfo: (await exportGroupInfo({ group: s.aliceGroup() })).groupInfo,

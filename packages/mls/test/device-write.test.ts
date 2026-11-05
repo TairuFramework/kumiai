@@ -59,7 +59,7 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
   })
   const log = [
     inception,
-    revokeChain({
+    await revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
@@ -100,7 +100,7 @@ test.each(['leafLifetime', 'trustedGrantLifetime'] as const)(
   'derived authentication owns its %s provider',
   async (limit) => {
     const { group } = await lifecycleGroup()
-    const candidate = deriveGroup(group, structuredClone(group.state))
+    const candidate = await deriveGroup(group, structuredClone(group.state))
     const issuer = agent(51)
     const child = agent(61)
     const parent = await trustedGrant(issuer)
@@ -288,7 +288,7 @@ describe('receive-path acceptance (the symmetric device carve-out)', () => {
 
     const targetSeed = new Uint8Array(32).fill(43)
     const targetIdentity: OwnIdentity = {
-      ...createFullIdentity(targetSeed),
+      ...createFullIdentity({ privateKey: targetSeed }),
       privateKey: targetSeed,
     }
     const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })

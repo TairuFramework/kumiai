@@ -60,8 +60,8 @@ function roleInput(
 }
 
 describe('registryApply', () => {
-  test('register binds a device to a controller, active', () => {
-    const r = registryApply(
+  test('register binds a device to a controller, active', async () => {
+    const r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -77,8 +77,8 @@ describe('registryApply', () => {
     expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('active')
   })
 
-  test('revoke flips status and populates the deny set, keeping the controller', () => {
-    let r = registryApply(
+  test('revoke flips status and populates the deny set, keeping the controller', async () => {
+    let r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: {
@@ -90,7 +90,7 @@ describe('registryApply', () => {
       },
       registrySeed(),
     )
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: { type: DEVICE_ENTRY_TYPE, groupID: GROUP, subject: DEV_A, value: { op: 'revoke' } },
@@ -102,8 +102,8 @@ describe('registryApply', () => {
     expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
   })
 
-  test('revocation is terminal: a later register/add does not re-activate a revoked subject', () => {
-    let r = registryApply(
+  test('revocation is terminal: a later register/add does not re-activate a revoked subject', async () => {
+    let r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: {
@@ -115,7 +115,7 @@ describe('registryApply', () => {
       },
       registrySeed(),
     )
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: { type: DEVICE_ENTRY_TYPE, groupID: GROUP, subject: DEV_A, value: { op: 'revoke' } },
@@ -123,7 +123,7 @@ describe('registryApply', () => {
       r,
     )
     // A second register of the revoked subject must NOT clear its revoked status or deny-set bit.
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: {
@@ -138,7 +138,7 @@ describe('registryApply', () => {
     expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('revoked')
     expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
     // An `add` of the revoked subject is likewise a no-op against the revoked status.
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: {
@@ -154,8 +154,8 @@ describe('registryApply', () => {
     expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
   })
 
-  test('label sets a label without changing binding or status', () => {
-    let r = registryApply(
+  test('label sets a label without changing binding or status', async () => {
+    let r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: {
@@ -167,7 +167,7 @@ describe('registryApply', () => {
       },
       registrySeed(),
     )
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: {
@@ -185,8 +185,8 @@ describe('registryApply', () => {
 })
 
 describe('authority', () => {
-  test('resolves a bound device to its controller', () => {
-    const r = registryApply(
+  test('resolves a bound device to its controller', async () => {
+    const r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -205,8 +205,8 @@ describe('authority', () => {
     expect(authority(registrySeed(), DEV_A)).toBe(normalizeDID(DEV_A))
   })
 
-  test('a revoked device confers no authority, though its raw binding and deny-set membership persist', () => {
-    let r = registryApply(
+  test('a revoked device confers no authority, though its raw binding and deny-set membership persist', async () => {
+    let r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -218,7 +218,7 @@ describe('authority', () => {
       },
       registrySeed(),
     )
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: {
@@ -242,16 +242,16 @@ describe('authority', () => {
 describe('foldControl', () => {
   const anchor: GroupAnchor = { creatorDID: CREATOR, version: 1 }
 
-  test('empty ledger seeds creator-admin and an empty registry', () => {
-    const { roster, registry } = foldControl([], anchor, GROUP)
+  test('empty ledger seeds creator-admin and an empty registry', async () => {
+    const { roster, registry } = await foldControl([], anchor, GROUP)
     expect(roster.roles.get(normalizeDID(CREATOR))).toBe('admin')
     expect(registry.devices.size).toBe(0)
   })
 
-  test('admin-as-controller: a device of an admin profile authors a role entry', () => {
+  test('admin-as-controller: a device of an admin profile authors a role entry', async () => {
     // Creator makes PROFILE an admin; DEV_A registers under PROFILE; DEV_A (a device of the
     // admin profile) promotes DEV_B's controller. authority(DEV_A) === PROFILE === admin.
-    const { roster } = foldControl(
+    const { roster } = await foldControl(
       [
         roleInput(CREATOR, PROFILE, 'admin', 'e1'),
         deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e2'),
@@ -263,9 +263,9 @@ describe('foldControl', () => {
     expect(roster.roles.get(normalizeDID(DEV_B))).toBe('member')
   })
 
-  test('a device of a NON-admin profile cannot author a role entry (dropped)', () => {
+  test('a device of a NON-admin profile cannot author a role entry (dropped)', async () => {
     const drops: Array<{ entryID: string }> = []
-    const { roster } = foldControl(
+    const { roster } = await foldControl(
       [
         deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e1'),
         roleInput(DEV_A, DEV_B, 'admin', 'e2'),
@@ -278,10 +278,10 @@ describe('foldControl', () => {
     expect(drops.map((d) => d.entryID)).toContain('e2')
   })
 
-  test('registry-so-far, not final: a role entry authored BEFORE its issuer registers is dropped', () => {
+  test('registry-so-far, not final: a role entry authored BEFORE its issuer registers is dropped', async () => {
     // Order matters — determinism. The role entry at e1 must NOT resolve authority against a
     // binding registered later at e2.
-    const { roster } = foldControl(
+    const { roster } = await foldControl(
       [
         roleInput(CREATOR, PROFILE, 'admin', 'a0'),
         roleInput(DEV_A, DEV_B, 'member', 'e1'),
@@ -293,13 +293,13 @@ describe('foldControl', () => {
     expect(roster.roles.get(normalizeDID(DEV_B))).toBeUndefined()
   })
 
-  test('a role entry that would empty the admin set is dropped; the last admin survives', () => {
+  test('a role entry that would empty the admin set is dropped; the last admin survives', async () => {
     // Creator is the only admin. An admin may author role entries, so creator demoting itself
     // to member passes the authority gate — but adminCount(next) === 0 trips the floor, so the
     // entry is dropped (never thrown) and creator stays admin. This is the invariant guarding
     // against a group locking itself out of all membership authority.
     const drops: Array<{ entryID: string }> = []
-    const { roster } = foldControl(
+    const { roster } = await foldControl(
       [roleInput(CREATOR, CREATOR, 'member', 'e1')],
       anchor,
       GROUP,
@@ -309,8 +309,8 @@ describe('foldControl', () => {
     expect(drops.map((d) => d.entryID)).toContain('e1')
   })
 
-  test('a cross-group entry is dropped by both projections', () => {
-    const { roster, registry } = foldControl(
+  test('a cross-group entry is dropped by both projections', async () => {
+    const { roster, registry } = await foldControl(
       [deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e1', 'other-group')],
       anchor,
       GROUP,
@@ -321,8 +321,8 @@ describe('foldControl', () => {
 })
 
 describe('beacon', () => {
-  test('a beacon op records the controller log head in the controllers projection', () => {
-    const r = registryApply(
+  test('a beacon op records the controller log head in the controllers projection', async () => {
+    const r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -341,8 +341,8 @@ describe('beacon', () => {
     expect(denySetOf(r).size).toBe(0)
   })
 
-  test('a later beacon overwrites the earlier one (last-write-wins)', () => {
-    let r = registryApply(
+  test('a later beacon overwrites the earlier one (last-write-wins)', async () => {
+    let r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -354,7 +354,7 @@ describe('beacon', () => {
       },
       registrySeed(),
     )
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -369,8 +369,8 @@ describe('beacon', () => {
     expect(beaconOf(r, PROFILE)).toEqual({ logLength: 9, headDigest: 'zNew' })
   })
 
-  test('a device register/revoke leaves the controllers projection untouched', () => {
-    let r = registryApply(
+  test('a device register/revoke leaves the controllers projection untouched', async () => {
+    let r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -382,7 +382,7 @@ describe('beacon', () => {
       },
       registrySeed(),
     )
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(DEV_A),
         entry: {
@@ -394,7 +394,7 @@ describe('beacon', () => {
       },
       r,
     )
-    r = registryApply(
+    r = await registryApply(
       {
         issuer: normalizeDID(PROFILE),
         entry: { type: DEVICE_ENTRY_TYPE, groupID: GROUP, subject: DEV_A, value: { op: 'revoke' } },
@@ -414,11 +414,11 @@ describe('beacon', () => {
   })
 })
 
-describe('authenticated lifecycle projections', () => {
+describe('authenticated lifecycle projections', async () => {
   const seed = new Uint8Array(32).fill(31)
-  const inception = createInception(seed, 0)
+  const inception = await createInception({ seed: seed, profile: 0 })
   const controller = didFromInception(inception.event)
-  const rev = revokeChain({
+  const rev = await revokeChain({
     seed: seed,
     profile: 0,
     did: controller,
@@ -427,7 +427,7 @@ describe('authenticated lifecycle projections', () => {
   })
   const anchor: GroupAnchor = { creatorDID: CREATOR, version: 1, controller }
 
-  test('records a leafless revocation from authenticated ledger data alone', () => {
+  test('records a leafless revocation from authenticated ledger data alone', async () => {
     const entries = [
       deviceInput(
         DEV_B,
@@ -442,7 +442,7 @@ describe('authenticated lifecycle projections', () => {
         'revoke',
       ),
     ]
-    const { registry } = foldControl(entries, anchor, GROUP)
+    const { registry } = await foldControl(entries, anchor, GROUP)
     expect(registry.devices.get(DEV_A)).toEqual({
       controller,
       status: 'revoked',
@@ -459,7 +459,7 @@ describe('authenticated lifecycle projections', () => {
     expect(denySetOf(registry)).toEqual(new Set([DEV_A]))
   })
 
-  test('replays clock floors and keeps beacons independent of recorded proof', () => {
+  test('replays clock floors and keeps beacons independent of recorded proof', async () => {
     const entries = [
       deviceInput(
         DEV_B,
@@ -476,7 +476,7 @@ describe('authenticated lifecycle projections', () => {
       deviceInput(DEV_B, controller, { op: 'clock', time: 100 }, 'c'),
       deviceInput(DEV_B, controller, { op: 'beacon', logLength: 999, headDigest: 'advisory' }, 'b'),
     ]
-    const { registry } = foldControl(entries, anchor, GROUP)
+    const { registry } = await foldControl(entries, anchor, GROUP)
     expect(registry.controllers.get(controller)).toMatchObject({
       recordedLog: { chain: [inception, rev], events: [] },
       genFloor: 0,
@@ -486,8 +486,8 @@ describe('authenticated lifecycle projections', () => {
     expect(denySetOf(registry)).toEqual(new Set([DEV_A]))
   })
 
-  test('a lifecycle replay cannot add a discretionary role or device binding', () => {
-    const { roster, registry } = foldControl(
+  test('a lifecycle replay cannot add a discretionary role or device binding', async () => {
+    const { roster, registry } = await foldControl(
       [
         roleInput(controller, DEV_A, 'admin', 'role'),
         deviceInput(DEV_A, DEV_A, { op: 'register', controller }, 'register'),

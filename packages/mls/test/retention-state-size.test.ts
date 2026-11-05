@@ -69,7 +69,7 @@ test('a receiver in a three-member group keeps its persisted state bounded at st
     const frame = encode(mlsMessageEncoder, built.commit)
     await receiver.processMessage(frame)
     await other.processMessage(frame)
-    admin = deriveGroup(admin, built.newState)
+    admin = await deriveGroup(admin, built.newState)
     admin.confirmAdopted()
   }
   // Two senders, each with a full window in the current and every retained past epoch, at

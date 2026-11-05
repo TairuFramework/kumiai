@@ -353,7 +353,7 @@ test.each(['floating', 'foreign', 'malformed'] as const)(
         ? undefined
         : { ...binding, id: kind === 'foreign' ? 'did:kokuin:foreign' : 'did:key:wrong' },
     )
-    const invalid = deriveGroup(group, (await rawCommit({ group })).newState)
+    const invalid = await deriveGroup(group, (await rawCommit({ group })).newState)
     const bob = agent(61)
     const added = await rawAdd(
       invalid,
@@ -436,12 +436,12 @@ test.each([
 async function oversizedJoinGroup() {
   authorClock()
   const setup = await pipelineGroup()
-  const rotation = createRotate({
+  const rotation = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: 'h'.repeat(210000),
   })
   const prefix = [inception, rotation]
@@ -567,20 +567,20 @@ async function membershipLeaf(lease = 1000) {
 
 test('membership leaf lapses at its lease end by tree time', async () => {
   const f = await membershipLeaf()
-  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(1000)
+  expect(await leafExpiry(f.binding, f.group.registry, f.did)).toBe(1000)
   f.floor(1000)
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({ reason: 'lapsed' })
   f.floor(1001)
-  expect(isLapsed(f.group, f.leaf)).toBe(true)
+  expect(await isLapsed(f.group, f.leaf)).toBe(true)
 })
 
 test('renewal reaches a membership leaf through a log entry', async () => {
   const f = await membershipLeaf()
-  const renew = createRenew({
+  const renew = await createRenew({
     did: f.did,
     head: f.head,
-    parents: epochHeads(f.did, f.log),
+    parents: await epochHeads({ did: f.did, log: f.log }),
     signer: f.root,
     add: f.member.add,
     lease: 2000,
@@ -594,21 +594,21 @@ test('renewal reaches a membership leaf through a log entry', async () => {
     }),
   ])
   f.floor(1500)
-  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(2000)
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(await leafExpiry(f.binding, f.group.registry, f.did)).toBe(2000)
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
 })
 
 test('phone member keeps its leaf 30 days on a 90-day lease', async () => {
   const f = await membershipLeaf(7_776_000)
   f.floor(2_592_000)
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
 })
 
 test('membership leaf attests no tree time', async () => {
   const f = await membershipLeaf()
-  expect(treeTime(f.group, f.did)).toBe(100)
+  expect(await treeTime(f.group, f.did)).toBe(100)
   await expect(
     verifyLifecycleProof(f.group, {
       issuer: f.identity.id,
@@ -625,8 +625,8 @@ test('membership leaf attests no tree time', async () => {
 test('an unavailable membership lease keeps existing leaves and refuses admission', async () => {
   const f = await membershipLeaf()
   ;(f.group.registry.controllers as Map<string, unknown>).clear()
-  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBeUndefined()
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(await leafExpiry(f.binding, f.group.registry, f.did)).toBeUndefined()
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({
     reason: 'member-unavailable',
   })
@@ -648,8 +648,8 @@ async function stagedWelcome(membership = false, carriesAdd = true) {
       ? { member: { add: member.add, g: epoch.head.gen }, iat: 100 }
       : {
           capability: stringifyToken(
-            await member.identity.signToken(
-              {
+            await member.identity.signToken({
+              payload: {
                 sub: epoch.did,
                 aud: joiner.id,
                 act: 'authenticate',
@@ -659,8 +659,8 @@ async function stagedWelcome(membership = false, carriesAdd = true) {
                 exp: 200,
                 mbr: { add: member.add, g: epoch.head.gen },
               },
-              { embedLongForm: true },
-            ),
+              embedLongForm: true,
+            }),
           ),
         }),
   }
@@ -722,7 +722,7 @@ test.each([
     Object.assign(judging, { timeFloor: judgingFloor })
     const leaf = leafAt(group.state.ratchetTree, group.state.privatePath.leafIndex)
     if (leaf == null) throw new Error('Missing joiner')
-    expect(leafExpiry(f.binding, registry, f.did)).toBe(1000)
+    expect(await leafExpiry(f.binding, registry, f.did)).toBe(1000)
     const validate = async () => {
       if (path === 'entry')
         return validateEntry(group, leaf, undefined, { registry, stage: 'full', mode: 'admit' })
@@ -740,7 +740,7 @@ test.each([
           enactedDeviceEntries: [],
         }),
       })
-      gate.check({
+      await gate.check({
         kind: 'proposal',
         proposal: {
           senderLeafIndex: undefined,

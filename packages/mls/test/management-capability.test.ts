@@ -7,7 +7,7 @@ import { verifyManagementCapability } from '../src/authentication.js'
 import { asControllerLog } from '../src/controller-log.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
-const manager = createSigningIdentity(new Uint8Array(32).fill(51))
+const manager = createSigningIdentity({ privateKey: new Uint8Array(32).fill(51) })
 
 describe('verifyManagementCapability', () => {
   test('accepts a valid manage/kumiai-devices grant', async () => {
@@ -98,19 +98,21 @@ test('rejects a management grant naming another subject', async () => {
     managerDID: manager.id,
     managerKey: manager.publicKey,
   })
-  const controller = createControllerIdentity({
+  const controller = await createControllerIdentity({
     seed: new Uint8Array(32).fill(31),
     profile: 0,
     log: asControllerLog(f.prefix),
   })
   const token = await controller.signToken({
-    sub: manager.id,
-    aud: manager.id,
-    act: 'manage',
-    res: 'kumiai/devices',
-    iat: 1000,
-    exp: 2000,
-    cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: manager.publicKey }),
+    payload: {
+      sub: manager.id,
+      aud: manager.id,
+      act: 'manage',
+      res: 'kumiai/devices',
+      iat: 1000,
+      exp: 2000,
+      cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: manager.publicKey }),
+    },
   })
   const clock = vi.spyOn(Date, 'now').mockReturnValue(1500000)
   try {
@@ -158,14 +160,16 @@ test('management capabilities remain root-only with a well-formed member claim',
     managerKey: manager.publicKey,
   })
   const capability = await manager.signToken({
-    sub: cap.controllerID,
-    aud: manager.id,
-    act: 'manage',
-    res: 'kumiai/devices',
-    iat: 100,
-    exp: 200,
-    mbr: { add: 'member-add', g: 0 },
-    cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: manager.publicKey }),
+    payload: {
+      sub: cap.controllerID,
+      aud: manager.id,
+      act: 'manage',
+      res: 'kumiai/devices',
+      iat: 100,
+      exp: 200,
+      mbr: { add: 'member-add', g: 0 },
+      cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: manager.publicKey }),
+    },
   })
   expect(
     await verifyManagementCapability({

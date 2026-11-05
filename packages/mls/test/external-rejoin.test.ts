@@ -60,8 +60,8 @@ async function membershipRecovery(carriesAdd = true) {
   if (carriesAdd) {
     const child = agent(61)
     const capability = stringifyToken(
-      await member.identity.signToken(
-        {
+      await member.identity.signToken({
+        payload: {
           sub: epoch.did,
           aud: child.id,
           act: 'authenticate',
@@ -71,8 +71,8 @@ async function membershipRecovery(carriesAdd = true) {
           exp: 200,
           mbr: { add: member.add, g: epoch.head.gen },
         },
-        { embedLongForm: true },
-      ),
+        embedLongForm: true,
+      }),
     )
     const source = await belowGateWelcome(author, child, {
       id: epoch.did,
@@ -683,7 +683,7 @@ test('an external join authentication context follows the returned handle ledger
       controller: await timedBinding({ identity: bob, iat: 150, exp: 250 }),
       resync: true,
     })
-    const revoke = revokeChain({
+    const revoke = await revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,

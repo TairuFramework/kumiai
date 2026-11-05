@@ -65,7 +65,7 @@ async function speculativeRevoke(operation: 'processMessage' | 'bootstrapLedger'
     await receiver.processMessage(result.commitMessage)
     state = receiver.state
   }
-  const candidate = deriveGroup(live, state)
+  const candidate = await deriveGroup(live, state)
   const receive = async (persist: (handle: GroupHandle) => Promise<void>) => {
     if (operation === 'processMessage') {
       await candidate.processMessage(result.commitMessage, { persist })
@@ -143,7 +143,7 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
   })
   const log = [
     inception,
-    revokeChain({
+    await revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
@@ -247,7 +247,7 @@ test('an adopted reset reports its reason and proof reference only once', async 
   const { group, identity } = await lifecycleGroup()
   const peer = agent(51)
   const fixture = await lowLevelWelcome(group, peer, await bindingFor(peer))
-  const log = [inception, createReset(controllerSeed, 0, 1)]
+  const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
   const renewed = await renewLeaf(fixture.author, await bindingFor(identity, log))
   const seen: Array<unknown> = []
   renewed.newGroup.events.on('deviceRevoked', (batch) => {

@@ -117,7 +117,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     groupID: invite.groupID,
   }
 
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
     state,
     credential,
     context,
@@ -348,7 +348,7 @@ export async function joinGroupExternal(
   }
   const commitMessage = encode(mlsMessageEncoder, framedCommit)
 
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
     state: newState,
     credential,
     context,
@@ -388,7 +388,7 @@ export async function joinGroupExternal(
   const beforeTree = newState.ratchetTree.slice()
   beforeTree[ownIndex * 2] = undefined
   beforeTree[removed.remove.removed * 2] = { ...own, leaf: { ...own.leaf, ...previous } }
-  const before = new GroupHandle({
+  const before = await GroupHandle.create({
     state: { ...newState, ratchetTree: beforeTree, groupContext: groupInfo.groupContext },
     credential,
     context: await resolveMlsContext(options, anchor),
@@ -413,7 +413,7 @@ export async function joinGroupExternal(
     }),
     externalLeaf: own.leaf,
   })
-  gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
+  await gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
   await gate.postApply(newState)
   await validateWelcomeTree(group)
   return { commitMessage, group, sourceTree: beforeTree, sourceRegistry: before.registry }

@@ -44,9 +44,9 @@ function entry(
   }
 }
 
-function replay(did: string, entries: Array<FoldInput>) {
+async function replay(did: string, entries: Array<FoldInput>) {
   const drops: Array<FoldDrop> = []
-  const folded = registry.foldControl(
+  const folded = await registry.foldControl(
     entries,
     { creatorDID: did, controller: did, version: 1 },
     groupID,
@@ -55,21 +55,21 @@ function replay(did: string, entries: Array<FoldInput>) {
   return { ...folded, drops }
 }
 
-function folded(did: string, log: ControllerLog) {
-  const result = foldControllerLog(did, log)
+async function folded(did: string, log: ControllerLog) {
+  const result = await foldControllerLog(did, log)
   if (!result.ok) throw new Error(result.reason)
   return result
 }
 
 test('seed entry at position 0 seeds the recorded log', async () => {
   const { did, log, members } = await buildEpoch({ members: 1 })
-  const result = replay(did, [entry(did, 'seed', log)])
+  const result = await replay(did, [entry(did, 'seed', log)])
   expect(result.drops).toEqual([])
   const recorded = registry.recordedLogOf(result.registry, did)
   const [member] = members
   if (recorded == null || member == null) throw new Error('Missing seeded member')
   expect(recorded?.events).toEqual(log.events)
-  expect(folded(did, recorded).head.members.get(member.add)).toMatchObject({
+  expect((await folded(did, recorded)).head.members.get(member.add)).toMatchObject({
     effective: true,
   })
   expect(result.registry.controllers.get(did)).toMatchObject({
@@ -79,7 +79,7 @@ test('seed entry at position 0 seeds the recorded log', async () => {
     removedMembers: new Map(),
     survivorGrants: new Map(),
   })
-  expect(registry.registryForLog(did, log)).toEqual(result.registry)
+  expect(await registry.registryForLog(did, log)).toEqual(result.registry)
 })
 
 test.each(['re-added', 'concurrent'] as const)(
@@ -89,11 +89,11 @@ test.each(['re-added', 'concurrent'] as const)(
     const f = await buildEpoch({ members: 1 })
     const member = f.members[0]
     if (member == null) throw new Error('Missing member')
-    const key = encodeKey(member.identity.publicKey, 'EdDSA')
-    const removal = createRemove({
+    const key = encodeKey({ publicKey: member.identity.publicKey, alg: 'EdDSA' })
+    const removal = await createRemove({
       did: f.did,
       head: f.head,
-      parents: epochHeads(f.did, f.log),
+      parents: await epochHeads({ did: f.did, log: f.log }),
       signer: f.root,
       add: member.add,
     })
@@ -101,16 +101,16 @@ test.each(['re-added', 'concurrent'] as const)(
       chain: f.log.chain,
       events: [...f.log.events, ...(kind === 're-added' ? [removal] : [])],
     }
-    const add = createAdd({
+    const add = await createAdd({
       seed: f.seed,
       profile: 0,
       did: f.did,
-      head: folded(f.did, prior).head,
-      parents: kind === 're-added' ? epochHeads(f.did, prior) : [f.head.epoch],
+      head: (await folded(f.did, prior)).head,
+      parents: kind === 're-added' ? await epochHeads({ did: f.did, log: prior }) : [f.head.epoch],
       member: { did: member.did, key, lease: 1100 },
     })
     const log = { chain: prior.chain, events: [...prior.events, add] }
-    const members = folded(f.did, log).head.members
+    const members = (await folded(f.did, log)).head.members
     expect(members.get(member.add)).toMatchObject({ effective: kind === 'concurrent', key })
     expect(members.get(digestOf(add.event))).toMatchObject({ effective: true, key })
     expect(new Set([...members.values()].map((value) => value.key))).toEqual(new Set([key]))
@@ -131,7 +131,7 @@ test.each(['re-added', 'concurrent'] as const)(
       },
     }
     await expect(verifyLifecycleProof(group, clock)).resolves.toMatchObject({ timeFloor: 0 })
-    const applied = registry.registryApply(clock, group.registry, f.did)
+    const applied = await registry.registryApply(clock, group.registry, f.did)
     expect(applied.controllers.get(f.did)?.attestations).toEqual(new Map([[key, 1050]]))
     expect(applied.controllers.get(f.did)?.timeFloor).toBe(0)
   },
@@ -141,21 +141,27 @@ test('the recorded log refuses another pin for the same member DID', async () =>
   const f = await buildEpoch({ members: 2 })
   const [a, b] = f.members
   if (a == null || b == null) throw new Error('Missing members')
-  const add = createAdd({
+  const add = await createAdd({
     seed: f.seed,
     profile: 0,
     did: f.did,
     head: f.head,
     parents: [f.head.epoch],
-    member: { did: a.did, key: encodeKey(b.identity.publicKey, 'EdDSA'), lease: 1100 },
+    member: {
+      did: a.did,
+      key: encodeKey({ publicKey: b.identity.publicKey, alg: 'EdDSA' }),
+      lease: 1100,
+    },
   })
-  const result = replay(f.did, [entry(f.did, 'seed', { ...f.log, events: [...f.log.events, add] })])
+  const result = await replay(f.did, [
+    entry(f.did, 'seed', { ...f.log, events: [...f.log.events, add] }),
+  ])
   expect(result.drops).toEqual([])
   const recorded = registry.recordedLogOf(result.registry, f.did)
   if (recorded == null) throw new Error('Missing recorded log')
-  expect(folded(f.did, recorded).head.members.has(digestOf(add.event))).toBe(false)
-  expect(folded(f.did, recorded).head.members.get(a.add)?.key).toBe(
-    encodeKey(a.identity.publicKey, 'EdDSA'),
+  expect((await folded(f.did, recorded)).head.members.has(digestOf(add.event))).toBe(false)
+  expect((await folded(f.did, recorded)).head.members.get(a.add)?.key).toBe(
+    encodeKey({ publicKey: a.identity.publicKey, alg: 'EdDSA' }),
   )
 })
 
@@ -164,10 +170,10 @@ test('attest clock is refused when the issuer has no effective incarnation', asy
   const f = await buildEpoch({ members: 1 })
   const member = f.members[0]
   if (member == null) throw new Error('Missing member')
-  const removal = createRemove({
+  const removal = await createRemove({
     did: f.did,
     head: f.head,
-    parents: epochHeads(f.did, f.log),
+    parents: await epochHeads({ did: f.did, log: f.log }),
     signer: f.root,
     add: member.add,
   })
@@ -193,9 +199,9 @@ test('attest clock is refused when the issuer has no effective incarnation', asy
     reason: 'effects-mismatch',
   })
   // The fold refuses it too, not only the admission gate.
-  expect(() => registry.registryApply(clock, group.registry, f.did)).toThrow(
-    expect.objectContaining({ reason: 'effects-mismatch' }),
-  )
+  await expect(
+    async () => await registry.registryApply(clock, group.registry, f.did),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
 })
 
 test('seed at a later position, or into a recorded log, is refused', async () => {
@@ -213,17 +219,19 @@ test('seed at a later position, or into a recorded log, is refused', async () =>
     },
   }
   for (const prefix of [beacon, entry(did, 'seed', log)]) {
-    const result = replay(did, [prefix, entry(did, 'seed', log)])
+    const result = await replay(did, [prefix, entry(did, 'seed', log)])
     expect(result.drops).toHaveLength(1)
     expect(result.drops[0]?.reason).toBe('invalid lifecycle proof')
   }
-  const state = registry.registryForLog(did, log)
-  expect(() => registry.registryApply(entry(did, 'seed', log).verified, state, did)).toThrow()
+  const state = await registry.registryForLog(did, log)
+  await expect(
+    async () => await registry.registryApply(entry(did, 'seed', log).verified, state, did),
+  ).rejects.toThrow()
 })
 
 test('log entry into an empty projection is refused', async () => {
   const { did, log } = await buildEpoch({ members: 1 })
-  const result = replay(did, [entry(did, 'log', log)])
+  const result = await replay(did, [entry(did, 'log', log)])
   expect(result.drops.map(({ reason }) => reason)).toEqual(['invalid lifecycle proof'])
   expect(registry.recordedLogOf(result.registry, did)).toBeUndefined()
 })
@@ -232,15 +240,15 @@ test('foldControl keeps an authenticated renewal log entry in a lifecycle group'
   const f = await buildEpoch({ members: 1 })
   const member = f.members[0]
   if (member == null) throw new Error('Missing member')
-  const renewal = createRenew({
+  const renewal = await createRenew({
     did: f.did,
     head: f.head,
-    parents: epochHeads(f.did, f.log),
+    parents: await epochHeads({ did: f.did, log: f.log }),
     signer: f.root,
     add: member.add,
     lease: 2000,
   })
-  const result = replay(f.did, [
+  const result = await replay(f.did, [
     entry(f.did, 'seed', f.log),
     entry(f.did, 'log', { chain: [], events: [renewal] }),
   ])
@@ -250,14 +258,14 @@ test('foldControl keeps an authenticated renewal log entry in a lifecycle group'
 
 test('log entry with a chain suffix settles without a revoke', async () => {
   const { seed, did, log, head, inception } = await buildEpoch({ members: 1 })
-  const rotation = createRotate({
+  const rotation = await createRotate({
     seed,
     profile: 0,
     did,
     prior: inception.event,
-    snapshot: snapshotOf(head),
+    snapshot: snapshotOf({ state: head }),
   })
-  const result = replay(did, [
+  const result = await replay(did, [
     entry(did, 'seed', log),
     entry(did, 'log', { chain: [rotation], events: [] }),
   ])
@@ -274,14 +282,15 @@ test('log entry renewing a member extends the recorded lease', async () => {
     renewEvery: 1000,
     until: 1000,
   })
-  const result = replay(did, [
+  const result = await replay(did, [
     entry(did, 'seed', genesis),
     ...deltas.map((proof) => entry(did, 'log', proof)),
   ])
   expect(result.drops).toEqual([])
   const log = registry.recordedLogOf(result.registry, did)
   if (log == null) throw new Error('Missing recorded log')
-  for (const { add } of members) expect(folded(did, log).head.members.get(add)?.lease).toBe(2000)
+  for (const { add } of members)
+    expect((await folded(did, log)).head.members.get(add)?.lease).toBe(2000)
 })
 
 async function concurrent() {
@@ -289,7 +298,7 @@ async function concurrent() {
   const [a, b, c] = fixture.members
   if (a == null || b == null || c == null) throw new Error('Missing members')
   const base = { did: fixture.did, head: fixture.head, parents: [c.add] }
-  const remove = createRemove({ ...base, signer: { member: b }, add: a.add })
+  const remove = await createRemove({ ...base, signer: { member: b }, add: a.add })
   const recorded = { chain: fixture.log.chain, events: [...fixture.log.events, remove] }
   return { ...fixture, a, b, c, base, recorded, remove }
 }
@@ -302,11 +311,11 @@ for (const descendant of [false, true]) {
     async () => {
       const { ingestControllerLog } = await import('../src/controller-ingest.js')
       const { did, a, b, c, base, recorded } = await concurrent()
-      const renew = createRenew({ ...base, signer: { member: a }, add: c.add, lease: 9000 })
+      const renew = await createRenew({ ...base, signer: { member: a }, add: c.add, lease: 9000 })
       const events = [renew]
       if (descendant)
         events.push(
-          createRenew({
+          await createRenew({
             ...base,
             parents: [digestOf(renew.event)],
             signer: { member: b },
@@ -315,19 +324,19 @@ for (const descendant of [false, true]) {
           }),
         )
       const merged = { chain: recorded.chain, events: [...recorded.events, ...events] }
-      expect(folded(did, merged).applied).toContain(digestOf(renew.event))
-      expect(folded(did, merged).head.members.get(c.add)?.lease).toBe(9000)
+      expect((await folded(did, merged)).applied).toContain(digestOf(renew.event))
+      expect((await folded(did, merged)).head.members.get(c.add)?.lease).toBe(9000)
       const before = structuredClone(recorded)
-      expect(() => ingestControllerLog(did, recorded, { chain: [], events })).toThrow(
-        expect.objectContaining({ reason: 'not-endorsed' }),
-      )
-      const result = replay(did, [
+      await expect(
+        async () => await ingestControllerLog(did, recorded, { chain: [], events }),
+      ).rejects.toThrow(expect.objectContaining({ reason: 'not-endorsed' }))
+      const result = await replay(did, [
         entry(did, 'seed', recorded),
         entry(did, 'log', { chain: [], events }),
       ])
       expect(result.drops.map(({ reason }) => reason)).toEqual(['invalid lifecycle proof'])
       expect(registry.recordedLogOf(result.registry, did)).toEqual(before)
-      expect(folded(did, recorded).head.members.get(c.add)?.lease).toBe(1000)
+      expect((await folded(did, recorded)).head.members.get(c.add)?.lease).toBe(1000)
       expect(recorded).toEqual(before)
     },
   )
@@ -336,8 +345,8 @@ for (const descendant of [false, true]) {
 test("removed member's concurrent counter-removal is refused even under a descendant", async () => {
   const { ingestControllerLog } = await import('../src/controller-ingest.js')
   const { did, a, b, c, base, recorded } = await concurrent()
-  const remove = createRemove({ ...base, signer: { member: a }, add: b.add })
-  const renew = createRenew({
+  const remove = await createRemove({ ...base, signer: { member: a }, add: b.add })
+  const renew = await createRenew({
     ...base,
     parents: [digestOf(remove.event)],
     signer: { member: c },
@@ -346,13 +355,15 @@ test("removed member's concurrent counter-removal is refused even under a descen
   })
   const proof = { chain: [], events: [remove, renew] }
   expect(
-    folded(did, { chain: recorded.chain, events: [...recorded.events, ...proof.events] }).applied,
+    (await folded(did, { chain: recorded.chain, events: [...recorded.events, ...proof.events] }))
+      .applied,
   ).toContain(digestOf(remove.event))
   expect(
-    folded(did, { chain: recorded.chain, events: [...recorded.events, ...proof.events] }).applied,
+    (await folded(did, { chain: recorded.chain, events: [...recorded.events, ...proof.events] }))
+      .applied,
   ).toContain(digestOf(renew.event))
   const before = structuredClone(recorded)
-  expect(() => ingestControllerLog(did, recorded, proof)).toThrow(
+  await expect(async () => await ingestControllerLog(did, recorded, proof)).rejects.toThrow(
     expect.objectContaining({ reason: 'not-endorsed' }),
   )
   expect(recorded).toEqual(before)
@@ -364,14 +375,14 @@ test('endorsement checks introduced events beyond the stored saturation prefix',
   const events: ControllerLog['events'] = []
   let parents: Array<string> = []
   for (let index = 0; index <= MAX_EPOCH_EVENTS; index++) {
-    const renew = createRenew({ ...base, signer: root, add: c.add, lease: 2000 + index })
+    const renew = await createRenew({ ...base, signer: root, add: c.add, lease: 2000 + index })
     events.push(renew)
     parents.push(digestOf(renew.event))
   }
   while (parents.length > 1) {
     const next: Array<string> = []
     for (let index = 0; index < parents.length; index += MAX_EVENT_PARENTS) {
-      const renew = createRenew({
+      const renew = await createRenew({
         ...base,
         parents: parents.slice(index, index + MAX_EVENT_PARENTS),
         signer: root,
@@ -383,33 +394,44 @@ test('endorsement checks introduced events beyond the stored saturation prefix',
     }
     parents = next
   }
-  const renew = createRenew({ ...base, parents, signer: { member: a }, add: c.add, lease: 9000 })
+  const renew = await createRenew({
+    ...base,
+    parents,
+    signer: { member: a },
+    add: c.add,
+    lease: 9000,
+  })
   events.push(renew)
-  const result = folded(did, { chain: recorded.chain, events: [...recorded.events, ...events] })
+  const result = await folded(did, {
+    chain: recorded.chain,
+    events: [...recorded.events, ...events],
+  })
   expect(result.applied.indexOf(digestOf(renew.event))).toBeGreaterThan(MAX_EPOCH_EVENTS)
-  expect(() => ingestControllerLog(did, recorded, { chain: [], events })).toThrow(
-    expect.objectContaining({ reason: 'not-endorsed' }),
-  )
+  await expect(
+    async () => await ingestControllerLog(did, recorded, { chain: [], events }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'not-endorsed' }))
 }, 180_000)
 
 test('author removed only within the same delta passes', async () => {
   const { ingestControllerLog } = await import('../src/controller-ingest.js')
   const { did, log, a, b, c, base } = await concurrent()
-  const renew = createRenew({ ...base, signer: { member: a }, add: c.add, lease: 2000 })
-  const remove = createRemove({
+  const renew = await createRenew({ ...base, signer: { member: a }, add: c.add, lease: 2000 })
+  const remove = await createRemove({
     ...base,
     parents: [digestOf(renew.event)],
     signer: { member: b },
     add: a.add,
   })
-  const ingested = ingestControllerLog(did, log, { chain: [], events: [renew, remove] })
+  const ingested = await ingestControllerLog(did, log, { chain: [], events: [renew, remove] })
   expect(ingested.introduced).toEqual(
     expect.arrayContaining([digestOf(renew.event), digestOf(remove.event)]),
   )
   expect(ingested.before?.head.members.get(a.add)?.effective).toBe(true)
   expect(ingested.after.head.members.get(a.add)?.removed).toBe(true)
   expect(ingested.after.head.members.get(c.add)?.lease).toBe(2000)
-  expect(ingestControllerLog(did, ingested.log, { chain: [], events: [] }).introduced).toEqual([])
+  expect(
+    (await ingestControllerLog(did, ingested.log, { chain: [], events: [] })).introduced,
+  ).toEqual([])
 })
 
 test.each([
@@ -428,7 +450,7 @@ test.each([
       ? {
           chain: [],
           events: [
-            createRevoke({
+            await createRevoke({
               did,
               head,
               parents: [member.add],
@@ -440,8 +462,8 @@ test.each([
       : {
           chain: [
             kind === 'generation'
-              ? createReset(seed, 0, 1)
-              : createRotate({
+              ? await createReset({ seed: seed, profile: 0, gen: 1 })
+              : await createRotate({
                   seed,
                   profile: 0,
                   did,
@@ -452,11 +474,13 @@ test.each([
           events: [],
         }
   if (kind === 'generation') proof.chain.unshift(inception)
-  const state = registry.registryForLog(did, log)
-  expect(() => authenticateLifecycleProof(did, entry(did, 'log', proof).verified, state)).toThrow(
+  const state = await registry.registryForLog(did, log)
+  await expect(
+    async () => await authenticateLifecycleProof(did, entry(did, 'log', proof).verified, state),
+  ).rejects.toThrow(
     expect.objectContaining({ reason: kind === 'generation' ? 'needs-reset' : 'effects-mismatch' }),
   )
-  const result = replay(did, [entry(did, 'seed', log), entry(did, 'log', proof)])
+  const result = await replay(did, [entry(did, 'seed', log), entry(did, 'log', proof)])
   expect(result.drops.map(({ reason }) => reason)).toEqual(['invalid lifecycle proof'])
   expect(registry.recordedLogOf(result.registry, did)).toEqual(log)
 })
@@ -467,7 +491,7 @@ test('forged copy beside the genuine one stores the genuine copy', async () => {
   const add = genesis.events[0]
   if (genuine == null || add == null) throw new Error('Missing events')
   const forged = { ...genuine, sigs: add.sigs }
-  const result = replay(did, [
+  const result = await replay(did, [
     entry(did, 'seed', genesis),
     entry(did, 'log', { chain: [], events: [forged, genuine] }),
   ])
@@ -480,15 +504,21 @@ test('forged copy beside the genuine one stores the genuine copy', async () => {
 
 test('chain fork is refused and the prior log is kept', async () => {
   const { seed, did, log, head, inception } = await buildEpoch({ members: 1 })
-  const params = { seed, profile: 0, did, prior: inception.event, snapshot: snapshotOf(head) }
-  const left = createRotate({ ...params, seal: 'left' })
-  const right = createRotate({ ...params, seal: 'right' })
+  const params = {
+    seed,
+    profile: 0,
+    did,
+    prior: inception.event,
+    snapshot: snapshotOf({ state: head }),
+  }
+  const left = await createRotate({ ...params, seal: 'left' })
+  const right = await createRotate({ ...params, seal: 'right' })
   const prior = { chain: [...log.chain, left], events: [] }
   const { ingestControllerLog } = await import('../src/controller-ingest.js')
-  expect(() =>
-    ingestControllerLog(did, prior, { chain: [...log.chain, right], events: [] }),
-  ).toThrow(expect.objectContaining({ reason: 'detached' }))
-  const result = replay(did, [
+  await expect(
+    async () => await ingestControllerLog(did, prior, { chain: [...log.chain, right], events: [] }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'detached' }))
+  const result = await replay(did, [
     entry(did, 'seed', prior),
     entry(did, 'log', { chain: [...log.chain, right], events: [] }),
   ])
@@ -500,7 +530,7 @@ test('a log carrying only a pending event is refused', async () => {
   const { did, log, head, members, root } = await buildEpoch({ members: 1 })
   const [member] = members
   if (member == null) throw new Error('Missing member')
-  const renew = createRenew({
+  const renew = await createRenew({
     did,
     head,
     parents: [digestOf('missing')],
@@ -508,7 +538,7 @@ test('a log carrying only a pending event is refused', async () => {
     add: member.add,
     lease: 2000,
   })
-  const result = replay(did, [
+  const result = await replay(did, [
     entry(did, 'seed', log),
     entry(did, 'log', { chain: [], events: [renew] }),
   ])
@@ -542,14 +572,19 @@ test('seed from [icp, reset(snapshot with a denial)] installs the denial with a 
   const log = {
     chain: [
       f.inception,
-      createReset(f.seed, 0, 1, {
-        ...snapshotOf(f.head),
-        deny: ['did:key:edge'],
+      await createReset({
+        seed: f.seed,
+        profile: 0,
+        gen: 1,
+        snapshot: {
+          ...snapshotOf({ state: f.head }),
+          deny: ['did:key:edge'],
+        },
       }),
     ],
     events: [],
   }
-  const state = registry.registryApply(
+  const state = await registry.registryApply(
     entry(f.did, 'seed', log).verified,
     registry.registrySeed(),
     f.did,
@@ -560,16 +595,21 @@ test('seed from [icp, reset(snapshot with a denial)] installs the denial with a 
     proofRef: { snapshot: 1 },
   })
   expect(
-    memberRootStatus(state, f.did, { kind: 'member', did: creator.did, add: creator.add, gen: 1 }),
+    await memberRootStatus(state, f.did, {
+      kind: 'member',
+      did: creator.did,
+      add: creator.add,
+      gen: 1,
+    }),
   ).toMatchObject({ status: 'effective' })
-  expect(registry.registryForLog(f.did, log)).toEqual(state)
+  expect(await registry.registryForLog(f.did, log)).toEqual(state)
 })
 
 test('genesis seed with an effective creator and a prior denial installs both atomically', async () => {
   const f = await buildEpoch({ members: 2, revokes: 1 })
   const [creator, removed] = f.members
   if (creator == null || removed == null) throw new Error('Missing members')
-  const rmv = createRemove({
+  const rmv = await createRemove({
     did: f.did,
     head: f.head,
     parents: [removed.add],
@@ -578,9 +618,14 @@ test('genesis seed with an effective creator and a prior denial installs both at
   })
   const log = { ...f.log, events: [...f.log.events, rmv] }
   const seed = entry(f.did, 'seed', log)
-  const state = registry.registryApply(seed.verified, registry.registrySeed(), f.did)
+  const state = await registry.registryApply(seed.verified, registry.registrySeed(), f.did)
   expect(
-    memberRootStatus(state, f.did, { kind: 'member', did: creator.did, add: creator.add, gen: 0 }),
+    await memberRootStatus(state, f.did, {
+      kind: 'member',
+      did: creator.did,
+      add: creator.add,
+      gen: 0,
+    }),
   ).toMatchObject({ status: 'effective' })
   const rev = log.events.find(({ event }) => event.t === 'rev')
   if (rev == null) throw new Error('Missing rev')
@@ -595,22 +640,22 @@ test('genesis seed with an effective creator and a prior denial installs both at
     gen: 0,
     proofRef: { event: digestOf(rmv.event) },
   })
-  expect(replay(f.did, [seed])).toMatchObject({ registry: state, drops: [] })
-  expect(registry.registryForLog(f.did, log)).toEqual(state)
+  expect(await replay(f.did, [seed])).toMatchObject({ registry: state, drops: [] })
+  expect(await registry.registryForLog(f.did, log)).toEqual(state)
 })
 
 test('seed tombstones a member dropped by settlement without denying its DID', async () => {
   const f = await buildEpoch({ members: 1 })
   const member = f.members[0]
   if (member == null) throw new Error('Missing member')
-  const snapshot = createRotate({
+  const snapshot = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
     prior: f.inception.event,
-    snapshot: snapshotOf(f.head),
+    snapshot: snapshotOf({ state: f.head }),
   })
-  const drop = createRotate({
+  const drop = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
@@ -618,7 +663,7 @@ test('seed tombstones a member dropped by settlement without denying its DID', a
     snapshot: { members: [], deny: [] },
   })
   const log = { chain: [f.inception, snapshot, drop], events: [] }
-  const state = registry.registryApply(
+  const state = await registry.registryApply(
     entry(f.did, 'seed', log).verified,
     registry.registrySeed(),
     f.did,
@@ -635,12 +680,17 @@ test('empty log entries introduce no authenticated data and are refused', async 
   const f = await buildEpoch({ members: 1 })
   const seed = entry(f.did, 'seed', f.log)
   const empty = entry(f.did, 'log', { chain: [], events: [] })
-  const result = replay(f.did, [seed, empty])
+  const result = await replay(f.did, [seed, empty])
   expect(result.drops).toHaveLength(1)
   expect(registry.recordedLogOf(result.registry, f.did)).toEqual(f.log)
-  expect(() =>
-    authenticateLifecycleProof(f.did, empty.verified, registry.registryForLog(f.did, f.log)),
-  ).toThrow()
+  await expect(
+    async () =>
+      await authenticateLifecycleProof(
+        f.did,
+        empty.verified,
+        await registry.registryForLog(f.did, f.log),
+      ),
+  ).rejects.toThrow()
 })
 
 test('sixteen renewal entries replay with linear authenticated event folding', async () => {
@@ -651,14 +701,14 @@ test('sixteen renewal entries replay with linear authenticated event folding', a
     ...f.deltas.map((delta) => entry(f.did, 'log', delta)),
   ]
   const fold = vi.spyOn(controllerLogModule, 'foldControllerLog')
-  const result = replay(f.did, entries)
+  const result = await replay(f.did, entries)
   const checks = fold.mock.calls.reduce((count, [, log]) => count + log.events.length, 0)
   expect(result.drops).toEqual([])
   expect(checks).toBeGreaterThan(0)
   expect(checks).toBeLessThanOrEqual(2 * count + 2)
   const log = registry.recordedLogOf(result.registry, f.did)
   if (log == null) throw new Error('Missing log')
-  expect(folded(f.did, log).head).toEqual(f.head)
+  expect((await folded(f.did, log)).head).toEqual(f.head)
 })
 
 test('attestTreeTime does not author a clock beyond the member lease', async () => {

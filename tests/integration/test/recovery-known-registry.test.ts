@@ -131,7 +131,7 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
   const { controllerSeed, inception } = await import(
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
-  const rev = revokeChain({
+  const rev = await revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: fixture.controllerID,

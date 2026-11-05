@@ -38,7 +38,7 @@ export function printTable(rows: Array<Record<string, unknown>>) {
 }
 
 export const seed = new Uint8Array(32).fill(31)
-export const inception = createInception(seed, 0)
+export const inception = await createInception({ seed: seed, profile: 0 })
 export const controllerID = didFromInception(inception.event)
 export const jsonBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
 export const historyBytes = (log: Array<SignedEvent>) =>
@@ -52,18 +52,20 @@ export async function peer(byte: number) {
   })
 }
 
-export function buildLog(count: number, target: string, mixed = false) {
+export async function buildLog(count: number, target: string, mixed = false) {
   const log: Array<SignedEvent> = [inception]
   // Carry the generated snapshot to avoid folding every prefix in this large measurement fixture.
-  let snapshot = snapshotForChain(controllerID, log)
+  let snapshot = await snapshotForChain(controllerID, log)
   for (let i = 1; i < count; i++) {
     const prior = log.at(-1)
     if (prior == null) throw new Error('Missing prior')
     if (mixed && i % 4 === 0) {
-      const subject = createFullIdentity(sha256(jsonBytes([target, i]))).id
+      const subject = createFullIdentity({ privateKey: sha256(jsonBytes([target, i])) }).id
       snapshot = { ...snapshot, deny: [...snapshot.deny, subject] }
     }
-    log.push(createRotate({ seed, profile: 0, did: controllerID, prior: prior.event, snapshot }))
+    log.push(
+      await createRotate({ seed, profile: 0, did: controllerID, prior: prior.event, snapshot }),
+    )
   }
   return log
 }
@@ -72,8 +74,8 @@ export async function logMeasurements() {
   const target = (await peer(71)).id
   const rows = []
   for (const mixed of [false, true]) {
-    const log = buildLog(1000, target, mixed)
-    const folded = foldChain(controllerID, log)
+    const log = await buildLog(1000, target, mixed)
+    const folded = await foldChain(controllerID, log)
     if (!folded.ok) throw new Error(folded.reason)
     for (const count of [10, 50, 100, 256]) {
       const bytes = historyBytes(log.slice(0, count))
@@ -111,7 +113,7 @@ export async function logMeasurements() {
       average: prefix / 50,
     })
   }
-  const reset = createReset(seed, 0, 1)
+  const reset = await createReset({ seed: seed, profile: 0, gen: 1 })
   rows.push({
     kind: '[icp, reset]',
     events: 2,
@@ -120,11 +122,13 @@ export async function logMeasurements() {
   })
   printTable(rows)
   printTable(
-    [inception, buildLog(2, target)[1], buildLog(5, target, true)[4], reset].map((event) => ({
-      event: event?.event.t,
-      generation: event?.event.g,
-      bytes: jsonBytes(event).length,
-    })),
+    [inception, (await buildLog(2, target))[1], (await buildLog(5, target, true))[4], reset].map(
+      (event) => ({
+        event: event?.event.t,
+        generation: event?.event.g,
+        bytes: jsonBytes(event).length,
+      }),
+    ),
   )
   return rows
 }
@@ -154,14 +158,22 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
   const alice = await peer(41)
   const bob = await peer(51)
   const target = await peer(71)
-  const log = buildLog(options?.onlyHorizon ? 900 : 2000, target.id)
+  const log = await buildLog(options?.onlyHorizon ? 900 : 2000, target.id)
   const sums = [0]
   for (const event of log) sums.push((sums.at(-1) ?? 0) + jsonBytes(event).length)
   const groupID = 'history-probe'
   const requestID = 'e871e04b-e0dc-4a4d-a3ae-c050360d5c22'
-  const signer = createControllerIdentity({ seed, profile: 0, log: asControllerLog([inception]) })
+  const signer = await createControllerIdentity({
+    seed,
+    profile: 0,
+    log: asControllerLog([inception]),
+  })
   const binding = async (identity: typeof alice, prefix: Array<SignedEvent>) => {
-    const authority = createControllerIdentity({ seed, profile: 0, log: asControllerLog(prefix) })
+    const authority = await createControllerIdentity({
+      seed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    })
     return {
       id: controllerID,
       prefix,
@@ -224,12 +236,12 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       const prior = prefix.at(-2)
       if (prior == null) throw new Error('Missing rotation prior')
       const gap = (393216 - 2 * historyBytes(prefix)) / 2
-      prefix[count - 1] = createRotate({
+      prefix[count - 1] = await createRotate({
         seed: seed,
         profile: 0,
         did: controllerID,
         prior: prior.event,
-        snapshot: snapshotForChain(controllerID, prefix.slice(0, -1)),
+        snapshot: await snapshotForChain(controllerID, prefix.slice(0, -1)),
         seal: 's'.repeat(gap - 7),
       })
     }
@@ -247,7 +259,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       if (prior == null) throw new Error('Missing proof prior')
       proof = [
         ...rotations,
-        revokeChain({
+        await revokeChain({
           seed: seed,
           profile: 0,
           did: controllerID,
@@ -261,18 +273,18 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
         const sealSize = 393216 - 2 * historyBytes(prefix) - historyBytes(proof) - 7
         let matched = false
         for (let offset = -2; offset <= 2; offset++) {
-          const rotation = createRotate({
+          const rotation = await createRotate({
             seed: seed,
             profile: 0,
             did: controllerID,
             prior: priorRotate.event,
-            snapshot: snapshotForChain(controllerID, rotations.slice(0, -1)),
+            snapshot: await snapshotForChain(controllerID, rotations.slice(0, -1)),
             seal: 's'.repeat(sealSize + offset),
           })
           proof = [
             ...rotations.slice(0, -1),
             rotation,
-            revokeChain({
+            await revokeChain({
               seed: seed,
               profile: 0,
               did: controllerID,
@@ -337,19 +349,19 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     const ledger = rpc.encodeLedgerEntries(tokens)
     const sealedEntries = entrySeal.sealEntries(await entrySeal.deriveEntryKey(group), ledger)
     const commitFrame = rpc.encodeHandshakeFrame(0, rpc.encodeCommitFrame(commit, sealedEntries))
-    const derived = deriveGroup(group, result.newState)
+    const derived = await deriveGroup(group, result.newState)
     await derived.bootstrapLedger(tokens)
     const { groupInfo } = await exportGroupInfo({ group: derived })
     const attestation = stringifyToken(
-      await alice.signToken(
-        {
+      await alice.signToken({
+        payload: {
           type: 'kumiai.recovery-groupinfo',
           groupID,
           requestID,
           groupInfoDigest: encodeMultibase(sha256(groupInfo)),
         },
-        { embedLongForm: true },
-      ),
+        embedLongForm: true,
+      }),
     )
     const tokenBytes = new TextEncoder().encode(attestation)
     const plaintext = new Uint8Array(8 + tokenBytes.length + groupInfo.length + ledger.length)
@@ -405,8 +417,8 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       ledgerEntries: tokens,
     })
     const verdictToken = stringifyToken(
-      await alice.signToken(
-        {
+      await alice.signToken({
+        payload: {
           groupID,
           requestID,
           position: '1',
@@ -415,8 +427,8 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
           epoch: '1',
           tag: encodeMultibase(sha256(commit)),
         },
-        { embedLongForm: true },
-      ),
+        embedLongForm: true,
+      }),
     )
     const verdictSeal = await hpke.seal(
       ephemeral.publicKey,

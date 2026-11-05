@@ -1180,7 +1180,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           tuple = { position, commitDigest, tag: tagFor(key, requestID) }
           return key
         },
-        judgeVerdict: ({ signer, verdict }) => {
+        judgeVerdict: async ({ signer, verdict }) => {
           if (
             tuple == null ||
             !isRecoveryVerdict(verdict) ||

@@ -103,7 +103,7 @@ describe('host invocation boundary', () => {
       epoch: 1,
       markBindingUnusable: () => {},
       confirmationKey: async () => new Uint8Array(32),
-      judgeVerdict: () => 'authoritative' as const,
+      judgeVerdict: async () => 'authoritative' as const,
       commit: bytes,
       bodies: [],
       kind: 'ledger' as const,
@@ -282,8 +282,8 @@ describe('host invocation boundary', () => {
   test('never inspects or wraps ordinary byte, token, schema or callable-bearing data', async () => {
     const boundary = createHostBoundary()
     const bytes = new Uint8Array([1, 2])
-    const identity = createSigningIdentity(new Uint8Array(32).fill(0x75))
-    const token = await identity.signToken({ sub: identity.id })
+    const identity = createSigningIdentity({ privateKey: new Uint8Array(32).fill(0x75) })
+    const token = await identity.signToken({ payload: { sub: identity.id } })
     const schema = { 'chat/echo': { type: 'request', param: { type: 'object' } } }
     let inspections = 0
     const values = [bytes, token, schema, { validate: () => true }].map(

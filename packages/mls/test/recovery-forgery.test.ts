@@ -220,15 +220,15 @@ async function sealForgedReply(opts: {
   requestID: string
   groupInfo: Uint8Array
 }): Promise<Uint8Array> {
-  const signed = await opts.signer.signToken(
-    {
+  const signed = await opts.signer.signToken({
+    payload: {
       type: RECOVERY_GROUPINFO_TYPE,
       groupID: opts.groupID,
       requestID: opts.requestID,
       groupInfoDigest: encodeMultibase(sha256(opts.groupInfo)),
     },
-    { embedLongForm: true },
-  )
+    embedLongForm: true,
+  })
   const token = utf8.encode(stringifyToken(signed))
   const plaintext = new Uint8Array(4 + token.length + opts.groupInfo.length)
   new DataView(plaintext.buffer).setUint32(0, token.length, false)
@@ -257,7 +257,7 @@ async function exportForged(
   groupID: string,
   context: MlsContext,
 ): Promise<Uint8Array> {
-  const handle = new GroupHandle({
+  const handle = await GroupHandle.create({
     state,
     credential: { id: creator.id, groupID },
     context,

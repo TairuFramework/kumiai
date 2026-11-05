@@ -138,23 +138,25 @@ test('boundDeviceRenewedByPeerAccepted', async () => {
 
 test.each(['aud', 'cnf'] as const)('holderGrantMustNameLeafKey: %s', async (claim) => {
   const f = await fixture()
-  const controller = createControllerIdentity({
+  const controller = await createControllerIdentity({
     seed: controllerSeed,
     profile: 0,
     log: asControllerLog([inception]),
   })
   const holderGrant = stringifyToken(
     await controller.signToken({
-      sub: controllerID,
-      aud: claim === 'aud' ? f.holder.id : f.device.id,
-      act: 'authenticate',
-      res: 'kumiai/mls-leaf',
-      iat: 100,
-      exp: 1000,
-      cnf: audienceConfirmation({
-        alg: 'EdDSA',
-        publicKey: claim === 'cnf' ? f.holder.publicKey : f.device.publicKey,
-      }),
+      payload: {
+        sub: controllerID,
+        aud: claim === 'aud' ? f.holder.id : f.device.id,
+        act: 'authenticate',
+        res: 'kumiai/mls-leaf',
+        iat: 100,
+        exp: 1000,
+        cnf: audienceConfirmation({
+          alg: 'EdDSA',
+          publicKey: claim === 'cnf' ? f.holder.publicKey : f.device.publicKey,
+        }),
+      },
     }),
   )
   await expect(
@@ -167,7 +169,7 @@ test.each(['aud', 'cnf'] as const)('holderGrantMustNameLeafKey: %s', async (clai
 
 test('deniedHolderGrantRefused', async () => {
   const f = await fixture()
-  const revoke = revokeChain({
+  const revoke = await revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
@@ -201,7 +203,7 @@ test.each(['signature', 'issuer', 'subject', 'chain', 'permission', 'lifetime'] 
   'invalid holder evidence refused: %s',
   async (fault) => {
     const f = await fixture()
-    const controller = createControllerIdentity({
+    const controller = await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
       log: asControllerLog([inception]),
@@ -217,9 +219,9 @@ test.each(['signature', 'issuer', 'subject', 'chain', 'permission', 'lifetime'] 
       ...(fault === 'chain' ? { cap: f.evidenced.holderGrant } : {}),
     }
     const signer = fault === 'issuer' ? f.holder : controller
-    let holderGrant = stringifyToken(await signer.signToken(payload))
+    let holderGrant = stringifyToken(await signer.signToken({ payload: payload }))
     if (fault === 'signature') {
-      const forged = await f.holder.signToken(payload)
+      const forged = await f.holder.signToken({ payload: payload })
       holderGrant = `${holderGrant.slice(0, holderGrant.lastIndexOf('.') + 1)}${forged.signature}`
     }
     await expect(
@@ -348,21 +350,23 @@ test.each(['key-package build', 'Add receipt'] as const)(
   'holder grant not yet active at leaf issuance refused: %s',
   async (path) => {
     const f = await fixture()
-    const controller = createControllerIdentity({
+    const controller = await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
       log: asControllerLog([inception]),
     })
     const holderGrant = stringifyToken(
       await controller.signToken({
-        sub: controllerID,
-        aud: f.device.id,
-        act: 'authenticate',
-        res: 'kumiai/mls-leaf',
-        iat: 100,
-        nbf: 120,
-        exp: 1000,
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: f.device.publicKey }),
+        payload: {
+          sub: controllerID,
+          aud: f.device.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          iat: 100,
+          nbf: 120,
+          exp: 1000,
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: f.device.publicKey }),
+        },
       }),
     )
     const binding = { ...f.binding, holderGrant }
@@ -460,22 +464,22 @@ async function memberHolderFixture() {
     mbr: { add: member.add, g: 0 },
   }
   const parent = stringifyToken(
-    await member.identity.signToken(
-      {
+    await member.identity.signToken({
+      payload: {
         ...payload,
         aud: f.trusted.id,
         cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: f.trusted.publicKey }),
       },
-      { embedLongForm: true },
-    ),
+      embedLongForm: true,
+    }),
   )
   const holderGrant = stringifyToken(
-    await member.identity.signToken(payload, { embedLongForm: true }),
+    await member.identity.signToken({ payload: payload, embedLongForm: true }),
   )
   const leafPayload = { ...payload, mbr: undefined, iat: 200, nbf: 200, exp: 3800, cap: parent }
-  const capability = stringifyToken(await f.trusted.signToken(leafPayload))
+  const capability = stringifyToken(await f.trusted.signToken({ payload: leafPayload }))
   const binding = { id: epoch.did, prefix: epoch.log.chain, capability, holderGrant }
-  const registry = registryForLog(epoch.did, epoch.log)
+  const registry = await registryForLog(epoch.did, epoch.log)
   const deps: DIDAuthenticationDependencies = {
     judging: () => ({ registry, stage: 'full' as const, mode: 'admit' as const }),
     leafLifetime: () => 3600,
@@ -504,7 +508,9 @@ test('30-day member parent with a one-hour leaf authenticates', async () => {
   }).frozen()
   const payload = readCapability(f.binding.capability).payload
   await expect(
-    checkCapability({ act: 'authenticate', res: 'kumiai/mls-leaf' }, payload, {
+    checkCapability({
+      permission: { act: 'authenticate', res: 'kumiai/mls-leaf' },
+      payload: payload,
       atTime: payload.iat,
       methods: [frozen],
       maxDepth: 1,
@@ -517,20 +523,22 @@ test('30-day member parent with a one-hour leaf authenticates', async () => {
 test('member holder grant over the group trustedGrantLifetime is refused', async () => {
   const f = await memberHolderFixture()
   const holderGrant = stringifyToken(
-    await f.member.identity.signToken(
-      {
+    await f.member.identity.signToken({
+      payload: {
         ...readCapability(f.holderGrant).payload,
         exp: 2_592_101,
       },
-      { embedLongForm: true },
-    ),
+      embedLongForm: true,
+    }),
   )
   await expect(f.verify({ holderGrant })).rejects.toMatchObject({ reason: 'lifetime-cap' })
 })
 
 test('longer holder grant does not lengthen the leaf', async () => {
   const f = await memberHolderFixture()
-  const capability = stringifyToken(await f.f.trusted.signToken({ ...f.leafPayload, exp: 3801 }))
+  const capability = stringifyToken(
+    await f.f.trusted.signToken({ payload: { ...f.leafPayload, exp: 3801 } }),
+  )
   await expect(f.verify({ capability })).rejects.toMatchObject({ reason: 'lifetime-cap' })
 })
 
@@ -567,13 +575,13 @@ test.each([
   async (stage, forged) => {
     const f = await memberHolderFixture()
     const capability = stringifyToken(
-      await f.member.identity.signToken(
-        {
+      await f.member.identity.signToken({
+        payload: {
           ...readCapability(f.holderGrant).payload,
           exp: 200,
         },
-        { embedLongForm: true },
-      ),
+        embedLongForm: true,
+      }),
     )
     await expect(
       f.verify(
@@ -593,13 +601,15 @@ test.each(['retain', 'rejudge'] as const)(
     const f = await memberHolderFixture()
     const parent = stringifyToken(
       await f.f.controller.signToken({
-        ...readCapability(f.parent).payload,
-        iss: f.f.controller.id,
-        mbr: undefined,
+        payload: {
+          ...readCapability(f.parent).payload,
+          iss: f.f.controller.id,
+          mbr: undefined,
+        },
       }),
     )
     const capability = stringifyToken(
-      await f.f.trusted.signToken({ ...f.leafPayload, cap: parent }),
+      await f.f.trusted.signToken({ payload: { ...f.leafPayload, cap: parent } }),
     )
     const judging: JudgingContext = { registry: registrySeed(), stage: 'full', mode }
     const checking = f.verify({ capability }, { ...f.deps, judging: () => judging })

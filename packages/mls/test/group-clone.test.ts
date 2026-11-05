@@ -265,7 +265,7 @@ describe('GroupHandle.clone', () => {
   test('preserves externally supplied authentication behaviour in a fresh service wrapper', async () => {
     const { receiver } = await fixture()
     const authService = { validateCredential: vi.fn(async () => false) }
-    const external = new GroupHandle({
+    const external = await GroupHandle.create({
       state: structuredClone(receiver.state),
       credential: structuredClone(receiver.credential),
       context: { ...receiver.context, authService },
@@ -292,7 +292,7 @@ describe('GroupHandle.clone', () => {
 
   test('inherits callbacks, supports overrides, and starts non-speculative', async () => {
     const { receiver } = await fixture()
-    const staged = deriveGroup(receiver, structuredClone(receiver.state))
+    const staged = await deriveGroup(receiver, structuredClone(receiver.state))
     const beacon = {
       issuer: receiver.credential.id,
       entry: {

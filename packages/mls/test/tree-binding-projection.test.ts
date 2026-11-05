@@ -36,7 +36,7 @@ test.each([true, false])(
       throw new Error('Missing basic credential')
     }
     node.leaf.credential.identity = new TextEncoder().encode('not-json-garbage')
-    const constructed = deriveGroup(group, structuredClone(state))
+    const constructed = await deriveGroup(group, structuredClone(state))
     expect(constructed.registry).toEqual(group.registry)
     const restored = await restoreGroup({
       state,

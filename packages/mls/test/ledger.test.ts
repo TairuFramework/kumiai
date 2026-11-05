@@ -11,8 +11,8 @@ import {
   verifyLedgerEntry,
 } from '../src/ledger.js'
 
-function createSigner() {
-  return createIdentity({ keys: [{ purpose: 'sig', alg: 'EdDSA' }], didMethod: 'key' })
+async function createSigner() {
+  return await createIdentity({ keys: [{ purpose: 'sig', alg: 'EdDSA' }], didMethod: 'key' })
 }
 
 /**
@@ -105,11 +105,13 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
     // was never checked. It must never verify.
     const forged = stringifyToken(
       createUnsignedToken({
-        iss: 'did:example:mallory',
-        type: 'kumiai.role',
-        groupID: 'A',
-        subject: 'did:mallory',
-        value: 'admin',
+        payload: {
+          iss: 'did:example:mallory',
+          type: 'kumiai.role',
+          groupID: 'A',
+          subject: 'did:mallory',
+          value: 'admin',
+        },
       }),
     )
     // The stringified unsigned token has two segments, so it is rejected at the
@@ -125,37 +127,48 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
 
   test('returns null on a signed token whose payload omits groupID', async () => {
     const signer = await createSigner()
-    const signed = await signer.signToken(
-      { type: 'kumiai.role', subject: 'did:example:subject', value: 'admin' },
-      { embedLongForm: true },
-    )
+    const signed = await signer.signToken({
+      payload: { type: 'kumiai.role', subject: 'did:example:subject', value: 'admin' },
+      embedLongForm: true,
+    })
     await expect(verifyLedgerEntry(stringifyToken(signed))).resolves.toBeNull()
   })
 
   test('returns null on a signed token whose groupID is not a string', async () => {
     const signer = await createSigner()
-    const signed = await signer.signToken(
-      { type: 'kumiai.role', groupID: 123, subject: 'did:example:subject', value: 'admin' },
-      { embedLongForm: true },
-    )
+    const signed = await signer.signToken({
+      payload: {
+        type: 'kumiai.role',
+        groupID: 123,
+        subject: 'did:example:subject',
+        value: 'admin',
+      },
+      embedLongForm: true,
+    })
     await expect(verifyLedgerEntry(stringifyToken(signed))).resolves.toBeNull()
   })
 
   test('returns null on a signed token whose type is missing', async () => {
     const signer = await createSigner()
-    const signed = await signer.signToken(
-      { groupID: 'A', subject: 'did:example:subject', value: 'admin' },
-      { embedLongForm: true },
-    )
+    const signed = await signer.signToken({
+      payload: { groupID: 'A', subject: 'did:example:subject', value: 'admin' },
+      embedLongForm: true,
+    })
     await expect(verifyLedgerEntry(stringifyToken(signed))).resolves.toBeNull()
   })
 
   test('returns null on a signed token whose ord is not a string', async () => {
     const signer = await createSigner()
-    const signed = await signer.signToken(
-      { type: 'kumiai.role', groupID: 'A', subject: 'did:example:subject', value: 'admin', ord: 7 },
-      { embedLongForm: true },
-    )
+    const signed = await signer.signToken({
+      payload: {
+        type: 'kumiai.role',
+        groupID: 'A',
+        subject: 'did:example:subject',
+        value: 'admin',
+        ord: 7,
+      },
+      embedLongForm: true,
+    })
     await expect(verifyLedgerEntry(stringifyToken(signed))).resolves.toBeNull()
   })
 

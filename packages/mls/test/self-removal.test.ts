@@ -30,7 +30,7 @@ test('selfRemovalCommittedByAnotherMemberKeepsSender', async () => {
   const { author, joined, peer, tokens } = await pair(120)
   const target = joined.state.privatePath.leafIndex
   const epoch = joined.epoch
-  const withoutProposal = deriveGroup(author, structuredClone(author.state))
+  const withoutProposal = await deriveGroup(author, structuredClone(author.state))
   const proposal = await proposeSelfRemoval(joined)
   expect(proposal.epoch).toBe(epoch)
   expect(joined.epoch).toBe(epoch)
@@ -167,7 +167,7 @@ test('forgedSelfRemovalRefused', async () => {
   ).rejects.toMatchObject({ name: 'CommitRejectedError', reason: 'invalid' })
   expect(author.state).toEqual(snapshot)
   expect(author.findMemberLeafIndex(author.credential.id)).toBe(target)
-  const forgedPending = deriveGroup(joined, forgedProposal.newState)
+  const forgedPending = await deriveGroup(joined, forgedProposal.newState)
   const pendingSnapshot = structuredClone(forgedPending.state)
   expect(Object.values(forgedPending.state.unappliedProposals)).toEqual([
     {

@@ -66,7 +66,7 @@ describe('attack: thief holds only an authenticate capability', () => {
     const attackerSeed = new Uint8Array(32).fill(71)
     const attackerLeaf = await buildBoundLeaf({ deviceSeed: attackerSeed })
     const attackerBundle = await buildBoundKeyPackageBundle(attackerLeaf, attackerSeed)
-    const attackerIdentity = createSigningIdentity(attackerSeed)
+    const attackerIdentity = createSigningIdentity({ privateKey: attackerSeed })
 
     const { newGroup: withAttacker } = await addDevice(managerGroup, managerIdentity, {
       keyPackage: attackerBundle.publicPackage,
@@ -241,13 +241,15 @@ describe('attack: unsigned management capability', () => {
 
     const unsignedCapability = stringifyToken(
       createUnsignedToken({
-        iss: controllerID,
-        sub: controllerID,
-        aud: managerIdentity.id,
-        act: MLS_DEVICES_ACT,
-        res: MLS_DEVICES_RES,
-        exp: now() + 3600,
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: managerIdentity.publicKey }),
+        payload: {
+          iss: controllerID,
+          sub: controllerID,
+          aud: managerIdentity.id,
+          act: MLS_DEVICES_ACT,
+          res: MLS_DEVICES_RES,
+          exp: now() + 3600,
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: managerIdentity.publicKey }),
+        },
       }),
     )
 
@@ -260,13 +262,13 @@ describe('attack: unsigned management capability', () => {
   })
 })
 
-describe('attack: history hidden in advisory or clock entries', () => {
-  const oversized = createRotate({
+describe('attack: history hidden in advisory or clock entries', async () => {
+  const oversized = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: 'a'.repeat(393216),
   })
   const fields = [
@@ -346,23 +348,23 @@ describe('attack: history hidden in advisory or clock entries', () => {
   )
 })
 
-function authorityRevoke(subject: string, chain: Array<SignedEvent> = [inception]) {
-  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject })
+async function authorityRevoke(subject: string, chain: Array<SignedEvent> = [inception]) {
+  return await revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject })
 }
 
-describe('attack: invalid lifecycle proofs keep their classifications', () => {
+describe('attack: invalid lifecycle proofs keep their classifications', async () => {
   const target = agent(61).id
   const firstSubject = agent(71).id
-  const reset = createReset(controllerSeed, 0, 1)
-  const oversized = createRotate({
+  const reset = await createReset({ seed: controllerSeed, profile: 0, gen: 1 })
+  const oversized = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: 'a'.repeat(393216),
   })
-  const rev = authorityRevoke(target)
+  const rev = await authorityRevoke(target)
   const skipped = {
     ...rev,
     event: { ...rev.event, t: 'future', crit: false },
@@ -388,24 +390,24 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       attack: 'wrong controller',
       reason: 'wrong-controller',
       controller: 'did:kokuin:other',
-      proof: [inception, authorityRevoke(target)],
+      proof: [inception, await authorityRevoke(target)],
     },
     {
       attack: 'detached suffix',
       reason: 'detached',
       recorded: true,
-      proof: [authorityRevoke(target)],
+      proof: [await authorityRevoke(target)],
     },
     {
       attack: 'unrecorded reset',
       reason: 'needs-reset',
       recorded: true,
-      proof: [createReset(controllerSeed, 0, 1)],
+      proof: [await createReset({ seed: controllerSeed, profile: 0, gen: 1 })],
     },
     {
       attack: 'missing authority signature',
       reason: 'not-authority-signed',
-      proof: [inception, { ...authorityRevoke(target), sigs: [] }],
+      proof: [inception, { ...(await authorityRevoke(target)), sigs: [] }],
     },
     { attack: 'non-authority signer', reason: 'not-authority-signed', proof: [inception, foreign] },
     { attack: 'delegated revoke', reason: 'not-authority-signed', proof: [inception, delegated] },
@@ -419,7 +421,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     {
       attack: 'over-horizon proof',
       reason: 'too-large',
-      proof: [inception, oversized, authorityRevoke(target, [inception, oversized])],
+      proof: [inception, oversized, await authorityRevoke(target, [inception, oversized])],
     },
     {
       attack: 'forged effects',
@@ -455,10 +457,10 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           groupID: group.groupID,
           subject: controllerID,
           value: {
-            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
+            effects: denyEffects([await authorityRevoke(firstSubject)], firstSubject),
             removed: [],
             op: 'revoke',
-            proof: asControllerLog([authorityRevoke(firstSubject)]),
+            proof: asControllerLog([await authorityRevoke(firstSubject)]),
             revoked: [{ did: firstSubject }],
           },
         })
@@ -523,10 +525,10 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           groupID: group.groupID,
           subject: controllerID,
           value: {
-            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
+            effects: denyEffects([await authorityRevoke(firstSubject)], firstSubject),
             removed: [],
             op: 'revoke',
-            proof: asControllerLog([authorityRevoke(firstSubject)]),
+            proof: asControllerLog([await authorityRevoke(firstSubject)]),
             revoked: [{ did: firstSubject }],
           },
         })

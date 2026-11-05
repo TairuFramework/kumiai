@@ -133,7 +133,7 @@ describe('out-of-order receive within an epoch', () => {
   test('a handle built on a caller context without a client config gets the kumiai retention', async () => {
     const { bobGroup } = await twoMemberGroup('out-of-order-caller-context')
     const { clientConfig: _omitted, ...context } = bobGroup.context
-    const handle = new GroupHandle({
+    const handle = await GroupHandle.create({
       state: bobGroup.state,
       credential: bobGroup.credential,
       context,

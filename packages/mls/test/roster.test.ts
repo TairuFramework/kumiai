@@ -8,8 +8,8 @@ import { foldRoster, ROLE_ENTRY_TYPE, type RoleValue } from '../src/roster.js'
 
 const GROUP = 'group-1'
 
-function makeSigner(): Promise<OwnIdentity> {
-  return createIdentity({ keys: [{ purpose: 'sig', alg: 'EdDSA' }], didMethod: 'key' })
+async function makeSigner(): Promise<Promise<OwnIdentity>> {
+  return await createIdentity({ keys: [{ purpose: 'sig', alg: 'EdDSA' }], didMethod: 'key' })
 }
 
 /**

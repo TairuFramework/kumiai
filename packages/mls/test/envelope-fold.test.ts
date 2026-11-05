@@ -53,7 +53,7 @@ function input({
 }
 
 describe('foldEnvelope', () => {
-  test('stores and surfaces an admin-issued app entry, roster unchanged', () => {
+  test('stores and surfaces an admin-issued app entry, roster unchanged', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const appEntry = input({
       issuer: CREATOR_DID,
@@ -62,7 +62,7 @@ describe('foldEnvelope', () => {
       entryID: 'e1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [appEntry],
@@ -76,7 +76,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects the whole fold when a member issues an app entry', () => {
+  test('rejects the whole fold when a member issues an app entry', async () => {
     const base = roster([
       [CREATOR_DID, 'admin'],
       [MEMBER_DID, 'member'],
@@ -88,7 +88,7 @@ describe('foldEnvelope', () => {
       entryID: 'bad',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [memberEntry],
@@ -102,7 +102,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('reads state-so-far: a promoted subject may author a later entry in the same envelope', () => {
+  test('reads state-so-far: a promoted subject may author a later entry in the same envelope', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const promoteBob = input({
       issuer: CREATOR_DID,
@@ -118,7 +118,7 @@ describe('foldEnvelope', () => {
       entryID: 'bob-app',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [promoteBob, bobEntry],
@@ -132,7 +132,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects when the same entries are reordered so the issuer is not yet admin', () => {
+  test('rejects when the same entries are reordered so the issuer is not yet admin', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const promoteBob = input({
       issuer: CREATOR_DID,
@@ -148,7 +148,7 @@ describe('foldEnvelope', () => {
       entryID: 'bob-app',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [bobEntry, promoteBob],
@@ -161,7 +161,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects an unknown kumiai.* type', () => {
+  test('rejects an unknown kumiai.* type', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const mystery = input({
       issuer: CREATOR_DID,
@@ -170,7 +170,7 @@ describe('foldEnvelope', () => {
       entryID: 'm1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [mystery],
@@ -184,7 +184,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('surfaces a host entry under the freed `group.` prefix, no longer reserved', () => {
+  test('surfaces a host entry under the freed `group.` prefix, no longer reserved', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const hostEntry = input({
       issuer: CREATOR_DID,
@@ -193,7 +193,7 @@ describe('foldEnvelope', () => {
       entryID: 'h1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [hostEntry],
@@ -207,7 +207,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('passes a non-group entry through unread, never inspecting its value', () => {
+  test('passes a non-group entry through unread, never inspecting its value', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const arbitrary = input({
       issuer: CREATOR_DID,
@@ -216,7 +216,7 @@ describe('foldEnvelope', () => {
       entryID: 'a1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [arbitrary],
@@ -230,7 +230,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects an entry signed for a different group even when otherwise authorized', () => {
+  test('rejects an entry signed for a different group even when otherwise authorized', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const crossGroup = input({
       issuer: CREATOR_DID,
@@ -240,7 +240,7 @@ describe('foldEnvelope', () => {
       entryID: 'x1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [crossGroup],
@@ -254,7 +254,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects a self-demotion that would empty the admin set', () => {
+  test('rejects a self-demotion that would empty the admin set', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const selfDemote = input({
       issuer: CREATOR_DID,
@@ -264,7 +264,7 @@ describe('foldEnvelope', () => {
       entryID: 'd1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [selfDemote],
@@ -278,7 +278,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('accepts a demotion when a second admin remains', () => {
+  test('accepts a demotion when a second admin remains', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const promoteBob = input({
       issuer: CREATOR_DID,
@@ -295,7 +295,7 @@ describe('foldEnvelope', () => {
       entryID: 'demote',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [promoteBob, selfDemote],
@@ -309,7 +309,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects a kumiai.role whose value is neither admin nor member', () => {
+  test('rejects a kumiai.role whose value is neither admin nor member', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const bogus = input({
       issuer: CREATOR_DID,
@@ -319,7 +319,7 @@ describe('foldEnvelope', () => {
       entryID: 'r1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [bogus],
@@ -333,10 +333,10 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('an empty envelope changes no roster and surfaces nothing', () => {
+  test('an empty envelope changes no roster and surfaces nothing', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [],
@@ -350,7 +350,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('a demoted admin cannot relay a ledger entry back in through a colluding admin', () => {
+  test('a demoted admin cannot relay a ledger entry back in through a colluding admin', async () => {
     const base = roster([
       [CREATOR_DID, 'admin'],
       [BOB_DID, 'member'],
@@ -368,7 +368,7 @@ describe('foldEnvelope', () => {
       entryID: 'relayed',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [colluderEntry, relayed],
@@ -382,7 +382,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('never throws across any of these inputs', () => {
+  test('never throws across any of these inputs', async () => {
     const base = roster([
       [CREATOR_DID, 'admin'],
       [MEMBER_DID, 'member'],
@@ -404,14 +404,14 @@ describe('foldEnvelope', () => {
       [input({ issuer: CREATOR_DID, type: 'x', value: null, groupID: OTHER_GROUP, entryID: 'c5' })],
     ]
     for (const entries of cases) {
-      expect(() =>
+      await expect(
         foldEnvelope({
           baseRoster: base,
           baseRegistry: EMPTY_REGISTRY,
           entries: entries,
           groupID: GROUP_ID,
         }),
-      ).not.toThrow()
+      ).resolves.not.toThrow()
     }
   })
 })
@@ -420,7 +420,7 @@ describe('foldEnvelope — kumiai.device branch', () => {
   const profile = 'did:kokuin:profileP'
   const dev = 'did:key:zDev'
 
-  test('a device entry bypasses the admin invariant and folds into the registry', () => {
+  test('a device entry bypasses the admin invariant and folds into the registry', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     // The issuer is a plain device DID, NOT an admin. A role/app entry from it would reject;
     // a device entry is authorized by the pipeline, so the fold applies it structurally.
@@ -431,7 +431,7 @@ describe('foldEnvelope — kumiai.device branch', () => {
       value: { op: 'register', controller: profile },
       entryID: 'd1',
     })
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [register],
@@ -444,7 +444,7 @@ describe('foldEnvelope — kumiai.device branch', () => {
     }
   })
 
-  test('a malformed device value rejects the whole fold', () => {
+  test('a malformed device value rejects the whole fold', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const bad = input({
       issuer: dev,
@@ -453,7 +453,7 @@ describe('foldEnvelope — kumiai.device branch', () => {
       value: { op: 'nope' },
       entryID: 'd-bad',
     })
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [bad],
@@ -463,7 +463,7 @@ describe('foldEnvelope — kumiai.device branch', () => {
     if (!result.ok) expect(result.entryID).toBe('d-bad')
   })
 
-  test('admin-as-controller: a device of an admin profile authors a role entry in the same envelope', () => {
+  test('admin-as-controller: a device of an admin profile authors a role entry in the same envelope', async () => {
     const base = roster([[normalizeDID(profile), 'admin']])
     const register = input({
       issuer: dev,
@@ -479,7 +479,7 @@ describe('foldEnvelope — kumiai.device branch', () => {
       value: 'member',
       entryID: 'r1',
     })
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [register, grant],
@@ -489,10 +489,10 @@ describe('foldEnvelope — kumiai.device branch', () => {
     if (result.ok) expect(result.roster.roles.get(normalizeDID('did:key:zNew'))).toBe('member')
   })
 
-  test('an unknown kumiai.* type still fails closed', () => {
+  test('an unknown kumiai.* type still fails closed', async () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const mystery = input({ issuer: CREATOR_DID, type: 'kumiai.mystery', value: {}, entryID: 'm1' })
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster: base,
       baseRegistry: EMPTY_REGISTRY,
       entries: [mystery],
@@ -507,7 +507,7 @@ describe('foldEnvelope beacon', () => {
   const devA = 'did:key:zDeviceA'
   const baseRoster = roleReducer.seed({ creatorDID: CREATOR_DID, version: 1 })
 
-  test('a beacon entry folds into the candidate registry controllers projection', () => {
+  test('a beacon entry folds into the candidate registry controllers projection', async () => {
     const beacon = input({
       issuer: devA,
       type: DEVICE_ENTRY_TYPE,
@@ -516,7 +516,7 @@ describe('foldEnvelope beacon', () => {
       entryID: 'e1',
     })
 
-    const result = foldEnvelope({
+    const result = await foldEnvelope({
       baseRoster,
       baseRegistry: registrySeed(),
       entries: [beacon],
@@ -528,7 +528,7 @@ describe('foldEnvelope beacon', () => {
       expect(beaconOf(result.registry, profile)).toEqual({ logLength: 5, headDigest: 'zH' })
   })
 
-  test('a base registry beacon survives folding an unrelated device entry', () => {
+  test('a base registry beacon survives folding an unrelated device entry', async () => {
     const seedBeacon = input({
       issuer: devA,
       type: DEVICE_ENTRY_TYPE,
@@ -536,7 +536,7 @@ describe('foldEnvelope beacon', () => {
       value: { op: 'beacon', logLength: 2, headDigest: 'zOld' },
       entryID: 'b0',
     })
-    const seeded = foldEnvelope({
+    const seeded = await foldEnvelope({
       baseRoster,
       baseRegistry: registrySeed(),
       entries: [seedBeacon],
@@ -552,7 +552,7 @@ describe('foldEnvelope beacon', () => {
       value: { op: 'register', controller: profile },
       entryID: 'r1',
     })
-    const next = foldEnvelope({
+    const next = await foldEnvelope({
       baseRoster,
       baseRegistry: seeded.registry,
       entries: [registerDevice],
@@ -576,9 +576,9 @@ test('lifecycle envelope folds an effect-free log into the candidate registry', 
     value: { op: 'log', proof: { chain: [], events: f.log.events } },
     entryID: 'log',
   })
-  const result = foldEnvelope({
+  const result = await foldEnvelope({
     baseRoster: roster([]),
-    baseRegistry: registryForLog(f.did, { chain: f.log.chain, events: [] }),
+    baseRegistry: await registryForLog(f.did, { chain: f.log.chain, events: [] }),
     entries: [entry],
     groupID: GROUP_ID,
     context: { controllerID: f.did, memberController: () => f.did },

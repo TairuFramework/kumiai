@@ -77,7 +77,7 @@ async function setup() {
     ratchetTree: group.state.ratchetTree,
     options: { resolveLedgerEntries: carolSlot.resolve },
   })
-  const revoke = revokeChain({
+  const revoke = await revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
@@ -195,7 +195,7 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
   const target = fixture.agent(71).id
   const prior = s.log[1]
   if (prior == null) throw new Error('Missing revoke event')
-  const nextRev = revokeChain({
+  const nextRev = await revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
@@ -304,7 +304,7 @@ test('non-building outcomes do not serialize or advance', async () => {
         options: options,
       }),
     ).toMatchObject({ status: 'not-provable', reason: 'no-rev' })
-    const selfRev = revokeChain({
+    const selfRev = await revokeChain({
       seed: controller.controllerSeed,
       profile: 0,
       did: controller.controllerID,

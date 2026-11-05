@@ -92,7 +92,7 @@ describe('GroupHandle device registry', () => {
     expect(group.registry.devices.size).toBe(0)
   })
 
-  test('a folded register binding is readable through controllerOf/denySetOf', () => {
+  test('a folded register binding is readable through controllerOf/denySetOf', async () => {
     // Ruling override (2026-08-17): the brief's original version of this test committed an
     // un-owned kumiai.device register through commitLedgerEntries, authored by a leaf that is
     // not a bound device of the profile it registers. Task 5 adds an authoring device-proof
@@ -114,14 +114,14 @@ describe('GroupHandle device registry', () => {
       },
       entryID: 'e1',
     }
-    const { registry } = foldControl([input], anchor, GROUP)
+    const { registry } = await foldControl([input], anchor, GROUP)
     // normalizeDID only folds did:peer:4 (see @kokuin/token); did:kokuin passes through
     // unchanged, so the controller reads back exactly as registered.
     expect(controllerOf(registry, 'did:key:zDeviceX')).toBe('did:kokuin:profileP')
     expect(denySetOf(registry).size).toBe(0)
   })
 
-  test('denySetOf answers `has` correctly for both a revoked and an active device (matched, never enumerated)', () => {
+  test('denySetOf answers `has` correctly for both a revoked and an active device (matched, never enumerated)', async () => {
     const anchor: GroupAnchor = { creatorDID: 'did:key:zCreator', version: 1 }
     const entries: Array<FoldInput<DeviceValue>> = [
       {
@@ -161,7 +161,7 @@ describe('GroupHandle device registry', () => {
         entryID: 'e3',
       },
     ]
-    const { registry } = foldControl(entries, anchor, GROUP)
+    const { registry } = await foldControl(entries, anchor, GROUP)
     const deny = denySetOf(registry)
     expect(deny.has('did:key:zDeviceY')).toBe(true)
     expect(deny.has('did:key:zDeviceX')).toBe(false)

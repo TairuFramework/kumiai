@@ -128,7 +128,7 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
         throw new Error('createInvite: entries must be consumer entries signed by the inviter')
     }
     if (params.controllerLog != null) {
-      const delta = controllerLogDelta(group, params.controllerLog)
+      const delta = await controllerLogDelta(group, params.controllerLog)
       if (delta != null)
         appended.unshift(
           await signLedgerEntry(identity, {
@@ -276,8 +276,8 @@ export async function commitWithEntries(
     }
     inputs.push({ verified, entryID: ledgerEntryDigest(token) })
   }
-  const foldEntries = () =>
-    foldEnvelope({
+  const foldEntries = async () =>
+    await foldEnvelope({
       baseRoster: group.roster,
       baseRegistry: group.registry,
       entries: inputs,
@@ -290,7 +290,7 @@ export async function commitWithEntries(
               memberController: (did) => group.bindingOfDID(did)?.controller,
             },
     })
-  let fold = foldEntries()
+  let fold = await foldEntries()
   if (!fold.ok) {
     if (fold.error != null) throw fold.error
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
@@ -310,7 +310,7 @@ export async function commitWithEntries(
     if (verified == null) throw new Error('Invalid preservation clock')
     enacted.push(clock)
     inputs.push({ verified, entryID: ledgerEntryDigest(clock) })
-    fold = foldEntries()
+    fold = await foldEntries()
     if (!fold.ok) throw fold.error ?? new Error(fold.reason)
   }
 
@@ -379,7 +379,7 @@ export async function commitWithEntries(
     ],
   }
   try {
-    gate.check(incoming)
+    await gate.check(incoming)
   } catch (cause) {
     if (params.pendingProposals == null) throw cause
     const error = new CommitRejectedError(
@@ -515,7 +515,7 @@ export async function commitLedgerEntries(
       throw new Error('commitLedgerEntries: no ledger entries to commit')
     }
     const result = await commitWithEntries({ group, extraProposals: [], enacted: tokens })
-    const newGroup = deriveGroup(group, result.newState)
+    const newGroup = await deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
@@ -645,7 +645,7 @@ export async function commitInvite(
       ratchetTreeExtension: true,
     })
 
-    const newGroup = deriveGroup(group, result.newState)
+    const newGroup = await deriveGroup(group, result.newState)
 
     if (result.welcome == null) {
       throw new Error('commitInvite: expected a Welcome message for the add proposal')

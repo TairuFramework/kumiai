@@ -408,11 +408,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       const rejoined = candidate
       if (
         rejoined.group.anchor.controller != null &&
-        !recoverySignerEligible({
+        !(await recoverySignerEligible({
           group: rejoined.group,
           registry: rejoined.knownRegistry,
           signer: reply.signer,
-        })
+        }))
       )
         return null
       const judge = createVerdictJudge({

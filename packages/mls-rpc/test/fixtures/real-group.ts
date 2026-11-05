@@ -61,7 +61,7 @@ export async function createRealBoundRecovery(
       denialAliases: { long: string; short: string }
       nextLog: (
         op: 'log' | 'deny' | 'deny-alias' | 'remove',
-      ) => Parameters<typeof publishControllerLog>[1]
+      ) => Promise<Parameters<typeof publishControllerLog>[1]>
       admissionBinding: (
         authority: 'effective' | 'removed' | 'unavailable' | 'foreign',
       ) => Promise<ControllerBinding>
@@ -178,7 +178,7 @@ export async function createRealBoundRecovery(
         })
         if (!applied.advanced) throw new Error('Root-bound requester leaf was not installed')
       }
-      const log = management.nextLog(op)
+      const log = await management.nextLog(op)
       const result =
         op === 'log'
           ? await publishControllerLog(source, log)
@@ -390,10 +390,10 @@ export async function sealRealRecoveryVerdict(
   const { sealToRequest } = await import(
     new URL('../../../mls/src/recovery.ts', import.meta.url).href
   )
-  const token = await member.identity.signToken(
-    { ...verdict, type: 'kumiai.recovery-verdict' },
-    { embedLongForm: true },
-  )
+  const token = await member.identity.signToken({
+    payload: { ...verdict, type: 'kumiai.recovery-verdict' },
+    embedLongForm: true,
+  })
   return await sealToRequest({
     kind: {
       hpkeInfo: new TextEncoder().encode('kumiai/mls/recovery-verdict/v1'),

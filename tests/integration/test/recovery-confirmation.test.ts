@@ -782,7 +782,7 @@ test.each(['policy', 'invalid'] as const)(
     const s = await setup({ deadlineMs: 10_000 })
     const original = s.aliceGroup()
     if (reason === 'policy') {
-      const rejector = new GroupHandle({
+      const rejector = await GroupHandle.create({
         state: original.state,
         context: original.context,
         credential: original.credential,

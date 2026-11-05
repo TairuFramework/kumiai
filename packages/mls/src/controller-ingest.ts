@@ -1,4 +1,5 @@
 import {
+  type AuthoritativeLog,
   authoritativeLog,
   type ControllerLog,
   digestOf,
@@ -23,12 +24,19 @@ const authenticatedFolds = new WeakMap<
   { controller: string; digest: string; folded: FoldOk }
 >()
 
-export function ingestControllerLog(
+export type IngestedControllerLog = {
+  log: ControllerLog
+  before?: FoldOk
+  after: FoldOk
+  introduced: Array<string>
+}
+
+export async function ingestControllerLog(
   controller: string,
   recorded: ControllerLog | undefined,
   proof: ControllerLog,
   previous?: ControllerProjection,
-): { log: ControllerLog; before?: FoldOk; after: FoldOk; introduced: Array<string> } {
+): Promise<IngestedControllerLog> {
   const did = normalizeDID(controller)
   let before: FoldOk | undefined
   if (recorded != null) {
@@ -36,7 +44,7 @@ export function ingestControllerLog(
     const folded =
       cached?.controller === did && cached.digest === digestOf(recorded)
         ? structuredClone(cached.folded)
-        : foldControllerLog(did, recorded)
+        : await foldControllerLog(did, recorded)
     if (!folded.ok) throw new RevokeProofError('not-authority-signed')
     before = folded
   }
@@ -58,7 +66,7 @@ export function ingestControllerLog(
       throw new RevokeProofError('not-authority-signed')
   }
   const joined = { chain, events: proof.events }
-  const folded = foldControllerLog(did, { chain, events: [] })
+  const folded = await foldControllerLog(did, { chain, events: [] })
   if (!folded.ok) {
     throw new RevokeProofError(
       isDetachedFoldReason(folded.reason) ? 'detached' : 'not-authority-signed',
@@ -71,10 +79,16 @@ export function ingestControllerLog(
   if (first?.t === 'icp' && before != null && folded.head.gen <= before.head.gen)
     throw new RevokeProofError('detached')
 
-  let authoritative: ReturnType<typeof authoritativeLog>
+  let authoritative: AuthoritativeLog
   try {
-    const loaded = recorded == null ? joined : mergeLogs(did, recorded, joined)
-    authoritative = authoritativeLog({ did, loaded, seen: recorded, context: 'device registry' })
+    const loaded =
+      recorded == null ? joined : await mergeLogs({ did: did, left: recorded, right: joined })
+    authoritative = await authoritativeLog({
+      did,
+      loaded,
+      seen: recorded,
+      context: 'device registry',
+    })
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause)
     const detached =

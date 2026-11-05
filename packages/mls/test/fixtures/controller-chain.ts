@@ -12,14 +12,14 @@ type RotateChainParams = {
   deny?: Iterable<string>
 }
 
-export function rotateChain(params: RotateChainParams): SignedEvent {
-  const folded = foldChain(params.did, params.chain)
+export async function rotateChain(params: RotateChainParams): Promise<SignedEvent> {
+  const folded = await foldChain(params.did, params.chain)
   if (!folded.ok) throw new Error(folded.reason)
   const head = folded.states.at(-1)
   const prior = params.chain.at(-1)
   if (head == null || prior == null) throw new Error('Missing controller head')
-  const snapshot = snapshotOf(head)
-  return createRotate({
+  const snapshot = snapshotOf({ state: head })
+  return await createRotate({
     seed: params.seed,
     profile: params.profile,
     did: params.did,
@@ -28,18 +28,18 @@ export function rotateChain(params: RotateChainParams): SignedEvent {
   })
 }
 
-export function revokeChain(
+export async function revokeChain(
   params: Omit<RotateChainParams, 'deny'> & { subject: string },
-): SignedEvent {
-  return rotateChain({ ...params, deny: [params.subject] })
+): Promise<SignedEvent> {
+  return await rotateChain({ ...params, deny: [params.subject] })
 }
 
-export function snapshotForChain(did: string, chain: Array<SignedEvent>) {
-  const folded = foldChain(did, chain)
+export async function snapshotForChain(did: string, chain: Array<SignedEvent>) {
+  const folded = await foldChain(did, chain)
   if (!folded.ok) throw new Error(folded.reason)
   const head = folded.states.at(-1)
   if (head == null) throw new Error('Missing controller head')
-  return snapshotOf(head)
+  return snapshotOf({ state: head })
 }
 
 /** Explicit single-target declarations for chain-only test fixtures. */

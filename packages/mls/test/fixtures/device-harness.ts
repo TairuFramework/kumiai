@@ -92,7 +92,10 @@ export async function joinBoundDevice(): Promise<{
 
   const deviceSeed = new Uint8Array(32).fill(41)
   const leaf = await buildBoundLeaf({ deviceSeed })
-  const deviceIdentity: OwnIdentity = { ...createFullIdentity(deviceSeed), privateKey: deviceSeed }
+  const deviceIdentity: OwnIdentity = {
+    ...createFullIdentity({ privateKey: deviceSeed }),
+    privateKey: deviceSeed,
+  }
 
   const { invite } = await createInvite({
     group: creatorGroup,
@@ -176,7 +179,7 @@ export async function twoDeviceProfileGroup(): Promise<{
 
   const targetSeed = new Uint8Array(32).fill(43)
   const targetIdentity: OwnIdentity = {
-    ...createFullIdentity(targetSeed),
+    ...createFullIdentity({ privateKey: targetSeed }),
     privateKey: targetSeed,
   }
   const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })

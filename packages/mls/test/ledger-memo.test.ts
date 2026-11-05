@@ -44,7 +44,7 @@ describe('verified ledger replay', () => {
     verify.mockClear()
 
     const reopened = await restore(tokens)
-    const clone = deriveGroup(first, group.state)
+    const clone = await deriveGroup(first, group.state)
     const cloned = await restore(clone.ledgerTokens)
     expect(reopened.ledgerTokens).toEqual(tokens)
     expect(cloned.ledgerTokens).toEqual(tokens)
@@ -83,11 +83,13 @@ describe('verified ledger replay', () => {
     const tokens = [
       stringifyToken(
         await identity.signToken({
-          type: 'app.value',
-          groupID: group.groupID,
-          subject: identity.id,
-          value: 'one',
-          exp: now + 60,
+          payload: {
+            type: 'app.value',
+            groupID: group.groupID,
+            subject: identity.id,
+            value: 'one',
+            exp: now + 60,
+          },
         }),
       ),
     ]
@@ -232,11 +234,13 @@ describe('verified ledger replay', () => {
     const tokens = [
       stringifyToken(
         await identity.signToken({
-          type: 'app.value',
-          groupID: group.groupID,
-          subject: identity.id,
-          value: 'one',
-          exp: now + 60,
+          payload: {
+            type: 'app.value',
+            groupID: group.groupID,
+            subject: identity.id,
+            value: 'one',
+            exp: now + 60,
+          },
         }),
       ),
     ]

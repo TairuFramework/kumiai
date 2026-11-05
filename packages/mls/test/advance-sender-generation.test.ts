@@ -656,7 +656,7 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
       await bobGroup.reserveHandshakeGeneration(async () => {})
       const built = await createCommit({ context: bobGroup.context, state: bobGroup.state })
       last = encode(mlsMessageEncoder, built.commit)
-      accepted = deriveGroup(bobGroup, built.newState)
+      accepted = await deriveGroup(bobGroup, built.newState)
       expect(await framedGeneration(aliceGroup, last)).toBe(i)
       await bobGroup.consumeHandshakeReservation(async () => {})
     }

@@ -34,12 +34,12 @@ export async function buildEpoch({
   revokes?: number
 } = {}) {
   const seed = new Uint8Array(32).fill(31)
-  const inception = createInception(seed, 0)
+  const inception = await createInception({ seed: seed, profile: 0 })
   const did = didFromInception(inception.event)
   const log: ControllerLog = { chain: [inception], events: [] }
   const root = { root: { seed, profile: 0 } }
-  const headOf = () => {
-    const folded = foldControllerLog(did, log)
+  const headOf = async () => {
+    const folded = await foldControllerLog(did, log)
     if (!folded.ok) throw new Error(folded.reason)
     return folded.head
   }
@@ -51,15 +51,15 @@ export async function buildEpoch({
       didMethod: 'peer:4',
     })
     if (identity.longForm == null) throw new Error('Missing member long form')
-    const add = createAdd({
+    const add = await createAdd({
       seed,
       profile: 0,
       did,
-      head: headOf(),
-      parents: epochHeads(did, log),
+      head: await headOf(),
+      parents: await epochHeads({ did: did, log: log }),
       member: {
         did: identity.longForm,
-        key: encodeKey(identity.publicKey, 'EdDSA'),
+        key: encodeKey({ publicKey: identity.publicKey, alg: 'EdDSA' }),
         lease: renewEvery || 1000,
       },
     })
@@ -74,10 +74,10 @@ export async function buildEpoch({
   }
   for (let index = 0; index < revokes; index++) {
     log.events.push(
-      createRevoke({
+      await createRevoke({
         did,
-        head: headOf(),
-        parents: epochHeads(did, log),
+        head: await headOf(),
+        parents: await epochHeads({ did: did, log: log }),
         signer: root,
         target: `did:key:denied-${index}`,
       }),
@@ -89,10 +89,10 @@ export async function buildEpoch({
     for (let at = renewEvery; at <= until; at += renewEvery) {
       for (const [index, pin] of pins.entries()) {
         const author = pins[(index + 1) % pins.length]
-        const renew = createRenew({
+        const renew = await createRenew({
           did,
-          head: headOf(),
-          parents: epochHeads(did, log),
+          head: await headOf(),
+          parents: await epochHeads({ did: did, log: log }),
           signer:
             pins.length < 2 || author == null
               ? root
@@ -105,7 +105,7 @@ export async function buildEpoch({
       }
     }
   }
-  return { seed, did, inception, log, genesis, deltas, members: pins, head: headOf(), root }
+  return { seed, did, inception, log, genesis, deltas, members: pins, head: await headOf(), root }
 }
 
 type SaturatedFixture = { log: ControllerLog; registry: DeviceRegistry }
@@ -132,7 +132,7 @@ export async function buildSaturatedLog(): Promise<ControllerLog> {
   const fixture = await buildEpoch({ members: 1 })
   const member = fixture.members[0]
   if (member == null) throw new Error('Missing member')
-  const renew = createRenew({
+  const renew = await createRenew({
     did: fixture.did,
     head: fixture.head,
     parents: [member.add],
@@ -140,7 +140,11 @@ export async function buildSaturatedLog(): Promise<ControllerLog> {
     add: member.add,
     lease: 2000,
   })
-  const privateKey = deriveKeyMaterial(fixture.seed, authorityPath(0, 0, 0), 'EdDSA')
+  const privateKey = deriveKeyMaterial({
+    seed: fixture.seed,
+    path: authorityPath({ profile: 0, gen: 0, seq: 0 }),
+    alg: 'EdDSA',
+  })
   for (let index = 0; index < MAX_EPOCH_EVENTS; index++) {
     const event = { ...renew.event, lease: 2000 + index }
     fixture.log.events.push({

@@ -58,28 +58,30 @@ async function grant(f: Fixture, identity: OwnIdentity): Promise<ControllerBindi
     prefix: f.log.chain,
     capability: stringifyToken(
       await f.member.identity.signToken({
-        sub: f.did,
-        aud: identity.id,
-        act: 'authenticate',
-        res: 'kumiai/mls-leaf',
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
-        iat: 100,
-        exp: 800,
-        mbr: { add: f.member.add, g: 0 },
+        payload: {
+          sub: f.did,
+          aud: identity.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
+          iat: 100,
+          exp: 800,
+          mbr: { add: f.member.add, g: 0 },
+        },
       }),
     ),
   }
 }
 
-function renewed(f: Fixture): ControllerLog {
+async function renewed(f: Fixture): Promise<ControllerLog> {
   return {
     chain: f.log.chain,
     events: [
       ...f.log.events,
-      createRenew({
+      await createRenew({
         did: f.did,
         head: f.head,
-        parents: epochHeads(f.did, f.log),
+        parents: await epochHeads({ did: f.did, log: f.log }),
         signer: f.root,
         add: f.member.add,
         lease: 2000,
@@ -88,16 +90,16 @@ function renewed(f: Fixture): ControllerLog {
   }
 }
 
-function settled(f: Fixture): ControllerLog {
+async function settled(f: Fixture): Promise<ControllerLog> {
   return {
     chain: [
       ...f.log.chain,
-      createRotate({
+      await createRotate({
         seed: f.seed,
         profile: 0,
         did: f.did,
         prior: f.inception.event,
-        snapshot: snapshotOf(f.head),
+        snapshot: snapshotOf({ state: f.head }),
       }),
     ],
     events: [],
@@ -112,15 +114,15 @@ test.each([
   [33, 'blocked'],
 ] as const)('settleAdvisory thresholds: %i events gives %s', async (count, advisory) => {
   const { log } = await buildEpoch({ members: 0, revokes: count })
-  expect(api.epochEventCount(log)).toBe(count)
-  expect(api.settleAdvisory(log)).toBe(advisory)
+  expect(await api.epochEventCount(log)).toBe(count)
+  expect(await api.settleAdvisory(log)).toBe(advisory)
 })
 
 test('epochEventCount counts distinct authenticated applied events of the current epoch', async () => {
   const f = await fixture(32)
   const first = f.log.events[0]
   if (first == null) throw new Error('Missing event')
-  const extra = renewed(f).events.at(-1)
+  const extra = (await renewed(f)).events.at(-1)
   if (extra == null) throw new Error('Missing renewal')
   const padded = {
     chain: f.log.chain,
@@ -128,7 +130,7 @@ test('epochEventCount counts distinct authenticated applied events of the curren
       ...f.log.events,
       first,
       { ...extra, sigs: [] },
-      createRenew({
+      await createRenew({
         did: f.did,
         head: f.head,
         parents: ['missing-parent'],
@@ -138,19 +140,19 @@ test('epochEventCount counts distinct authenticated applied events of the curren
       }),
     ],
   }
-  expect(api.epochEventCount(padded)).toBe(32)
-  expect(api.settleAdvisory(padded)).toBe('prompt')
-  expect(api.epochEventCount({ ...settled(f), events: f.log.events })).toBe(0)
+  expect(await api.epochEventCount(padded)).toBe(32)
+  expect(await api.settleAdvisory(padded)).toBe('prompt')
+  expect(await api.epochEventCount({ ...(await settled(f)), events: f.log.events })).toBe(0)
 })
 
 test('GroupHandle.settleAdvisory reads the recorded log and defaults to ok without one', async () => {
   const f = await fixture()
-  expect(f.group.settleAdvisory()).toBe('blocked')
-  const result = await api.publishControllerLog(f.group, settled(f))
+  expect(await f.group.settleAdvisory()).toBe('blocked')
+  const result = await api.publishControllerLog(f.group, await settled(f))
   if (result == null) throw new Error('Missing settlement')
-  expect(result.newGroup.settleAdvisory()).toBe('ok')
+  expect(await result.newGroup.settleAdvisory()).toBe('ok')
   const { group } = await createGroup(agent(62), 'standard')
-  expect(group.settleAdvisory()).toBe('ok')
+  expect(await group.settleAdvisory()).toBe('ok')
 })
 
 test.each(['direct mbr capability', 'member-rooted parent', 'membership binding'] as const)(
@@ -236,7 +238,7 @@ test('admission cap reads the candidate registry when a log entry crosses 32 eve
     group: f.group,
     identity: f.identity,
     recipientDID: identity.id,
-    controllerLog: renewed(f),
+    controllerLog: await renewed(f),
   })
   await expect(api.commitInvite(f.group, bundle.publicPackage, invite)).rejects.toMatchObject({
     reason: 'epoch-cap',
@@ -264,7 +266,7 @@ test('unchanged member-rooted committer still commits at 33 events', async () =>
     keyPackageBundle: { ...bundle, ownerDID: identity.id },
     options: { resolveLedgerEntries: f.group.resolveLedgerEntries },
   })
-  const grown = await api.publishControllerLog(added.newGroup, renewed(f))
+  const grown = await api.publishControllerLog(added.newGroup, await renewed(f))
   if (grown == null) throw new Error('Missing log commit')
   f.publish(grown.newGroup.ledgerTokens)
   await joined.processMessage(grown.commitMessage)
@@ -277,7 +279,7 @@ test('unchanged member-rooted committer still commits at 33 events', async () =>
 
 test('Welcome with member-rooted tree leaves joins at 33 events', async () => {
   const f = await fixture(32, true)
-  const grown = await api.publishControllerLog(f.group, renewed(f))
+  const grown = await api.publishControllerLog(f.group, await renewed(f))
   if (grown == null) throw new Error('Missing log commit')
   const identity = agent(62)
   const bundle = await rawBundle(
@@ -303,16 +305,16 @@ test('Welcome with member-rooted tree leaves joins at 33 events', async () => {
 
 test('log and revoke entries still land at 33 events', async () => {
   const f = await fixture()
-  const result = await api.publishControllerLog(f.group, renewed(f))
+  const result = await api.publishControllerLog(f.group, await renewed(f))
   if (result == null) throw new Error('Missing log commit')
   expect(recordedLogOf(result.newGroup.registry, f.did)?.events).toHaveLength(34)
   const subject = agent(63).id
-  const rotation = createRotate({
+  const rotation = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
     prior: f.inception.event,
-    snapshot: { ...snapshotOf(f.head), deny: [...f.head.deny, subject] },
+    snapshot: { ...snapshotOf({ state: f.head }), deny: [...f.head.deny, subject] },
   })
   const revoked = await api.revokeWithProof(f.group, {
     deny: [subject],
@@ -340,17 +342,22 @@ test('after a root settlement the refused Add is accepted', async () => {
     group: f.group,
     identity: f.identity,
     recipientDID: identity.id,
-    controllerLog: settled(f),
+    controllerLog: await settled(f),
   })
   const accepted = await api.commitInvite(f.group, bundle.publicPackage, repaired.invite)
   expect(accepted.newGroup.findMemberLeafIndex(identity.id)).toBeDefined()
   const recorded = recordedLogOf(accepted.newGroup.registry, f.did)
   if (recorded == null) throw new Error('Missing log')
-  const folded = foldControllerLog(f.did, recorded)
+  const folded = await foldControllerLog(f.did, recorded)
   expect(folded.ok && folded.applied.length).toBe(0)
+  const registry = await registryForLog(f.did, recorded)
   await expect(
     verifyLeafCredential(makeMLSCredential(identity, binding), identity.publicKey, {
-      judging: () => ({ registry: registryForLog(f.did, recorded), stage: 'full', mode: 'admit' }),
+      judging: () => ({
+        registry,
+        stage: 'full',
+        mode: 'admit',
+      }),
     }),
   ).resolves.toBeUndefined()
 })

@@ -117,7 +117,7 @@ export async function createGroup(
   const registry =
     anchor.controller == null || options?.controllerLog == null
       ? undefined
-      : registryForLog(anchor.controller, options.controllerLog)
+      : await registryForLog(anchor.controller, options.controllerLog)
   const tokens: Array<string> = []
   if (anchor.controller != null && options?.controllerLog != null) {
     tokens.push(
@@ -125,7 +125,10 @@ export async function createGroup(
         type: DEVICE_ENTRY_TYPE,
         groupID,
         subject: anchor.controller,
-        value: { op: 'seed', proof: pruneLog(anchor.controller, options.controllerLog) },
+        value: {
+          op: 'seed',
+          proof: await pruneLog({ did: anchor.controller, input: options.controllerLog }),
+        },
       }),
     )
   }
@@ -168,7 +171,7 @@ export async function createGroup(
     id: identity.id,
     groupID,
   }
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
     state,
     credential,
     context,
@@ -192,7 +195,7 @@ export type RestoreGroupParams = {
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
   // Construction reseeds control authority from the anchor in the restored state;
   // an anchorless state throws (the same fail-closed guard).
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),

@@ -109,8 +109,8 @@ test('a throwing judging scope leaves the original context unchanged', async () 
   expect({ judging: holder.judging, provider: holder.provider }).toEqual(previous)
 })
 
-function head(did: string, log: ControllerLog) {
-  const folded = foldControllerLog(did, log)
+async function head(did: string, log: ControllerLog) {
+  const folded = await foldControllerLog(did, log)
   if (!folded.ok) throw new Error(folded.reason)
   return folded.head
 }
@@ -149,28 +149,30 @@ async function grant(f: Fixture, identity: OwnIdentity, exp = 800): Promise<Cont
     prefix: f.log.chain,
     capability: stringifyToken(
       await f.member.identity.signToken({
-        sub: f.did,
-        aud: identity.id,
-        act: 'authenticate',
-        res: 'kumiai/mls-leaf',
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
-        iat: 150,
-        exp,
-        mbr: { add: f.member.add, g: 0 },
+        payload: {
+          sub: f.did,
+          aud: identity.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
+          iat: 150,
+          exp,
+          mbr: { add: f.member.add, g: 0 },
+        },
       }),
     ),
   }
 }
 
-function renewed(f: Fixture): ControllerLog {
+async function renewed(f: Fixture): Promise<ControllerLog> {
   return {
     chain: f.log.chain,
     events: [
       ...f.log.events,
-      createRenew({
+      await createRenew({
         did: f.did,
-        head: head(f.did, f.log),
-        parents: epochHeads(f.did, f.log),
+        head: await head(f.did, f.log),
+        parents: await epochHeads({ did: f.did, log: f.log }),
         signer: f.root,
         add: f.member.add,
         lease: 2000,
@@ -214,10 +216,10 @@ test('createGroup with a creator log that already denies an edge device seeds th
     chain: f.log.chain,
     events: [
       ...f.log.events,
-      createRevoke({
+      await createRevoke({
         did: f.did,
         head: f.head,
-        parents: epochHeads(f.did, f.log),
+        parents: await epochHeads({ did: f.did, log: f.log }),
         signer: f.root,
         target: denied.id,
       }),
@@ -272,10 +274,10 @@ test('renewLeaf with a new grant past the recorded lease succeeds when the bundl
     identity: new TextEncoder().encode(JSON.stringify({ id: f.identity.id, controller: binding })),
   }
   await expect(validateEntry(f.group, { ...leaf, credential })).rejects.toThrow()
-  const result = await api.renewLeaf(f.group, binding, { controllerLog: renewed(f) })
+  const result = await api.renewLeaf(f.group, binding, { controllerLog: await renewed(f) })
   const log = recordedLogOf(result.newGroup.registry, f.did)
   if (log == null) throw new Error('Missing recorded log')
-  expect(head(f.did, log).members.get(f.member.add)?.lease).toBe(2000)
+  expect((await head(f.did, log)).members.get(f.member.add)?.lease).toBe(2000)
 })
 
 test('commitWithEntries validates an Add against the candidate registry', async () => {
@@ -307,7 +309,7 @@ test("member processes an invite commit whose log entry carries the issuing memb
     group: author,
     identity: f.identity,
     recipientDID: bob.id,
-    controllerLog: renewed(f),
+    controllerLog: await renewed(f),
   })
   const result = await api.commitInvite(author, bundle.publicPackage, invite)
   f.publish(result.newGroup.ledgerTokens)
@@ -348,12 +350,12 @@ test('author refuses to build a commit its receivers would reject', async () => 
 test('publishControllerLog settles without a revoke', async () => {
   const f = await fixture()
   const { author, joined } = await receiver(f)
-  const rotation = createRotate({
+  const rotation = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
     prior: f.inception.event,
-    snapshot: snapshotOf(f.head),
+    snapshot: snapshotOf({ state: f.head }),
   })
   const log = { chain: [...f.log.chain, rotation], events: [] }
   const result = await api.publishControllerLog(author, log)
@@ -369,9 +371,9 @@ test('log entry from a device bound to another controller is refused', async () 
   const f = await fixture()
   const outsider = agent(62)
   const seed = new Uint8Array(32).fill(32)
-  const inception = createInception(seed, 0)
+  const inception = await createInception({ seed: seed, profile: 0 })
   const did = didFromInception(inception.event)
-  const signer = createControllerIdentity({
+  const signer = await createControllerIdentity({
     seed,
     profile: 0,
     log: { chain: [inception], events: [] },
@@ -381,13 +383,15 @@ test('log entry from a device bound to another controller is refused', async () 
     prefix: [inception],
     capability: stringifyToken(
       await signer.signToken({
-        sub: did,
-        aud: outsider.id,
-        act: 'authenticate',
-        res: 'kumiai/mls-leaf',
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: outsider.publicKey }),
-        iat: 100,
-        exp: 900,
+        payload: {
+          sub: did,
+          aud: outsider.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: outsider.publicKey }),
+          iat: 100,
+          exp: 900,
+        },
       }),
     ),
   }
@@ -420,12 +424,12 @@ test('two log entries in one commit are refused', async () => {
 test('log entry beside a proof is refused', async () => {
   const f = await fixture()
   const target = agent(62).id
-  const revoked = createRotate({
+  const revoked = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
     prior: f.inception.event,
-    snapshot: { ...snapshotOf(f.head), deny: [target] },
+    snapshot: { ...snapshotOf({ state: f.head }), deny: [target] },
   })
   const proof = await signLedgerEntry(f.identity, {
     type: DEVICE_ENTRY_TYPE,
@@ -455,7 +459,7 @@ test('lapsed sender cannot publish a log entry', async () => {
     agent(61),
     await timedBinding({ identity: agent(61), iat: 901, exp: 1000 }),
   )
-  await expect(api.publishControllerLog(author, renewed(f))).rejects.toMatchObject({
+  await expect(api.publishControllerLog(author, await renewed(f))).rejects.toMatchObject({
     reason: 'lapsed',
   })
 })
@@ -464,7 +468,7 @@ test('renewLeaf with controllerLog carries the renewal the new grant needs', asy
   const f = await fixture()
   const { author, joined } = await receiver(f)
   const result = await api.renewLeaf(author, await grant(f, f.identity, 1500), {
-    controllerLog: renewed(f),
+    controllerLog: await renewed(f),
   })
   f.publish(result.newGroup.ledgerTokens)
   await joined.processMessage(result.commitMessage)
@@ -477,16 +481,25 @@ test.each(['deny', 'remove', 'generation'] as const)(
   async (kind) => {
     const f = await fixture()
     let log: ControllerLog
-    if (kind === 'generation') log = { chain: [f.inception, createReset(f.seed, 0, 1)], events: [] }
+    if (kind === 'generation')
+      log = {
+        chain: [f.inception, await createReset({ seed: f.seed, profile: 0, gen: 1 })],
+        events: [],
+      }
     else {
-      const params = { did: f.did, head: f.head, parents: epochHeads(f.did, f.log), signer: f.root }
+      const params = {
+        did: f.did,
+        head: f.head,
+        parents: await epochHeads({ did: f.did, log: f.log }),
+        signer: f.root,
+      }
       log = {
         chain: f.log.chain,
         events: [
           ...f.log.events,
           kind === 'deny'
-            ? createRevoke({ ...params, target: agent(62).id })
-            : createRemove({ ...params, add: f.member.add }),
+            ? await createRevoke({ ...params, target: agent(62).id })
+            : await createRemove({ ...params, add: f.member.add }),
         ],
       }
     }
@@ -499,32 +512,36 @@ test.each(['deny', 'remove', 'generation'] as const)(
 
 test('controllerLogDelta returns missing events, a chain suffix, null and refuses a fork', async () => {
   const f = await fixture()
-  const log = renewed(f)
-  expect(api.controllerLogDelta(f.group, log)).toEqual({ chain: [], events: log.events.slice(1) })
-  expect(api.controllerLogDelta(f.group, f.log)).toBeNull()
-  const rotation = createRotate({
+  const log = await renewed(f)
+  expect(await api.controllerLogDelta(f.group, log)).toEqual({
+    chain: [],
+    events: log.events.slice(1),
+  })
+  expect(await api.controllerLogDelta(f.group, f.log)).toBeNull()
+  const rotation = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
     prior: f.inception.event,
-    snapshot: snapshotOf(f.head),
+    snapshot: snapshotOf({ state: f.head }),
   })
   const result = await api.publishControllerLog(f.group, {
     chain: [f.inception, rotation],
     events: [],
   })
   if (result == null) throw new Error('Missing log commit')
-  const fork = createRotate({
+  const fork = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
     prior: f.inception.event,
-    snapshot: snapshotOf(f.head),
+    snapshot: snapshotOf({ state: f.head }),
     seal: 'fork',
   })
-  expect(() =>
-    api.controllerLogDelta(result.newGroup, { chain: [f.inception, fork], events: [] }),
-  ).toThrowError(expect.objectContaining({ reason: 'detached' }))
+  await expect(
+    async () =>
+      await api.controllerLogDelta(result.newGroup, { chain: [f.inception, fork], events: [] }),
+  ).rejects.toThrowError(expect.objectContaining({ reason: 'detached' }))
 })
 
 test('live lifecycle gate refuses a seed after ledger position zero', async () => {
@@ -559,12 +576,12 @@ test('an unchanged evidenced child retains its binding against the candidate reg
   })
   const withChild = await lowLevelWelcome(withBystander.author, child, childBinding)
   await withBystander.joined.processMessage(withChild.message)
-  const revoke = createRotate({
+  const revoke = await createRotate({
     seed: f.seed,
     profile: 0,
     did: f.did,
     prior: f.inception.event,
-    snapshot: { ...snapshotOf(f.head), deny: [issuer.id] },
+    snapshot: { ...snapshotOf({ state: f.head }), deny: [issuer.id] },
   })
   const result = await api.revokeWithProof(withChild.author, {
     deny: [issuer.id],
@@ -630,13 +647,13 @@ test.each(['author', 'receiver'] as const)(
           privateKeys: bundle.privatePackage,
         }),
     )
-    const member = new GroupHandle({
+    const member = await GroupHandle.create({
       state,
       context,
       credential: { id: f.member.identity.id, groupID: f.group.groupID },
       ledger: [...f.group.ledger],
     })
-    const firstAuthor = deriveGroup(f.group, added.newState)
+    const firstAuthor = await deriveGroup(f.group, added.newState)
     const peer = agent(63)
     const peerBundle = await rawBundle(
       firstAuthor,
@@ -663,14 +680,14 @@ test.each(['author', 'receiver'] as const)(
           privateKeys: peerBundle.privatePackage,
         }),
     )
-    const receiver = new GroupHandle({
+    const receiver = await GroupHandle.create({
       state: peerState,
       context: peerContext,
       credential: { id: peer.id, groupID: f.group.groupID },
       ledger: [...f.group.ledger],
     })
     await member.processMessage(encode(mlsMessageEncoder, peerCommit.commit))
-    const author = deriveGroup(firstAuthor, peerCommit.newState)
+    const author = await deriveGroup(firstAuthor, peerCommit.newState)
     for (const group of [member, author, receiver])
       (group.registry.controllers as Map<string, unknown>).clear()
     const proposal = await rawUpdate(member, f.member.identity, binding)
@@ -797,12 +814,12 @@ test.each(['completed', 'failed'] as const)(
       value: {
         effects: denyEffects(
           [
-            createRotate({
+            await createRotate({
               seed: f.seed,
               profile: 0,
               did: f.did,
               prior: f.inception.event,
-              snapshot: { ...snapshotOf(f.head), deny: [peer.id] },
+              snapshot: { ...snapshotOf({ state: f.head }), deny: [peer.id] },
             }),
           ],
           peer.id,
@@ -810,12 +827,12 @@ test.each(['completed', 'failed'] as const)(
         removed: [],
         op: 'revoke',
         proof: asControllerLog([
-          createRotate({
+          await createRotate({
             seed: f.seed,
             profile: 0,
             did: f.did,
             prior: f.inception.event,
-            snapshot: { ...snapshotOf(f.head), deny: [peer.id] },
+            snapshot: { ...snapshotOf({ state: f.head }), deny: [peer.id] },
           }),
         ]),
         revoked: [{ did: peer.id }],
@@ -861,7 +878,10 @@ test('renewal then clock in one envelope uses the renewed lease on commit and re
     peer,
     await timedBinding({ identity: peer, iat: 100, exp: 3000 }),
   )
-  const renewal = await logToken(f, api.controllerLogDelta(author, renewed(f)) ?? renewed(f))
+  const renewal = await logToken(
+    f,
+    (await api.controllerLogDelta(author, await renewed(f))) ?? (await renewed(f)),
+  )
   const clock = await signLedgerEntry(f.identity, {
     type: DEVICE_ENTRY_TYPE,
     groupID: author.groupID,
@@ -874,6 +894,7 @@ test('renewal then clock in one envelope uses the renewed lease on commit and re
   expect(joined.registry).toEqual(result.newGroup.registry)
   expect(joined.registry.controllers.get(f.did)?.attestations.size).toBe(1)
   expect(
-    head(f.did, recordedLogOf(joined.registry, f.did) ?? f.log).members.get(f.member.add)?.lease,
+    (await head(f.did, recordedLogOf(joined.registry, f.did) ?? f.log)).members.get(f.member.add)
+      ?.lease,
   ).toBe(2000)
 })

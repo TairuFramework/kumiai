@@ -22,12 +22,12 @@ import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../../src/
 import { ledgerEntryDigest } from '../../src/ledger.js'
 
 export const controllerSeed = new Uint8Array(32).fill(31)
-export const inception = createInception(controllerSeed, 0)
+export const inception = await createInception({ seed: controllerSeed, profile: 0 })
 export const controllerID = didFromInception(inception.event)
 
 export function agent(seedByte: number): OwnIdentity {
   const privateKey = new Uint8Array(32).fill(seedByte)
-  return { ...createFullIdentity(privateKey), privateKey }
+  return { ...createFullIdentity({ privateKey: privateKey }), privateKey }
 }
 
 /** A delegating device and the trusted grant it holds. */
@@ -40,7 +40,11 @@ export async function bindingFor(
 ): Promise<ControllerBinding> {
   const signer =
     issuer?.identity ??
-    createControllerIdentity({ seed: controllerSeed, profile: 0, log: asControllerLog(prefix) })
+    (await createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    }))
   const holderGrant = issuer == null ? undefined : await trustedGrant(identity, prefix)
   const capability = await mintLeafCapability({
     signer,
@@ -63,7 +67,7 @@ export async function trustedGrant(
   prefix: Array<SignedEvent> = [inception],
 ) {
   return mintTrustedGrant({
-    signer: createControllerIdentity({
+    signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
       log: asControllerLog(prefix),
@@ -119,7 +123,7 @@ export async function addMember(
     keyPackage: bundle.publicPackage,
     privateKeys: bundle.privatePackage,
   })
-  const joined = new GroupHandle({
+  const joined = await GroupHandle.create({
     state: joinedState,
     context,
     credential: { id: identity.id, groupID: group.groupID },
@@ -127,7 +131,7 @@ export async function addMember(
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
   await joined.bootstrapLedger(group.ledgerTokens)
-  return { group: deriveGroup(group, result.newState), joined }
+  return { group: await deriveGroup(group, result.newState), joined }
 }
 
 export async function enact(group: GroupHandle, tokens: Array<string>) {
@@ -137,7 +141,7 @@ export async function enact(group: GroupHandle, tokens: Array<string>) {
     enacted: tokens,
     requireAdmin: false,
   })
-  const derived = deriveGroup(group, result.newState)
+  const derived = await deriveGroup(group, result.newState)
   await derived.applyLedgerEntries(result.enacted)
   return { group: derived, message: encode(mlsMessageEncoder, result.commit) }
 }

@@ -132,13 +132,17 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
           controller,
           beforeBinding: async (pending, source) => {
             if (group.anchor.controller == null) return
-            assertRetainsKnownEffects(group.anchor.controller, group.registry, source.registry)
+            await assertRetainsKnownEffects(
+              group.anchor.controller,
+              group.registry,
+              source.registry,
+            )
             if (
-              !recoverySignerEligible({
+              !(await recoverySignerEligible({
                 group: pending,
                 registry: source.registry,
                 signer: reply.signer,
-              })
+              }))
             )
               throw new Error('Ineligible recovery attestation signer')
             signerEligible = true
@@ -203,7 +207,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       tuple.tag = confirmationTag(key, requestID)
       return key
     },
-    judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory' {
+    async judgeVerdict(opened: OpenedRecoveryVerdict): Promise<'authoritative' | 'advisory'> {
       const { signer, verdict } = opened
       if (
         normalizeDID(signer) === normalizeDID(group.credential.id) ||
@@ -220,7 +224,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       )
         return 'advisory'
       if (group.anchor.controller != null)
-        return recoverySignerEligible({ group, registry: known, signer })
+        return (await recoverySignerEligible({ group, registry: known, signer }))
           ? 'authoritative'
           : 'advisory'
       if (verdict.verdict === 'confirmed') return 'authoritative'

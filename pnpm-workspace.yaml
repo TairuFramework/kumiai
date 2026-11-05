@@ -17,15 +17,15 @@ catalog:
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^5.1.0
-  '@enkaku/client': ^0.22.5
-  '@enkaku/http-fetch': ^0.22.5
-  '@enkaku/http-serve': ^0.22.5
-  '@enkaku/protocol': ^0.22.5
-  '@enkaku/server': ^0.22.5
-  '@enkaku/transport': ^0.22.5
-  '@kokuin/capability': ^0.5.2
-  '@kokuin/controller': ^0.2.5
-  '@kokuin/token': ^0.6.4
+  '@enkaku/client': ^0.23.0
+  '@enkaku/http-fetch': ^0.23.0
+  '@enkaku/http-serve': ^0.23.0
+  '@enkaku/protocol': ^0.23.0
+  '@enkaku/server': ^0.23.0
+  '@enkaku/transport': ^0.23.0
+  '@kokuin/capability': ^0.7.0
+  '@kokuin/controller': ^0.7.0
+  '@kokuin/token': ^0.7.0
   '@sozai/async': ^0.4.3
   '@sozai/codec': ^0.4.4
   '@sozai/event': ^0.1.6
@@ -35,7 +35,7 @@ catalog:
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.6
   '@sozai/stream': ^0.2.0
-  '@kokuin/expo': ^0.4.2
+  '@kokuin/expo': ^0.7.0
   '@sozai/runtime-expo': ^0.3.0
   'expo': ^58.0.16
   'expo-status-bar': ^58.0.3
@@ -48,8 +48,8 @@ catalog:
   '@hozon/node-sqlite': ^0.2.0
   '@hozon/postgres': ^0.2.0
   '@hozon/provider': ^0.3.0
-  '@teikyo/access': ^0.4.0
-  '@teikyo/enkaku': ^0.4.0
+  '@teikyo/access': ^0.5.0
+  '@teikyo/enkaku': ^0.5.0
   '@teikyo/hozon': ^0.4.0
   '@teikyo/rate-limit': ^0.2.0
   '@testcontainers/postgresql': ^12.2.1
@@ -73,8 +73,8 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.2 || 58.0.13
   - expo-modules-autolinking@57.0.2 || 58.0.14
   - expo@57.0.0 || 58.0.17
-  - '@teikyo/access@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0'
-  - '@teikyo/enkaku@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0'
+  - '@teikyo/access@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0 || 0.5.0'
+  - '@teikyo/enkaku@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0 || 0.5.0'
   - '@teikyo/hozon@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0'
   - '@teikyo/rate-limit@0.1.0 || 0.2.0'
   - '@expo/config-plugins@58.0.10'
