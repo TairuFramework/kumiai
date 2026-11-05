@@ -63,6 +63,7 @@ export type LastResortProvisioner = {
    */
   ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError>
   readonly sourceID: string
+  kind: 'last-resort'
   /** Every retained bundle, `notAfter` descending, for `openWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
   consume(ref: string, groupID: string): Promise<void>
@@ -249,6 +250,7 @@ export function createLastResortProvisioner(
 
   return {
     sourceID,
+    kind: 'last-resort',
     // A ref receipt would suppress later Welcomes for this reusable package.
     async consume(_ref: string, _groupID: string): Promise<void> {},
     async receipt(_ref: string): Promise<null> {

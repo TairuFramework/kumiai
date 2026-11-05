@@ -21,6 +21,7 @@ export {
   type OpenWelcomeParams,
   type OpenWelcomeResult,
   openWelcome,
+  type PackageUse,
 } from './join.js'
 export {
   createKeyPackagePool,

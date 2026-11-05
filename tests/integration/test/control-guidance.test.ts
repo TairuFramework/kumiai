@@ -170,3 +170,19 @@ test.each([
   expect(doc).toContain('Breaking')
   for (const symbol of symbols) expect(doc).toContain(symbol)
 })
+
+test('Welcome opening guidance distinguishes package consumption from verified admission', async () => {
+  const doc = await guidance('packages/mls-hub/README.md')
+  for (const symbol of [
+    'PackageUse',
+    'packageUse',
+    "refused: 'package-consumed'",
+    'kind',
+    'ordinary',
+    'last-resort',
+  ]) {
+    expect(doc).toContain(symbol)
+  }
+  expect(doc).not.toContain('{alreadyJoined: groupID}')
+  expect(doc).not.toContain('opened.joinRef')
+})

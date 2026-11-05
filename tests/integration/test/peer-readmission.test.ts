@@ -74,6 +74,7 @@ test.each([false, true])('last-resort readmission, fork halt: %s', async (halted
     }
     const opened = await openWelcome([source], firstWelcome)
     if (!('joined' in opened)) throw new Error('Expected initial join')
+    expect(opened.packageUse).toEqual({ sourceID: 'fallback', ref, kind: 'last-resort' })
     const held = opened.joined.group
     const spentEpochAuthenticators = [held.state.keySchedule.epochAuthenticator.slice()]
     const oldBranchMember = randomIdentity()
@@ -118,6 +119,7 @@ test.each([false, true])('last-resort readmission, fork halt: %s', async (halted
     await source.consume(ref, held.groupID)
     const repeated = await openWelcome([source], firstWelcome)
     if (!('joined' in repeated)) throw new Error('Last-resort repeat must reach epoch admission')
+    expect(repeated.packageUse).toEqual({ sourceID: 'fallback', ref, kind: 'last-resort' })
     expect(
       judgeWelcomeAdmission({
         held: {
@@ -154,6 +156,7 @@ test.each([false, true])('last-resort readmission, fork halt: %s', async (halted
     }
     const readmitted = await openWelcome([source], laterWelcome)
     if (!('joined' in readmitted)) throw new Error('Last-resort Welcome must reach re-admission')
+    expect(readmitted.packageUse).toEqual({ sourceID: 'fallback', ref, kind: 'last-resort' })
     const joined = readmitted.joined.group
     expect(joined.groupID).toBe(held.groupID)
     expect(Number(joined.epoch)).toBe(epoch + 3)

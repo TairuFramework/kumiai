@@ -1,4 +1,5 @@
 import { randomIdentity } from '@kokuin/token'
+import * as mls from '@kumiai/mls'
 import {
   commitInvite,
   createGroup,
@@ -17,12 +18,14 @@ import {
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { judgeWelcomeAdmission } from '../src/admission.js'
-import { openWelcome } from '../src/join.js'
+import { type BundleSource, openWelcome } from '../src/join.js'
 import { createKeyPackagePool } from '../src/pool.js'
 import { createMemoryKeyPackagePoolStore } from '../src/pool-store.js'
 import { createLastResortProvisioner } from '../src/provisioner.js'
 import { createMemoryLastResortStore } from '../src/store.js'
 import { createTestHub, type TestHub } from './fixtures/hub.js'
+
+vi.mock('@kumiai/mls', { spy: true })
 
 let hub: TestHub
 
@@ -114,6 +117,130 @@ async function inviteAStranger(): Promise<InviteAndCommit> {
 }
 
 describe('openWelcome', () => {
+  test.each(['ordinary', 'last-resort'] as const)(
+    'opened Welcome identifies source ref and kind: %s',
+    async (kind) => {
+      const source =
+        kind === 'ordinary'
+          ? createKeyPackagePool({
+              sourceID: 'ordinary',
+              identity: hub.identity,
+              client: hub.client,
+              store: createMemoryKeyPackagePoolStore(),
+              target: 1,
+              lowWater: 1,
+            })
+          : createLastResortProvisioner({
+              sourceID: 'fallback',
+              identity: hub.identity,
+              client: hub.client,
+              store: createMemoryLastResortStore(),
+            })
+      if ('ensureStocked' in source) await source.ensureStocked().value
+      else await source.ensureProvisioned().value
+      const [bundle] = await source.bundles()
+      if (bundle == null) throw new Error('Missing retained bundle')
+      const ref = await keyPackageRef(bundle.publicPackage)
+      const welcome = await inviteWith(hub.identity.id, encodeKeyPackage(bundle.publicPackage))
+      const consume = vi.spyOn(source, 'consume')
+      const receipt = vi.spyOn(source, 'receipt')
+      const decrypt = vi.mocked(mls.processWelcome)
+      decrypt.mockClear()
+
+      const result = await openWelcome([source], { identity: hub.identity, ...welcome })
+
+      expect(result).toHaveProperty('packageUse', {
+        sourceID: kind === 'ordinary' ? 'ordinary' : 'fallback',
+        ref,
+        kind,
+      })
+      if (!('joined' in result)) throw new Error('Expected a verified Welcome')
+      expect(Object.keys(result).sort()).toEqual(['joined', 'packageUse'])
+      expect(result.joined.group.groupID).toBe(welcome.invite.groupID)
+      expect(result.joined.group.epoch).toBe(1n)
+      expect(result.joined.credential.id).toBe(hub.identity.id)
+      expect(decrypt).toHaveBeenCalledTimes(1)
+      expect(consume).not.toHaveBeenCalled()
+      expect(receipt).toHaveBeenCalledTimes(kind === 'ordinary' ? 1 : 0)
+    },
+  )
+
+  test('last resort remains reusable without receipt admission', async () => {
+    const source = createLastResortProvisioner({
+      sourceID: 'fallback',
+      identity: hub.identity,
+      client: hub.client,
+      store: createMemoryLastResortStore(),
+    })
+    const { ref } = await source.ensureProvisioned().value
+    const welcome = await inviteFromLastResortSlot()
+    const receipt = vi.spyOn(source, 'receipt').mockResolvedValue({ groupID: 'unrelated' })
+    const consume = vi.spyOn(source, 'consume')
+    const decrypt = vi.mocked(mls.processWelcome)
+    decrypt.mockClear()
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await openWelcome([source], { identity: hub.identity, ...welcome })
+      expect(result).toHaveProperty('packageUse', {
+        sourceID: 'fallback',
+        ref,
+        kind: 'last-resort',
+      })
+      if (!('joined' in result)) throw new Error('Expected a reusable Welcome to open')
+      expect(result.joined.group.groupID).toBe(welcome.invite.groupID)
+    }
+    expect(decrypt).toHaveBeenCalledTimes(2)
+    expect(receipt).not.toHaveBeenCalled()
+    expect(consume).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    { name: 'empty ID', descriptors: [{ sourceID: '', kind: 'ordinary' }], error: /sourceID/ },
+    {
+      name: 'duplicate IDs',
+      descriptors: [
+        { sourceID: 'same', kind: 'ordinary' },
+        { sourceID: 'same', kind: 'last-resort' },
+      ],
+      error: /sourceID/,
+    },
+    {
+      name: 'unknown kind',
+      descriptors: [
+        { sourceID: 'valid', kind: 'ordinary' },
+        { sourceID: 'invalid', kind: 'unknown' },
+      ],
+      error: /kind/,
+    },
+    { name: 'missing kind', descriptors: [{ sourceID: 'invalid' }], error: /kind/ },
+  ])(
+    'invalid source descriptors refuse before callbacks: $name',
+    async ({ descriptors, error }) => {
+      const sources = descriptors.map((descriptor) => ({
+        ...descriptor,
+        bundles: vi.fn(async () => []),
+        consume: vi.fn(async () => {}),
+        receipt: vi.fn(async () => null),
+      }))
+      const welcome = await inviteAStranger()
+      const decrypt = vi.mocked(mls.processWelcome)
+      decrypt.mockClear()
+
+      await expect(
+        openWelcome(sources as Array<BundleSource>, {
+          identity: hub.identity,
+          ...welcome,
+        }),
+      ).rejects.toThrow(error)
+      for (const source of sources) {
+        expect(source.bundles).not.toHaveBeenCalled()
+        expect(source.consume).not.toHaveBeenCalled()
+        expect(source.receipt).not.toHaveBeenCalled()
+      }
+      expect(decrypt).not.toHaveBeenCalled()
+    },
+  )
+
   test('a saved join remains consumable after the expired package is pruned', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const bundle = await createKeyPackageBundle(hub.identity)
@@ -145,7 +272,7 @@ describe('openWelcome', () => {
     const saved = {
       state: encodeClientState(result.joined.group.state),
       groupID: result.joined.group.groupID,
-      joinRef: result.joinRef,
+      packageUse: result.packageUse,
     }
     await pool.ensureStocked().value
     expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).not.toContain(ref)
@@ -153,13 +280,14 @@ describe('openWelcome', () => {
 
     // Recreate the helper: consumption cannot depend on an in-process open reservation.
     const restarted = createKeyPackagePool(poolParams)
-    await expect(restarted.consume(saved.joinRef.ref, saved.groupID)).resolves.toBeUndefined()
+    await expect(restarted.consume(saved.packageUse.ref, saved.groupID)).resolves.toBeUndefined()
     expect(await restarted.receipt(ref)).toEqual({ groupID: saved.groupID })
-    await expect(restarted.consume(saved.joinRef.ref, saved.groupID)).resolves.toBeUndefined()
+    await expect(restarted.consume(saved.packageUse.ref, saved.groupID)).resolves.toBeUndefined()
     await expect(restarted.consume(ref, 'group:other')).rejects.toThrow('another group')
     await expect(openWelcome([restarted], { identity: hub.identity, ...welcome })).resolves.toEqual(
       {
-        alreadyJoined: saved.groupID,
+        refused: 'package-consumed',
+        packageUse: { sourceID: 'ordinary', ref, kind: 'ordinary' },
       },
     )
   })
@@ -184,20 +312,21 @@ describe('openWelcome', () => {
     if (!('joined' in a) || !('joined' in b)) throw new Error('Expected two authenticated joins')
     expect(a.joined.group.groupID).toBe('group:reuse-a')
     expect(b.joined.group.groupID).toBe('group:reuse-b')
-    expect(a.joinRef).toEqual(b.joinRef)
+    expect(a.packageUse).toEqual(b.packageUse)
     expect(await pool.receipt(record.ref)).toBeNull()
     const saved = [a, b].map((opened) => ({
       state: encodeClientState(opened.joined.group.state),
       groupID: opened.joined.group.groupID,
-      joinRef: opened.joinRef,
+      packageUse: opened.packageUse,
     }))
-    await pool.consume(a.joinRef.ref, a.joined.group.groupID)
-    await expect(pool.consume(b.joinRef.ref, b.joined.group.groupID)).rejects.toThrow(
+    await pool.consume(a.packageUse.ref, a.joined.group.groupID)
+    await expect(pool.consume(b.packageUse.ref, b.joined.group.groupID)).rejects.toThrow(
       'another group',
     )
     expect(saved.map((entry) => entry.groupID)).toEqual(['group:reuse-a', 'group:reuse-b'])
     await expect(openWelcome([pool], { identity: hub.identity, ...welcomeB })).resolves.toEqual({
-      alreadyJoined: 'group:reuse-a',
+      refused: 'package-consumed',
+      packageUse: { sourceID: 'ordinary', ref: record.ref, kind: 'ordinary' },
     })
   })
 
@@ -221,19 +350,25 @@ describe('openWelcome', () => {
     })
     if (!('joined' in result)) throw new Error('Expected a new join')
     expect(result.joined.group.groupID).toBe(invite.groupID)
-    expect(result.joinRef).toEqual({ sourceID: 'ordinary', ref: usedRef })
+    expect(result.packageUse).toEqual({ sourceID: 'ordinary', ref: usedRef, kind: 'ordinary' })
     expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).toContain(usedRef)
     expect(await pool.receipt(usedRef)).toBeNull()
 
-    const saved = new Map<string, { group: GroupHandle; joinRef: typeof result.joinRef }>()
-    saved.set(result.joined.group.groupID, { group: result.joined.group, joinRef: result.joinRef })
-    await pool.consume(result.joinRef.ref, result.joined.group.groupID)
-    expect(saved.get(invite.groupID)?.joinRef).toEqual(result.joinRef)
+    const saved = new Map<string, { group: GroupHandle; packageUse: typeof result.packageUse }>()
+    saved.set(result.joined.group.groupID, {
+      group: result.joined.group,
+      packageUse: result.packageUse,
+    })
+    await pool.consume(result.packageUse.ref, result.joined.group.groupID)
+    expect(saved.get(invite.groupID)?.packageUse).toEqual(result.packageUse)
     expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).not.toContain(usedRef)
     expect(await pool.receipt(usedRef)).toEqual({ groupID: invite.groupID })
     await expect(
       openWelcome([pool], { identity: hub.identity, invite, welcome, ratchetTree }),
-    ).resolves.toEqual({ alreadyJoined: invite.groupID })
+    ).resolves.toEqual({
+      refused: 'package-consumed',
+      packageUse: { sourceID: 'ordinary', ref: usedRef, kind: 'ordinary' },
+    })
   })
 
   test('a failed host save leaves a Welcome retryable', async () => {
@@ -254,7 +389,7 @@ describe('openWelcome', () => {
       throw new Error('host save failed')
     }
     await expect(save()).rejects.toThrow('host save failed')
-    expect(await pool.receipt(result.joinRef.ref)).toBeNull()
+    expect(await pool.receipt(result.packageUse.ref)).toBeNull()
     const retry = await openWelcome([pool], { identity: hub.identity, ...welcome })
     expect('joined' in retry && retry.joined.group.groupID).toBe(result.joined.group.groupID)
   })
@@ -278,12 +413,12 @@ describe('openWelcome', () => {
     const welcome = await inviteFromPool()
     const result = await openWelcome([pool], { identity: hub.identity, ...welcome })
     if (!('joined' in result)) throw new Error('Expected a new join')
-    const saved = { group: result.joined.group, joinRef: result.joinRef }
-    await expect(pool.consume(saved.joinRef.ref, saved.group.groupID)).rejects.toThrow(
+    const saved = { group: result.joined.group, packageUse: result.packageUse }
+    await expect(pool.consume(saved.packageUse.ref, saved.group.groupID)).rejects.toThrow(
       'store offline',
     )
     expect(saved.group.groupID).toBe(welcome.invite.groupID)
-    expect(await pool.receipt(saved.joinRef.ref)).toBeNull()
+    expect(await pool.receipt(saved.packageUse.ref)).toBeNull()
     expect(await inner.list(hub.identity.id)).toHaveLength(1)
   })
 
@@ -310,7 +445,7 @@ describe('openWelcome', () => {
     const welcome = await inviteFromLastResortSlot()
     const result = await openWelcome([pool, provisioner], { identity: hub.identity, ...welcome })
     if (!('joined' in result)) throw new Error('Expected a new join')
-    expect(result.joinRef).toEqual({ sourceID: 'fallback', ref })
+    expect(result.packageUse).toEqual({ sourceID: 'fallback', ref, kind: 'last-resort' })
     expect(result.joined.group.groupID).toBe(welcome.invite.groupID)
     await provisioner.consume(ref, result.joined.group.groupID)
     expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).toContain(ref)

@@ -155,7 +155,7 @@ describe('consume', () => {
     },
   )
 
-  test('receipted ref is alreadyJoined without decrypt', async () => {
+  test('ordinary receipt refuses without claiming admission', async () => {
     const hub = createTestHub()
     try {
       const store = createMemoryKeyPackagePoolStore()
@@ -174,6 +174,8 @@ describe('consume', () => {
       await pool.consume(ref, 'group:joined')
       const decrypt = vi.mocked(mls.processWelcome)
       decrypt.mockClear()
+      const bundles = vi.spyOn(pool, 'bundles')
+      const consume = vi.spyOn(pool, 'consume')
       const result = await openWelcome([pool], {
         identity: hub.identity,
         invite: {
@@ -193,7 +195,14 @@ describe('consume', () => {
           encryptedGroupInfo: new Uint8Array(),
         },
       })
-      expect(result).toEqual({ alreadyJoined: 'group:joined' })
+      expect(result).toEqual({
+        refused: 'package-consumed',
+        packageUse: { sourceID: 'ordinary', ref, kind: 'ordinary' },
+      })
+      expect(result).not.toHaveProperty('alreadyJoined')
+      expect(result).not.toHaveProperty('joined')
+      expect(bundles).not.toHaveBeenCalled()
+      expect(consume).not.toHaveBeenCalled()
       expect(decrypt).not.toHaveBeenCalled()
     } finally {
       await hub.dispose()

@@ -63,6 +63,7 @@ export type KeyPackagePool = {
    */
   ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError>
   readonly sourceID: string
+  kind: 'ordinary'
   /** Every retained bundle, `notAfter` descending, for `openWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
   consume(ref: string, groupID: string): Promise<void>
@@ -195,6 +196,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
 
   return {
     sourceID,
+    kind: 'ordinary',
     async consume(ref: string, groupID: string): Promise<void> {
       await consumeWithReceipt(store, ref, groupID, () => store.consume(ref, groupID))
     },

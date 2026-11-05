@@ -33,9 +33,14 @@ nothing decided anything.
 - `createMemoryLastResortStore` — the strict reference implementation. In-memory; see the warning
   below.
 - `openWelcome(sources, welcome)` validates and opens using the retained bundle the Welcome names.
-  It returns `{joined, joinRef: {sourceID, ref}}` without consuming the package.
-  A receipted ref returns `{alreadyJoined: groupID}` before decryption.
+  It returns `{joined, packageUse}` without consuming the package.
+  An ordinary receipted ref returns `{refused: 'package-consumed', packageUse}` before decryption.
+  Receipts prove consumption, never Welcome admission or membership.
+  Last-resort sources bypass receipts and reopen valid Welcomes for admission.
   Independent source read failures appear as `joined.sourceErrors` on a successful fallback.
+- `PackageUse` carries `{sourceID, ref, kind: 'ordinary' | 'last-resort'}`.
+  `BundleSource` requires a distinct non-empty `sourceID` and a `kind` of `'ordinary'` or `'last-resort'`.
+  Invalid source descriptors reject before any source callback. Pool/provisioner constructors supply their literal kinds.
 - `judgeWelcomeAdmission(params)` judges verified Welcome identity against held metadata and retained spent authenticators.
   It returns `join`, `alreadyJoined`, `replace`, or `refused`.
 - `HubRetryableError`, `HubRefusedError`, `HubCallStage` — the two outcomes of a failed hub call.
@@ -88,21 +93,21 @@ if ('joined' in opened) {
   })
   if (admission === 'join' || admission === 'replace') {
     if (admission === 'replace') await host.stopAndDrainPeer(group.groupID)
-    await host.seed(group, opened.joinRef, { replace: admission === 'replace' })
+    await host.seed(group, opened.packageUse, { replace: admission === 'replace' })
   } else if (admission === 'alreadyJoined') {
-    await host.saveJoinRef(group.groupID, opened.joinRef)
+    await host.savePackageUse(group.groupID, opened.packageUse)
   }
   if (admission !== 'refused') {
-    const source = sources.find((source) => source.sourceID === opened.joinRef.sourceID)
+    const source = sources.find((source) => source.sourceID === opened.packageUse.sourceID)
     if (source == null) throw new Error('Missing Welcome source')
-    await source.consume(opened.joinRef.ref, group.groupID)
-    await host.clearJoinRef(group.groupID)
+    await source.consume(opened.packageUse.ref, group.groupID)
+    await host.clearPackageUse(group.groupID)
   }
 }
 ```
 
 For `replace`, the host compare-and-sets the stored version and uses one root transaction to
-install the joined state and `joinRef`, apply rpc's `readmissionChanges(snapshot)` and clear the
+install the joined state and `packageUse`, apply rpc's `readmissionChanges(snapshot)` and clear the
 anchor slot. Open operations and the rejoin record become `unknown` outcomes and are deleted;
 applied commits, external responses and the commit cursor are cleared. Keep prior outcomes and
 Welcome obligations. Restart the peer as a fresh join so it captures the anchor at the joined
@@ -176,13 +181,13 @@ the exact outage these stores exist to prevent. Tests and throwaway processes on
 ### One store namespace per source
 
 Give each source a stable, distinct `sourceID` and a dedicated receipt-store namespace.
-At startup, consume each saved `joinRef` through its named source, then clear that reference.
+At startup, consume each saved `packageUse` through its named source, then clear that reference.
 Ordinary consumption atomically deletes the package and writes the receipt. Last-resort consumption is a no-op and `receipt(ref)` always returns `null`.
 Repeated last-resort Welcomes reopen and pass through spent-authenticator admission.
 Receipts survive package pruning. Ambiguous writes reject with `StorageOutcomeUnknownError`, prompting receipt read-back.
 
 Ordinary package deletion retains the owner and ref without private material until `consume` writes its receipt.
-This includes pruning and `release`: a saved join with an outstanding `joinRef` must remain consumable after either deletion.
+This includes pruning and `release`: a saved join with an outstanding `packageUse` must remain consumable after either deletion.
 Store adapters persist this metadata durably and include it when checking that a ref belongs to exactly one owner.
 Unknown refs still reject consumption. Unconsumed deletion metadata has no expiry because a saved join may resume arbitrarily late.
 
@@ -191,10 +196,10 @@ WARNING: ordinary package reuse is detected at consumption, after the host has s
 Two genuine Welcomes for different groups naming the same ordinary package can therefore both return joined states before either consumption.
 Both groups can be saved. The first consumption succeeds, and the second rejects because its group differs from the receipt.
 
-Replaying either Welcome then returns `alreadyJoined` with the first consumed group, even for the second Welcome's group.
+Replaying either Welcome then returns `{refused: 'package-consumed', packageUse}` without claiming either group's membership.
 The helper cannot prevent that second save with these ports.
 Hosts must serialise open, admission, save and consume for each package ref within its source.
-Hosts must finish consuming saved `joinRef`s at startup before admitting further Welcomes.
+Hosts must finish consuming saved `packageUse`s at startup before admitting further Welcomes.
 Serialisation through successful consumption closes this window within that host. There is no cross-host reservation protocol.
 
 The two ports are not interchangeable, and wiring one store to both mixes secret material held

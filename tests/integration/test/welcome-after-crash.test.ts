@@ -60,6 +60,7 @@ async function setup() {
   })
   const source: BundleSource = {
     sourceID: 'invitee-pool',
+    kind: 'ordinary',
     bundles: async () => {
       return (await store.list(invitee.id)).map((row): KeyPackageBundle => {
         const publicPackage = decodeKeyPackage(row.keyPackage)
@@ -263,7 +264,7 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
         control: await database.control(groupID, { groupID, incarnation: 1 }).load(),
         state: encodeClientState(opened.joined.group.state),
         ledger: opened.joined.group.ledgerTokens,
-        joinRef: opened.joinRef as typeof opened.joinRef | null,
+        packageUse: opened.packageUse as typeof opened.packageUse | null,
         spentEpochAuthenticators: [
           opened.joined.group.state.keySchedule.epochAuthenticator.slice(),
         ],
@@ -276,7 +277,7 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
           credential: opened.joined.group.credential,
           ledgerEntries: persisted.ledger,
         }),
-        joinRef: persisted.joinRef,
+        packageUse: persisted.packageUse,
       }
       if (boundary === 'consume-mid-transaction') {
         const set = Map.prototype.set
@@ -315,21 +316,22 @@ test.each(['joined-before-consume', 'consume-mid-transaction', 'consumed-before-
         ).toBe('refused')
       }
       if (boundary === 'consumed-before-ack') await ctx.source.consume(ctx.ref, saved.group.groupID)
-      // Startup finishes the saved joinRef before clearing it, including an already committed consume.
-      if (saved.joinRef != null) {
-        expect(saved.joinRef.sourceID).toBe(ctx.source.sourceID)
-        await ctx.source.consume(saved.joinRef.ref, saved.group.groupID)
-        saved.joinRef = null
-        persisted.joinRef = null
+      // Startup finishes the saved packageUse before clearing it, including an already committed consume.
+      if (saved.packageUse != null) {
+        expect(saved.packageUse.sourceID).toBe(ctx.source.sourceID)
+        await ctx.source.consume(saved.packageUse.ref, saved.group.groupID)
+        saved.packageUse = null
+        persisted.packageUse = null
       }
-      expect(persisted.joinRef).toBeNull()
+      expect(persisted.packageUse).toBeNull()
       expect(await ctx.store.list(ctx.invitee.id)).toEqual([])
       expect(await ctx.source.receipt(ctx.ref)).toEqual({ groupID: saved.group.groupID })
       const bundles = vi
         .spyOn(ctx.source, 'bundles')
         .mockRejectedValue(new Error('must not decrypt again'))
       expect(await openWelcome([ctx.source], { identity: ctx.invitee, ...artifact })).toEqual({
-        alreadyJoined: saved.group.groupID,
+        refused: 'package-consumed',
+        packageUse: { sourceID: 'invitee-pool', ref: ctx.ref, kind: 'ordinary' },
       })
       expect(bundles).not.toHaveBeenCalled()
       expect(
