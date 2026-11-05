@@ -261,6 +261,40 @@ for (const context of [false, true])
       expect((await device.load()).revision).toBe(1)
     })
 
+    test('synchronous Combined prepare failure releases owners without an unhandled rejection', async () => {
+      const { db, device, capability } = await setup(context)
+      const transact = vi.spyOn(db, 'transact')
+      const failure = new Error('synchronous prepare failure')
+      const work = vi.fn(async () => {})
+      const unhandled: Array<unknown> = []
+      const onUnhandled = (error: unknown) => unhandled.push(error)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        await expect(
+          capability.runCombined(
+            request,
+            () => {
+              throw failure
+            },
+            work,
+          ),
+        ).rejects.toBe(failure)
+        expect(work).not.toHaveBeenCalled()
+        expect(
+          transact,
+          'failed prepare must open no provider work transaction',
+        ).not.toHaveBeenCalled()
+        const deviceRead = device.load()
+        const groupRead = device.groups.load(request.groupID)
+        expect((await deviceRead).revision).toBe(0)
+        expect(await groupRead).toMatchObject({ revision: 1, mutationID: 'seed' })
+        await tick()
+        expect(unhandled, 'handled preparation failure must leave no orphan rejection').toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+      }
+    })
+
     test('work revalidates prepared group and device expectations', async () => {
       const { capability, prepare } = await setup(context)
       for (const field of ['device', 'group']) {

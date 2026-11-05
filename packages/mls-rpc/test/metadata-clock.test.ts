@@ -1,4 +1,5 @@
-import { expect, test } from 'vitest'
+import * as mls from '@kumiai/mls'
+import { expect, test, vi } from 'vitest'
 
 import type { AccountedGroupObservation } from '../src/entry-capability.js'
 import { entryCapability } from '../src/entry-capability.js'
@@ -148,7 +149,21 @@ for (const terminal of [false, true]) {
     `terminal projection survives unreadable state and tombstone (terminal=${terminal}, %s)`,
     async (damage) => {
       const { fixture, groups, key } = await terminalFixture(terminal)
+      const restore = vi.spyOn(mls, 'restoreGroup')
       try {
+        const stored = await groups.loadState(key)
+        if (stored === null || stored.deleted || stored.state === null)
+          throw new Error('Missing old source')
+        const state = mls.decodeClientState(stored.state)
+        if (state === undefined) throw new Error('Invalid old source')
+        // Calibrate the source primitive independently of at-rest state opens.
+        await mls.restoreGroup({
+          state,
+          credential: stored.credential,
+          ledgerEntries: stored.ledger,
+        })
+        expect(restore).toHaveBeenCalledOnce()
+        restore.mockClear()
         await groups.transition(
           await nextChange(groups, key.groupID, 'certify'),
           async (stores) => {
@@ -167,6 +182,10 @@ for (const terminal of [false, true]) {
         await fixture.entry().finaliseCertifiedApp(key, 1)
         expect(observations.at(-1)?.terminal).toBe(terminal)
         expect(privateOpens, 'administrative accounting must not open private state').toEqual([])
+        expect(
+          restore,
+          'administrative accounting must not restore the old MLS source',
+        ).not.toHaveBeenCalled()
         const metadata = await fixture.entry().read(key.groupID, (reads) => reads.metadata(1))
         expect(metadata).toMatchObject({ ...key, deleted: false, terminal })
         await groups.transition(
@@ -189,11 +208,55 @@ for (const terminal of [false, true]) {
           { deleted: true, terminal },
         )
         expect(privateOpens).toEqual([])
+        expect(restore, 'tombstoning must not restore the old MLS source').not.toHaveBeenCalled()
       } finally {
+        restore.mockRestore()
         await fixture.close()
       }
     },
   )
+
+  test(`effect-only accounting preserves terminal projection (terminal=${terminal})`, async () => {
+    const { fixture, groups, key } = await terminalFixture(terminal)
+    try {
+      const before = await groups.loadState(key)
+      if (before === null || before.deleted) throw new Error('Missing state')
+      const observations: Array<AccountedGroupObservation> = []
+      fixture.entry().observe(key.groupID, (value) => observations.push(value))
+      const outcome = { id: 'effect-only', opID: null, at: 1, kind: 'unknown' as const }
+      await fixture.entry().run(
+        { groupID: key.groupID, mutationID: 'effect-only' },
+        async (reads) => {
+          const life = await reads.lifetime()
+          if (life === null) throw new Error('Missing lifetime')
+          return {
+            expected: { revision: life.revision, activeIncarnation: life.activeIncarnation },
+            value: undefined,
+          }
+        },
+        async () => {},
+        async (stores) => {
+          await stores.incarnation(1).control.apply({ putOutcomes: [outcome] }, 'effect-only')
+        },
+      )
+      expect(observations).toHaveLength(1)
+      expect(observations[0]?.terminal).toBe(terminal)
+      expect(observations[0]?.activeVersion).toBe(before.version + 1)
+      expect(observations[0]?.metadata).toContainEqual(
+        expect.objectContaining({ ...key, version: before.version + 1, terminal }),
+      )
+      const reopened = (await fixture.reopen()).device.groups
+      expect(await reopened.loadState(key)).toEqual({ ...before, version: before.version + 1 })
+      expect(await fixture.entry().read(key.groupID, (reads) => reads.metadata(1))).toMatchObject({
+        ...key,
+        terminal,
+        version: before.version + 1,
+      })
+      expect((await reopened.ports(key).control.load()).outcomes).toContainEqual(outcome)
+    } finally {
+      await fixture.close()
+    }
+  })
 
   test.each(['commit', 'rollback'] as const)(
     `every accounting path preserves terminal projection (terminal=${terminal}, %s)`,

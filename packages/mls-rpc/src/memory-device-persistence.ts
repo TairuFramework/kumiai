@@ -513,11 +513,13 @@ export function createMemoryDevicePersistence(params: {
               if (attempt.revoked) cancel()
             })
             const prepared = await Promise.race([
-              entry.callback(() =>
-                prepare({
-                  device: memoryOperation(tx, () => load(tx)),
-                  group: coordinator.prepareReads(entry, owned.groupID),
-                }),
+              Promise.resolve().then(() =>
+                entry.callback(() =>
+                  prepare({
+                    device: memoryOperation(tx, () => load(tx)),
+                    group: coordinator.prepareReads(entry, owned.groupID),
+                  }),
+                ),
               ),
               cancelled,
             ]).finally(() => attempt.signal.removeEventListener('abort', cancel))

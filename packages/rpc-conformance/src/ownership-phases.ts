@@ -2273,14 +2273,16 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
       }
     })
 
-    test.each([
-      { namespace: 'control', versionBump: 1 },
-      { namespace: 'pending', versionBump: 0 },
-      { namespace: 'poison', versionBump: 0 },
-      { namespace: 'cursor', versionBump: 0 },
-    ] as const)(
-      'effect-only $namespace observation accounts once after side writes',
-      async ({ namespace, versionBump }) => {
+    test.each(
+      [
+        { namespace: 'control', versionBump: 1 },
+        { namespace: 'pending', versionBump: 0 },
+        { namespace: 'poison', versionBump: 0 },
+        { namespace: 'cursor', versionBump: 0 },
+      ].flatMap((value) => [false, true].map((terminal) => ({ ...value, terminal }))),
+    )(
+      'effect-only $namespace observation accounts once after side writes (terminal=$terminal)',
+      async ({ namespace, versionBump, terminal }) => {
         let supplied!: ConformanceGroupStores<TTx>
         const donor = await params.createFixture(groupID)
         const frame = {
@@ -2323,6 +2325,19 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
               await writeStorageInstall(stores, fresh, 'install-observed', 2)
             },
           )
+          if (terminal)
+            await groups.transition(
+              await storageChange(groups, groupID, 'terminal-observed'),
+              async (stores) => {
+                const state = await stores.incarnation(2).state.load()
+                if (state === null || state.deleted) throw new Error('Missing active state')
+                await stores.incarnation(2).state.save({
+                  ...state,
+                  version: state.version + 1,
+                  terminal,
+                })
+              },
+            )
           const installed = await groups.loadState({ ...key, incarnation: 2 })
           const observations: Array<ConformanceAccountedGroupObservation> = []
           fixture.entry().observe(groupID, (value) => observations.push(value))
@@ -2334,17 +2349,24 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
           expect(observations).toHaveLength(1)
           if (installed === null) throw new Error('Missing installed state')
           expect(observations[0]?.activeVersion).toBe(installed.version + versionBump)
+          expect(observations[0]?.terminal).toBe(terminal)
           expect(observations[0]?.metadata).toContainEqual(
             expect.objectContaining({
               ...key,
               incarnation: 2,
               version: installed.version + versionBump,
-              terminal: false,
+              terminal,
             }),
           )
           const reopened = (await fixture.reopen()).device.groups
           expect(await reopened.loadState({ ...key, incarnation: 2 })).toEqual({
             ...installed,
+            version: installed.version + versionBump,
+          })
+          expect(await fixture.entry().read(groupID, (reads) => reads.metadata(2))).toMatchObject({
+            ...key,
+            incarnation: 2,
+            terminal,
             version: installed.version + versionBump,
           })
           await reopened.transition(
