@@ -650,13 +650,16 @@ test('a lifecycle reply authenticates the complete ordered ledger', async () => 
   const clock = vi.spyOn(Date, 'now').mockReturnValue(150_000)
   try {
     const { group, identity } = await pipelineGroup()
-    const token = await signLedgerEntry(identity, {
-      groupID: group.groupID,
-      type: 'note',
-      subject: identity.id,
-      value: 'reply-ledger-entry',
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        groupID: group.groupID,
+        type: 'note',
+        subject: identity.id,
+        value: 'reply-ledger-entry',
+      },
     })
-    const responder = (await commitLedgerEntries(group, [token])).newGroup
+    const responder = (await commitLedgerEntries({ group, tokens: [token] })).newGroup
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({
       group,
       identity,

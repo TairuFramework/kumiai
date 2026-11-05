@@ -119,7 +119,7 @@ export type CommitJournal = {
    * Record that the hub accepted this commit as `sequenceID`. Must be durable before it
    * resolves, and must land before the host adopts.
    */
-  markAccepted({ publishID, sequenceID }: CommitJournalMarkAcceptedParams): Promise<void>
+  markAccepted(params: CommitJournalMarkAcceptedParams): Promise<void>
   get(): Promise<JournalEntry | null>
   clear(publishID: string): Promise<void>
 }

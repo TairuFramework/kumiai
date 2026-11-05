@@ -134,10 +134,7 @@ export type DIDAuthenticationDependencies = CryptoOptions & {
    * answers for the group (its anchor names a controller) and for the leaf (it is the credential
    * already in the tree at that index, or it arrives in a Welcome tree). Absent: never.
    */
-  mayKeepDeniedIssuer?: ({
-    credential,
-    signaturePublicKey,
-  }: DIDAuthenticationDependenciesMayKeepDeniedIssuerParams) => boolean
+  mayKeepDeniedIssuer?: (params: DIDAuthenticationDependenciesMayKeepDeniedIssuerParams) => boolean
 }
 
 function isDenied(denied: ReadonlySet<string>, did: string): boolean {

@@ -199,10 +199,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           try {
             await pending.persistOpened(state, record)
           } catch (error) {
-            throw new AppFrameStorageError({
-              message: 'failed to persist opened app frame',
-              cause: error,
-            })
+            throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
           }
         }
         let openError: unknown
@@ -226,10 +223,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
                 })
               } catch (error) {
                 if (isAppFrameStorageError(error)) throw error
-                throw new AppFrameStorageError({
-                  message: 'failed to stage opened app frame',
-                  cause: error,
-                })
+                throw new AppFrameStorageError('failed to stage opened app frame', { cause: error })
               }
             },
           })
@@ -252,8 +246,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           // The open's own refusal says whether the frame is dead. Anything the adapter raised
           // around it (a restore, a read) left the key unspent, so the lane must retry.
           if (error === openError || isAppFrameStorageError(error)) throw error
-          throw new AppFrameStorageError({
-            message: 'handle access failed during durable open',
+          throw new AppFrameStorageError('handle access failed during durable open', {
             cause: error,
           })
         }

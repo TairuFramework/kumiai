@@ -29,12 +29,12 @@ function recordingHub(): Recorder {
       return fake.publish(params)
     },
     subscribe: ({ subscriberDID, topicID, ...options }) =>
-      fake.subscribe(subscriberDID, topicID, options),
+      fake.subscribe({ subscriberDID, topicID, ...options }),
     unsubscribe: ({ subscriberDID, topicID }) => {
       unsubscribed.push([subscriberDID, topicID])
-      return fake.unsubscribe(subscriberDID, topicID)
+      return fake.unsubscribe({ subscriberDID, topicID })
     },
-    receive: ({ subscriberDID }) => fake.receive(subscriberDID),
+    receive: ({ subscriberDID }) => fake.receive({ subscriberDID }),
   }
   return { hub, published, unsubscribed }
 }
@@ -78,13 +78,13 @@ function controllableHub(): ControllableRecorder {
       return fake.publish(params)
     },
     subscribe: ({ subscriberDID, topicID, ...options }) =>
-      fake.subscribe(subscriberDID, topicID, options),
+      fake.subscribe({ subscriberDID, topicID, ...options }),
     unsubscribe: ({ subscriberDID, topicID }) => {
       unsubscribed.push([subscriberDID, topicID])
-      return fake.unsubscribe(subscriberDID, topicID)
+      return fake.unsubscribe({ subscriberDID, topicID })
     },
     receive: ({ subscriberDID }): HubReceiveSubscription => {
-      const inner = fake.receive(subscriberDID)
+      const inner = fake.receive({ subscriberDID })
       const innerIterator = inner[Symbol.asyncIterator]()
       const iterator: AsyncIterator<StoredMessage> = {
         next: () => {

@@ -277,7 +277,7 @@ describe('durable storage stall', () => {
     expect(stalled).toHaveBeenCalledTimes(1)
     reader.setEpoch(2)
     await lane.deliver()
-    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(topicID, position))
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith({ topicID, position }))
     await vi.waitFor(() => expect(lane.pendingRecords()).toHaveLength(0))
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
       groupID: 'group',
@@ -340,7 +340,7 @@ describe('durable storage stall', () => {
     await lane.deliver()
     expect(stalled).toHaveBeenCalledTimes(1)
     await expect(lane.dropFrame(topicID, position)).rejects.toThrow('cursor unavailable')
-    expect(save).toHaveBeenCalledWith(topicID, position)
+    expect(save).toHaveBeenCalledWith({ topicID, position })
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
       groupID: 'group',
       protocol: 'chat',

@@ -187,7 +187,7 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
     commitDigest: 'digest',
     verdict: 'confirmed' as const,
     epoch: pending.epoch,
-    tag: confirmationTag(key, requestID),
+    tag: confirmationTag({ key, requestID }),
   }
   const sealed = await s.responder.sealRecoveryVerdict({ request, verdict })
   const opened = await s.mls.openRecoveryVerdict({ sealed, requestID })
@@ -197,7 +197,7 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
     { epoch: before },
     { position: 'other' },
     { commitDigest: 'other' },
-    { tag: confirmationTag(new Uint8Array(32), requestID) },
+    { tag: confirmationTag({ key: new Uint8Array(32), requestID }) },
     { groupID: 'other' },
     { requestID: 'other' },
   ]) {
@@ -244,10 +244,19 @@ test('candidate registries retain revocations and stale refusals are advisory', 
   }
   const { assertRetainsKnownEffects, RecoveryKnowledgeError } = await import('@kumiai/mls')
   await expect(
-    async () => await assertRetainsKnownEffects(fixture.controllerID, known, current.knownRegistry),
+    async () =>
+      await assertRetainsKnownEffects({
+        controller: fixture.controllerID,
+        known,
+        candidate: current.knownRegistry,
+      }),
   ).rejects.toThrow(new RecoveryKnowledgeError('revocation'))
   await expect(
-    assertRetainsKnownEffects(fixture.controllerID, registrySeed(), known),
+    assertRetainsKnownEffects({
+      controller: fixture.controllerID,
+      known: registrySeed(),
+      candidate: known,
+    }),
   ).resolves.not.toThrow()
   const judge = createVerdictJudge({
     group: current.group,
@@ -255,7 +264,7 @@ test('candidate registries retain revocations and stale refusals are advisory', 
     known,
     requestID: 'stale',
   })
-  const key = await judge.confirmationKey('position', 'digest')
+  const key = await judge.confirmationKey({ position: 'position', commitDigest: 'digest' })
   const { confirmationTag } = await import('@kumiai/mls')
   const binding = {
     groupID: s.group().groupID,
@@ -269,7 +278,7 @@ test('candidate registries retain revocations and stale refusals are advisory', 
     known: current.knownRegistry,
     requestID: 'stale',
   })
-  const controlKey = await control.confirmationKey('position', 'digest')
+  const controlKey = await control.confirmationKey({ position: 'position', commitDigest: 'digest' })
   expect(
     await recoverySignerEligible({ group: current.group, registry: known, signer: s.bob.id }),
   ).toBe(false)
@@ -293,7 +302,7 @@ test('candidate registries retain revocations and stale refusals are advisory', 
         ...binding,
         verdict: 'confirmed',
         epoch: candidate.epoch,
-        tag: confirmationTag(controlKey, 'stale'),
+        tag: confirmationTag({ key: controlKey, requestID: 'stale' }),
       },
     }),
   ).toBe('authoritative')
@@ -310,7 +319,7 @@ test('candidate registries retain revocations and stale refusals are advisory', 
         ...binding,
         verdict: 'confirmed',
         epoch: candidate.epoch,
-        tag: confirmationTag(key, 'stale'),
+        tag: confirmationTag({ key, requestID: 'stale' }),
       },
     }),
   ).toBe('advisory')
@@ -321,7 +330,7 @@ test('candidate registries retain revocations and stale refusals are advisory', 
         ...binding,
         verdict: 'confirmed',
         epoch: candidate.epoch,
-        tag: confirmationTag(key, 'stale'),
+        tag: confirmationTag({ key, requestID: 'stale' }),
       },
     }),
   ).toBe('advisory')
@@ -370,7 +379,8 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
     chain: [inception],
     subject: s.bob.id,
   })
-  const removed = await revokeWithProof(s.group(), {
+  const removed = await revokeWithProof({
+    group: s.group(),
     deny: [s.bob.id],
     log: { chain: [inception, rev], events: [] },
   })
@@ -445,7 +455,7 @@ test('outside lifecycle groups a valid confirmed tag needs no known leaf, while 
     ...binding,
     verdict: 'confirmed' as const,
     epoch: candidate.epoch,
-    tag: confirmationTag(key, requestID),
+    tag: confirmationTag({ key, requestID }),
   }
   const opened = { signer: outsider.id, verdict }
   expect(await candidate.judgeVerdict(opened)).toBe('authoritative')
@@ -547,7 +557,7 @@ test('the rejoiner cannot count its own signed confirmation', async () => {
         commitDigest: 'digest',
         verdict: 'confirmed',
         epoch: pending.epoch,
-        tag: confirmationTag(key, requestID),
+        tag: confirmationTag({ key, requestID }),
       },
     }),
   ).toBe('advisory')

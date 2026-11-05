@@ -1336,7 +1336,8 @@ test('delayed application frame gets the same verdict before and after a later r
     add: b.add,
   })
   const removedLog = { chain: f.log.chain, events: [...renewedLog.events, removal] }
-  const removed = await revokeWithProof(published.newGroup, {
+  const removed = await revokeWithProof({
+    group: published.newGroup,
     log: removedLog,
     remove: [{ did: b.did, add: b.add }],
   })

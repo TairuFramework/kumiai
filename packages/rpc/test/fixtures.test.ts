@@ -144,9 +144,10 @@ describe('fake hub', () => {
   test('delivers published payloads to topic subscribers, excluding the sender', async () => {
     const hub = new FakeHub()
     const received: Array<string> = []
-    hub.subscribe('bob', 'topic:1')
+    hub.subscribe({ subscriberDID: 'bob', topicID: 'topic:1' })
     void (async () => {
-      for await (const msg of hub.receive('bob')) received.push(toUTF(msg.payload))
+      for await (const msg of hub.receive({ subscriberDID: 'bob' }))
+        received.push(toUTF(msg.payload))
     })()
     await hub.publish({ senderDID: 'alice', topicID: 'topic:1', payload: fromUTF('hi') })
     await new Promise((r) => setTimeout(r, 10))
@@ -156,9 +157,10 @@ describe('fake hub', () => {
   test('does not deliver to the sender even if subscribed', async () => {
     const hub = new FakeHub()
     const received: Array<string> = []
-    hub.subscribe('alice', 'topic:1')
+    hub.subscribe({ subscriberDID: 'alice', topicID: 'topic:1' })
     void (async () => {
-      for await (const msg of hub.receive('alice')) received.push(toUTF(msg.payload))
+      for await (const msg of hub.receive({ subscriberDID: 'alice' }))
+        received.push(toUTF(msg.payload))
     })()
     await hub.publish({ senderDID: 'alice', topicID: 'topic:1', payload: fromUTF('hi') })
     await new Promise((r) => setTimeout(r, 10))
@@ -168,10 +170,10 @@ describe('fake hub', () => {
   test('subscriberCount reflects subscribe/unsubscribe', () => {
     const hub = new FakeHub()
     expect(hub.subscriberCount('t')).toBe(0)
-    hub.subscribe('a', 't')
-    hub.subscribe('b', 't')
+    hub.subscribe({ subscriberDID: 'a', topicID: 't' })
+    hub.subscribe({ subscriberDID: 'b', topicID: 't' })
     expect(hub.subscriberCount('t')).toBe(2)
-    hub.unsubscribe('a', 't')
+    hub.unsubscribe({ subscriberDID: 'a', topicID: 't' })
     expect(hub.subscriberCount('t')).toBe(1)
   })
 })

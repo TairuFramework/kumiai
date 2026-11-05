@@ -142,7 +142,8 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
     chain: [inception],
     subject: mallory.id,
   })
-  const removed = await revokeWithProof(s.group(), {
+  const removed = await revokeWithProof({
+    group: s.group(),
     deny: [mallory.id],
     log: { chain: [inception, rev], events: [] },
   })

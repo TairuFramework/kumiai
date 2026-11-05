@@ -197,7 +197,8 @@ export async function createRealBoundRecovery(
       const result =
         op === 'log'
           ? await publishControllerLog({ group: source, log })
-          : await revokeWithProof(source, {
+          : await revokeWithProof({
+              group: source,
               log,
               ...(op === 'deny' || op === 'deny-alias'
                 ? { deny: [management.deniedDID] }

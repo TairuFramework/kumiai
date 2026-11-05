@@ -19,7 +19,7 @@ export type ConformanceCommitJournalMarkAcceptedParams = {
 export type ConformanceCommitJournal = {
   put(entry: ConformanceJournalEntry): Promise<void>
   get(): Promise<ConformanceJournalEntry | null>
-  markAccepted({ publishID, sequenceID }: ConformanceCommitJournalMarkAcceptedParams): Promise<void>
+  markAccepted(params: ConformanceCommitJournalMarkAcceptedParams): Promise<void>
   clear(publishID: string): Promise<void>
 }
 

@@ -34,7 +34,7 @@ describe('commit delivery during initialization', () => {
     let delivered = false
     const hub: LogHub = {
       subscribe: ({ subscriberDID: did, topicID, ...options }) => {
-        fake.subscribe(did, topicID, options)
+        fake.subscribe({ subscriberDID: did, topicID, ...options })
         if (topicID === appTopic && !delivered) {
           delivered = true
           void fake.publish({
@@ -45,10 +45,11 @@ describe('commit delivery during initialization', () => {
           })
         }
       },
-      unsubscribe: ({ subscriberDID: did, topicID }) => fake.unsubscribe(did, topicID),
+      unsubscribe: ({ subscriberDID: did, topicID }) =>
+        fake.unsubscribe({ subscriberDID: did, topicID }),
       publish: (params) => fake.publish(params),
       fetchTopic: (params) => fake.fetchTopic(params),
-      receive: ({ subscriberDID: did }) => fake.receive(did),
+      receive: ({ subscriberDID: did }) => fake.receive({ subscriberDID: did }),
     }
 
     const crypto = createFakeCrypto({

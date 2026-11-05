@@ -154,7 +154,8 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
       subject: issuer.id,
     }),
   ]
-  const built = await revokeWithProof(fixture.author, {
+  const built = await revokeWithProof({
+    group: fixture.author,
     deny: [issuer.id],
     log: asControllerLog(log),
   })
@@ -260,7 +261,11 @@ test('an adopted reset reports its reason and proof reference only once', async 
   renewed.newGroup.events.on('deviceRevoked', (batch) => {
     seen.push(batch)
   })
-  const built = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
+  const built = await revokeWithProof({
+    group: renewed.newGroup,
+    reset: true,
+    log: asControllerLog(log),
+  })
   if (built.status !== 'built') throw new Error('Missing reset candidate')
   expect(seen).toHaveLength(0)
   built.result.newGroup.confirmAdopted()

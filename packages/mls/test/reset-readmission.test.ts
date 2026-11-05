@@ -71,7 +71,11 @@ async function resetRemoved() {
     group: fixture.author,
     binding: await timedBinding({ identity: setup.identity, iat: 150, exp: 250, prefix: log }),
   })
-  const reset = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
+  const reset = await revokeWithProof({
+    group: renewed.newGroup,
+    reset: true,
+    log: asControllerLog(log),
+  })
   expect(reset.status).toBe('built')
   if (reset.status !== 'built') throw new Error('Missing reset')
   const group = reset.result.newGroup
@@ -161,7 +165,8 @@ test('subjectRevokedDeviceStillRefused', async () => {
   const setup = await pipelineGroup()
   const target = agent(51)
   const log = [inception, await revoke([inception], target.id)]
-  const result = await revokeWithProof(setup.group, {
+  const result = await revokeWithProof({
+    group: setup.group,
     deny: [target.id],
     log: asControllerLog(log),
   })
@@ -190,7 +195,8 @@ test('cascadeRevokedDeviceStillRefused', async () => {
   const parent = await trustedGrant(issuer, [inception])
   const chained = await timedBinding({ identity: target, iat: 150, exp: 250, issuer, parent })
   const fixture = await belowGateWelcome(setup.group, target, withoutHolderEvidence(chained))
-  const result = await revokeWithProof(fixture.author, {
+  const result = await revokeWithProof({
+    group: fixture.author,
     deny: [issuer.id],
     log: asControllerLog([inception, await revoke([inception], issuer.id)]),
   })
@@ -352,7 +358,8 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
 
 test('resetThenSubjectRevokedStaysTerminal', async () => {
   const { group, target, log } = await resetRemoved()
-  const result = await revokeWithProof(group, {
+  const result = await revokeWithProof({
+    group,
     deny: [target.id],
     log: asControllerLog([...log, await revoke(log, target.id)]),
   })

@@ -81,7 +81,7 @@ export type ConformanceBoundRecovery = {
 export type ConformancePendingRecovery = {
   epoch: number
   markBindingUnusable: () => void
-  confirmationKey: (position: string, commitDigest: string) => Promise<Uint8Array>
+  confirmationKey: (params: ConformanceGroupMLSConfirmationKeyParams) => Promise<Uint8Array>
   judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => Promise<'authoritative' | 'advisory'>
   commit: Uint8Array
   onAccepted: () => Promise<void>
@@ -141,46 +141,37 @@ export type ConformanceGroupMLSOpenSealedLedgerParams = {
  */
 export type ConformanceGroupMLS = {
   verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
-  confirmationKey: ({
-    position,
-    commitDigest,
-  }: ConformanceGroupMLSConfirmationKeyParams) => Promise<ConformanceConfirmationKey>
-  sealRecoveryVerdict: ({
-    request,
-    verdict,
-  }: ConformanceGroupMLSSealRecoveryVerdictParams) => Promise<Uint8Array>
-  openRecoveryVerdict: ({
-    sealed,
-    requestID,
-  }: ConformanceGroupMLSOpenRecoveryVerdictParams) => Promise<ConformanceOpenedRecoveryVerdict | null>
+  confirmationKey: (
+    params: ConformanceGroupMLSConfirmationKeyParams,
+  ) => Promise<ConformanceConfirmationKey>
+  sealRecoveryVerdict: (params: ConformanceGroupMLSSealRecoveryVerdictParams) => Promise<Uint8Array>
+  openRecoveryVerdict: (
+    params: ConformanceGroupMLSOpenRecoveryVerdictParams,
+  ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
   prepareCommitBuild?: () => Promise<void>
   commitBuildFramed?: () => Promise<void>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
-  processCommit: ({
-    commit,
-    context,
-  }: ConformanceGroupMLSProcessCommitParams) => Promise<ConformanceProcessCommitResult>
+  processCommit: (
+    params: ConformanceGroupMLSProcessCommitParams,
+  ) => Promise<ConformanceProcessCommitResult>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
   prepareRecovery: () => Promise<'ready' | 'renewal-required'>
-  createRecoveryRequest: ({
-    requestID,
-    deadlineMs,
-  }: ConformanceGroupMLSCreateRecoveryRequestParams) => Promise<Uint8Array>
+  createRecoveryRequest: (
+    params: ConformanceGroupMLSCreateRecoveryRequestParams,
+  ) => Promise<Uint8Array>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
-  applyRecovery: ({
-    sealed,
-    requestID,
-  }: ConformanceGroupMLSApplyRecoveryParams) => Promise<ConformanceAppliedRecovery>
+  applyRecovery: (
+    params: ConformanceGroupMLSApplyRecoveryParams,
+  ) => Promise<ConformanceAppliedRecovery>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
-  openSealedLedger: ({
-    sealed,
-    requestID,
-  }: ConformanceGroupMLSOpenSealedLedgerParams) => Promise<Array<string> | null>
+  openSealedLedger: (
+    params: ConformanceGroupMLSOpenSealedLedgerParams,
+  ) => Promise<Array<string> | null>
   bootstrapLedger: (tokens: Array<string>) => Promise<void>
 }
 
@@ -204,11 +195,7 @@ export type ConformanceMLSGroupSealVerdictPayloadParams = {
 export type ConformanceMLSGroup = {
   groupID: string
   /** Authenticated malformed payloads bypass the sender port's shape guard. */
-  sealVerdictPayload: ({
-    member,
-    request,
-    verdict,
-  }: ConformanceMLSGroupSealVerdictPayloadParams) => Promise<Uint8Array>
+  sealVerdictPayload: (params: ConformanceMLSGroupSealVerdictPayloadParams) => Promise<Uint8Array>
   /**
    * The ports under test. The COMMITTER is not among them: every Commit here is authored by a
    * member outside this list, so `processCommit` is only ever asked about a RECEIVED commit —
@@ -258,10 +245,7 @@ export type GroupMLSConformanceParams = {
   /** Prefix for the describe block, so a failure names the implementation it came from. */
   label: string
   /** A fresh group of `size` ports plus an outside committer. `id` is unique per case. */
-  createGroup: ({
-    size,
-    id,
-  }: GroupMLSConformanceParamsCreateGroupParams) => Promise<ConformanceMLSGroup>
+  createGroup: (params: GroupMLSConformanceParamsCreateGroupParams) => Promise<ConformanceMLSGroup>
   createBoundRecovery: (
     binding?: 'root' | 'mbr' | 'membership',
   ) => Promise<ConformanceBoundRecovery>
@@ -292,7 +276,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
     id: string,
     run: (group: ConformanceMLSGroup) => Promise<void>,
   ): Promise<void> => {
-    const group = await createGroup(size, id)
+    const group = await createGroup({ size, id })
     try {
       await run(group)
     } finally {
@@ -1096,10 +1080,12 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           })
           if (pending == null || 'renewalRequired' in pending)
             throw new Error('No pending recovery')
-          const deriving = pending.confirmationKey('position', 'digest')
+          const deriving = pending.confirmationKey({ position: 'position', commitDigest: 'digest' })
           pending.markBindingUnusable()
           expect(await bob.mls.prepareRecovery()).toBe('ready')
-          await expect(pending.confirmationKey('other', 'digest')).rejects.toThrow()
+          await expect(
+            pending.confirmationKey({ position: 'other', commitDigest: 'digest' }),
+          ).rejects.toThrow()
           const key = await deriving
           expect(key).toHaveLength(32)
           expect(await bob.mls.readEpoch()).toBe(before)
@@ -1132,7 +1118,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const pending = await bob.mls.applyRecovery({ sealed: reply, requestID: 'verdict' })
           if (pending == null || 'renewalRequired' in pending)
             throw new Error('No pending recovery')
-          await pending.confirmationKey('position', 'digest')
+          await pending.confirmationKey({ position: 'position', commitDigest: 'digest' })
           const verdict: ConformanceRecoveryVerdict = {
             groupID: group.groupID,
             requestID: 'verdict',

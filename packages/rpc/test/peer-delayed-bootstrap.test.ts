@@ -110,8 +110,8 @@ describe('delayed ledger bootstrap', () => {
     const { hub, rs, alice, bob, events, recoveryRequests } = state
     hub.acceptAtAnyHead()
     const process = bob.mls.processCommit.bind(bob.mls)
-    vi.spyOn(bob.mls, 'processCommit').mockImplementation(async (commit, context) => {
-      if ((await bob.mls.readCommitHeader(commit))?.external) return process(commit, context)
+    vi.spyOn(bob.mls, 'processCommit').mockImplementation(async ({ commit, context }) => {
+      if ((await bob.mls.readCommitHeader(commit))?.external) return process({ commit, context })
       return { advanced: false, epochBefore: bob.mls.epoch(), epochAfter: bob.mls.epoch() }
     })
     const competing = await publishCommit({

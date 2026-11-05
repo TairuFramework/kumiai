@@ -216,7 +216,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       }),
     )
 
-  const wrap: GroupCrypto['wrap'] = (bytes, opts) => {
+  const wrap: GroupCrypto['wrap'] = ({ bytes, ...opts }) => {
     const did = fromUTF(localDID)
     const aad = opts?.aad ?? new Uint8Array()
     const framed = new Uint8Array(
@@ -356,7 +356,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     const payload = framed.subarray(headerEnd + didLen + aadLen, framed.length - TAG_BYTES)
     return { payload, senderDID, spentKey }
   }
-  const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
+  const unwrap: GroupCrypto['unwrap'] = ({ bytes, ...opts }) => {
     if (opts?.frame == null) {
       const { payload, senderDID } = open(bytes, opts, true)
       return { payload, senderDID, epoch }
@@ -370,10 +370,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       try {
         await pending.persistOpened(saveState(spentKey), record)
       } catch (error) {
-        throw new AppFrameStorageError({
-          message: 'failed to persist opened app frame',
-          cause: error,
-        })
+        throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
       }
       spent.add(spentKey)
       return { payload, senderDID, epoch: openedAt }

@@ -27,7 +27,7 @@ export type GroupProcedureHandlers<Protocol extends ProtocolDefinition> = {
 export type BusHandlerMaps = {
   /** Fire-and-forget event fan-out, keyed by procedure name. Host handlers are pre-registered. */
   events: EventEmitter<BusEvents>
-  /** Anycast request procedures: prc -> handler(param, { senderDID, signal }) -> result. */
+  /** Anycast request procedures: prc -> handler({ prm, context: { senderDID, signal } }) -> result. */
   requestHandlers: Record<string, BroadcastHandler>
 }
 
@@ -92,7 +92,7 @@ export function adaptBusHandlers(
       // async: a validation failure must reach the caller as a REJECTED promise (the shape
       // `createBroadcastResponder`'s handleRequest awaits), not a synchronous throw escaping the
       // call expression before any promise exists.
-      const fn: BroadcastHandler = async (param, context) => {
+      const fn: BroadcastHandler = async ({ prm: param, context }) => {
         if (validator != null) {
           const result = validator(param)
           if (result instanceof Error) throw result

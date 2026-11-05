@@ -28,11 +28,12 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
           retains.push({ topicID: topic, retention: options?.retention })
           if (scenario === 'delayed') await subscriptionGate
         }
-        fake.subscribe(did, topic, options)
+        fake.subscribe({ subscriberDID: did, topicID: topic, ...options })
       },
-      unsubscribe: ({ subscriberDID: did, topicID: topic }) => fake.unsubscribe(did, topic),
+      unsubscribe: ({ subscriberDID: did, topicID: topic }) =>
+        fake.unsubscribe({ subscriberDID: did, topicID: topic }),
       publish: (params) => fake.publish(params),
-      receive: ({ subscriberDID: did }) => fake.receive(did),
+      receive: ({ subscriberDID: did }) => fake.receive({ subscriberDID: did }),
       fetchTopic: (params) => fake.fetchTopic(params),
     }
     let captured = (): void => {}

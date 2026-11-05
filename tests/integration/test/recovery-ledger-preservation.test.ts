@@ -183,7 +183,8 @@ test('peer recovery and restore retain authenticated revocations, reset history 
     chain: [ledger.inception],
     subject: revoked.id,
   })
-  const revoke = await revokeWithProof(s.aliceGroup(), {
+  const revoke = await revokeWithProof({
+    group: s.aliceGroup(),
     deny: [revoked.id],
     log: { chain: [ledger.inception, rev], events: [] },
   })
@@ -207,7 +208,8 @@ test('peer recovery and restore retain authenticated revocations, reset history 
       })
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), {
+  const reset = await revokeWithProof({
+    group: s.aliceGroup(),
     reset: true,
     log: { chain: prefix, events: [] },
   })

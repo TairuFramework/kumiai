@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import { decodeAppAAD } from '../src/app-aad.js'
+import type { GroupCryptoUnwrapParams, GroupCryptoWrapParams } from '../src/crypto.js'
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -21,11 +22,11 @@ function peer(hub: FakeHub, localDID: string, handlers: Record<string, unknown>)
   const opened: Array<Aad> = []
   const crypto = {
     ...base,
-    wrap: (bytes: Uint8Array, opts?: { aad?: Uint8Array }) => {
+    wrap: ({ bytes, ...opts }: GroupCryptoWrapParams) => {
       sealed.push(decodeAppAAD(opts?.aad ?? new Uint8Array()))
       return base.wrap({ bytes, ...opts })
     },
-    unwrap: (bytes: Uint8Array, opts?: { expectedAAD?: Uint8Array }) => {
+    unwrap: ({ bytes, ...opts }: GroupCryptoUnwrapParams) => {
       opened.push(decodeAppAAD(opts?.expectedAAD ?? new Uint8Array()))
       return base.unwrap({ bytes, ...opts })
     },

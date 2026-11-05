@@ -102,7 +102,8 @@ function observedProvider(crypto: CryptoProvider): CryptoProvider {
   }
   return observed
 }
-export type VerifyLedgerEntryParams<_TValue = unknown> = {
+
+export type VerifyLedgerEntryParams = {
   token: string
 } & CryptoOptions
 
@@ -120,12 +121,12 @@ export type VerifyLedgerEntryParams<_TValue = unknown> = {
 export async function verifyLedgerEntry<TValue = unknown>({
   token,
   ...options
-}: VerifyLedgerEntryParams<TValue>): Promise<VerifiedLedgerEntry<TValue> | null> {
+}: VerifyLedgerEntryParams): Promise<VerifiedLedgerEntry<TValue> | null> {
   let verified: Awaited<ReturnType<typeof verifyToken<LedgerEntry<TValue>>>>
   try {
     verified = await verifyToken<LedgerEntry<TValue>>({
       ...options,
-      crypto: observedProvider(options?.crypto ?? nobleCrypto),
+      crypto: observedProvider(options.crypto ?? nobleCrypto),
       token: token,
     })
   } catch (error) {

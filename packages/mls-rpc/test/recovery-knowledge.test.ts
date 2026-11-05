@@ -508,7 +508,8 @@ async function recoveryGroup(f: Awaited<ReturnType<typeof buildEpoch>>, log = f.
 async function recovery() {
   const f = await removal()
   const r = await recoveryGroup(f)
-  const removed = await mls.revokeWithProof(r.group(), {
+  const removed = await mls.revokeWithProof({
+    group: r.group(),
     log: f.removedLog,
     remove: [{ did: f.a.identity.id, add: f.a.add }],
   })
@@ -637,7 +638,7 @@ test('known removal survives adoption and restore', async () => {
     knownRegistry: DeviceRegistry
   }
   expect(candidate.knownRegistry).toBe(candidate.group.registry)
-  const checked = retention.mock.calls[0]?.[2]
+  const checked = retention.mock.calls[0]?.[0].candidate
   expect(checked).toBeDefined()
   expect(candidate.group.registry).toEqual(checked)
   expect(candidate.group.ledgerTokens).toEqual(f.source().ledgerTokens)
@@ -664,7 +665,8 @@ test('recovery adoption refuses knowledge bootstrapped after preparation, includ
   const request = await r.requester.createRecoveryRequest({ requestID: 'adoption-race' })
   const sealed = await r.responder.sealGroupInfo(request)
   const partialLedger = r.group().ledgerTokens
-  const removed = await mls.revokeWithProof(r.group(), {
+  const removed = await mls.revokeWithProof({
+    group: r.group(),
     log: f.removedLog,
     remove: [{ did: f.a.identity.id, add: f.a.add }],
   })

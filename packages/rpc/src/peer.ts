@@ -69,6 +69,7 @@ import {
   DEFAULT_RECOVERY_JITTER_MS,
   DEFAULT_RECOVERY_TIMEOUT_MS,
   type GroupPeer,
+  type GroupPeerCommitParams,
   type GroupPeerParams,
   type ProtocolSurface,
   type RecoveryEvent,
@@ -2120,10 +2121,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * Commit to the group, rebasing until it lands or the deadline passes. Runs under the commit
    * mutex for its whole life, so `build()` never races another `build()` on this device.
    */
-  const commit = async (
-    buildInput: () => Promise<PendingCommit>,
-    options?: { holdLogSends?: true },
-  ): Promise<LaneResult> => {
+  const commit = async ({
+    build: buildInput,
+    ...options
+  }: GroupPeerCommitParams): Promise<LaneResult> => {
     if (options?.holdLogSends === true) revokeHolds++
     try {
       return await commitHeld(buildInput, options)

@@ -135,13 +135,13 @@ export async function logMeasurements() {
 
 type RpcCodecs = {
   encodeLedgerEntries: (tokens: Array<string>) => Uint8Array
-  encodeCommitFrame: (commit: Uint8Array, entries: Uint8Array) => Uint8Array
-  encodeHandshakeFrame: (kind: number, payload: Uint8Array) => Uint8Array
-  encodeRecoveryReply: (id: string, bytes: Uint8Array) => Uint8Array
+  encodeCommitFrame: (params: { commit: Uint8Array; sealedEntries: Uint8Array }) => Uint8Array
+  encodeHandshakeFrame: (params: { kind: number; payload: Uint8Array }) => Uint8Array
+  encodeRecoveryReply: (params: { requestID: string; groupInfo: Uint8Array }) => Uint8Array
 }
 type EntrySeal = {
-  deriveEntryKey: (group: GroupHandle) => Promise<Uint8Array>
-  sealEntries: (key: Uint8Array, bytes: Uint8Array) => Uint8Array
+  deriveEntryKey: (params: { handle: GroupHandle }) => Promise<Uint8Array>
+  sealEntries: (params: { key: Uint8Array; entries: Uint8Array }) => Uint8Array
 }
 
 export type FrameMeasurementsOptions = {
@@ -358,8 +358,14 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     const commit = encode(mlsMessageEncoder, result.commit)
     const welcome = encode(mlsMessageEncoder, result.welcome)
     const ledger = rpc.encodeLedgerEntries(tokens)
-    const sealedEntries = entrySeal.sealEntries(await entrySeal.deriveEntryKey(group), ledger)
-    const commitFrame = rpc.encodeHandshakeFrame(0, rpc.encodeCommitFrame(commit, sealedEntries))
+    const sealedEntries = entrySeal.sealEntries({
+      key: await entrySeal.deriveEntryKey({ handle: group }),
+      entries: ledger,
+    })
+    const commitFrame = rpc.encodeHandshakeFrame({
+      kind: 0,
+      payload: rpc.encodeCommitFrame({ commit, sealedEntries }),
+    })
     const derived = await deriveGroup(group, result.newState)
     await derived.bootstrapLedger({ tokens })
     const { groupInfo } = await exportGroupInfo({ group: derived })
@@ -402,7 +408,10 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     if (!Buffer.from(opened).equals(Buffer.from(plaintext)))
       throw new Error('HPKE round trip failed')
     const sealed = Uint8Array.from([1, ...enc, ...ct])
-    const provisional = rpc.encodeHandshakeFrame(2, rpc.encodeRecoveryReply(requestID, sealed))
+    const provisional = rpc.encodeHandshakeFrame({
+      kind: 2,
+      payload: rpc.encodeRecoveryReply({ requestID, groupInfo: sealed }),
+    })
     const requester = await processWelcome({
       identity: bob,
       invite: { groupID, inviterID: alice.id, recipientDID: bob.id, ledgerEntries: tokens },
@@ -419,7 +428,10 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       identity: alice,
       request: request.request,
     })
-    const reply = rpc.encodeHandshakeFrame(2, rpc.encodeRecoveryReply(requestID, finalSeal))
+    const reply = rpc.encodeHandshakeFrame({
+      kind: 2,
+      payload: rpc.encodeRecoveryReply({ requestID, groupInfo: finalSeal }),
+    })
     const delta = reply.length - provisional.length
     const invite = jsonBytes({
       groupID,
@@ -447,13 +459,13 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       new TextEncoder().encode('kumiai/mls/recovery-verdict/v1'),
       aad,
     )
-    const verdict = rpc.encodeHandshakeFrame(
-      6,
-      rpc.encodeRecoveryReply(
+    const verdict = rpc.encodeHandshakeFrame({
+      kind: 6,
+      payload: rpc.encodeRecoveryReply({
         requestID,
-        Uint8Array.from([1, ...verdictSeal.enc, ...verdictSeal.ct]),
-      ),
-    )
+        groupInfo: Uint8Array.from([1, ...verdictSeal.enc, ...verdictSeal.ct]),
+      }),
+    })
     const frames = {
       commit: commitFrame,
       Welcome: welcome,

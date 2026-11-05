@@ -24,12 +24,12 @@ function controllableReceiveHub(
   let returnCalls = 0
   const hub: LogHub = {
     subscribe: ({ subscriberDID, topicID, ...options }) =>
-      fake.subscribe(subscriberDID, topicID, options),
-    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe(subscriberDID, topicID),
+      fake.subscribe({ subscriberDID, topicID, ...options }),
+    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe({ subscriberDID, topicID }),
     publish: (params) => fake.publish(params),
     fetchTopic: (params) => fake.fetchTopic(params),
     receive: ({ subscriberDID }) => {
-      const inner = fake.receive(subscriberDID)
+      const inner = fake.receive({ subscriberDID })
       const iterator = inner[Symbol.asyncIterator]()
       return {
         [Symbol.asyncIterator]: () => ({

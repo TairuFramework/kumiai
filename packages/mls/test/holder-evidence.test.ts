@@ -178,7 +178,8 @@ test('deniedHolderGrantRefused', async () => {
     chain: [inception],
     subject: f.device.id,
   })
-  const revoked = await revokeWithProof(f.group, {
+  const revoked = await revokeWithProof({
+    group: f.group,
     deny: [f.device.id],
     log: asControllerLog([inception, revoke]),
   })

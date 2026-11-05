@@ -221,11 +221,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     const { commitInvite } = await import('@kumiai/mls')
-    const addBob = await commitInvite(
-      aliceHandle,
-      bobMaterial.bundle.publicPackage,
-      bobMaterial.invite,
-    )
+    const addBob = await commitInvite({
+      group: aliceHandle,
+      keyPackage: bobMaterial.bundle.publicPackage,
+      invite: bobMaterial.invite,
+    })
     aliceHandle = addBob.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,
@@ -242,11 +242,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       invitee: carolID,
       bodies,
     })
-    const addCarol = await commitInvite(
-      aliceHandle,
-      carolMaterial.bundle.publicPackage,
-      carolMaterial.invite,
-    )
+    const addCarol = await commitInvite({
+      group: aliceHandle,
+      keyPackage: carolMaterial.bundle.publicPackage,
+      invite: carolMaterial.invite,
+    })
     aliceHandle = addCarol.newGroup
     const carolHandle = await joinFromWelcome({
       identity: carolID,
@@ -388,7 +388,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       invitee: bobID,
       bodies,
     })
-    const added = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const added = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = added.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,
@@ -499,7 +503,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       invitee: bobID,
       bodies,
     })
-    const added = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const added = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = added.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,
@@ -609,7 +617,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       invitee: bobID,
       bodies,
     })
-    const added = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const added = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = added.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,
@@ -701,7 +713,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       invitee: bobID,
       bodies,
     })
-    const added = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const added = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = added.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,
@@ -843,7 +859,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       invitee: bobID,
       bodies,
     })
-    const added = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const added = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = added.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,

@@ -94,8 +94,8 @@ test('accepted adoption entries seal at the matching admission epoch once the de
   const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
   const seals: Array<number> = []
   const wrap = crypto.wrap.bind(crypto)
-  vi.spyOn(crypto, 'wrap').mockImplementation(async (bytes, opts) => {
-    const sealed = await wrap(bytes, opts)
+  vi.spyOn(crypto, 'wrap').mockImplementation(async ({ bytes, ...opts }) => {
+    const sealed = await wrap({ bytes, ...opts })
     const admission = mls.sendAdmission()
     expect(admission.admissible).toBe(true)
     expect(crypto.frameEpoch(sealed)).toBe(admission.epoch)

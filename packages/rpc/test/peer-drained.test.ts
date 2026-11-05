@@ -325,12 +325,10 @@ describe('peer host drain', { concurrent: false }, () => {
       const gather = BroadcastClient.prototype.gather
       const capture = vi.spyOn(BroadcastClient.prototype, 'gather').mockImplementation(function (
         this: BroadcastClient,
-        prc,
-        prm,
-        options,
+        { prc, prm, ...options },
       ) {
         deliveredObserver = options?.onReply
-        return gather.call(this, prc, prm, options)
+        return gather.call(this, { prc, prm, ...options })
       })
       try {
         await new Promise((resolve) => setTimeout(resolve, 30))
@@ -556,11 +554,12 @@ describe('peer host drain', { concurrent: false }, () => {
       {
         publish: (params) => fake.publish(params),
         subscribe: ({ subscriberDID: did, topicID: topic, ...options }) =>
-          fake.subscribe(did, topic, options),
-        unsubscribe: ({ subscriberDID: did, topicID: topic }) => fake.unsubscribe(did, topic),
+          fake.subscribe({ subscriberDID: did, topicID: topic, ...options }),
+        unsubscribe: ({ subscriberDID: did, topicID: topic }) =>
+          fake.unsubscribe({ subscriberDID: did, topicID: topic }),
         fetchTopic: (params) => fake.fetchTopic(params),
         receive: ({ subscriberDID: did }) => {
-          const inner = fake.receive(did)
+          const inner = fake.receive({ subscriberDID: did })
           const iterator = inner[Symbol.asyncIterator]()
           return {
             [Symbol.asyncIterator]: () => ({

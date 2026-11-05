@@ -36,9 +36,10 @@ function gatedHub(
       return hub.publish(params)
     },
     subscribe: ({ subscriberDID: did, topicID, ...options }) =>
-      hub.subscribe(did, topicID, options),
-    unsubscribe: ({ subscriberDID: did, topicID }) => hub.unsubscribe(did, topicID),
-    receive: ({ subscriberDID: did }) => hub.receive(did),
+      hub.subscribe({ subscriberDID: did, topicID, ...options }),
+    unsubscribe: ({ subscriberDID: did, topicID }) =>
+      hub.unsubscribe({ subscriberDID: did, topicID }),
+    receive: ({ subscriberDID: did }) => hub.receive({ subscriberDID: did }),
     fetchTopic: (params: HubFetchTopicParams) => hub.fetchTopic(params),
   }
 }

@@ -1678,10 +1678,7 @@ export class GroupHandle {
    * no ratchet generation, so a wrong-topic frame costs nothing to reject. The frame's AAD
    * is always returned, whether or not `expectedAAD` was given.
    */
-  async decrypt({
-    message,
-    ...opts
-  }: GroupHandleDecryptParams): Promise<{
+  async decrypt({ message, ...opts }: GroupHandleDecryptParams): Promise<{
     payload: Uint8Array
     senderDID?: string
     aad: Uint8Array
@@ -1733,11 +1730,7 @@ export class GroupHandle {
    * group's handle state. It must not call this handle or the peer. If opening or
    * persistence fails, the live state and its ratchet secrets remain untouched.
    */
-  async decryptStaged({
-    message,
-    opts,
-    persist,
-  }: GroupHandleDecryptStagedParams): Promise<{
+  async decryptStaged({ message, opts, persist }: GroupHandleDecryptStagedParams): Promise<{
     payload: Uint8Array
     senderDID: string
     aad: Uint8Array

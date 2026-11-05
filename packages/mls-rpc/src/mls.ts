@@ -131,7 +131,7 @@ export type RecoveryPendingPutParams = {
 
 export type RecoveryPending = {
   get(requestID: string): Uint8Array | null
-  put({ requestID, ephemeralPrivateKey, deadlineMs }: RecoveryPendingPutParams): void
+  put(params: RecoveryPendingPutParams): void
   delete(requestID: string): void
 }
 

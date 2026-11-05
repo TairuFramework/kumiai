@@ -247,16 +247,19 @@ test('external replacement reports denied subjects as invalid and tree-time regr
     chain: [inception],
     subject: bob.id,
   })
-  const token = await signLedgerEntry(initial.identity, {
-    groupID: author.groupID,
-    type: 'kumiai.device',
-    subject: controllerID,
-    value: {
-      effects: denyEffects([revoke], bob.id),
-      removed: [],
-      op: 'revoke',
-      proof: asControllerLog([revoke]),
-      revoked: [{ did: bob.id }],
+  const token = await signLedgerEntry({
+    identity: initial.identity,
+    entry: {
+      groupID: author.groupID,
+      type: 'kumiai.device',
+      subject: controllerID,
+      value: {
+        effects: denyEffects([revoke], bob.id),
+        removed: [],
+        op: 'revoke',
+        proof: asControllerLog([revoke]),
+        revoked: [{ did: bob.id }],
+      },
     },
   })
   await author.applyLedgerEntries([token])

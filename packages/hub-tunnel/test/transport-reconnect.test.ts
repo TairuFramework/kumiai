@@ -29,7 +29,7 @@ const sendInboundFrame = async (
     seq,
     body: { header: {}, payload: { typ: 'test', msg } },
   }
-  hub.subscribe(localDID, receiveTopicID)
+  hub.subscribe({ subscriberDID: localDID, topicID: receiveTopicID })
   await hub.publish({
     senderDID: peerDID,
     topicID: receiveTopicID,
@@ -124,8 +124,8 @@ describe('createHubTunnelTransport reconnect', () => {
 
     const hubWithoutEvents: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
-      subscribe: ({ subscriberDID, topicID }) => fakeHub.subscribe(subscriberDID, topicID),
-      receive: ({ subscriberDID }): HubReceiveSubscription => fakeHub.receive(subscriberDID),
+      subscribe: ({ subscriberDID, topicID }) => fakeHub.subscribe({ subscriberDID, topicID }),
+      receive: ({ subscriberDID }): HubReceiveSubscription => fakeHub.receive({ subscriberDID }),
     }
 
     const transport = createHubTunnelTransport<Msg, Msg>({

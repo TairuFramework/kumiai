@@ -1,5 +1,5 @@
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
+import type { HubBaseReceiveParams, HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
 import { getDefaultConfig, reset, setup } from '@sozai/log'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -30,8 +30,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       subscribe: hub.subscribe.bind(hub),
       unsubscribe: hub.unsubscribe.bind(hub),
       fetchTopic: hub.fetchTopic.bind(hub),
-      receive(subscriberDID: string): HubReceiveSubscription {
-        const inner = hub.receive(subscriberDID)
+      receive({ subscriberDID }: HubBaseReceiveParams): HubReceiveSubscription {
+        const inner = hub.receive({ subscriberDID })
         const innerIterator = inner[Symbol.asyncIterator]()
         let ended = false
         return {

@@ -126,13 +126,9 @@ export type HubBaseReceiveParams = {
  * own `publish` on top; neither is derived from the other.
  */
 export type HubBase = {
-  subscribe: ({
-    subscriberDID,
-    topicID,
-    ...options
-  }: HubBaseSubscribeParams) => Promise<void> | void
-  unsubscribe?: ({ subscriberDID, topicID }: HubBaseUnsubscribeParams) => Promise<void> | void
-  receive: ({ subscriberDID, ...options }: HubBaseReceiveParams) => HubReceiveSubscription
+  subscribe: (params: HubBaseSubscribeParams) => Promise<void> | void
+  unsubscribe?: (params: HubBaseUnsubscribeParams) => Promise<void> | void
+  receive: (params: HubBaseReceiveParams) => HubReceiveSubscription
   readonly events?: MailboxHubEvents
 }
 

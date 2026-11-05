@@ -124,7 +124,7 @@ async function fixture(
     for (const token of group.ledgerTokens) setup.tokens.set(ledgerEntryDigest(token), token)
   }
   const build = (survivors?: Array<string>, log = removedLog) =>
-    api.revokeWithProof(joined.author, { log, remove, survivors })
+    api.revokeWithProof({ group: joined.author, log, remove, survivors })
   return {
     ...epoch,
     ...setup,
@@ -193,7 +193,7 @@ test.each([
     { controller: f.did, member: f.remove[0], removedLeaves: [f.device.id] },
   ])
   expect(
-    await api.revokeWithProof(result.newGroup, { log: f.removedLog, remove: f.remove }),
+    await api.revokeWithProof({ group: result.newGroup, log: f.removedLog, remove: f.remove }),
   ).toEqual({ status: 'already-revoked' })
 })
 
@@ -223,7 +223,9 @@ test('settled rmv proved by chain index removes the same leaves', async () => {
     add: f.a.add,
   })
   const log = await settle(f, { ...snapshotted, events: [rmv] })
-  const result = built(await api.revokeWithProof(published.newGroup, { log, remove: f.remove }))
+  const result = built(
+    await api.revokeWithProof({ group: published.newGroup, log, remove: f.remove }),
+  )
   expect(result.newGroup.findMemberLeafIndex(f.device.id)).toBeUndefined()
   expect(
     result.newGroup.registry.controllers.get(f.did)?.removedMembers.get(f.a.add)?.proofRef,
@@ -235,7 +237,7 @@ test('settled rmv of a never-snapshotted incarnation is proved by its tombstone'
   const log = await pruneLog({ did: f.did, input: await settle(f) })
   expect(log.events).toEqual([])
   expect((await head(f.did, log)).tombstones?.has(f.a.add)).toBe(true)
-  const result = built(await api.revokeWithProof(f.group, { log, remove: f.remove }))
+  const result = built(await api.revokeWithProof({ group: f.group, log, remove: f.remove }))
   expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
     effects: [{ kind: 'remove', ref: { chainIndex: 1 } }],
   })
@@ -274,7 +276,8 @@ test('a settle that drops the tombstone needs the epoch proof', async () => {
   })
   expect(evidence).toBeDefined()
   const result = built(
-    await api.revokeWithProof(f.group, {
+    await api.revokeWithProof({
+      group: f.group,
       log,
       remove: f.remove,
       evidence: evidence == null ? [] : [evidence],
@@ -295,7 +298,8 @@ test('evidence takes precedence over the tombstone', async () => {
   })
   if (evidence == null) throw new Error('Missing evidence')
   const result = built(
-    await api.revokeWithProof(f.group, {
+    await api.revokeWithProof({
+      group: f.group,
       log: await pruneLog({ did: f.did, input: await settle(f) }),
       remove: f.remove,
       evidence: [evidence],
@@ -401,13 +405,13 @@ test('revokeWithProof with retained removal evidence lands after a tombstone-dro
   if (evidence == null) throw new Error('Missing evidence')
   const log = await pruneLog({ did: f.did, input: await settle(f, f.removedLog, [f.a.add]) })
   expect(log.events).toEqual([])
-  expect(await api.revokeWithProof(f.group, { log, remove: f.remove })).toEqual({
+  expect(await api.revokeWithProof({ group: f.group, log, remove: f.remove })).toEqual({
     status: 'not-provable',
     reason: 'no-rev',
   })
   const inputs = structuredClone({ log, remove: f.remove, evidence: [evidence] })
   const original = structuredClone(inputs)
-  const result = built(await api.revokeWithProof(f.group, inputs))
+  const result = built(await api.revokeWithProof({ group: f.group, ...inputs }))
   expect(inputs).toEqual(original)
   const observer = await belowGateWelcome(
     f.group,
@@ -415,7 +419,7 @@ test('revokeWithProof with retained removal evidence lands after a tombstone-dro
     await timedBinding({ identity: agent(81), iat: 100, exp: 900 }),
   )
   // Build on the same tree the observer joined.
-  const received = built(await api.revokeWithProof(observer.author, inputs))
+  const received = built(await api.revokeWithProof({ group: observer.author, ...inputs }))
   f.publish(received.newGroup)
   await observer.joined.processMessage({ message: received.commitMessage })
   const welcome = await welcomeBoundary(
@@ -683,7 +687,8 @@ test.each(['direct', 'membership'] as const)(
 
 test('oversized retained removal evidence refuses with too-large', async () => {
   const f = await fixture()
-  const result = api.revokeWithProof(f.group, {
+  const result = api.revokeWithProof({
+    group: f.group,
     log: await settle(f),
     remove: f.remove,
     evidence: [
@@ -728,7 +733,8 @@ test('a later removal cascades through the survivor grant root', async () => {
     add: f.b.add,
   })
   const second = built(
-    await api.revokeWithProof(first.newGroup, {
+    await api.revokeWithProof({
+      group: first.newGroup,
       log: { ...f.removedLog, events: [...f.removedLog.events, rmv] },
       remove: [{ did: f.b.identity.id, add: f.b.add }],
     }),
@@ -895,7 +901,8 @@ test('concurrent mutual rmv: the first to land wins and the second is not-endors
   })
   const result = built(await f.build())
   expect(
-    await api.revokeWithProof(result.newGroup, {
+    await api.revokeWithProof({
+      group: result.newGroup,
       log: { ...f.removedLog, events: [...f.removedLog.events, reverse] },
       remove: [{ did: f.b.identity.id, add: f.b.add }],
     }),
@@ -947,7 +954,8 @@ test('a new denial after reset is not mistaken for an earlier-generation record'
     target,
   })
   const first = built(
-    await api.revokeWithProof(f.group, {
+    await api.revokeWithProof({
+      group: f.group,
       log: { ...f.log, events: [...f.log.events, rev] },
       deny: [target],
     }),
@@ -960,7 +968,7 @@ test('a new denial after reset is not mistaken for an earlier-generation record'
     group: first.newGroup,
     binding: await timedBinding({ identity: f.identity, iat: 150, exp: 900, prefix: log.chain }),
   })
-  const reset = built(await api.revokeWithProof(renewed.newGroup, { reset: true, log }))
+  const reset = built(await api.revokeWithProof({ group: renewed.newGroup, reset: true, log }))
   const next = await createRevoke({
     did: f.did,
     head: await head(f.did, log),
@@ -969,7 +977,11 @@ test('a new denial after reset is not mistaken for an earlier-generation record'
     target,
   })
   const result = built(
-    await api.revokeWithProof(reset.newGroup, { log: { ...log, events: [next] }, deny: [target] }),
+    await api.revokeWithProof({
+      group: reset.newGroup,
+      log: { ...log, events: [next] },
+      deny: [target],
+    }),
   )
   expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
     effects: [{ kind: 'deny', did: target, ref: { event: digestOf(next.event) } }],
@@ -987,7 +999,8 @@ test.each(['tombstoned', 're-added'] as const)(
       iat: 100,
     })
     const removed = built(
-      await api.revokeWithProof(withB.author, {
+      await api.revokeWithProof({
+        group: withB.author,
         log: f.removedLog,
         remove: f.remove,
       }),
@@ -1023,7 +1036,8 @@ test.each(['tombstoned', 're-added'] as const)(
       add: f.b.add,
     })
     const proof = { ...settled, events: [hostile] }
-    const result = await api.revokeWithProof(group, {
+    const result = await api.revokeWithProof({
+      group,
       log: proof,
       remove: [{ did: f.b.identity.id, add: f.b.add }],
     })

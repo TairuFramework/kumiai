@@ -161,7 +161,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     'physical removal reports gaps but removal of the cursor alone does not ($name)',
     async ({ Hub }) => {
       const hub = new Hub()
-      hub.subscribe('reader', 'topic')
+      hub.subscribe({ subscriberDID: 'reader', topicID: 'topic' })
       const a = await hub.publish({
         senderDID: 'alice',
         topicID: 'topic',
@@ -1227,7 +1227,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           await flush()
         }
         const payload = await wrap(...args)
-        const message = decodeFrame(args[0]) as { payload: { data: { seq: number } } }
+        const message = decodeFrame(args[0].bytes) as { payload: { data: { seq: number } } }
         sealed.set(Array.from(payload).join(','), {
           seq: message.payload.data.seq,
           epoch: bob.crypto.frameEpoch(payload),

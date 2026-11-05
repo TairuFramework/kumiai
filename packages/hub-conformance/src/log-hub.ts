@@ -47,19 +47,9 @@ export type ConformanceMailboxHubReceiveParams = {
 
 /** The subset of `MailboxHub` (`@kumiai/hub-tunnel`) this suite exercises. */
 export type ConformanceMailboxHub = {
-  subscribe: ({
-    subscriberDID,
-    topicID,
-    ...options
-  }: ConformanceMailboxHubSubscribeParams) => Promise<void> | void
-  unsubscribe?: ({
-    subscriberDID,
-    topicID,
-  }: ConformanceMailboxHubUnsubscribeParams) => Promise<void> | void
-  receive: ({
-    subscriberDID,
-    ...options
-  }: ConformanceMailboxHubReceiveParams) => ConformanceReceiveSubscription
+  subscribe: (params: ConformanceMailboxHubSubscribeParams) => Promise<void> | void
+  unsubscribe?: (params: ConformanceMailboxHubUnsubscribeParams) => Promise<void> | void
+  receive: (params: ConformanceMailboxHubReceiveParams) => ConformanceReceiveSubscription
   publish: (params: ConformancePublishParams) => Promise<{ sequenceID: string }>
 }
 
@@ -533,10 +523,7 @@ export type MailboxAckConformanceParams<Hub extends ConformanceMailboxHub> =
      * unacked frames as a real reconnect would. Required: without a hub that actually redelivers,
      * "not redelivered" passes vacuously against one that never redelivers anything.
      */
-    redeliver: ({
-      hub,
-      subscriberDID,
-    }: MailboxAckConformanceParamsRedeliverParams<Hub>) => void | Promise<void>
+    redeliver: (params: MailboxAckConformanceParamsRedeliverParams<Hub>) => void | Promise<void>
   }
 
 /** Params for {@link testAckConformance}: the base params plus the required redelivery hook. */
@@ -573,7 +560,7 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
       // The mailbox class is delivery-derived: the last ack frees it. A hub that redelivers an
       // acked frame hands a peer the same message on every reconnect for the retention window.
       const replayed = hub.receive({ subscriberDID: BOB, topicID: TOPIC })
-      await redeliver(hub, BOB)
+      await redeliver({ hub, subscriberDID: BOB })
       const backlog = await drain(replayed, 1)
       expect(backlog.map((message) => message.sequenceID)).toEqual([delivered[1]?.sequenceID])
     })

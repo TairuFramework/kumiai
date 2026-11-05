@@ -174,9 +174,11 @@ describe('the commit lane is pull-driven', () => {
     // is a hub this lane cannot be built on, and the type says so at the host's wiring.
     const mailboxOnly: MailboxHub = {
       publish: (params) => hub.publish(params),
-      subscribe: ({ subscriberDID: did, topicID }) => hub.subscribe(did, topicID),
-      unsubscribe: ({ subscriberDID: did, topicID }) => hub.unsubscribe(did, topicID),
-      receive: ({ subscriberDID: did }) => hub.receive(did),
+      subscribe: ({ subscriberDID: did, topicID }) =>
+        hub.subscribe({ subscriberDID: did, topicID }),
+      unsubscribe: ({ subscriberDID: did, topicID }) =>
+        hub.unsubscribe({ subscriberDID: did, topicID }),
+      receive: ({ subscriberDID: did }) => hub.receive({ subscriberDID: did }),
     }
     // Never invoked: the assertion IS the compile error, checked by `test:types`. If a
     // MailboxHub ever became assignable here, @ts-expect-error would fail the build.

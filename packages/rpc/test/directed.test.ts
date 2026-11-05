@@ -67,13 +67,17 @@ function member(
     mux,
     localDID,
     selfInboxTopic: topicID,
-    inbound: createInboxPath({ mux, topicID, unwrap: unwrap ?? crypto.unwrap }),
+    inbound: createInboxPath({
+      mux,
+      topicID,
+      unwrap: unwrap ?? ((bytes) => crypto.unwrap({ bytes })),
+    }),
     resolveSendTopic: (senderDID) =>
       inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: senderDID }),
     protocol,
     protocolName: 'rpc',
     handlers: handlers as Handlers,
-    wrap: (bytes, opts) => {
+    wrap: ({ bytes, ...opts }) => {
       onWrapAAD?.(opts?.aad)
       return crypto.wrap({ bytes, ...opts })
     },
@@ -102,10 +106,14 @@ function caller(
     memberDID,
     sendTopicID: inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID }),
     receiveTopicID,
-    inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
+    inbound: createInboxPath({
+      mux,
+      topicID: receiveTopicID,
+      unwrap: (bytes) => crypto.unwrap({ bytes }),
+    }),
     runtime: createRuntime({ getRandomID: () => sessionID }),
     protocol: 'rpc',
-    wrap: (bytes, opts) => {
+    wrap: ({ bytes, ...opts }) => {
       onWrapAAD?.(opts?.aad)
       return crypto.wrap({ bytes, ...opts })
     },

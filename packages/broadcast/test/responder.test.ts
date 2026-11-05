@@ -16,7 +16,7 @@ describe('createBroadcastResponder', () => {
     const responder = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      requestHandlers: { add: (prm) => (prm as { n: number }).n + 1 },
+      requestHandlers: { add: ({ prm }) => (prm as { n: number }).n + 1 },
     })
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
@@ -271,7 +271,7 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
       requestHandlers: {
-        slow: (_prm, context) => {
+        slow: ({ context }) => {
           capturedSignal = context?.signal
           release()
           // Never resolves on its own; the test disposes the responder to abort it.
@@ -305,7 +305,7 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
       requestHandlers: {
-        slow: (_prm, context) => {
+        slow: ({ context }) => {
           release()
           // Resolves ON abort, the exact pattern that resumes `handleRequest` after
           // `dispose()` has already cleared `suppressTimers`/`inFlight`.

@@ -1,5 +1,6 @@
 import {
   type ConformanceLogHub,
+  type ConformanceMailboxHubReceiveParams,
   type ConformanceReceiveSubscription,
   testHubStoreConformance,
   testLogHubConformance,
@@ -42,7 +43,9 @@ function logHubOver(store: HubStore): ConformanceLogHub {
     return next
   }
 
-  function receive(subscriberDID: string): ConformanceReceiveSubscription {
+  function receive({
+    subscriberDID,
+  }: ConformanceMailboxHubReceiveParams): ConformanceReceiveSubscription {
     let stopped = false
     let after: string | undefined
     const buffered: Array<StoredMessage> = []

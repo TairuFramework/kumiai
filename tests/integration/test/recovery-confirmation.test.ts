@@ -472,9 +472,9 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     .mockImplementation(seal)
   const adopted: Array<number> = []
   const replace = s.bobAccess.replace.bind(s.bobAccess)
-  vi.spyOn(s.bobAccess, 'replace').mockImplementation(async (group, guard) => {
+  vi.spyOn(s.bobAccess, 'replace').mockImplementation(async ({ next: group, guard }) => {
     adopted.push(Number(group.epoch))
-    await replace(group, guard)
+    await replace({ next: group, guard })
   })
   let supersededOpened = false
   const open = s.bobMLS.openRecoveryVerdict.bind(s.bobMLS)
@@ -581,8 +581,8 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
     return opened
   })
   const seal = s.aliceMLS.sealRecoveryVerdict.bind(s.aliceMLS)
-  vi.spyOn(s.aliceMLS, 'sealRecoveryVerdict').mockImplementation(async (request, verdict) => {
-    if (verdict.verdict !== 'confirmed') return seal(request, verdict)
+  vi.spyOn(s.aliceMLS, 'sealRecoveryVerdict').mockImplementation(async ({ request, verdict }) => {
+    if (verdict.verdict !== 'confirmed') return seal({ request, verdict })
     const refusal = { ...verdict, verdict: 'refused', reason: 'policy' }
     return sealRealRecoveryVerdict({ identity: outsider, handle: s.aliceGroup() }, request, refusal)
   })
@@ -591,14 +591,17 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
     const frame = decodeHandshakeFrame(value.payload)
     if (frame.kind === HANDSHAKE_KIND.recoveryConfirmRequest) {
       const request = decodeRecoveryConfirmRequest(frame.payload)
-      const forged = await seal(request.request, {
-        groupID: s.aliceGroup().groupID,
-        requestID: request.requestID,
-        position: request.position,
-        commitDigest: request.commitDigest,
-        verdict: 'confirmed',
-        epoch: Number(s.aliceGroup().epoch),
-        tag: confirmationTag({ key: new Uint8Array(32), requestID: request.requestID }),
+      const forged = await seal({
+        request: request.request,
+        verdict: {
+          groupID: s.aliceGroup().groupID,
+          requestID: request.requestID,
+          position: request.position,
+          commitDigest: request.commitDigest,
+          verdict: 'confirmed',
+          epoch: Number(s.aliceGroup().epoch),
+          tag: confirmationTag({ key: new Uint8Array(32), requestID: request.requestID }),
+        },
       })
       await s.aliceConnection.publish({
         senderDID: s.aliceID.id,

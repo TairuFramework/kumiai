@@ -58,7 +58,7 @@ describe('retained pushes precede later group opens', () => {
       aad: encodeAppAAD({ topicID: liveTopic, intent: 'ephemeral' }),
     })
     const openFailures: Array<unknown> = []
-    vi.spyOn(crypto, 'unwrap').mockImplementation(async (bytes, opts) => {
+    vi.spyOn(crypto, 'unwrap').mockImplementation(async ({ bytes, ...opts }) => {
       const name = bytes === a ? 'A' : bytes === b ? 'B' : 'other'
       // Model an evicted skipped key: opening B first makes A permanently unavailable.
       if (name === 'A' && opened.includes('B')) {
@@ -66,7 +66,7 @@ describe('retained pushes precede later group opens', () => {
         openFailures.push(error)
         throw error
       }
-      const result = await unwrap(bytes, opts)
+      const result = await unwrap({ bytes, ...opts })
       opened.push(name)
       return result
     })

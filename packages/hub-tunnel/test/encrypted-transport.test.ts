@@ -116,7 +116,7 @@ describe('createEncryptedHubTunnelTransport', () => {
     })
 
     try {
-      hub.subscribe(bDID, topicA)
+      hub.subscribe({ subscriberDID: bDID, topicID: topicA })
       await hub.publish({
         senderDID: aDID,
         topicID: topicA,

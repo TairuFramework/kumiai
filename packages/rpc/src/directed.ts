@@ -149,7 +149,8 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(tagged, {
+        payload: await wrap({
+          bytes: tagged,
           aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
         }),
       })
@@ -335,7 +336,8 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
         const tagged = encodeDirectedPayload(protocolName, publishParams.payload)
-        const sealed = await wrap(tagged, {
+        const sealed = await wrap({
+          bytes: tagged,
           aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
         })
         return mux.mailbox.publish({

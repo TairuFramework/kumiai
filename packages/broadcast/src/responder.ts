@@ -15,10 +15,7 @@ export type BroadcastHandlerParams = {
   context?: { senderDID?: string; signal?: AbortSignal }
 }
 
-export type BroadcastHandler = ({
-  prm,
-  context,
-}: BroadcastHandlerParams) => unknown | Promise<unknown>
+export type BroadcastHandler = (params: BroadcastHandlerParams) => unknown | Promise<unknown>
 export type SuppressConfig = { jitterMs?: number; suppressTtlMs?: number }
 export type SuppressibleHandler = BroadcastHandler & { suppress: SuppressConfig }
 
@@ -113,7 +110,10 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     inFlight.add(controller)
     let reply: ReplyData
     try {
-      const ok = await handler(request.prm, { senderDID, signal: controller.signal })
+      const ok = await handler({
+        prm: request.prm,
+        context: { senderDID, signal: controller.signal },
+      })
       reply = { kind: 'res', rid: request.rid, ok }
     } catch (error) {
       reply = {

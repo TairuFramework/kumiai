@@ -505,7 +505,7 @@ export async function survivorTargets({
   return descendants
 }
 
-export type RevokeWithProofParams =
+export type RevokeProofInput =
   | {
       log: ControllerLog
       deny?: Array<string>
@@ -515,10 +515,12 @@ export type RevokeWithProofParams =
     }
   | { reset: true; log: ControllerLog }
 
-export async function revokeWithProof(
-  group: GroupHandle,
-  params: RevokeWithProofParams,
-): Promise<RevokeBuildResult> {
+export type RevokeWithProofParams = { group: GroupHandle } & RevokeProofInput
+
+export async function revokeWithProof({
+  group,
+  ...params
+}: RevokeWithProofParams): Promise<RevokeBuildResult> {
   return mutexFor(group).run(async () => {
     try {
       const controller = group.anchor.controller

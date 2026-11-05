@@ -36,7 +36,7 @@ test('the app-log drain never opens a frame the hub attributes to this member', 
   const base = createFakeCrypto({ epoch: 1, localDID: 'bob' })
   const opened: Array<Uint8Array> = []
   const crypto: typeof base = Object.assign(Object.create(base) as typeof base, {
-    unwrap: ((bytes, opts) => {
+    unwrap: (({ bytes, ...opts }) => {
       opened.push(bytes)
       return base.unwrap({ bytes, ...opts })
     }) satisfies GroupCrypto['unwrap'],
