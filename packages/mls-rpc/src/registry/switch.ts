@@ -14,8 +14,12 @@ import {
 
 import { branchAbandonmentPreparer, writeBranchAbandonment } from '../branch-history.js'
 import { currentCheckpointFact, prepareCheckpointInstallation } from '../checkpoint-capture.js'
-import { retirementDomain } from '../closing-preparation.js'
-import type { EntryCapability } from '../entry-capability.js'
+import {
+  observeSourceClosure,
+  persistenceDigest,
+  retirementDomain,
+} from '../closing-preparation.js'
+import { coordinatorBinding, type EntryCapability, type EntryReads } from '../entry-capability.js'
 import {
   hasActiveManualRecovery,
   manualRecoveryAttempt,
@@ -43,11 +47,7 @@ import {
   reserveFromBytes,
   restoreCaptured,
 } from './reserve.js'
-import {
-  prepareIncarnationRetirement,
-  type RetirementRequest,
-  retireIncarnation,
-} from './retired.js'
+import { prepareIncarnationRetirement, retireIncarnation } from './retired.js'
 import {
   assertRetirementDrained,
   type RegistryRetirement,
@@ -136,6 +136,23 @@ function matchSource(
     throw new RegistrySourceMovedError('Registry switch source moved')
 }
 
+type RetirementRetry = {
+  source: GroupKey
+  at: number
+  outcomeID: string
+  guardsDigest: Uint8Array
+}
+
+async function retirementGuards(reads: EntryReads, key: GroupKey): Promise<Uint8Array> {
+  return persistenceDigest({
+    source: await readRecoverySource(reads, key.groupID),
+    lifetime: await reads.lifetime(),
+    control: await reads.control(key.incarnation),
+    outbox: await reads.outbox(key.incarnation),
+    checkpoints: await reads.checkpoints(),
+  })
+}
+
 export function createRegistrySwitch<TTx extends GroupTransaction>(environment: {
   persistence: GroupPersistence<TTx>
   capability: EntryCapability<TTx>
@@ -145,13 +162,29 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
   ownerDID: string
   start(): Promise<void>
   held(key: GroupKey): SafetyHold
-}): (
-  input: GroupHandle,
-  params: Parameters<GroupHandleRegistry['switchIncarnation']>[1],
-) => Promise<{ key: GroupKey; reservation: Reservation | null }> {
+}) {
   const { persistence, capability, retirement } = environment
-  const retirementPlans = new Map<string, RetirementRequest>()
-  return async (input: GroupHandle, params) => {
+  const retirementPlans = new Map<string, RetirementRetry>()
+  const planObservers = new Map<string, () => void>()
+  let disposed = false
+  function purgePlans(groupID: string): void {
+    for (const [id, plan] of retirementPlans)
+      if (plan.source.groupID === groupID) retirementPlans.delete(id)
+  }
+  function observePlans(groupID: string): void {
+    if (planObservers.has(groupID) || disposed) return
+    planObservers.set(
+      groupID,
+      capability.observe(groupID, () => purgePlans(groupID)),
+    )
+  }
+  const coordinator = coordinatorBinding(persistence)
+  if (coordinator === null) throw new GroupStateConflictError('Missing switch coordinator')
+  const stopClosure = observeSourceClosure(coordinator, (key) => purgePlans(key.groupID))
+  async function switchIncarnation(
+    input: GroupHandle,
+    params: Parameters<GroupHandleRegistry['switchIncarnation']>[1],
+  ): Promise<{ key: GroupKey; reservation: Reservation | null }> {
     retirement.assertEntry(() => params.source.key)
     const automatic = automaticRegistrySwitches.delete(input)
     const captured = await relinquishSend(input)
@@ -159,6 +192,7 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     const { source, rejoinID, proof, write } = copyStoredValue(params)
     const groupID = source.key.groupID
     const planKey = JSON.stringify([groupID, write.mutationID])
+    observePlans(groupID)
     const destination = { groupID, incarnation: source.key.incarnation + 1 }
     const capturedState = capturedRecord(captured, destination, 1)
     const candidate = await restoreCaptured(environment.cold, capturedState)
@@ -188,6 +222,18 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
       if (!(error instanceof GroupStateUncertainError)) throw error
     }
     const replay = await capability.read(groupID, async (reads) => {
+      if ([...retirementPlans.values()].some((plan) => plan.source.groupID === groupID)) {
+        const guardsDigest = await retirementGuards(reads, source.key)
+        for (const plan of retirementPlans.values()) {
+          if (plan.source.groupID !== groupID || sameStoredValue(plan.guardsDigest, guardsDigest))
+            continue
+          const invalidRetry = retirementPlans.has(planKey)
+          purgePlans(groupID)
+          if (invalidRetry)
+            throw new GroupStateConflictError('Closing rollback retry source or domain moved')
+          break
+        }
+      }
       assertChoice(await reads.checkpoints())
       const control = await reads.control(source.key.incarnation)
       const manual =
@@ -265,8 +311,10 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     })
     let stopObservation = () => {}
     let hooked = false
+    let retryPlan: RetirementRetry | undefined
     function settle(outcome: 'committed' | 'rolled-back'): void {
-      if (outcome === 'committed') retirementPlans.delete(planKey)
+      if (outcome === 'committed') purgePlans(groupID)
+      else if (retryPlan !== undefined && !disposed) retirementPlans.set(planKey, retryPlan)
       attempt.settle(outcome)
       stopObservation()
     }
@@ -404,33 +452,36 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                 mutationID: write.mutationID,
                 restorePending: false,
               }
-              const retirement =
-                retirementPlans.get(planKey) ??
-                (await prepareIncarnationRetirement(reads, {
-                  source: source.key,
-                  nextIncarnation: destination.incarnation,
-                  ...(authorisationID === undefined
-                    ? { switchedRejoinID: rejoinID }
-                    : { manualRejoinID: rejoinID }),
-                  abandonedAttempts: [
-                    ...new Set(
-                      (
-                        await reads.checkpoints()
-                      ).flatMap((row) =>
-                        row.kind === 'manual-recovery' &&
-                        sameStoredValue(row.key, source.key) &&
-                        row.value.stage === 'authorised' &&
-                        row.value.attempt !== null &&
-                        row.value.attempt.id !== rejoinID
-                          ? [row.value.attempt.id]
-                          : [],
-                      ),
+              // Only deterministic inputs survive rollback. Private rows are read anew under G.
+              const retry = retirementPlans.get(planKey) ?? {
+                source: { ...source.key },
+                at: Date.now(),
+                outcomeID: crypto.randomUUID(),
+                guardsDigest: await retirementGuards(reads, source.key),
+              }
+              const retirement = await prepareIncarnationRetirement(reads, {
+                source: source.key,
+                nextIncarnation: destination.incarnation,
+                ...(authorisationID === undefined
+                  ? { switchedRejoinID: rejoinID }
+                  : { manualRejoinID: rejoinID }),
+                abandonedAttempts: [
+                  ...new Set(
+                    (await reads.checkpoints()).flatMap((row) =>
+                      row.kind === 'manual-recovery' &&
+                      sameStoredValue(row.key, source.key) &&
+                      row.value.stage === 'authorised' &&
+                      row.value.attempt !== null &&
+                      row.value.attempt.id !== rejoinID
+                        ? [row.value.attempt.id]
+                        : [],
                     ),
-                  ],
-                  mutationID: write.mutationID,
-                  at: Date.now(),
-                }))
-              retirementPlans.set(planKey, retirement)
+                  ),
+                ],
+                mutationID: write.mutationID,
+                at: retry.at,
+                outcomeID: retry.outcomeID,
+              })
               const prepared = {
                 expected: {
                   revision: lifetime.revision,
@@ -469,12 +520,14 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
                   }),
                 },
               }
-              return await closing.freeze({
+              const frozen = await closing.freeze({
                 source: source.key,
                 reason: 'switch',
                 prepared,
                 domain: await retirementDomain(reads, nextLifetime, [state]),
               })
+              retryPlan = retry
+              return frozen
             },
             async (stores, prepared) => {
               assertChoice(await stores.checkpoints.list())
@@ -576,5 +629,15 @@ export function createRegistrySwitch<TTx extends GroupTransaction>(environment: 
     } finally {
       stopDrainObservation()
     }
+  }
+  return {
+    switchIncarnation,
+    dispose() {
+      disposed = true
+      retirementPlans.clear()
+      stopClosure()
+      for (const unsubscribe of planObservers.values()) unsubscribe()
+      planObservers.clear()
+    },
   }
 }

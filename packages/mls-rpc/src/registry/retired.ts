@@ -96,6 +96,7 @@ export type RetirementRequest = {
   abandonedAttempts?: Array<string>
   mutationID: string
   at: number
+  outcomeID?: string
 } & { prepared?: RetirementPlan }
 
 function retirementChanges(control: ControlSnapshot, params: RetirementRequest): ControlChanges {
@@ -108,7 +109,12 @@ function retirementChanges(control: ControlSnapshot, params: RetirementRequest):
     at,
     kind: 'unknown',
   }))
-  const closure = closeControlBuild(control, { kind: 'unknown' }, at, crypto.randomUUID())
+  const closure = closeControlBuild(
+    control,
+    { kind: 'unknown' },
+    at,
+    params.outcomeID ?? crypto.randomUUID(),
+  )
   const changes: ControlChanges = {
     ...closure,
     spentSource: null,

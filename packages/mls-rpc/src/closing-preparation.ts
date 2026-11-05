@@ -59,7 +59,7 @@ type ClosingExpectation = Pick<
 }
 // Retain only guards and a digest across attempts, never the retired private state bytes.
 const originalExpectations = new WeakMap<object, Map<string, ClosingExpectation>>()
-function persistenceDigest(value: unknown): Uint8Array {
+export function persistenceDigest(value: unknown): Uint8Array {
   function sorted(value: unknown): unknown {
     if (value === null || typeof value !== 'object' || value instanceof Uint8Array) return value
     if (Array.isArray(value)) return value.map(sorted)

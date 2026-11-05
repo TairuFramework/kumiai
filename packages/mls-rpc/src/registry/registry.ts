@@ -994,6 +994,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     }
     if (disposal !== null) return disposal
     closing = true
+    disposeSwitches()
     finaliserStop.abort(new DisplacedGroupHandleError('Registry is disposed'))
     for (const slot of slots.values()) {
       slot.pendingHandoff = null
@@ -1056,7 +1057,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     start,
     held,
   })
-  const switchIncarnation = createRegistrySwitch({
+  const { switchIncarnation, dispose: disposeSwitches } = createRegistrySwitch({
     persistence: persistence.groups,
     capability,
     retirement,

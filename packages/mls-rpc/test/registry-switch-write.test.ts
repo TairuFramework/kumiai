@@ -22,8 +22,10 @@ import { asLogPosition, type StagedAdoption } from '@kumiai/rpc'
 import { createCommit, defaultProposalTypes } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
+import { encodeControlJournal } from '../src/control-journal.js'
 import { entryCapability } from '../src/entry-capability.js'
 import { createRecoverySwitchFactory, toRegistrySwitchWrite } from '../src/index.js'
+import { encodeStoredValue } from '../src/persistence-codec.js'
 import {
   GroupStateUncertainError,
   RegistryResyncRefusedError,
@@ -35,19 +37,23 @@ import {
 } from '../src/recovery-codec.js'
 import { recoveryTrustDigest } from '../src/recovery-trust-digest.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
+import * as retirementPreparation from '../src/registry/retired.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import type { RegistrySwitchWrite } from '../src/registry/types.js'
 import { verifyRegistryResync } from '../src/registry/verdict.js'
 import { deferred } from '../src/runtime.js'
 import { registryLeaseSnapshot } from '../src/testing.js'
+import { createAsyncLocalOwnershipContext } from './fixtures/ownership-context.js'
 import {
   createRegistryFixture,
+  registryFixtureMutateControl,
   registryFixtureRecoverySource,
   registryFixtureRestore,
   retainCapturedDestination,
 } from './fixtures/registry.js'
 import { createRegistryRecovery } from './fixtures/registry-recovery.js'
 import { registryHandle } from './fixtures/registry-welcome.js'
+import { requireValue } from './fixtures/require-value.js'
 
 const lifecycle = (await import(
   new URL('../../mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
@@ -81,6 +87,7 @@ async function setup(
   mode: 'real-mls' | 'double',
   advanced: boolean | 'remove-signer' | 'controller-less' = false,
   trustMaps = false,
+  ownershipContext = false,
 ) {
   const identity = randomIdentity()
   const signer = randomIdentity()
@@ -90,6 +97,7 @@ async function setup(
     setup: 'empty',
     groupID,
     identity,
+    ownershipContext: ownershipContext ? createAsyncLocalOwnershipContext() : undefined,
     options:
       advanced === 'controller-less'
         ? {}
@@ -262,6 +270,37 @@ async function setup(
     originSigner: signer,
   }
 }
+async function rolledBackRetirement(s: Awaited<ReturnType<typeof setup>>) {
+  const planKey = JSON.stringify([groupID, s.write.mutationID])
+  let plans: Map<string, unknown> | undefined
+  const originalSet = Map.prototype.set
+  const capture = vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+    this: Map<string, unknown>,
+    key,
+    value,
+  ) {
+    if (key === planKey && value !== null && typeof value === 'object' && 'at' in value)
+      plans = this as Map<string, unknown>
+    return originalSet.call(this, key, value)
+  })
+  try {
+    s.fixture.armWorkFault(s.write.mutationID, 'before-commit')
+    await expect(s.run()).rejects.toThrow()
+    expect((await s.fixture.device.groups.ports(key).control.load()).rejoin).toEqual(s.record)
+  } finally {
+    capture.mockRestore()
+  }
+  const retained = requireValue(plans)
+  expect(retained.has(planKey), 'proven rollback preserves deterministic retry inputs').toBe(true)
+  return { plans: retained, planKey }
+}
+
+function retainedBytes(value: unknown): Array<Uint8Array> {
+  if (value instanceof Uint8Array) return [value]
+  if (value === null || typeof value !== 'object') return []
+  return [...(value instanceof Map ? value.values() : Object.values(value))].flatMap(retainedBytes)
+}
+
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`captured restricted switch -- ${mode}`, () => {
     test.each(['member', 'non-member'] as const)(
@@ -703,6 +742,255 @@ for (const mode of ['real-mls', 'double'] as const) {
         await s.fixture.close()
       }
     })
+
+    for (const ownershipContext of [false, true]) {
+      describe(`retirement retry retention (ownershipContext=${ownershipContext})`, () => {
+        const create = () => setup(mode, false, false, ownershipContext)
+
+        test('rollback retains no recovery candidate or request key in retirement retry inputs', async () => {
+          const s = await create()
+          try {
+            const { plans, planKey } = await rolledBackRetirement(s)
+            expect(
+              s.record.candidate.length,
+              'live private candidate calibrates the witness',
+            ).toBeGreaterThan(32)
+            expect(s.record.requestKey.length).toBe(32)
+            const bytes = retainedBytes(plans.get(planKey))
+            expect
+              .soft(
+                bytes.some(
+                  (value) =>
+                    value.length === s.record.candidate.length &&
+                    value.every((byte, i) => byte === s.record.candidate[i]),
+                ),
+                'retry inputs never retain the recovery candidate',
+              )
+              .toBe(false)
+            expect
+              .soft(
+                bytes.some(
+                  (value) =>
+                    value.length === s.record.requestKey.length &&
+                    value.every((byte, i) => byte === s.record.requestKey[i]),
+                ),
+                'retry inputs never retain the request key',
+              )
+              .toBe(false)
+            expect(
+              bytes.every((value) => value.length <= 32),
+              'only fixed-size digests may survive rollback',
+            ).toBe(true)
+          } finally {
+            await s.owner.dispose()
+            await s.fixture.close()
+          }
+        })
+
+        test('unchanged retirement retry rebuilds private snapshots with original timestamps and outcome IDs', async () => {
+          const s = await create()
+          const prepare = vi.spyOn(retirementPreparation, 'prepareIncarnationRetirement')
+          const now = vi.spyOn(Date, 'now')
+          try {
+            const state = requireValue(await s.fixture.device.groups.loadState(key))
+            if (state.deleted || state.state === null) throw new Error('Missing source state')
+            const sourceState = state.state
+            await registryFixtureMutateControl(s.fixture, key, (control) => ({
+              ...control,
+              commitOnce: {
+                incarnation: 1,
+                epoch: state.epoch,
+                authenticatorBefore: state.epochAuthenticator,
+                opID: 'retiring-rotation',
+                kind: 'rotation',
+                revokes: false,
+                enqueuedAt: 1,
+                deadline: 1000,
+                publishID: 'retiring-publish',
+                payload: s.record.payload,
+                payloadDigest: s.record.payloadDigest,
+                digest: s.record.digest,
+                journal: encodeControlJournal({
+                  version: 1,
+                  source: s.source,
+                  checkpoint: null,
+                  sourceState,
+                  sourceCredential: s.sourceGroup.credential,
+                  sourceLedger: s.sourceGroup.ledgerTokens,
+                  candidate: encodeStoredValue({
+                    state: encodeClientState(s.candidate.state),
+                    credential: s.candidate.credential,
+                    ledger: s.candidate.ledgerTokens,
+                  }),
+                }),
+                bodies: [],
+                welcome: null,
+                head: null,
+                expectedHead: null,
+              },
+            }))
+            now.mockReturnValue(1700000000000)
+            const { plans } = await rolledBackRetirement(s)
+            const firstRequest: retirementPreparation.RetirementRequest = await requireValue(
+              prepare.mock.results[0],
+            ).value
+            const first = requireValue(firstRequest.prepared)
+            const outcome = requireValue(
+              first.changes.putOutcomes?.find((row) => row.opID === 'retiring-rotation'),
+            )
+            expect(outcome.at).toBe(1700000000000)
+            expect(outcome.id.length).toBeGreaterThan(0)
+            now.mockReturnValue(1700000010000)
+            await expect(s.run()).resolves.toEqual(destination)
+            const after = await s.fixture.device.groups.ports(key).control.load()
+            expect(after.outcomes.find((row) => row.opID === 'retiring-rotation')).toEqual(outcome)
+            expect(
+              prepare.mock.results,
+              'each retry freshly prepares the private retirement snapshot',
+            ).toHaveLength(2)
+            const secondRequest: retirementPreparation.RetirementRequest = await requireValue(
+              prepare.mock.results[1],
+            ).value
+            const second = requireValue(secondRequest.prepared)
+            expect(second.control).not.toBe(first.control)
+            expect(plans.size, 'successful retry discards its deterministic inputs').toBe(0)
+          } finally {
+            now.mockRestore()
+            prepare.mockRestore()
+            await s.owner.dispose()
+            await s.fixture.close()
+          }
+        })
+
+        test('changed retirement guards purge obsolete retry inputs before a fresh switch commits', async () => {
+          const s = await create()
+          try {
+            const { plans, planKey } = await rolledBackRetirement(s)
+            const state = requireValue(await s.fixture.device.groups.loadState(key))
+            await s.fixture.mutateMetadata(key, (metadata) => ({
+              ...(metadata as object),
+              version: state.version + 1,
+            }))
+            s.recovery.source = await s.owner.recoverySource(groupID)
+            await expect(s.run()).rejects.toThrow('Closing rollback retry source or domain moved')
+            expect
+              .soft(
+                plans.has(planKey),
+                'changed guards immediately discard the obsolete retry inputs',
+              )
+              .toBe(false)
+            const mutationID = crypto.randomUUID()
+            await registryFixtureMutateControl(s.fixture, key, (control) => ({
+              ...control,
+              rejoin: { ...s.record, switchMutationID: mutationID },
+            }))
+            s.write.mutationID = mutationID
+            await expect(s.run()).resolves.toEqual(destination)
+            expect(
+              plans.has(planKey),
+              'fresh switch commit leaves no obsolete retirement plan',
+            ).toBe(false)
+            expect(
+              retainedBytes([...plans.values()]),
+              'fresh commit retains no old private recovery bytes',
+            ).toEqual([])
+          } finally {
+            await s.owner.dispose()
+            await s.fixture.close()
+          }
+        })
+
+        test('fresh committed mutation purges rolled-back retirement retry inputs', async () => {
+          const s = await create()
+          try {
+            const { plans, planKey } = await rolledBackRetirement(s)
+            await s.fixture.device.groups.ports(key).control.apply(
+              {
+                cursor: {
+                  position: asLogPosition('new-control-position'),
+                  epoch: s.record.epochAfter,
+                },
+              },
+              crypto.randomUUID(),
+            )
+            expect(
+              plans.has(planKey),
+              'a later committed mutation discards obsolete retry inputs',
+            ).toBe(false)
+          } finally {
+            await s.owner.dispose()
+            await s.fixture.close()
+          }
+        })
+
+        test('source closure purges rolled-back retirement retry inputs before another submission', async () => {
+          const s = await create()
+          try {
+            const { plans, planKey } = await rolledBackRetirement(s)
+            const capability = requireValue(entryCapability(s.fixture.device.groups))
+            await expect(
+              capability.run(
+                { groupID, mutationID: crypto.randomUUID() },
+                async (reads, closing) => {
+                  const record = requireValue(await reads.state(1))
+                  const state = { ...record, terminal: true, version: record.version + 1 }
+                  return closing.freeze({
+                    source: key,
+                    reason: 'terminal',
+                    prepared: { expected: await reads.lifetime(), value: { state } },
+                    domain: { states: [state], lifetime: null },
+                  })
+                },
+                async () => {
+                  expect
+                    .soft(plans.has(planKey), 'source closure discards obsolete inputs before work')
+                    .toBe(false)
+                  throw new Error('terminal rollback')
+                },
+              ),
+            ).rejects.toThrow('terminal rollback')
+            expect(plans.size, 'another rollback cannot resurrect the old plan').toBe(0)
+          } finally {
+            await s.owner.dispose()
+            await s.fixture.close()
+          }
+        })
+
+        test('disposal during unresolved switch cannot retain retry inputs after rollback', async () => {
+          const s = await create()
+          const { plans } = await rolledBackRetirement(s)
+          const fault = s.fixture.armWorkFault(s.write.mutationID, 'pending')
+          const result = s.run().catch((error: unknown) => ({ error }))
+          let disposal: Promise<void> | undefined
+          try {
+            await fault.rejected
+            disposal = s.owner.dispose()
+            await fault.finish('rollback')
+            expect(await result).toHaveProperty('error')
+            await disposal
+            expect(plans.size, 'late rollback cannot repopulate a disposed retry cache').toBe(0)
+          } finally {
+            await fault.finish('rollback')
+            await result
+            await disposal
+            await s.owner.dispose()
+            await s.fixture.close()
+          }
+        })
+
+        test('registry disposal purges rolled-back retirement retry inputs', async () => {
+          const s = await create()
+          try {
+            const { plans } = await rolledBackRetirement(s)
+            await s.owner.dispose()
+            expect(plans.size, 'disposal discards all retained retry inputs').toBe(0)
+          } finally {
+            await s.owner.dispose()
+            await s.fixture.close()
+          }
+        })
+      })
+    }
 
     test('factory keeps saved mutation ID across rollback and rejects unrestricted adoption writes', async () => {
       const s = await setup(mode)
