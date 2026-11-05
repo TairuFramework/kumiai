@@ -9,6 +9,7 @@
  * @module mls-hub
  */
 
+export type { HubRefusedErrorParams, HubRetryableErrorParams } from './errors.js'
 export {
   type HubCallStage,
   HubRefusedError,
@@ -26,6 +27,7 @@ export {
   type KeyPackagePoolParams,
   type StockResult,
 } from './pool.js'
+export type { KeyPackagePoolStoreDeleteParams, KeyPackagePoolStorePutParams } from './pool-store.js'
 export {
   createMemoryKeyPackagePoolStore,
   type KeyPackagePoolStore,
@@ -37,6 +39,7 @@ export {
   type LastResortProvisionerParams,
   type ProvisionResult,
 } from './provisioner.js'
+export type { LastResortStoreDeleteParams, LastResortStorePutParams } from './store.js'
 export {
   createMemoryLastResortStore,
   type LastResortRecord,

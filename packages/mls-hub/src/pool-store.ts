@@ -29,6 +29,16 @@ export type KeyPackageRecord = {
   notAfter: number
 }
 
+export type KeyPackagePoolStorePutParams = {
+  ownerDID: string
+  record: KeyPackageRecord
+}
+
+export type KeyPackagePoolStoreDeleteParams = {
+  ownerDID: string
+  ref: string
+}
+
 /**
  * Durable storage for retained ordinary key packages, implemented by the host.
  *
@@ -52,8 +62,8 @@ export type KeyPackageRecord = {
  */
 export type KeyPackagePoolStore = {
   list(ownerDID: string): Promise<Array<KeyPackageRecord>>
-  put(ownerDID: string, record: KeyPackageRecord): Promise<void>
-  delete(ownerDID: string, ref: string): Promise<void>
+  put({ ownerDID, record }: KeyPackagePoolStorePutParams): Promise<void>
+  delete({ ownerDID, ref }: KeyPackagePoolStoreDeleteParams): Promise<void>
 }
 
 /**

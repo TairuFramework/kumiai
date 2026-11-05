@@ -85,7 +85,9 @@ export async function lifecycleGroup(
 ) {
   const identity = agent(41)
   const tokens = new Map<string, string>()
-  const { group } = await createGroup(identity, 'lifecycle-ledger', {
+  const { group } = await createGroup({
+    identity,
+    groupID: 'lifecycle-ledger',
     controller: await bindingFor(identity, prefix),
     controllerLog,
     // Isolate ledger checks from the proposal rules supplied by the later consensus gate.
@@ -106,7 +108,7 @@ export async function addMember(
   identity: OwnIdentity,
   binding: ControllerBinding,
 ) {
-  const bundle = await createKeyPackageBundle(identity, { controller: binding })
+  const bundle = await createKeyPackageBundle({ identity, controller: binding })
   const result = await createCommit({
     context: group.context,
     state: group.state,
@@ -130,7 +132,7 @@ export async function addMember(
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
-  await joined.bootstrapLedger(group.ledgerTokens)
+  await joined.bootstrapLedger({ tokens: group.ledgerTokens })
   return { group: await deriveGroup(group, result.newState), joined }
 }
 
@@ -155,7 +157,7 @@ export async function rawEnact(group: GroupHandle, tokens: Array<string>) {
   const head = readLedgerHead(group)
   if (head == null) throw new Error('Missing ledger head')
   const entries = tokens.map(ledgerEntryDigest)
-  const extension = buildLedgerHeadExtension(extendHead(head.head, entries))
+  const extension = buildLedgerHeadExtension(extendHead({ head: head.head, entryIDs: entries }))
   const result = await createCommit({
     context: group.context,
     state: group.state,

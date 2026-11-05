@@ -102,7 +102,7 @@ test('external rejoin judges an mbr source tree after the ledger bootstrap', asy
     let bootstrapped = false
     const { group, commitMessage } = await joinGroupExternal({
       ...f.params,
-      beforeBinding: async (pending, source) => {
+      beforeBinding: async ({ pending, source }) => {
         expect(source.ledgerTokens).toEqual(f.params.ledgerEntries)
         expect(pending.ledgerTokens).toEqual(f.params.ledgerEntries)
         bootstrapped = true
@@ -110,7 +110,7 @@ test('external rejoin judges an mbr source tree after the ledger bootstrap', asy
     })
     expect(bootstrapped).toBe(true)
     expect(group.sendAdmission()).toMatchObject({ admissible: true })
-    await f.author.processMessage(commitMessage)
+    await f.author.processMessage({ message: commitMessage })
     expect(f.author.epoch).toBe(group.epoch)
   } finally {
     clock.mockRestore()
@@ -139,7 +139,7 @@ test('external rejoin whose membership binding the reply ledger cannot support i
 describe('external rejoin codec round-trip', () => {
   test('mlsMessage(GroupInfo) encode → decode preserves version + wireformat', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup(alice, 'codec-rt-group')
+    const { group } = await createGroup({ identity: alice, groupID: 'codec-rt-group' })
 
     const { groupInfo } = await exportGroupInfo({ group })
     expect(groupInfo).toBeInstanceOf(Uint8Array)
@@ -171,19 +171,22 @@ describe('joinGroupExternal — stale device recovery', () => {
     const carol = randomIdentity()
 
     // A creates group, invites B
-    const { group: aliceGroup } = await createGroup(alice, 'stale-rejoin-group')
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'stale-rejoin-group',
+    })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { group: bobGroup, credential: bobCred } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -202,21 +205,24 @@ describe('joinGroupExternal — stale device recovery', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol)
-    const { newGroup: aliceAfterCarol } = await commitInvite(
-      aliceAfterBob,
-      carolKP.publicPackage,
-      carolInvite,
-    )
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const { newGroup: aliceAfterCarol } = await commitInvite({
+      group: aliceAfterBob,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
     const carolLeaf = aliceAfterCarol.findMemberLeafIndex(carol.id)
     expect(carolLeaf).toBeDefined()
-    const { newGroup: aliceAdvanced } = await removeMember(aliceAfterCarol, carolLeaf as number)
+    const { newGroup: aliceAdvanced } = await removeMember({
+      group: aliceAfterCarol,
+      leafIndex: carolLeaf as number,
+    })
     expect(aliceAdvanced.epoch).toBe(3n)
     expect(bobGroup.epoch).toBe(1n) // B still stale
 
     // A publishes a message B cannot decrypt at its stale epoch
-    const staleMsg = await aliceAdvanced.encrypt(new TextEncoder().encode('locked'))
-    await expect(bobGroup.processMessage(staleMsg)).rejects.toThrow()
+    const staleMsg = await aliceAdvanced.encrypt({ plaintext: new TextEncoder().encode('locked') })
+    await expect(bobGroup.processMessage({ message: staleMsg })).rejects.toThrow()
 
     // A exports GroupInfo; B rejoins externally using its cached credential
     const { groupInfo } = await exportGroupInfo({ group: aliceAdvanced })
@@ -240,16 +246,18 @@ describe('joinGroupExternal — stale device recovery', () => {
     if (decodedRejoin?.wireformat !== wireformats.mls_public_message) {
       throw new Error('failed to decode rejoin commit')
     }
-    await aliceAdvanced.processMessage(decodedRejoin)
+    await aliceAdvanced.processMessage({ message: decodedRejoin })
     expect(aliceAdvanced.epoch).toBe(bobRejoined.epoch)
 
     // Round-trip messaging resumes
-    const msgAB = await aliceAdvanced.encrypt(new TextEncoder().encode('welcome back'))
-    const got = await bobRejoined.processMessage(msgAB)
+    const msgAB = await aliceAdvanced.encrypt({
+      plaintext: new TextEncoder().encode('welcome back'),
+    })
+    const got = await bobRejoined.processMessage({ message: msgAB })
     expect(new TextDecoder().decode(got as Uint8Array)).toBe('welcome back')
 
-    const msgBA = await bobRejoined.encrypt(new TextEncoder().encode('thanks'))
-    const gotBA = await aliceAdvanced.processMessage(msgBA)
+    const msgBA = await bobRejoined.encrypt({ plaintext: new TextEncoder().encode('thanks') })
+    const gotBA = await aliceAdvanced.processMessage({ message: msgBA })
     expect(new TextDecoder().decode(gotBA as Uint8Array)).toBe('thanks')
 
     // B's DID appears exactly once in the tree post-rejoin (resync removed old leaf)
@@ -290,7 +298,9 @@ describe('joinGroupExternal — stale device recovery', () => {
 
     // Alice creates the group carrying the custom extension. Bob joins via
     // Welcome with a leaf that advertises it.
-    const { group: aliceGroup } = await createGroup(alice, 'ext-rejoin-group', {
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'ext-rejoin-group',
       extensions: [customExtension],
     })
     const { invite: bobInvite } = await createInvite({
@@ -299,12 +309,15 @@ describe('joinGroupExternal — stale device recovery', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob, { capabilities: extensionAwareCapabilities })
-    const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: extensionAwareCapabilities,
+    })
+    const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { group: bobGroup, credential: bobCred } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -321,17 +334,21 @@ describe('joinGroupExternal — stale device recovery', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol, {
+    const carolKP = await createKeyPackageBundle({
+      identity: carol,
       capabilities: extensionAwareCapabilities,
     })
-    const { newGroup: aliceAfterCarol } = await commitInvite(
-      aliceAfterBob,
-      carolKP.publicPackage,
-      carolInvite,
-    )
+    const { newGroup: aliceAfterCarol } = await commitInvite({
+      group: aliceAfterBob,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
     const carolLeaf = aliceAfterCarol.findMemberLeafIndex(carol.id)
     expect(carolLeaf).toBeDefined()
-    const { newGroup: aliceAdvanced } = await removeMember(aliceAfterCarol, carolLeaf as number)
+    const { newGroup: aliceAdvanced } = await removeMember({
+      group: aliceAfterCarol,
+      leafIndex: carolLeaf as number,
+    })
     expect(bobGroup.epoch).toBe(1n)
 
     // Bob rejoins externally WITHOUT passing capabilities. The join must derive
@@ -352,28 +369,33 @@ describe('joinGroupExternal — stale device recovery', () => {
     if (decodedRejoin?.wireformat !== wireformats.mls_public_message) {
       throw new Error('failed to decode rejoin commit')
     }
-    await aliceAdvanced.processMessage(decodedRejoin)
-    const message = await aliceAdvanced.encrypt(new TextEncoder().encode('back with ext'))
-    const got = await bobRejoined.processMessage(message)
+    await aliceAdvanced.processMessage({ message: decodedRejoin })
+    const message = await aliceAdvanced.encrypt({
+      plaintext: new TextEncoder().encode('back with ext'),
+    })
+    const got = await bobRejoined.processMessage({ message })
     expect(new TextDecoder().decode(got as Uint8Array)).toBe('back with ext')
   })
 
   test('rejects when identity.id does not match credential.id (resync guard)', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'mismatch-guard-group')
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'mismatch-guard-group',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
       invite,
-    )
+    })
     const { credential: bobCred } = await processWelcome({
       identity: bob,
       invite,
@@ -397,19 +419,22 @@ describe('joinGroupExternal — stale device recovery', () => {
   test('a member an admin actually removed cannot resync back in', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'evicted-resync-group')
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'evicted-resync-group',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
       invite,
-    )
+    })
     const { credential: bobCred } = await processWelcome({
       identity: bob,
       invite,
@@ -422,7 +447,10 @@ describe('joinGroupExternal — stale device recovery', () => {
     // Alice actually evicts Bob: his leaf is gone from the tree, not merely demoted.
     const bobLeaf = aliceAfterBob.findMemberLeafIndex(bob.id)
     expect(bobLeaf).toBeDefined()
-    const { newGroup: aliceAfterRemove } = await removeMember(aliceAfterBob, bobLeaf as number)
+    const { newGroup: aliceAfterRemove } = await removeMember({
+      group: aliceAfterBob,
+      leafIndex: bobLeaf as number,
+    })
 
     // GroupInfo exported after the removal — Bob's leaf is not in this tree.
     const { groupInfo } = await exportGroupInfo({ group: aliceAfterRemove })
@@ -452,19 +480,19 @@ describe('joinGroupExternal — stale device recovery', () => {
 
     // Two-member peer4 group so the ratchet tree is non-trivial (ts-mls
     // requires a non-blank last node for rejoin).
-    const { group: aliceGroup } = await createGroup(alice, 'g-rejoin-peer4')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g-rejoin-peer4' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
       invite,
-    )
+    })
     const { credential: bobCred } = await processWelcome({
       identity: bob,
       invite,
@@ -504,7 +532,7 @@ describe('joinGroupExternal — stale device recovery', () => {
     const carol = randomIdentity()
 
     // Group of A, B, C with all online
-    const { group: aliceGroup } = await createGroup(alice, 'trio-group')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'trio-group' })
 
     // A commit's envelope names its ledger entries by content id, not by value, so a
     // member applying someone else's Add fetches the bodies out of band. Bob is served
@@ -527,12 +555,12 @@ describe('joinGroupExternal — stale device recovery', () => {
       permission: 'member',
     })
     publish(bobInvite)
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: aliceA } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: aliceA } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { group: bobGroup, credential: bobCred } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -549,13 +577,17 @@ describe('joinGroupExternal — stale device recovery', () => {
       permission: 'member',
     })
     publish(carolInvite)
-    const carolKP = await createKeyPackageBundle(carol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
     const {
       commitMessage: addCarolCommit,
       welcomeMessage: carolWelcome,
       newGroup: aliceB,
-    } = await commitInvite(aliceA, carolKP.publicPackage, carolInvite)
-    await bobGroup.processMessage(addCarolCommit)
+    } = await commitInvite({
+      group: aliceA,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
+    await bobGroup.processMessage({ message: addCarolCommit })
     const { group: carolGroup } = await processWelcome({
       identity: carol,
       invite: carolInvite,
@@ -577,21 +609,21 @@ describe('joinGroupExternal — stale device recovery', () => {
       permission: 'member',
     })
     publish(daveInvite)
-    const daveKP = await createKeyPackageBundle(dave)
-    const { commitMessage: addDave, newGroup: aliceC } = await commitInvite(
-      aliceB,
-      daveKP.publicPackage,
-      daveInvite,
-    )
-    await carolGroup.processMessage(addDave)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const { commitMessage: addDave, newGroup: aliceC } = await commitInvite({
+      group: aliceB,
+      keyPackage: daveKP.publicPackage,
+      invite: daveInvite,
+    })
+    await carolGroup.processMessage({ message: addDave })
     // B skips this commit — now stale.
 
     const daveLeaf = aliceC.findMemberLeafIndex(dave.id)
-    const { commitMessage: rmDave, newGroup: aliceD } = await removeMember(
-      aliceC,
-      daveLeaf as number,
-    )
-    await carolGroup.processMessage(rmDave)
+    const { commitMessage: rmDave, newGroup: aliceD } = await removeMember({
+      group: aliceC,
+      leafIndex: daveLeaf as number,
+    })
+    await carolGroup.processMessage({ message: rmDave })
     expect(aliceD.epoch).toBe(4n)
     expect(carolGroup.epoch).toBe(4n)
     expect(bobGroup.epoch).toBe(2n)
@@ -610,15 +642,15 @@ describe('joinGroupExternal — stale device recovery', () => {
     if (decodedRejoin?.wireformat !== wireformats.mls_public_message) {
       throw new Error('failed to decode rejoin commit')
     }
-    await aliceD.processMessage(decodedRejoin)
-    await carolGroup.processMessage(decodedRejoin)
+    await aliceD.processMessage({ message: decodedRejoin })
+    await carolGroup.processMessage({ message: decodedRejoin })
     expect(aliceD.epoch).toBe(bobRejoined.epoch)
     expect(carolGroup.epoch).toBe(bobRejoined.epoch)
 
     // C encrypts; A and B decrypt
-    const message = await carolGroup.encrypt(new TextEncoder().encode('hi all'))
-    const aliceGot = await aliceD.processMessage(message)
-    const bobGot = await bobRejoined.processMessage(message)
+    const message = await carolGroup.encrypt({ plaintext: new TextEncoder().encode('hi all') })
+    const aliceGot = await aliceD.processMessage({ message })
+    const bobGot = await bobRejoined.processMessage({ message })
     expect(new TextDecoder().decode(aliceGot as Uint8Array)).toBe('hi all')
     expect(new TextDecoder().decode(bobGot as Uint8Array)).toBe('hi all')
   })
@@ -647,7 +679,7 @@ test('public external join requires a bound replacement and survivors refuse a f
       joinGroupExternal({ identity: bob, groupInfo, credential: joined.credential, resync: true }),
     ).rejects.toMatchObject({ reason: 'floating-refused' })
     await expect(
-      author.processMessage(await lowLevelExternal({ group: author, identity: bob })),
+      author.processMessage({ message: await lowLevelExternal({ group: author, identity: bob }) }),
     ).rejects.toThrow()
     const result = await joinGroupExternal({
       identity: bob,
@@ -657,7 +689,7 @@ test('public external join requires a bound replacement and survivors refuse a f
       resync: true,
     })
     expect(result.group.bindingOfDID(bob.id)?.controller).toBe(controllerID)
-    await author.processMessage(result.commitMessage)
+    await author.processMessage({ message: result.commitMessage })
     expect(author.epoch).toBe(result.group.epoch)
     expect(now()).toBe(150)
   } finally {
@@ -690,16 +722,19 @@ test('an external join authentication context follows the returned handle ledger
       chain: [inception],
       subject: bob.id,
     })
-    const token = await signLedgerEntry(identity, {
-      type: 'kumiai.device',
-      groupID: group.groupID,
-      subject: controllerID,
-      value: {
-        effects: denyEffects([inception, revoke], bob.id),
-        removed: [],
-        op: 'revoke',
-        proof: asControllerLog([inception, revoke]),
-        revoked: [{ did: bob.id }],
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: 'kumiai.device',
+        groupID: group.groupID,
+        subject: controllerID,
+        value: {
+          effects: denyEffects([inception, revoke], bob.id),
+          removed: [],
+          op: 'revoke',
+          proof: asControllerLog([inception, revoke]),
+          revoked: [{ did: bob.id }],
+        },
       },
     })
     await result.group.applyLedgerEntries([token])

@@ -80,11 +80,16 @@ export function defineGroupProtocol<const Definition extends GroupProtocolDefini
   return definition
 }
 
+export type RetentionOfParams = {
+  protocol: GroupProtocolDefinition
+  procedureName: string
+}
+
 /**
  * The retention a procedure was declared with in its group protocol definition. `'log'` only for
  * an `event` procedure carrying `retain: 'log'`; `'ephemeral'` for everything else (the default).
  */
-export function retentionOf(protocol: GroupProtocolDefinition, procedureName: string): Retention {
+export function retentionOf({ protocol, procedureName }: RetentionOfParams): Retention {
   const procedure = protocol[procedureName] as { type?: unknown; retain?: unknown } | undefined
   return procedure?.type === 'event' && procedure.retain === 'log' ? 'log' : 'ephemeral'
 }

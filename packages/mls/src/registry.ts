@@ -363,7 +363,7 @@ export async function registryApply(
         if (!('event' in member.proofRef)) continue
         const chain = effect.recordedLog.chain
         const index =
-          (await memberDropIndices(controller, chain, add, options)).at(-1) ??
+          (await memberDropIndices({ did: controller, chain, add, ...options })).at(-1) ??
           (await memberTombstoneIndices(controller, chain, add, member.did, options)).at(-1)
         if (index != null) removedMembers.set(add, { ...member, proofRef: { chainIndex: index } })
       }
@@ -467,32 +467,53 @@ export async function mayReadmitResetDevice(
   )
 }
 
+export type ControllerOfParams = {
+  registry: DeviceRegistry
+  deviceDID: string
+}
+
 /** The profile a device is bound to in the folded registry, or undefined — the authority input. */
-export function controllerOf(registry: DeviceRegistry, deviceDID: string): string | undefined {
+export function controllerOf({ registry, deviceDID }: ControllerOfParams): string | undefined {
   return registry.devices.get(normalizeDID(deviceDID))?.controller
 }
 
+export type BeaconOfParams = {
+  registry: DeviceRegistry
+  controllerDID: string
+}
+
 /** The advisory beacon a controller last announced, or undefined. Never a validation input. */
-export function beaconOf(
-  registry: DeviceRegistry,
-  controllerDID: string,
-): ControllerBeacon | undefined {
+export function beaconOf({
+  registry,
+  controllerDID,
+}: BeaconOfParams): ControllerBeacon | undefined {
   return registry.controllers.get(normalizeDID(controllerDID))?.beacon
 }
 
-export function recordedLogOf(
-  registry: DeviceRegistry,
-  controller: string,
-): ControllerLog | undefined {
+export type RecordedLogOfParams = {
+  registry: DeviceRegistry
+  controller: string
+}
+
+export function recordedLogOf({
+  registry,
+  controller,
+}: RecordedLogOfParams): ControllerLog | undefined {
   return registry.controllers.get(normalizeDID(controller))?.recordedLog
 }
 
-export async function assertRetainsKnownEffects(
-  controller: string,
-  known: DeviceRegistry,
-  candidate: DeviceRegistry,
-  options?: CryptoOptions,
-): Promise<void> {
+export type AssertRetainsKnownEffectsParams = {
+  controller: string
+  known: DeviceRegistry
+  candidate: DeviceRegistry
+} & CryptoOptions
+
+export async function assertRetainsKnownEffects({
+  controller,
+  known,
+  candidate,
+  ...options
+}: AssertRetainsKnownEffectsParams): Promise<void> {
   const did = normalizeDID(controller)
   const held = known.controllers.get(did)
   const offered = candidate.controllers.get(did)
@@ -553,18 +574,22 @@ export async function assertRetainsKnownEffects(
   }
 }
 
-export async function registryForLog(
-  controller: string,
-  log: ControllerLog,
-  options?: CryptoOptions,
-): Promise<DeviceRegistry> {
-  const { log: recordedLog, after } = await ingestControllerLog(
+export type RegistryForLogParams = {
+  controller: string
+  log: ControllerLog
+} & CryptoOptions
+
+export async function registryForLog({
+  controller,
+  log,
+  ...options
+}: RegistryForLogParams): Promise<DeviceRegistry> {
+  const { log: recordedLog, after } = await ingestControllerLog({
     controller,
-    undefined,
-    log,
-    undefined,
-    options,
-  )
+    recorded: undefined,
+    proof: log,
+    ...options,
+  })
   const devices = new Map<string, DeviceRecord>()
   const projection = await seedEffects(
     normalizeDID(controller),
@@ -592,7 +617,13 @@ async function seedEffects(
   const folded = await foldControllerLog(controller, log, options)
   if (!folded.ok) throw new RevokeProofError('effects-mismatch')
   const removedMembers = new Map(projection.removedMembers)
-  for (const claim of await claimsFor(controller, undefined, log, 0, options)) {
+  for (const claim of await claimsFor({
+    controller,
+    recorded: undefined,
+    merged: log,
+    genFloor: 0,
+    ...options,
+  })) {
     if (claim.kind === 'deny') {
       devices.set(normalizeDID(claim.did), { controller, status: 'revoked', proofRef: claim.ref })
     } else {
@@ -624,6 +655,11 @@ export function denySetOf(registry: DeviceRegistry): ReadonlySet<string> {
   return denied
 }
 
+export type AuthorityParams = {
+  registry: DeviceRegistry
+  issuer: string
+}
+
 /**
  * The universal rule: an ACTIVE binding resolves the issuer to its controller; anything else
  * resolves to the issuer itself. A revoked binding confers no authority until accepted re-entry.
@@ -632,11 +668,18 @@ export function denySetOf(registry: DeviceRegistry): ReadonlySet<string> {
  * {@link controllerOf} is the RAW lookup, deliberately status-blind, since the deviceRevoked event
  * emission and the revoke/label gate read the surviving binding of a just-revoked device.)
  */
-export function authority(registry: DeviceRegistry, issuer: string): string {
+export function authority({ registry, issuer }: AuthorityParams): string {
   const norm = normalizeDID(issuer)
   const record = registry.devices.get(norm)
   return record != null && record.status === 'active' ? record.controller : norm
 }
+
+export type FoldControlParams = {
+  entries: Array<FoldInput>
+  anchor: GroupAnchor
+  groupID: string
+  onDrop?: (drop: FoldDrop) => void
+} & CryptoOptions
 
 /**
  * Fold the whole control ledger into BOTH projections in one ordered pass, so a role entry's
@@ -651,13 +694,13 @@ export function authority(registry: DeviceRegistry, issuer: string): string {
  * and must not empty the admin set. Every other type, a groupID mismatch, or a malformed value is
  * dropped (never thrown), routed through `onDrop` exactly as {@link foldRoster}.
  */
-export async function foldControl(
-  entries: Array<FoldInput>,
-  anchor: GroupAnchor,
-  groupID: string,
-  onDrop?: (drop: FoldDrop) => void,
-  options?: CryptoOptions,
-): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
+export async function foldControl({
+  entries,
+  anchor,
+  groupID,
+  onDrop,
+  ...options
+}: FoldControlParams): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
   let roster = roleReducer.seed(anchor)
   let registry = registrySeed()
   for (const [position, { verified, entryID }] of entries.entries()) {
@@ -700,7 +743,7 @@ export async function foldControl(
       onDrop?.({ entryID, type: entry.type, reason: 'invalid role value' })
       continue
     }
-    const auth = authority(registry, issuer)
+    const auth = authority({ registry, issuer })
     if (roster.roles.get(auth) !== 'admin') {
       onDrop?.({
         entryID,
@@ -709,10 +752,10 @@ export async function foldControl(
       })
       continue
     }
-    const next = roleReducer.apply(
-      { issuer, entry: { ...entry, value: entry.value as RoleValue } },
-      roster,
-    )
+    const next = roleReducer.apply({
+      verified: { issuer, entry: { ...entry, value: entry.value as RoleValue } },
+      stateSoFar: roster,
+    })
     if (adminCount(next) === 0) {
       onDrop?.({ entryID, type: entry.type, reason: 'would empty the admin set' })
       continue
@@ -722,8 +765,13 @@ export async function foldControl(
   return { roster, registry }
 }
 
+export type RevocationOfParams = {
+  group: GroupHandle
+  did: string
+}
+
 /** A ledger revocation, independent of the controller's current log deny set. */
-export function revocationOf(group: GroupHandle, did: string): Revocation | null {
+export function revocationOf({ group, did }: RevocationOfParams): Revocation | null {
   const record = group.registry.devices.get(normalizeDID(did))
   if (record?.status !== 'revoked' || record.proofRef === undefined) return null
   return {

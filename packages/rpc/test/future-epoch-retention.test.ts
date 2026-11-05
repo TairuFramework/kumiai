@@ -10,7 +10,11 @@ import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const secret = new Uint8Array(32).fill(0xa4)
-const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+const topicID = protocolTopic({
+  secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+  epoch: 1,
+  protocol: 'chat',
+})
 
 function durableBob(hub: DurableFakeHub, options: Parameters<typeof makeMLSPeer>[3] = {}) {
   const rows = new Map<string, PendingAppFrame>()
@@ -56,7 +60,7 @@ describe('future-epoch app retention', () => {
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'epoch two' } })
     await vi.waitFor(() =>
       expect(hub.published.some((item) => item.topicID === topicID)).toBe(true),
@@ -95,7 +99,8 @@ describe('future-epoch app retention', () => {
       senderDID: 'mallory',
       topicID,
       retain: 'log',
-      payload: await forged.wrap(encodeEventFrame('chat/posted', { text: 'forged' }), {
+      payload: await forged.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'forged' } }),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
     })
@@ -116,7 +121,7 @@ describe('future-epoch app retention', () => {
     expect(restarted.appCursorStore.stored(topicID)).toBeNull()
     expect(seen).not.toHaveBeenCalled()
 
-    await restarted.peer.dropAppFrame(topicID, blocked.sequenceID)
+    await restarted.peer.dropAppFrame({ topicID, position: blocked.sequenceID })
     expect(restarted.appCursorStore.stored(topicID)).toBe(blocked.sequenceID)
     await restarted.peer.dispose()
     const again = makeMLSPeer(hub, 'bob', secret, {

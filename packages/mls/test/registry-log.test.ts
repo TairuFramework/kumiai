@@ -46,12 +46,12 @@ function entry(
 
 async function replay(did: string, entries: Array<FoldInput>) {
   const drops: Array<FoldDrop> = []
-  const folded = await registry.foldControl(
+  const folded = await registry.foldControl({
     entries,
-    { creatorDID: did, controller: did, version: 1 },
+    anchor: { creatorDID: did, controller: did, version: 1 },
     groupID,
-    (drop) => drops.push(drop),
-  )
+    onDrop: (drop) => drops.push(drop),
+  })
   return { ...folded, drops }
 }
 
@@ -65,7 +65,7 @@ test('seed entry at position 0 seeds the recorded log', async () => {
   const { did, log, members } = await buildEpoch({ members: 1 })
   const result = await replay(did, [entry(did, 'seed', log)])
   expect(result.drops).toEqual([])
-  const recorded = registry.recordedLogOf(result.registry, did)
+  const recorded = registry.recordedLogOf({ registry: result.registry, controller: did })
   const [member] = members
   if (recorded == null || member == null) throw new Error('Missing seeded member')
   expect(recorded?.events).toEqual(log.events)
@@ -79,7 +79,7 @@ test('seed entry at position 0 seeds the recorded log', async () => {
     removedMembers: new Map(),
     survivorGrants: new Map(),
   })
-  expect(await registry.registryForLog(did, log)).toEqual(result.registry)
+  expect(await registry.registryForLog({ controller: did, log })).toEqual(result.registry)
 })
 
 test.each(['re-added', 'concurrent'] as const)(
@@ -157,7 +157,7 @@ test('the recorded log refuses another pin for the same member DID', async () =>
     entry(f.did, 'seed', { ...f.log, events: [...f.log.events, add] }),
   ])
   expect(result.drops).toEqual([])
-  const recorded = registry.recordedLogOf(result.registry, f.did)
+  const recorded = registry.recordedLogOf({ registry: result.registry, controller: f.did })
   if (recorded == null) throw new Error('Missing recorded log')
   expect((await folded(f.did, recorded)).head.members.has(digestOf(add.event))).toBe(false)
   expect((await folded(f.did, recorded)).head.members.get(a.add)?.key).toBe(
@@ -223,7 +223,7 @@ test('seed at a later position, or into a recorded log, is refused', async () =>
     expect(result.drops).toHaveLength(1)
     expect(result.drops[0]?.reason).toBe('invalid lifecycle proof')
   }
-  const state = await registry.registryForLog(did, log)
+  const state = await registry.registryForLog({ controller: did, log })
   await expect(
     async () => await registry.registryApply(entry(did, 'seed', log).verified, state, did),
   ).rejects.toThrow()
@@ -233,7 +233,7 @@ test('log entry into an empty projection is refused', async () => {
   const { did, log } = await buildEpoch({ members: 1 })
   const result = await replay(did, [entry(did, 'log', log)])
   expect(result.drops.map(({ reason }) => reason)).toEqual(['invalid lifecycle proof'])
-  expect(registry.recordedLogOf(result.registry, did)).toBeUndefined()
+  expect(registry.recordedLogOf({ registry: result.registry, controller: did })).toBeUndefined()
 })
 
 test('foldControl keeps an authenticated renewal log entry in a lifecycle group', async () => {
@@ -253,7 +253,10 @@ test('foldControl keeps an authenticated renewal log entry in a lifecycle group'
     entry(f.did, 'log', { chain: [], events: [renewal] }),
   ])
   expect(result.drops).toEqual([])
-  expect(registry.recordedLogOf(result.registry, f.did)?.events).toEqual([...f.log.events, renewal])
+  expect(registry.recordedLogOf({ registry: result.registry, controller: f.did })?.events).toEqual([
+    ...f.log.events,
+    renewal,
+  ])
 })
 
 test('log entry with a chain suffix settles without a revoke', async () => {
@@ -270,7 +273,7 @@ test('log entry with a chain suffix settles without a revoke', async () => {
     entry(did, 'log', { chain: [rotation], events: [] }),
   ])
   expect(result.drops).toEqual([])
-  expect(registry.recordedLogOf(result.registry, did)).toEqual({
+  expect(registry.recordedLogOf({ registry: result.registry, controller: did })).toEqual({
     chain: [...log.chain, rotation],
     events: [],
   })
@@ -287,7 +290,7 @@ test('log entry renewing a member extends the recorded lease', async () => {
     ...deltas.map((proof) => entry(did, 'log', proof)),
   ])
   expect(result.drops).toEqual([])
-  const log = registry.recordedLogOf(result.registry, did)
+  const log = registry.recordedLogOf({ registry: result.registry, controller: did })
   if (log == null) throw new Error('Missing recorded log')
   for (const { add } of members)
     expect((await folded(did, log)).head.members.get(add)?.lease).toBe(2000)
@@ -335,7 +338,7 @@ for (const descendant of [false, true]) {
         entry(did, 'log', { chain: [], events }),
       ])
       expect(result.drops.map(({ reason }) => reason)).toEqual(['invalid lifecycle proof'])
-      expect(registry.recordedLogOf(result.registry, did)).toEqual(before)
+      expect(registry.recordedLogOf({ registry: result.registry, controller: did })).toEqual(before)
       expect((await folded(did, recorded)).head.members.get(c.add)?.lease).toBe(1000)
       expect(recorded).toEqual(before)
     },
@@ -474,7 +477,7 @@ test.each([
           events: [],
         }
   if (kind === 'generation') proof.chain.unshift(inception)
-  const state = await registry.registryForLog(did, log)
+  const state = await registry.registryForLog({ controller: did, log })
   await expect(
     async () => await authenticateLifecycleProof(did, entry(did, 'log', proof).verified, state),
   ).rejects.toThrow(
@@ -482,7 +485,7 @@ test.each([
   )
   const result = await replay(did, [entry(did, 'seed', log), entry(did, 'log', proof)])
   expect(result.drops.map(({ reason }) => reason)).toEqual(['invalid lifecycle proof'])
-  expect(registry.recordedLogOf(result.registry, did)).toEqual(log)
+  expect(registry.recordedLogOf({ registry: result.registry, controller: did })).toEqual(log)
 })
 
 test('forged copy beside the genuine one stores the genuine copy', async () => {
@@ -497,7 +500,7 @@ test('forged copy beside the genuine one stores the genuine copy', async () => {
   ])
   expect(result.drops).toEqual([])
   const stored = registry
-    .recordedLogOf(result.registry, did)
+    .recordedLogOf({ registry: result.registry, controller: did })
     ?.events.find(({ event }) => digestOf(event) === digestOf(genuine.event))
   expect(stored?.sigs).toEqual(genuine.sigs)
 })
@@ -523,7 +526,7 @@ test('chain fork is refused and the prior log is kept', async () => {
     entry(did, 'log', { chain: [...log.chain, right], events: [] }),
   ])
   expect(result.drops).toHaveLength(1)
-  expect(registry.recordedLogOf(result.registry, did)).toEqual(prior)
+  expect(registry.recordedLogOf({ registry: result.registry, controller: did })).toEqual(prior)
 })
 
 test('a log carrying only a pending event is refused', async () => {
@@ -543,7 +546,7 @@ test('a log carrying only a pending event is refused', async () => {
     entry(did, 'log', { chain: [], events: [renew] }),
   ])
   expect(result.drops).toHaveLength(1)
-  expect(registry.recordedLogOf(result.registry, did)).toEqual(log)
+  expect(registry.recordedLogOf({ registry: result.registry, controller: did })).toEqual(log)
 })
 
 test('effectDelta normalises DID denials and member effectiveness on both sides', async () => {
@@ -595,14 +598,18 @@ test('seed from [icp, reset(snapshot with a denial)] installs the denial with a 
     proofRef: { snapshot: 1 },
   })
   expect(
-    await memberRootStatus(state, f.did, {
-      kind: 'member',
-      did: creator.did,
-      add: creator.add,
-      gen: 1,
+    await memberRootStatus({
+      registry: state,
+      controller: f.did,
+      root: {
+        kind: 'member',
+        did: creator.did,
+        add: creator.add,
+        gen: 1,
+      },
     }),
   ).toMatchObject({ status: 'effective' })
-  expect(await registry.registryForLog(f.did, log)).toEqual(state)
+  expect(await registry.registryForLog({ controller: f.did, log })).toEqual(state)
 })
 
 test('genesis seed with an effective creator and a prior denial installs both atomically', async () => {
@@ -620,11 +627,15 @@ test('genesis seed with an effective creator and a prior denial installs both at
   const seed = entry(f.did, 'seed', log)
   const state = await registry.registryApply(seed.verified, registry.registrySeed(), f.did)
   expect(
-    await memberRootStatus(state, f.did, {
-      kind: 'member',
-      did: creator.did,
-      add: creator.add,
-      gen: 0,
+    await memberRootStatus({
+      registry: state,
+      controller: f.did,
+      root: {
+        kind: 'member',
+        did: creator.did,
+        add: creator.add,
+        gen: 0,
+      },
     }),
   ).toMatchObject({ status: 'effective' })
   const rev = log.events.find(({ event }) => event.t === 'rev')
@@ -641,7 +652,7 @@ test('genesis seed with an effective creator and a prior denial installs both at
     proofRef: { event: digestOf(rmv.event) },
   })
   expect(await replay(f.did, [seed])).toMatchObject({ registry: state, drops: [] })
-  expect(await registry.registryForLog(f.did, log)).toEqual(state)
+  expect(await registry.registryForLog({ controller: f.did, log })).toEqual(state)
 })
 
 test('seed tombstones a member dropped by settlement without denying its DID', async () => {
@@ -682,13 +693,13 @@ test('empty log entries introduce no authenticated data and are refused', async 
   const empty = entry(f.did, 'log', { chain: [], events: [] })
   const result = await replay(f.did, [seed, empty])
   expect(result.drops).toHaveLength(1)
-  expect(registry.recordedLogOf(result.registry, f.did)).toEqual(f.log)
+  expect(registry.recordedLogOf({ registry: result.registry, controller: f.did })).toEqual(f.log)
   await expect(
     async () =>
       await authenticateLifecycleProof(
         f.did,
         empty.verified,
-        await registry.registryForLog(f.did, f.log),
+        await registry.registryForLog({ controller: f.did, log: f.log }),
       ),
   ).rejects.toThrow()
 })
@@ -706,7 +717,7 @@ test('sixteen renewal entries replay with linear authenticated event folding', a
   expect(result.drops).toEqual([])
   expect(checks).toBeGreaterThan(0)
   expect(checks).toBeLessThanOrEqual(2 * count + 2)
-  const log = registry.recordedLogOf(result.registry, f.did)
+  const log = registry.recordedLogOf({ registry: result.registry, controller: f.did })
   if (log == null) throw new Error('Missing log')
   expect((await folded(f.did, log)).head).toEqual(f.head)
 })
@@ -725,7 +736,7 @@ test('attestTreeTime does not author a clock beyond the member lease', async () 
   })
   const state = joined.state
   const ledger = joined.ledgerTokens
-  await expect(attestTreeTime(joined, 1001)).resolves.toBeNull()
+  await expect(attestTreeTime({ group: joined, time: 1001 })).resolves.toBeNull()
   expect(joined.state).toBe(state)
   expect(joined.ledgerTokens).toEqual(ledger)
 })

@@ -16,12 +16,12 @@ export function hubWithAckOverride(
   ackOverride: (subscription: HubReceiveSubscription, sequenceID: string) => void | Promise<void>,
 ): LogHub {
   return {
-    subscribe: (subscriberDID, topicID, options) =>
+    subscribe: ({ subscriberDID, topicID, ...options }) =>
       instance.subscribe(subscriberDID, topicID, options),
-    unsubscribe: (subscriberDID, topicID) => instance.unsubscribe(subscriberDID, topicID),
+    unsubscribe: ({ subscriberDID, topicID }) => instance.unsubscribe(subscriberDID, topicID),
     publish: (params) => instance.publish(params),
     fetchTopic: (params) => instance.fetchTopic(params),
-    receive: (subscriberDID) => {
+    receive: ({ subscriberDID }) => {
       const subscription = instance.receive(subscriberDID)
       return {
         ...subscription,

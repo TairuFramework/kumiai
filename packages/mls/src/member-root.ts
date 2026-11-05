@@ -41,11 +41,16 @@ type EffectTarget =
 export type RemovedMember = { did: string; gen: number; proofRef: ProofRef }
 export type RemovedEffect = { did: string; cascadedFrom: string }
 
+export type MemberRootsOfParams = {
+  binding: ControllerBinding
+  leafDID: string
+}
+
 /** Decode only; callers authenticate the tokens and membership references. */
-export function memberRootsOf(
-  binding: ControllerBinding,
-  leafDID: string,
-): Array<{ slot: EvidenceSlot; root: MemberRoot }> {
+export function memberRootsOf({
+  binding,
+  leafDID,
+}: MemberRootsOfParams): Array<{ slot: EvidenceSlot; root: MemberRoot }> {
   const tokenRoot = (raw: string): MemberRoot => {
     const { iss, mbr } = readCapability(raw).payload
     return mbr == null
@@ -218,13 +223,20 @@ async function checkEffect(
   if (state.gen < genFloor) throw new RevokeProofError('generation-floor')
 }
 
-export async function effectOf(
-  controller: string,
-  log: ControllerLog,
-  claim: EffectClaim,
-  genFloor: number,
-  options?: CryptoOptions,
-): Promise<void> {
+export type EffectOfParams = {
+  controller: string
+  log: ControllerLog
+  claim: EffectClaim
+  genFloor: number
+} & CryptoOptions
+
+export async function effectOf({
+  controller,
+  log,
+  claim,
+  genFloor,
+  ...options
+}: EffectOfParams): Promise<void> {
   await checkEffect(
     log,
     claim,
@@ -248,13 +260,20 @@ export async function effectProofContext(
   }
 }
 
-export async function claimsFor(
-  controller: string,
-  recorded: ControllerLog | undefined,
-  merged: ControllerLog,
-  genFloor: number,
-  options?: CryptoOptions,
-): Promise<Array<EffectClaim>> {
+export type ClaimsForParams = {
+  controller: string
+  recorded: ControllerLog | undefined
+  merged: ControllerLog
+  genFloor: number
+} & CryptoOptions
+
+export async function claimsFor({
+  controller,
+  recorded,
+  merged,
+  genFloor,
+  ...options
+}: ClaimsForParams): Promise<Array<EffectClaim>> {
   return (await effectProofContext(controller, merged, options)).claimsFor(recorded, genFloor)
 }
 
@@ -268,7 +287,7 @@ async function claimsWithProofs(
 ): Promise<Array<EffectClaim>> {
   const before = recorded == null ? undefined : await foldedLog(did, recorded, options)
   const after = proofs.folded
-  const delta = effectDelta(before?.head, after.head)
+  const delta = effectDelta({ before: before?.head, after: after.head })
   const eventClaims = new Map<string, Array<{ claim: EffectClaim; gen: number }>>()
   // Authenticate each supplied epoch once, including retained pre-settlement closures.
   for (const [digest, { event }] of proofs.events) {
@@ -400,12 +419,18 @@ export function effectiveAttestingMembers(
   )
 }
 
-export async function memberRootStatus(
-  registry: DeviceRegistry,
-  controller: string,
-  root: MemberRoot,
-  options?: CryptoOptions,
-): Promise<MemberRootStatus> {
+export type MemberRootStatusParams = {
+  registry: DeviceRegistry
+  controller: string
+  root: MemberRoot
+} & CryptoOptions
+
+export async function memberRootStatus({
+  registry,
+  controller,
+  root,
+  ...options
+}: MemberRootStatusParams): Promise<MemberRootStatus> {
   if (root.kind === 'root') return { status: 'root' }
   const did = normalizeDID(controller)
   const projection = registry.controllers.get(did)
@@ -443,22 +468,33 @@ function substituteRoot(raw: string, leaf: LeafRef): MemberRoot | undefined {
   }
 }
 
-export async function effectiveAuthorityOf(
-  leaf: LeafRef,
-  registry: DeviceRegistry,
-  controller: string,
-  options?: CryptoOptions,
-): Promise<
+export type EffectiveAuthorityOfParams = {
+  leaf: LeafRef
+  registry: DeviceRegistry
+  controller: string
+} & CryptoOptions
+
+export async function effectiveAuthorityOf({
+  leaf,
+  registry,
+  controller,
+  ...options
+}: EffectiveAuthorityOfParams): Promise<
   | { root: MemberRoot; slot: EvidenceSlot; expiry?: number }
   | { status: 'removed' }
   | { status: 'unavailable' }
 > {
   const did = normalizeDID(controller)
   if (normalizeDID(leaf.binding.id) !== did) return { status: 'unavailable' }
-  const roots = memberRootsOf(leaf.binding, leaf.did)
+  const roots = memberRootsOf({ binding: leaf.binding, leafDID: leaf.did })
   const primary = roots[0]
   if (primary == null) return { status: 'unavailable' }
-  const status = await memberRootStatus(registry, did, primary.root, options)
+  const status = await memberRootStatus({
+    registry,
+    controller: did,
+    root: primary.root,
+    ...options,
+  })
   const projection = registry.controllers.get(did)
   const chain = projection?.recordedLog?.chain
   if (
@@ -472,7 +508,12 @@ export async function effectiveAuthorityOf(
   if (status.status === 'root' || status.status === 'effective') {
     const holder = roots.find(({ slot }) => slot === 'holder')
     if (holder != null) {
-      const held = await memberRootStatus(registry, did, holder.root, options)
+      const held = await memberRootStatus({
+        registry,
+        controller: did,
+        root: holder.root,
+        ...options,
+      })
       if (held.status === 'removed' || held.status === 'unavailable') return { status: held.status }
     }
     return primary
@@ -486,21 +527,29 @@ export async function effectiveAuthorityOf(
     if (raw == null) continue
     const root = substituteRoot(raw, leaf)
     if (root == null) continue
-    const status = await memberRootStatus(registry, did, root, options)
+    const status = await memberRootStatus({ registry, controller: did, root, ...options })
     if (status.status === 'root' || status.status === 'effective')
       return { root, slot, expiry: readCapability(raw).payload.exp }
   }
   return { status: 'removed' }
 }
 
-export async function cascadeOf(
-  leaves: ReadonlyArray<LeafRef & { leafIndex: number }>,
-  claims: ReadonlyArray<EffectClaim>,
-  before: DeviceRegistry,
-  after: DeviceRegistry,
-  controller: string,
-  options?: CryptoOptions,
-): Promise<{
+export type CascadeOfParams = {
+  leaves: ReadonlyArray<LeafRef & { leafIndex: number }>
+  claims: ReadonlyArray<EffectClaim>
+  before: DeviceRegistry
+  after: DeviceRegistry
+  controller: string
+} & CryptoOptions
+
+export async function cascadeOf({
+  leaves,
+  claims,
+  before,
+  after,
+  controller,
+  ...options
+}: CascadeOfParams): Promise<{
   revoked: Array<RevokedEffect>
   removed: Array<RemovedEffect>
   removeLeafIndices: Array<number>
@@ -523,8 +572,8 @@ export async function cascadeOf(
     const holderStatus =
       holderRoot == null
         ? undefined
-        : await memberRootStatus(after, controller, holderRoot, options)
-    const authority = await effectiveAuthorityOf(leaf, after, controller, options)
+        : await memberRootStatus({ registry: after, controller, root: holderRoot, ...options })
+    const authority = await effectiveAuthorityOf({ leaf, registry: after, controller, ...options })
     const evidenced =
       !direct.has(did) &&
       after.devices.get(did)?.status !== 'revoked' &&
@@ -540,14 +589,17 @@ export async function cascadeOf(
       continue
     }
     if (!('status' in authority) || authority.status !== 'removed') continue
-    const prior = await effectiveAuthorityOf(leaf, before, controller, options)
-    const roots = memberRootsOf(leaf.binding, leaf.did).map(({ root }) => root)
+    const prior = await effectiveAuthorityOf({ leaf, registry: before, controller, ...options })
+    const roots = memberRootsOf({ binding: leaf.binding, leafDID: leaf.did }).map(
+      ({ root }) => root,
+    )
     if ('root' in prior) roots.unshift(prior.root)
     let root: (typeof roots)[number] | undefined
     for (const candidate of roots) {
       if (
         candidate.kind === 'member' &&
-        (await memberRootStatus(after, controller, candidate, options)).status === 'removed'
+        (await memberRootStatus({ registry: after, controller, root: candidate, ...options }))
+          .status === 'removed'
       ) {
         root = candidate
         break

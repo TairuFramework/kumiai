@@ -30,7 +30,7 @@ async function fixture(groupID: string) {
   const publish = (invite: Invite) => {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -38,8 +38,8 @@ async function fixture(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle(bob)
-  const added = await commitInvite(created, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: bob })
+  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
   const { group: receiver } = await processWelcome({
     identity: bob,
     invite,
@@ -48,7 +48,8 @@ async function fixture(groupID: string) {
     ratchetTree: added.newGroup.state.ratchetTree,
     options: { resolveLedgerEntries },
   })
-  const sealed = await added.newGroup.encrypt(utf8.encode('staged payload'), {
+  const sealed = await added.newGroup.encrypt({
+    plaintext: utf8.encode('staged payload'),
     aad: utf8.encode('app topic'),
   })
   const restore = async (encoded: Uint8Array) => {
@@ -64,14 +65,18 @@ describe('GroupHandle.decryptStaged', () => {
     const { receiver, sealed } = await fixture('staged-aad')
     const persist = vi.fn(async () => {})
     await expect(
-      receiver.decryptStaged(sealed, { expectedAAD: utf8.encode('wrong') }, persist),
+      receiver.decryptStaged({
+        message: sealed,
+        opts: { expectedAAD: utf8.encode('wrong') },
+        persist,
+      }),
     ).rejects.toThrow(/authenticated data/)
     expect(persist).not.toHaveBeenCalled()
-    const opened = await receiver.decryptStaged(
-      sealed,
-      { expectedAAD: utf8.encode('app topic') },
+    const opened = await receiver.decryptStaged({
+      message: sealed,
+      opts: { expectedAAD: utf8.encode('app topic') },
       persist,
-    )
+    })
     expect(new TextDecoder().decode(opened.payload)).toBe('staged payload')
     expect(persist).toHaveBeenCalledTimes(1)
   })
@@ -89,10 +94,10 @@ describe('GroupHandle.decryptStaged', () => {
     ].map((bytes) => ({ bytes, original: bytes.slice() }))
     let saved: Uint8Array | undefined
 
-    const opened = await receiver.decryptStaged(
-      sealed,
-      { expectedAAD: utf8.encode('app topic') },
-      async (state, result) => {
+    const opened = await receiver.decryptStaged({
+      message: sealed,
+      opts: { expectedAAD: utf8.encode('app topic') },
+      persist: async (state, result) => {
         expect(encodeClientState(receiver.state)).toEqual(before)
         expect(holder?.provider).toBe(liveProvider)
         expect(result).toEqual({
@@ -102,7 +107,7 @@ describe('GroupHandle.decryptStaged', () => {
         })
         saved = state
       },
-    )
+    })
 
     expect(opened.senderDID).toBe(alice.id)
     expect(saved).toBeDefined()
@@ -115,8 +120,10 @@ describe('GroupHandle.decryptStaged', () => {
           original.some((byte) => byte !== 0) && bytes.every((byte) => byte === 0),
       ),
     ).toBe(true)
-    await expect(receiver.decrypt(sealed)).rejects.toThrow()
-    await expect((await restore(saved as Uint8Array)).decrypt(sealed)).rejects.toThrow()
+    await expect(receiver.decrypt({ message: sealed })).rejects.toThrow()
+    await expect(
+      (await restore(saved as Uint8Array)).decrypt({ message: sealed }),
+    ).rejects.toThrow()
   })
 
   test('a failed persist leaves both the live and stored pre-open states able to open', async () => {
@@ -128,14 +135,16 @@ describe('GroupHandle.decryptStaged', () => {
       throw new Error('storage unavailable')
     })
 
-    await expect(receiver.decryptStaged(sealed, {}, persist)).rejects.toThrow('storage unavailable')
+    await expect(receiver.decryptStaged({ message: sealed, opts: {}, persist })).rejects.toThrow(
+      'storage unavailable',
+    )
     expect(persist).toHaveBeenCalledOnce()
     expect(encodeClientState(receiver.state)).toEqual(before)
     expect(holder?.provider).toBe(liveProvider)
-    await expect((await restore(before)).decrypt(sealed)).resolves.toMatchObject({
+    await expect((await restore(before)).decrypt({ message: sealed })).resolves.toMatchObject({
       payload: utf8.encode('staged payload'),
     })
-    await expect(receiver.decrypt(sealed)).resolves.toMatchObject({
+    await expect(receiver.decrypt({ message: sealed })).resolves.toMatchObject({
       payload: utf8.encode('staged payload'),
     })
   })
@@ -162,12 +171,16 @@ describe('GroupHandle.decryptStaged', () => {
       const before = encodeClientState(receiver.state)
       const restored = await restore(before)
 
-      await expect(restored.decryptStaged(sealed, {}, persist)).rejects.toThrow('sender')
+      await expect(restored.decryptStaged({ message: sealed, opts: {}, persist })).rejects.toThrow(
+        'sender',
+      )
       expect(persist).not.toHaveBeenCalled()
       expect(encodeClientState(restored.state)).toEqual(before)
       expect(encodeClientState(receiver.state)).toEqual(before)
       credential.identity = originalIdentity
-      await expect(receiver.decrypt(sealed)).resolves.toMatchObject({ senderDID: alice.id })
+      await expect(receiver.decrypt({ message: sealed })).resolves.toMatchObject({
+        senderDID: alice.id,
+      })
     },
   )
 
@@ -180,7 +193,7 @@ describe('GroupHandle.decryptStaged', () => {
       throw new Error('missing sender credential')
     }
     node.leaf.credential.identity = utf8.encode(JSON.stringify({ id: '' }))
-    const opened = await receiver.decrypt(sealed)
+    const opened = await receiver.decrypt({ message: sealed })
     expect(opened.payload).toEqual(utf8.encode('staged payload'))
     expect(opened).not.toHaveProperty('senderDID')
   })

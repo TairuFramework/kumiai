@@ -107,10 +107,10 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     assertKind(await store.list(ownerDID), 'ordinary')
 
   const mint = async (): Promise<KeyPackageRecord> => {
-    const bundle = await createKeyPackageBundle(identity, options)
+    const bundle = await createKeyPackageBundle({ identity, ...options })
     const record: KeyPackageRecord = {
       kind: 'ordinary',
-      ref: await keyPackageRef(bundle.publicPackage, options),
+      ref: await keyPackageRef({ keyPackage: bundle.publicPackage, ...options }),
       keyPackage: encodeKeyPackage(bundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
       notAfter: Number(bundle.publicPackage.leafNode.lifetime.notAfter),
@@ -118,7 +118,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     // Durable before the upload. The reverse order has a crash window in which the hub serves a
     // package whose private half was never written down, and every Welcome built from it fails at
     // the joiner with nothing to diagnose.
-    await store.put(ownerDID, record)
+    await store.put({ ownerDID, record })
     return record
   }
 
@@ -139,7 +139,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     await Promise.all(
       records
         .filter((record) => !keepRefs.has(record.ref) && record.notAfter < cutoff)
-        .map((record) => store.delete(ownerDID, record.ref)),
+        .map((record) => store.delete({ ownerDID, ref: record.ref })),
     )
   }
 
@@ -211,7 +211,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       return toBundles(await listRecords(), ownerDID, 'key package')
     },
     async release(ref: string): Promise<void> {
-      await store.delete(ownerDID, ref)
+      await store.delete({ ownerDID, ref })
     },
   }
 }

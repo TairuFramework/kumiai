@@ -54,11 +54,17 @@ function frame(value: string): Uint8Array {
   return out
 }
 
-export async function confirmationKey(
-  group: GroupHandle,
-  position: string,
-  commitDigest: string,
-): Promise<Uint8Array> {
+export type ConfirmationKeyParams = {
+  group: GroupHandle
+  position: string
+  commitDigest: string
+}
+
+export async function confirmationKey({
+  group,
+  position,
+  commitDigest,
+}: ConfirmationKeyParams): Promise<Uint8Array> {
   const fields = [group.groupID, position, commitDigest].map(frame)
   const context = new Uint8Array(fields.reduce((size, field) => size + field.length, 0))
   let offset = 0
@@ -66,10 +72,15 @@ export async function confirmationKey(
     context.set(field, offset)
     offset += field.length
   }
-  return await group.exportSecret('kumiai.rejoin-confirm', context, 32)
+  return await group.exportSecret({ label: 'kumiai.rejoin-confirm', context, length: 32 })
 }
 
-export function confirmationTag(key: Uint8Array, requestID: string): string {
+export type ConfirmationTagParams = {
+  key: Uint8Array
+  requestID: string
+}
+
+export function confirmationTag({ key, requestID }: ConfirmationTagParams): string {
   return encodeMultibase(hmac(sha256, key, utf8.encode(requestID)))
 }
 
@@ -103,7 +114,7 @@ export type SealRecoveryVerdictParams = {
 
 export async function sealRecoveryVerdict(params: SealRecoveryVerdictParams): Promise<Uint8Array> {
   const { group, identity, request, verdict } = params
-  const verified = await verifyRecoveryRequest(request, { crypto: group.crypto })
+  const verified = await verifyRecoveryRequest({ token: request, crypto: group.crypto })
   if (
     normalizeDID(identity.id) !== normalizeDID(group.credential.id) ||
     !isRecoveryVerdict(verdict) ||
@@ -192,25 +203,25 @@ export async function recoverySignerEligible(
     const projection = registry.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
     const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
-    const authority = await effectiveAuthorityOf(
-      { did: signer, binding: bound, leafKey: binding.leafKey },
+    const authority = await effectiveAuthorityOf({
+      leaf: { did: signer, binding: bound, leafKey: binding.leafKey },
       registry,
       controller,
-      options,
-    )
+      ...options,
+    })
     if ('status' in authority) return false
     if (binding.member != null && authority.slot === 'membership') {
-      const status = await memberRootStatus(
+      const status = await memberRootStatus({
         registry,
         controller,
-        {
+        root: {
           kind: 'member',
           did: signer,
           add: binding.member.add,
           gen: binding.member.g,
         },
-        options,
-      )
+        ...options,
+      })
       if (
         status.status !== 'effective' ||
         status.key.length !== binding.leafKey.length ||
@@ -218,9 +229,14 @@ export async function recoverySignerEligible(
       )
         return false
     }
-    const expiry = await leafExpiry(bound, registry, controller, options)
+    const expiry = await leafExpiry({ binding: bound, registry, controller, ...options })
     if (expiry == null) return false
-    const time = await attestedTreeTime(group.state.ratchetTree, registry, controller, options)
+    const time = await attestedTreeTime({
+      tree: group.state.ratchetTree,
+      registry,
+      controllerID: controller,
+      ...options,
+    })
     return expiry >= Math.max(time, now - 300)
   } catch {
     return false

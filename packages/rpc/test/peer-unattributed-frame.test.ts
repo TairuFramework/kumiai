@@ -45,8 +45,8 @@ function senderStrippingCrypto(localDID: string): GroupCrypto {
   const inner = createFakeCrypto({ epoch: 1, localDID })
   return {
     ...inner,
-    unwrap: async (bytes: Uint8Array) => {
-      const { payload } = await inner.unwrap(bytes)
+    unwrap: async ({ bytes }) => {
+      const { payload } = await inner.unwrap({ bytes })
       return { payload } as unknown as { payload: Uint8Array; senderDID: string; epoch: number }
     },
   }

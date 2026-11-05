@@ -26,16 +26,19 @@ function member(group: RealGroup, index = 0): RealMember {
 async function noteCommit(group: RealGroup, values: Array<string>): Promise<Uint8Array> {
   const tokens: Array<string> = []
   for (const value of values) {
-    const token = await signLedgerEntry(group.committer.identity, {
-      type: 'app.note',
-      groupID: group.committer.handle.groupID,
-      subject: group.committer.identity.id,
-      value,
+    const token = await signLedgerEntry({
+      identity: group.committer.identity,
+      entry: {
+        type: 'app.note',
+        groupID: group.committer.handle.groupID,
+        subject: group.committer.identity.id,
+        value,
+      },
     })
     group.bodies.set(ledgerEntryDigest(token), token)
     tokens.push(token)
   }
-  const authored = await commitLedgerEntries(group.committer.handle, tokens)
+  const authored = await commitLedgerEntries({ group: group.committer.handle, tokens })
   group.committer.handle = authored.newGroup
   return authored.commitMessage
 }
@@ -96,10 +99,12 @@ test('non-Commit and wrong-epoch frames are refused before resolver or mutation'
   const group = await createRealGroup(2, 'apply-commit-refused')
   const self = member(group)
   const past = await buildRealCommit(group)
-  await self.handle.processMessage(past)
+  await self.handle.processMessage({ message: past })
   await noteCommit(group, ['current'])
   const future = await noteCommit(group, ['ahead'])
-  const application = await group.committer.handle.encrypt(new TextEncoder().encode('message'))
+  const application = await group.committer.handle.encrypt({
+    plaintext: new TextEncoder().encode('message'),
+  })
   for (const bytes of [new Uint8Array([0xff, 0xff]), application, past, future]) {
     const resolve = vi.fn(group.resolveLedgerEntries)
     const persist = vi.fn(async () => {})
@@ -127,15 +132,18 @@ test('non-Commit and wrong-epoch frames are refused before resolver or mutation'
 test('an own authenticated commit is refused and names its committer', async () => {
   const group = await createRealGroup(1, 'apply-commit-own')
   const self = group.committer
-  const token = await signLedgerEntry(self.identity, {
-    type: 'app.note',
-    groupID: self.handle.groupID,
-    subject: self.identity.id,
-    value: 'own',
+  const token = await signLedgerEntry({
+    identity: self.identity,
+    entry: {
+      type: 'app.note',
+      groupID: self.handle.groupID,
+      subject: self.identity.id,
+      value: 'own',
+    },
   })
   group.bodies.set(ledgerEntryDigest(token), token)
   // Built from the live handle and not adopted, so it is framed at this handle's epoch.
-  const own = (await commitLedgerEntries(self.handle, [token])).commitMessage
+  const own = (await commitLedgerEntries({ group: self.handle, tokens: [token] })).commitMessage
   const resolve = vi.fn(group.resolveLedgerEntries)
   const before = self.handle.epoch
 
@@ -263,7 +271,7 @@ test('a self-removal a host callback threw after is still applied, with or witho
     const commit = await buildRealCommit(group, { removes: 0 })
     const persist = vi.fn(async () => {})
     const handle = throwingAfter(self.handle, async (target, bytes, options) => {
-      await target.processMessage(bytes, options)
+      await target.processMessage({ message: bytes, ...options })
     })
 
     const result = await applyCommit({
@@ -321,16 +329,23 @@ test('a resolver fault propagates, and the same commit applies on retry', async 
 test('a commit removing this member surfaces the entries it appended', async () => {
   const group = await createRealGroup(2, 'apply-commit-removed-entries')
   const self = member(group)
-  const token = await signLedgerEntry(group.committer.identity, {
-    type: 'app.note',
-    groupID: group.committer.handle.groupID,
-    subject: group.committer.identity.id,
-    value: 'parting',
+  const token = await signLedgerEntry({
+    identity: group.committer.identity,
+    entry: {
+      type: 'app.note',
+      groupID: group.committer.handle.groupID,
+      subject: group.committer.identity.id,
+      value: 'parting',
+    },
   })
   group.bodies.set(ledgerEntryDigest(token), token)
   const leaf = group.committer.handle.findMemberLeafIndex(self.identity.id)
   if (leaf == null) throw new Error('missing leaf')
-  const removed = await removeMember(group.committer.handle, leaf, [token])
+  const removed = await removeMember({
+    group: group.committer.handle,
+    leafIndex: leaf,
+    ledgerEntries: [token],
+  })
 
   const result = await applyCommit({
     handle: self.handle,

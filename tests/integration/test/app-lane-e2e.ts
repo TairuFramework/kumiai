@@ -85,7 +85,7 @@ export function createMemoryAppCursorStore(): AppCursorStore & {
   const positions = new Map<string, string>()
   return {
     load: async (topicID: string) => positions.get(topicID) ?? null,
-    save: async (topicID: string, position: string) => {
+    save: async ({ topicID, position }) => {
       const held = positions.get(topicID)
       // A read position only ever moves forward. The rule lives in the peer, so the store
       // is the only thing in a position to catch a regression that wrote one backwards.
@@ -113,7 +113,7 @@ export function createMemoryCommitJournal(): CommitJournal & { slot: () => Journ
     put: async (next: JournalEntry) => {
       entry = next
     },
-    markAccepted: async (publishID: string, sequenceID: string) => {
+    markAccepted: async ({ publishID, sequenceID }) => {
       if (entry?.publishID !== publishID) return
       entry = { ...entry, acceptedAs: sequenceID }
     },
@@ -216,7 +216,7 @@ export function makeMember(params: MakeMemberParams): Member {
     adopt: adoptHandle,
     persist: (next) => stateStore.save(next),
   })
-  const adopt = (next: GroupHandle) => guardedReplace(access, next)
+  const adopt = (next: GroupHandle) => guardedReplace({ access, next })
   const pending =
     pendingStore == null
       ? undefined
@@ -331,7 +331,9 @@ export async function createFoundingGroup(
   groupID: string,
   entrySlot: LedgerEntrySlot,
 ): Promise<GroupHandle> {
-  const { group } = await createGroup(creator, groupID, {
+  const { group } = await createGroup({
+    identity: creator,
+    groupID,
     resolveLedgerEntries: entrySlot.resolve,
   })
   return group
@@ -355,7 +357,7 @@ export async function mintInvite(params: {
     permission: 'member',
   })
   params.bodies.publish(invite)
-  const bundle = await createKeyPackageBundle(params.invitee)
+  const bundle = await createKeyPackageBundle({ identity: params.invitee })
   return { invite, bundle }
 }
 
@@ -370,11 +372,11 @@ export function buildInviteCommit(
   deliverWelcome: (welcome: Uint8Array) => void,
 ): () => Promise<PendingCommit> {
   return async () => {
-    const committed = await commitInvite(
-      member.handle(),
-      material.bundle.publicPackage,
-      material.invite,
-    )
+    const committed = await commitInvite({
+      group: member.handle(),
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     return {
       commit: committed.commitMessage,
       bodies: material.invite.ledgerEntries,
@@ -393,7 +395,7 @@ export function buildRemoveCommit(member: Member, victimDID: string): () => Prom
   return async () => {
     const leafIndex = member.handle().findMemberLeafIndex(victimDID)
     if (leafIndex == null) throw new Error(`no leaf for ${victimDID}`)
-    const committed = await removeMember(member.handle(), leafIndex)
+    const committed = await removeMember({ group: member.handle(), leafIndex })
     return {
       commit: committed.commitMessage,
       bodies: [],
@@ -428,13 +430,16 @@ export function buildLedgerCommit(
   value: string,
 ): () => Promise<PendingCommit> {
   return async () => {
-    const token = await signLedgerEntry(identity, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: member.handle().groupID,
-      subject,
-      value,
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: member.handle().groupID,
+        subject,
+        value,
+      },
     })
-    const committed = await commitLedgerEntries(member.handle(), [token])
+    const committed = await commitLedgerEntries({ group: member.handle(), tokens: [token] })
     return {
       commit: committed.commitMessage,
       bodies: [token],

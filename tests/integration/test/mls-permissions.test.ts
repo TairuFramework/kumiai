@@ -118,12 +118,12 @@ async function inviteAndJoin(params: {
     recipientDID: params.recipient.id,
     permission: params.permission,
   })
-  const keyPackageBundle = await createKeyPackageBundle(params.recipient)
-  const { commitMessage, welcomeMessage, newGroup } = await commitInvite(
-    params.inviterGroup,
-    keyPackageBundle.publicPackage,
+  const keyPackageBundle = await createKeyPackageBundle({ identity: params.recipient })
+  const { commitMessage, welcomeMessage, newGroup } = await commitInvite({
+    group: params.inviterGroup,
+    keyPackage: keyPackageBundle.publicPackage,
     invite,
-  )
+  })
   const { group: recipientGroup } = await processWelcome({
     identity: params.recipient,
     invite,
@@ -143,7 +143,7 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     const groupID = `remove-${Math.random().toString(36).slice(2)}`
 
     const inviteTokens = new Map<string, string>()
-    const { group: aliceGroup0 } = await createGroup(alice, groupID)
+    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
     const { newGroup: aliceWithBob, recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -161,14 +161,18 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     for (const token of carolInvite.ledgerEntries) {
       inviteTokens.set(ledgerEntryDigest(token), token)
     }
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(aliceWithBob, carolKP.publicPackage, carolInvite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: aliceWithBob,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
     // Bob catches up to the add-Carol commit directly; only the Remove under test ships over the hub.
-    await bobGroup.processMessage(addCarol.commitMessage)
+    await bobGroup.processMessage({ message: addCarol.commitMessage })
 
     const carolLeaf = addCarol.newGroup.findMemberLeafIndex(carol.id)
     if (carolLeaf == null) throw new Error('expected carol to hold a leaf')
-    const removeCarol = await removeMember(addCarol.newGroup, carolLeaf)
+    const removeCarol = await removeMember({ group: addCarol.newGroup, leafIndex: carolLeaf })
 
     const testHub = createTestHub()
     const { client: aliceHub } = testHub.connect(alice)
@@ -179,7 +183,7 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
 
     await aliceHub.publish({ topicID: topic, payload: removeCarol.commitMessage })
     const received = await nextCommitBytes(reader)
-    await bobGroup.processMessage(received)
+    await bobGroup.processMessage({ message: received })
 
     expect(bobGroup.findMemberLeafIndex(carol.id)).toBeUndefined()
     expect(bobGroup.epoch).toBe(removeCarol.epoch)
@@ -202,7 +206,7 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     const bob = randomIdentity()
     const groupID = `remove-guard-${Math.random().toString(36).slice(2)}`
 
-    const { group: aliceGroup0 } = await createGroup(alice, groupID)
+    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
     const { recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -220,7 +224,7 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     // (policy.test.ts, forge-based group.test.ts): forging a syntactically valid
     // member commit needs the low-level ts-mls client the public API deliberately
     // does not expose.
-    await expect(removeMember(bobGroup, aliceLeaf)).rejects.toThrow(/admin/)
+    await expect(removeMember({ group: bobGroup, leafIndex: aliceLeaf })).rejects.toThrow(/admin/)
   })
 })
 
@@ -232,7 +236,7 @@ describe('a promotion travels with the commit that relies on it', () => {
     const groupID = `promote-${Math.random().toString(36).slice(2)}`
     const promotionTokens = new Map<string, string>()
 
-    const { group: aliceGroup0 } = await createGroup(alice, groupID)
+    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
     const { newGroup: aliceGroup, recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -241,14 +245,17 @@ describe('a promotion travels with the commit that relies on it', () => {
       recipientOptions: { resolveLedgerEntries: mapResolver(promotionTokens) },
     })
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     promotionTokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
 
     const testHub = createTestHub()
     const { client: aliceHub } = testHub.connect(alice)
@@ -259,7 +266,7 @@ describe('a promotion travels with the commit that relies on it', () => {
 
     await aliceHub.publish({ topicID: topic, payload: promotion.commitMessage })
     const received = await nextCommitBytes(reader)
-    await bobGroup.processMessage(received)
+    await bobGroup.processMessage({ message: received })
 
     expect(promotion.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
@@ -277,8 +284,12 @@ describe('a promotion travels with the commit that relies on it', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(bobGroup, carolKP.publicPackage, carolInvite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: bobGroup,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
     const { group: carolGroup } = await processWelcome({
       identity: carol,
       invite: carolInvite,
@@ -300,7 +311,7 @@ describe('a missing ledger entry blocks a commit until it is resolved out of ban
     const groupID = `missing-entry-${Math.random().toString(36).slice(2)}`
     const promotionTokens = new Map<string, string>()
 
-    const { group: aliceGroup0 } = await createGroup(alice, groupID)
+    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
     const { newGroup: aliceGroup, recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -310,14 +321,17 @@ describe('a missing ledger entry blocks a commit until it is resolved out of ban
       recipientOptions: { resolveLedgerEntries: mapResolver(promotionTokens) },
     })
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     const promoteID = ledgerEntryDigest(promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
 
     const testHub = createTestHub()
     const { client: aliceHub } = testHub.connect(alice)
@@ -330,7 +344,7 @@ describe('a missing ledger entry blocks a commit until it is resolved out of ban
     const received = await nextCommitBytes(reader)
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(received)).rejects.toMatchObject({
+    await expect(bobGroup.processMessage({ message: received })).rejects.toMatchObject({
       name: 'MissingLedgerEntriesError',
       ids: [promoteID],
     })
@@ -339,7 +353,7 @@ describe('a missing ledger entry blocks a commit until it is resolved out of ban
     // Resolve out of band: populate the map the resolver closure reads, then
     // retry the exact same bytes on the same handle.
     promotionTokens.set(promoteID, promoteBob)
-    await bobGroup.processMessage(received)
+    await bobGroup.processMessage({ message: received })
 
     expect(bobGroup.epoch).toBe(epochBefore + 1n)
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
@@ -357,7 +371,7 @@ describe('a roster member may resync; a stranger may not', () => {
     const bob = randomIdentity()
     const groupID = `resync-${Math.random().toString(36).slice(2)}`
 
-    const { group: aliceGroup0 } = await createGroup(alice, groupID)
+    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
     const { newGroup: aliceGroup, recipientGroup: bobGroupInitial } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -383,7 +397,7 @@ describe('a roster member may resync; a stranger may not', () => {
     const epochBefore = aliceGroup.epoch
     await bobHub.publish({ topicID: topic, payload: commitMessage })
     const received = await nextCommitBytes(reader)
-    await aliceGroup.processMessage(received)
+    await aliceGroup.processMessage({ message: received })
 
     expect(aliceGroup.epoch).toBe(epochBefore + 1n)
     expect(aliceGroup.findMemberLeafIndex(bob.id)).toBeDefined()
@@ -401,7 +415,7 @@ describe('a roster member may resync; a stranger may not', () => {
     const mallory = randomIdentity()
     const groupID = `resync-stranger-${Math.random().toString(36).slice(2)}`
 
-    const { group: aliceGroup0 } = await createGroup(alice, groupID)
+    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
     const { newGroup: aliceGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,

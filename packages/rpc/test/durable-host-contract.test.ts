@@ -8,7 +8,11 @@ import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 import { createSingleConnectionHost, deferred } from './fixtures/single-connection-host.js'
 
-const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+const topicID = protocolTopic({
+  secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+  epoch: 1,
+  protocol: 'chat',
+})
 const payload = (text: string) =>
   fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 const timeout = (ms = 250): Promise<'timeout'> =>
@@ -19,7 +23,8 @@ async function publish(hub: DurableFakeHub, text: string) {
   await hub.publish({
     topicID,
     senderDID: 'alice',
-    payload: await sender.wrap(payload(text), {
+    payload: await sender.wrap({
+      bytes: payload(text),
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     }),
     retain: 'log',

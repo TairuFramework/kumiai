@@ -14,7 +14,7 @@ function responder(bus: ReturnType<typeof createMemoryBus>, from: string) {
     from,
     requestHandlers: {
       // Suppressible: a plain `request` storm-collapses; a `gather` must NOT.
-      census: suppressible(() => ({ from }), { jitterMs: 5, suppressTtlMs: 1000 }),
+      census: suppressible({ handler: () => ({ from }), jitterMs: 5, suppressTtlMs: 1000 }),
     },
     getJitterMs: (max) => max,
   })
@@ -28,7 +28,7 @@ describe('gather bypasses suppression', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const replies = await client.gather('census', {}, { timeoutMs: 300 })
+    const replies = await client.gather({ prc: 'census', prm: {}, timeoutMs: 300 })
     const froms = replies.map((r) => (r.value as { from: string }).from).sort()
     expect(froms).toEqual(['b1', 'b2', 'b3'])
 
@@ -43,7 +43,7 @@ describe('gather bypasses suppression', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const result = await client.request('census', {}, { timeoutMs: 300 })
+    const result = await client.request({ prc: 'census', prm: {}, timeoutMs: 300 })
     expect(['b1', 'b2', 'b3']).toContain((result as { from: string }).from)
 
     await flush()

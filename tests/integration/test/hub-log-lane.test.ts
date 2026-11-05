@@ -242,9 +242,9 @@ describe('Topic log over the wire', () => {
     expect(error.code).toBe(HUB_ERROR_CODES.headMismatch)
     // The caller can branch on the error class: "I lost the CAS, rebase and retry" is not the
     // same as "the hub is unreachable", and a transport failure carries no hub code at all.
-    expect(hubErrorFromCode(error.code as string, error.message ?? '')).toBeInstanceOf(
-      HeadMismatchError,
-    )
+    expect(
+      hubErrorFromCode({ code: error.code as string, message: error.message ?? '' }),
+    ).toBeInstanceOf(HeadMismatchError)
 
     // Nothing was stored for the loser.
     const result = await bob.fetchTopic({ topicID: TOPIC })
@@ -300,9 +300,9 @@ describe('Topic log over the wire', () => {
       .catch((error: unknown) => error)
     const error = rejected as { code?: string; message?: string }
     expect(error.code).toBe(HUB_ERROR_CODES.retentionExceeded)
-    expect(hubErrorFromCode(error.code as string, error.message ?? '')).toBeInstanceOf(
-      RetentionExceededError,
-    )
+    expect(
+      hubErrorFromCode({ code: error.code as string, message: error.message ?? '' }),
+    ).toBeInstanceOf(RetentionExceededError)
     expect(await store.getSubscribers({ topicID: fixtureTopic('greedy') })).toEqual([])
 
     await ctx.dispose()
@@ -319,9 +319,9 @@ describe('Topic log over the wire', () => {
     const rejected = await carol.fetchTopic({ topicID: TOPIC }).catch((error: unknown) => error)
     const error = rejected as { code?: string; message?: string }
     expect(error.code).toBe(HUB_ERROR_CODES.notSubscribed)
-    expect(hubErrorFromCode(error.code as string, error.message ?? '')).toBeInstanceOf(
-      NotSubscribedError,
-    )
+    expect(
+      hubErrorFromCode({ code: error.code as string, message: error.message ?? '' }),
+    ).toBeInstanceOf(NotSubscribedError)
 
     await ctx.dispose()
   })

@@ -238,7 +238,7 @@ describe('the mux refcounts acks across its holders', () => {
   test('a listener acking synchronously does not free a message a live sink still holds', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
-    const sub = mux.mailbox.receive('bob')
+    const sub = mux.mailbox.receive({ subscriberDID: 'bob' })
     void (async () => {
       for await (const _ of sub) {
         /* holds it */

@@ -78,17 +78,23 @@ test('single member of two with iat = lease - 60 does not lapse other leaves', a
 test('two members agreeing advance tree time to the lower of their attestations', async () => {
   const f = await buildEpoch({ members: 2 })
   const leaves = tree(await memberLeaf(f, 0, 200), await memberLeaf(f, 1, 150))
-  expect(await attestedTreeTime(leaves, await registryForLog(f.did, f.log), f.did)).toBe(150)
+  expect(
+    await attestedTreeTime({
+      tree: leaves,
+      registry: await registryForLog({ controller: f.did, log: f.log }),
+      controllerID: f.did,
+    }),
+  ).toBe(150)
 })
 
 test('sole effective member advances tree time', async () => {
   const f = await buildEpoch({ members: 1 })
   expect(
-    await attestedTreeTime(
-      tree(await memberLeaf(f, 0, 200)),
-      await registryForLog(f.did, f.log),
-      f.did,
-    ),
+    await attestedTreeTime({
+      tree: tree(await memberLeaf(f, 0, 200)),
+      registry: await registryForLog({ controller: f.did, log: f.log }),
+      controllerID: f.did,
+    }),
   ).toBe(200)
 })
 
@@ -100,28 +106,53 @@ test('a member token from a stale generation does not advance tree time', async 
     gen: 1,
     snapshot: snapshotOf({ state: f.head }),
   })
-  const registry = await registryForLog(f.did, { chain: [f.inception, reset], events: [] })
-  expect(await attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(0)
+  const registry = await registryForLog({
+    controller: f.did,
+    log: { chain: [f.inception, reset], events: [] },
+  })
   expect(
-    await attestedTreeTime(tree(await memberLeaf(f, 0, 200, { generation: 1 })), registry, f.did),
+    await attestedTreeTime({
+      tree: tree(await memberLeaf(f, 0, 200)),
+      registry,
+      controllerID: f.did,
+    }),
+  ).toBe(0)
+  expect(
+    await attestedTreeTime({
+      tree: tree(await memberLeaf(f, 0, 200, { generation: 1 })),
+      registry,
+      controllerID: f.did,
+    }),
   ).toBe(200)
 })
 
 test('a token whose issuer differs from the pinned member DID does not advance tree time', async () => {
   const f = await buildEpoch({ members: 1 })
-  const registry = await registryForLog(f.did, f.log)
+  const registry = await registryForLog({ controller: f.did, log: f.log })
   const leaf = await memberLeaf(f, 0, 200, { issuer: agent(91) })
-  expect(await attestedTreeTime(tree(leaf), registry, f.did)).toBe(0)
-  expect(await attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(200)
+  expect(await attestedTreeTime({ tree: tree(leaf), registry, controllerID: f.did })).toBe(0)
+  expect(
+    await attestedTreeTime({
+      tree: tree(await memberLeaf(f, 0, 200)),
+      registry,
+      controllerID: f.did,
+    }),
+  ).toBe(200)
 })
 
 test('a member token for another controller does not advance tree time', async () => {
   const f = await buildEpoch({ members: 1 })
-  const registry = await registryForLog(f.did, f.log)
+  const registry = await registryForLog({ controller: f.did, log: f.log })
   const other = await createInception({ seed: new Uint8Array(32).fill(32), profile: 0 })
   const leaf = await memberLeaf(f, 0, 200, { controllerID: didFromInception(other.event) })
-  expect(await attestedTreeTime(tree(leaf), registry, f.did)).toBe(0)
-  expect(await attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(200)
+  expect(await attestedTreeTime({ tree: tree(leaf), registry, controllerID: f.did })).toBe(0)
+  expect(
+    await attestedTreeTime({
+      tree: tree(await memberLeaf(f, 0, 200)),
+      registry,
+      controllerID: f.did,
+    }),
+  ).toBe(200)
 })
 
 test('a token naming a non-effective member add does not advance tree time', async () => {
@@ -136,7 +167,7 @@ test('a token naming a non-effective member add does not advance tree time', asy
     add: a.add,
   })
   const removedLog = { chain: f.log.chain, events: [...f.log.events, removal] }
-  const removed = await registryForLog(f.did, removedLog)
+  const removed = await registryForLog({ controller: f.did, log: removedLog })
   const recorded = removed.controllers.get(f.did)?.recordedLog
   if (recorded == null) throw new Error('Missing recorded log')
   const folded = await foldControllerLog(f.did, recorded)
@@ -153,17 +184,26 @@ test('a token naming a non-effective member add does not advance tree time', asy
       lease: 1100,
     },
   })
-  const registry = await registryForLog(f.did, {
-    ...removedLog,
-    events: [...removedLog.events, add],
+  const registry = await registryForLog({
+    controller: f.did,
+    log: {
+      ...removedLog,
+      events: [...removedLog.events, add],
+    },
   })
-  expect(await attestedTreeTime(tree(await memberLeaf(f, 0, 200)), registry, f.did)).toBe(0)
   expect(
-    await attestedTreeTime(
-      tree(await memberLeaf(f, 0, 200, { add: digestOf(add.event) })),
+    await attestedTreeTime({
+      tree: tree(await memberLeaf(f, 0, 200)),
       registry,
-      f.did,
-    ),
+      controllerID: f.did,
+    }),
+  ).toBe(0)
+  expect(
+    await attestedTreeTime({
+      tree: tree(await memberLeaf(f, 0, 200, { add: digestOf(add.event) })),
+      registry,
+      controllerID: f.did,
+    }),
   ).toBe(200)
 })
 
@@ -188,8 +228,8 @@ test('two incarnations of one pinned key count once', async () => {
     await memberLeaf(f, 0, 200),
     await memberLeaf(f, 0, 250, { add: digestOf(concurrent.event) }),
   )
-  const registry = await registryForLog(f.did, log)
-  expect(await attestedTreeTime(leaves, registry, f.did)).toBe(0)
+  const registry = await registryForLog({ controller: f.did, log })
+  expect(await attestedTreeTime({ tree: leaves, registry, controllerID: f.did })).toBe(0)
 })
 
 test('root-issued leaves still advance tree time (0.11 behaviour)', async () => {
@@ -200,7 +240,11 @@ test('root-issued leaves still advance tree time (0.11 behaviour)', async () => 
     await rawBundle(group, identity, await timedBinding({ identity, iat: 150, exp: 250 }))
   ).publicPackage.leafNode
   expect(
-    await attestedTreeTime(tree(leaf), group.registry, group.anchor.controller as string),
+    await attestedTreeTime({
+      tree: tree(leaf),
+      registry: group.registry,
+      controllerID: group.anchor.controller as string,
+    }),
   ).toBe(150)
 })
 
@@ -217,9 +261,12 @@ test("removed member's attestation stops counting; the preserved floor stays", a
     signer: f.root,
     add: a.add,
   })
-  const registry = await registryForLog(f.did, {
-    chain: f.log.chain,
-    events: [...f.log.events, removal],
+  const registry = await registryForLog({
+    controller: f.did,
+    log: {
+      chain: f.log.chain,
+      events: [...f.log.events, removal],
+    },
   })
   const projection = registry.controllers.get(f.did)
   if (projection == null) throw new Error('Missing projection')
@@ -230,7 +277,9 @@ test("removed member's attestation stops counting; the preserved floor stays", a
     ...registry,
     controllers: new Map([[f.did, { ...projection, attestations }]]),
   }
-  expect(await attestedTreeTime(leaves, withClock, f.did)).toBe(150)
+  expect(await attestedTreeTime({ tree: leaves, registry: withClock, controllerID: f.did })).toBe(
+    150,
+  )
   const { group } = await pipelineGroup()
   vi.spyOn(Date, 'now').mockReturnValue(999_000)
   const membership = await rawBundle(group, b.identity, {
@@ -240,13 +289,13 @@ test("removed member's attestation stops counting; the preserved floor stays", a
     iat: 999,
   })
   expect(
-    await attestedTreeTime(
-      tree(membership.publicPackage.leafNode),
-      {
+    await attestedTreeTime({
+      tree: tree(membership.publicPackage.leafNode),
+      registry: {
         ...registry,
         controllers: new Map([[f.did, { ...projection, timeFloor: 150, attestations }]]),
       },
-      f.did,
-    ),
+      controllerID: f.did,
+    }),
   ).toBe(150)
 })

@@ -72,7 +72,7 @@ async function twoMemberGroup(groupID: string) {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
 
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -80,8 +80,8 @@ async function twoMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle(bob)
-  const added = await commitInvite(created, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: bob })
+  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -131,7 +131,7 @@ async function lapsedSender(): Promise<GroupHandle> {
     carol,
     await timedBinding({ identity: carol, iat: 95, exp: 200 }),
   )
-  await first.joined.processMessage(second.message)
+  await first.joined.processMessage({ message: second.message })
   return first.joined
 }
 
@@ -172,7 +172,7 @@ function faultyProvider() {
 }
 
 async function emptyEncrypts(group: GroupHandle, count: number): Promise<void> {
-  for (let i = 0; i < count; i++) await group.encrypt(new Uint8Array())
+  for (let i = 0; i < count; i++) await group.encrypt({ plaintext: new Uint8Array() })
 }
 
 describe('GroupHandle.advanceSenderGeneration', () => {
@@ -191,7 +191,7 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     const advanced = await reload(bobGroup)
     const encrypted = await reload(bobGroup)
     const replaced = ownApplication(advanced)?.secret
-    await advanced.advanceSenderGeneration(target)
+    await advanced.advanceSenderGeneration({ target })
     await emptyEncrypts(encrypted, target - start)
 
     expect(senderGeneration(advanced)).toBe(target)
@@ -205,8 +205,12 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     // Both now send at `target`, and a receiver at the pre-advance position opens each.
     const receiverA = await reload(aliceGroup)
     const receiverB = await reload(aliceGroup)
-    const fromAdvanced = await receiverA.decrypt(await advanced.encrypt(utf8.encode('after')))
-    const fromEncrypted = await receiverB.decrypt(await encrypted.encrypt(utf8.encode('after')))
+    const fromAdvanced = await receiverA.decrypt({
+      message: await advanced.encrypt({ plaintext: utf8.encode('after') }),
+    })
+    const fromEncrypted = await receiverB.decrypt({
+      message: await encrypted.encrypt({ plaintext: utf8.encode('after') }),
+    })
     expect(new TextDecoder().decode(fromAdvanced.payload)).toBe('after')
     expect(new TextDecoder().decode(fromEncrypted.payload)).toBe('after')
     expect(encodeClientState(advanced.state)).toEqual(encodeClientState(encrypted.state))
@@ -215,14 +219,14 @@ describe('GroupHandle.advanceSenderGeneration', () => {
   test('is a no-op at or below the current generation', async () => {
     const { bobGroup } = await twoMemberGroup('advance-noop')
     // Not derived yet: advancing to 0 must not derive it.
-    await bobGroup.advanceSenderGeneration(0)
+    await bobGroup.advanceSenderGeneration({ target: 0 })
     expect(ownApplication(bobGroup)).toBeUndefined()
 
     await emptyEncrypts(bobGroup, 5)
     const before = encodeClientState(bobGroup.state)
-    await bobGroup.advanceSenderGeneration(5)
-    await bobGroup.advanceSenderGeneration(2)
-    await bobGroup.advanceSenderGeneration(0)
+    await bobGroup.advanceSenderGeneration({ target: 5 })
+    await bobGroup.advanceSenderGeneration({ target: 2 })
+    await bobGroup.advanceSenderGeneration({ target: 0 })
     expect(encodeClientState(bobGroup.state)).toEqual(before)
     expect(senderGeneration(bobGroup)).toBe(5)
   })
@@ -230,7 +234,7 @@ describe('GroupHandle.advanceSenderGeneration', () => {
   test('refuses a target that is not a uint32 generation with one after it', async () => {
     const { bobGroup } = await twoMemberGroup('advance-range')
     for (const target of [-1, 1.5, Number.NaN, 0xffffffff, 2 ** 32]) {
-      await expect(bobGroup.advanceSenderGeneration(target)).rejects.toThrow(RangeError)
+      await expect(bobGroup.advanceSenderGeneration({ target })).rejects.toThrow(RangeError)
     }
     expect(ownApplication(bobGroup)).toBeUndefined()
   })
@@ -238,37 +242,43 @@ describe('GroupHandle.advanceSenderGeneration', () => {
   test('maxSteps refuses a longer advance before taking any step', async () => {
     const { bobGroup } = await twoMemberGroup('advance-max-steps')
     // Underived leaf: the distance is measured from generation 0.
-    await expect(bobGroup.advanceSenderGeneration(201, { maxSteps: 200 })).rejects.toThrow(
+    await expect(bobGroup.advanceSenderGeneration({ target: 201, maxSteps: 200 })).rejects.toThrow(
       RangeError,
     )
     expect(ownApplication(bobGroup)).toBeUndefined()
 
     await emptyEncrypts(bobGroup, 3)
     const before = encodeClientState(bobGroup.state)
-    await expect(bobGroup.advanceSenderGeneration(204, { maxSteps: 200 })).rejects.toThrow(
+    await expect(bobGroup.advanceSenderGeneration({ target: 204, maxSteps: 200 })).rejects.toThrow(
       RangeError,
     )
     for (const maxSteps of [-1, 1.5, Number.NaN]) {
-      await expect(bobGroup.advanceSenderGeneration(10, { maxSteps })).rejects.toThrow(RangeError)
+      await expect(bobGroup.advanceSenderGeneration({ target: 10, maxSteps })).rejects.toThrow(
+        RangeError,
+      )
     }
     expect(encodeClientState(bobGroup.state)).toEqual(before)
 
-    await bobGroup.advanceSenderGeneration(203, { maxSteps: 200 })
+    await bobGroup.advanceSenderGeneration({ target: 203, maxSteps: 200 })
     expect(senderGeneration(bobGroup)).toBe(203)
     // No default cap: a stored high-water mark may sit far past every receiver.
-    await bobGroup.advanceSenderGeneration(1203)
+    await bobGroup.advanceSenderGeneration({ target: 1203 })
     expect(senderGeneration(bobGroup)).toBe(1203)
   })
 
   test('a receiver accepts the first frame across the skipped gap', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('advance-gap')
-    const before = await bobGroup.encrypt(utf8.encode('before'))
-    expect(new TextDecoder().decode((await aliceGroup.decrypt(before)).payload)).toBe('before')
+    const before = await bobGroup.encrypt({ plaintext: utf8.encode('before') })
+    expect(new TextDecoder().decode((await aliceGroup.decrypt({ message: before })).payload)).toBe(
+      'before',
+    )
 
     // 150 skipped generations: inside ts-mls's default 200-step receive window.
-    await bobGroup.advanceSenderGeneration(senderGeneration(bobGroup) + 150)
+    await bobGroup.advanceSenderGeneration({ target: senderGeneration(bobGroup) + 150 })
     expect(senderGeneration(bobGroup)).toBe(151)
-    const after = await aliceGroup.decrypt(await bobGroup.encrypt(utf8.encode('after')))
+    const after = await aliceGroup.decrypt({
+      message: await bobGroup.encrypt({ plaintext: utf8.encode('after') }),
+    })
     expect(new TextDecoder().decode(after.payload)).toBe('after')
   })
 
@@ -280,8 +290,11 @@ describe('GroupHandle.advanceSenderGeneration', () => {
         label: 'removed from the group',
         setup: async () => {
           const { aliceGroup, bobGroup } = await twoMemberGroup('advance-refuse-removed')
-          const removed = await removeMember(aliceGroup, bobGroup.state.privatePath.leafIndex)
-          await bobGroup.processMessage(removed.commitMessage)
+          const removed = await removeMember({
+            group: aliceGroup,
+            leafIndex: bobGroup.state.privatePath.leafIndex,
+          })
+          await bobGroup.processMessage({ message: removed.commitMessage })
           expect(bobGroup.state.groupActiveState.kind).toBe('removedFromGroup')
           return bobGroup
         },
@@ -318,11 +331,11 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     ])('when $label', async ({ setup }) => {
       const group = await setup()
       const before = encodeClientState(group.state)
-      const encryptError = await rejection(group.encrypt(new Uint8Array()))
+      const encryptError = await rejection(group.encrypt({ plaintext: new Uint8Array() }))
       expect(encodeClientState(group.state)).toEqual(before)
 
       const advanceError = await rejection(
-        group.advanceSenderGeneration(senderGeneration(group) + 10),
+        group.advanceSenderGeneration({ target: senderGeneration(group) + 10 }),
       )
       expect(advanceError.constructor).toBe(encryptError.constructor)
       expect(advanceError.name).toBe(encryptError.name)
@@ -356,14 +369,18 @@ describe('GroupHandle.advanceSenderGeneration', () => {
       const before = encodeClientState(group.state)
 
       control.failAt = 5
-      await expect(group.advanceSenderGeneration(40)).rejects.toThrow('injected kdf failure')
+      await expect(group.advanceSenderGeneration({ target: 40 })).rejects.toThrow(
+        'injected kdf failure',
+      )
       expect(control.derived).toHaveLength(5)
       for (const secret of control.derived) expect(secret.every((byte) => byte === 0)).toBe(true)
       expect(encodeClientState(group.state)).toEqual(before)
       expect(ownApplication(group)?.secret).toEqual(chainSecret)
 
       control.failAt = -1
-      const opened = await aliceGroup.decrypt(await group.encrypt(utf8.encode('still sends')))
+      const opened = await aliceGroup.decrypt({
+        message: await group.encrypt({ plaintext: utf8.encode('still sends') }),
+      })
       expect(new TextDecoder().decode(opened.payload)).toBe('still sends')
     })
 
@@ -388,11 +405,13 @@ describe('GroupHandle.advanceSenderGeneration', () => {
         options: { cryptoProvider: counting.provider },
       })
       counting.control.failAt = Number.POSITIVE_INFINITY
-      await twin.encrypt(new Uint8Array())
+      await twin.encrypt({ plaintext: new Uint8Array() })
       const encryptCalls = counting.control.calls
 
       control.failAt = encryptCalls + 5
-      await expect(group.advanceSenderGeneration(400)).rejects.toThrow('injected kdf failure')
+      await expect(group.advanceSenderGeneration({ target: 400 })).rejects.toThrow(
+        'injected kdf failure',
+      )
       expect(ownApplication(group)).toBeUndefined()
       expect(encodeClientState(group.state)).toEqual(before)
       const chain = control.derived.slice(encryptCalls)
@@ -400,7 +419,9 @@ describe('GroupHandle.advanceSenderGeneration', () => {
       for (const secret of chain) expect(secret.every((byte) => byte === 0)).toBe(true)
 
       control.failAt = -1
-      const opened = await aliceGroup.decrypt(await group.encrypt(utf8.encode('still sends')))
+      const opened = await aliceGroup.decrypt({
+        message: await group.encrypt({ plaintext: utf8.encode('still sends') }),
+      })
       expect(new TextDecoder().decode(opened.payload)).toBe('still sends')
     })
   })
@@ -413,7 +434,7 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     const advanced = await reload(bobGroup)
     const encrypted = await reload(bobGroup)
     // Warm both paths so neither pays first-call JIT cost inside the timed region.
-    await advanced.advanceSenderGeneration(senderGeneration(advanced) + 10)
+    await advanced.advanceSenderGeneration({ target: senderGeneration(advanced) + 10 })
     await emptyEncrypts(encrypted, 10)
 
     const median = (values: Array<number>): number =>
@@ -422,7 +443,7 @@ describe('GroupHandle.advanceSenderGeneration', () => {
     const encryptMs: Array<number> = []
     for (let round = 0; round < rounds; round++) {
       let started = performance.now()
-      await advanced.advanceSenderGeneration(senderGeneration(advanced) + steps)
+      await advanced.advanceSenderGeneration({ target: senderGeneration(advanced) + steps })
       advanceMs.push(performance.now() - started)
       started = performance.now()
       await emptyEncrypts(encrypted, steps)
@@ -508,14 +529,14 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
       HandshakeWindowError,
     )
     if (last == null) throw new Error('missing last frame')
-    await aliceGroup.processMessage(last)
+    await aliceGroup.processMessage({ message: last })
   })
 
   test('consuming a reservation after the epoch moves throws a typed error', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('stale-handshake-reservation')
     await bobGroup.reserveHandshakeGeneration(() => {})
     const built = await createCommit({ context: aliceGroup.context, state: aliceGroup.state })
-    await bobGroup.processMessage(encode(mlsMessageEncoder, built.commit))
+    await bobGroup.processMessage({ message: encode(mlsMessageEncoder, built.commit) })
     const before = encodeClientState(bobGroup.state)
     const error = await rejection(bobGroup.consumeHandshakeReservation(() => {}))
     expect(error).toBeInstanceOf(HandshakeReservationError)
@@ -546,7 +567,7 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
     'persists before framing, including after restore (derived: %s)',
     async (derived) => {
       const { aliceGroup, bobGroup } = await twoMemberGroup(`reserve-handshake-${derived}`)
-      if (derived) await bobGroup.encrypt(utf8.encode('warmup'))
+      if (derived) await bobGroup.encrypt({ plaintext: utf8.encode('warmup') })
       const epoch = bobGroup.epoch
       const application = senderGeneration(bobGroup)
       const proposals = bobGroup.state.unappliedProposals
@@ -580,7 +601,7 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
       expect(generations).toEqual([1, 2])
       expect(current.epoch).toBe(epoch)
       // Skipping a failed attempt must still produce a commit a real receiver applies.
-      await aliceGroup.processMessage(frames[1] as Uint8Array)
+      await aliceGroup.processMessage({ message: frames[1] as Uint8Array })
       expect(aliceGroup.epoch).toBe(epoch + 1n)
     },
   )
@@ -600,9 +621,9 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
         const built = await createCommit({ context: bobGroup.context, state })
         const frame = encode(mlsMessageEncoder, built.commit)
         expect(await framedGeneration(otherReceiver, frame)).toBe(i)
-        if (i === window) await aliceGroup.processMessage(frame)
+        if (i === window) await aliceGroup.processMessage({ message: frame })
         else
-          await expect(otherReceiver.processMessage(frame)).rejects.toThrow(
+          await expect(otherReceiver.processMessage({ message: frame })).rejects.toThrow(
             'Desired generation too far in the future',
           )
       }
@@ -644,7 +665,7 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
     const built = await createCommit({ context: current.context, state: current.state })
     const frame = encode(mlsMessageEncoder, built.commit)
     expect(await framedGeneration(aliceGroup, frame)).toBe(1)
-    await aliceGroup.processMessage(frame)
+    await aliceGroup.processMessage({ message: frame })
   })
 
   test('the last allowed real frame opens and the next reservation hits the window gate', async () => {
@@ -666,7 +687,7 @@ describe('GroupHandle.reserveHandshakeGeneration', () => {
     )
     expect(encodeClientState(bobGroup.state)).toEqual(before)
     if (last == null) throw new Error('missing last frame')
-    await aliceGroup.processMessage(last)
+    await aliceGroup.processMessage({ message: last })
     expect(aliceGroup.epoch).toBe(bobGroup.epoch + 1n)
     if (accepted == null) throw new Error('missing accepted state')
     await accepted.reserveHandshakeGeneration(async () => {})

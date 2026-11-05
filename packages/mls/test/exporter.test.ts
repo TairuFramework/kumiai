@@ -35,7 +35,7 @@ async function threeMemberGroup(groupID: string) {
       return token
     })
 
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
 
   const join = async (
     admin: GroupHandle,
@@ -48,8 +48,8 @@ async function threeMemberGroup(groupID: string) {
       permission: 'member',
     })
     publish(invite)
-    const bundle = await createKeyPackageBundle(identity)
-    const added = await commitInvite(admin, bundle.publicPackage, invite)
+    const bundle = await createKeyPackageBundle({ identity })
+    const added = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
     const { group: joined } = await processWelcome({
       identity,
       invite,
@@ -64,7 +64,7 @@ async function threeMemberGroup(groupID: string) {
   const addBob = await join(created, bob)
   const addCarol = await join(addBob.adminGroup, carol)
   // Bob has to walk the commit that added Carol to reach the same epoch.
-  await addBob.joined.processMessage(addCarol.commit)
+  await addBob.joined.processMessage({ message: addCarol.commit })
 
   return {
     alice,
@@ -82,37 +82,41 @@ describe('MLS exporter secret', () => {
     expect(bobGroup.epoch).toBe(2n)
     expect(carolGroup.epoch).toBe(2n)
 
-    const fromAlice = await aliceGroup.exportSecret(LABEL, CONTEXT)
-    expect(await bobGroup.exportSecret(LABEL, CONTEXT)).toEqual(fromAlice)
-    expect(await carolGroup.exportSecret(LABEL, CONTEXT)).toEqual(fromAlice)
+    const fromAlice = await aliceGroup.exportSecret({ label: LABEL, context: CONTEXT })
+    expect(await bobGroup.exportSecret({ label: LABEL, context: CONTEXT })).toEqual(fromAlice)
+    expect(await carolGroup.exportSecret({ label: LABEL, context: CONTEXT })).toEqual(fromAlice)
     expect(fromAlice.length).toBe(32)
 
     // Alice removes Bob (leaf 1). Alice and Carol move to the next epoch; Bob's own handle
     // stays where it was, since the commit's UpdatePath excludes his leaf. Same label, same
     // context, different epoch: different bytes.
-    const removed = await removeMember(aliceGroup, 1)
-    await carolGroup.processMessage(removed.commitMessage)
+    const removed = await removeMember({ group: aliceGroup, leafIndex: 1 })
+    await carolGroup.processMessage({ message: removed.commitMessage })
     expect(removed.newGroup.epoch).toBe(3n)
     expect(carolGroup.epoch).toBe(3n)
     expect(bobGroup.epoch).toBe(2n)
 
-    const atFour = await removed.newGroup.exportSecret(LABEL, CONTEXT)
-    expect(await carolGroup.exportSecret(LABEL, CONTEXT)).toEqual(atFour)
+    const atFour = await removed.newGroup.exportSecret({ label: LABEL, context: CONTEXT })
+    expect(await carolGroup.exportSecret({ label: LABEL, context: CONTEXT })).toEqual(atFour)
     expect(atFour).not.toEqual(fromAlice)
 
     // Bob, removed, keeps epoch 3's secret for life and cannot follow it forward.
-    expect(await bobGroup.exportSecret(LABEL, CONTEXT)).toEqual(fromAlice)
-    expect(await bobGroup.exportSecret(LABEL, CONTEXT)).not.toEqual(atFour)
+    expect(await bobGroup.exportSecret({ label: LABEL, context: CONTEXT })).toEqual(fromAlice)
+    expect(await bobGroup.exportSecret({ label: LABEL, context: CONTEXT })).not.toEqual(atFour)
   })
 
   test('the label and the context each separate the secret', async () => {
     const { aliceGroup } = await threeMemberGroup('exporter-domain-separation')
 
-    const base = await aliceGroup.exportSecret(LABEL, CONTEXT)
-    expect(await aliceGroup.exportSecret('kumiai/inbox/v1', CONTEXT)).not.toEqual(base)
-    expect(await aliceGroup.exportSecret(LABEL, new TextEncoder().encode('other'))).not.toEqual(
-      base,
-    )
-    expect(await aliceGroup.exportSecret(LABEL, CONTEXT, 64)).toHaveLength(64)
+    const base = await aliceGroup.exportSecret({ label: LABEL, context: CONTEXT })
+    expect(
+      await aliceGroup.exportSecret({ label: 'kumiai/inbox/v1', context: CONTEXT }),
+    ).not.toEqual(base)
+    expect(
+      await aliceGroup.exportSecret({ label: LABEL, context: new TextEncoder().encode('other') }),
+    ).not.toEqual(base)
+    expect(
+      await aliceGroup.exportSecret({ label: LABEL, context: CONTEXT, length: 64 }),
+    ).toHaveLength(64)
   })
 })

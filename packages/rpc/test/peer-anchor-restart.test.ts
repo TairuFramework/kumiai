@@ -105,8 +105,8 @@ describe('the app-lane anchor survives a restart', () => {
     const bob = makeRoomPeer(hub, 'bob', recoverySecret, bobHandlers)
     await flush()
 
-    const { secret } = await alice.crypto.exportSecret(APP_TOPIC_LABEL)
-    const anchorTopic = protocolTopic(secret, 1, 'room')
+    const { secret } = await alice.crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    const anchorTopic = protocolTopic({ secret, epoch: 1, protocol: 'room' })
     expect(bob.peer.anchorEpoch()).toBe(1)
 
     // Drift the group PAST the anchor: an update/no-op commit and a ledger-only commit, neither
@@ -156,9 +156,11 @@ describe('the app-lane anchor survives a restart', () => {
     // and the live epoch's topic was never reached for at all.
     const drained = await hub.fetchTopic({ subscriberDID: 'alice', topicID: anchorTopic })
     expect(drained.messages).toHaveLength(2)
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3, APP_TOPIC_LABEL), 3, 'room'))).toBe(
-      0,
-    )
+    expect(
+      hub.subscriberCount(
+        protocolTopic({ secret: fakeEpochSecret(3, APP_TOPIC_LABEL), epoch: 3, protocol: 'room' }),
+      ),
+    ).toBe(0)
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
@@ -174,7 +176,9 @@ describe('the app-lane anchor survives a restart', () => {
     expect(alice.peer.anchorEpoch()).toBe(1)
     const stored = alice.anchorStore.stored()
     expect(stored?.epoch).toBe(1)
-    expect(stored?.secret).toEqual((await alice.crypto.exportSecret(APP_TOPIC_LABEL)).secret)
+    expect(stored?.secret).toEqual(
+      (await alice.crypto.exportSecret({ label: APP_TOPIC_LABEL })).secret,
+    )
     // Written once, at the seed. Nothing rotated it: the group has had no roster change.
     expect(alice.anchorStore.saves()).toBe(1)
 

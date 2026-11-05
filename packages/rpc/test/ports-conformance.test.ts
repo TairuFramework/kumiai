@@ -60,7 +60,7 @@ function didAt(index: number): string {
 
 testGroupCryptoConformance({
   label: 'createFakeCrypto',
-  createGroup: async (size) => {
+  createGroup: async ({ size }) => {
     let hintOffset = 0
     const members = Array.from({ length: size }, (_, index) => ({
       did: didAt(index),
@@ -169,7 +169,7 @@ test.each([
     adds: ['newcomer'],
     bindings: { newcomer: binding },
   })
-  expect(await receiver.processCommit(commit, {})).toMatchObject({
+  expect(await receiver.processCommit({ commit, context: {} })).toMatchObject({
     advanced: false,
     refusal: 'binding',
   })
@@ -210,7 +210,7 @@ test.each([
     bindings: { newcomer: binding },
     signatureKeys: key == null ? undefined : { newcomer: key },
   })
-  expect(await receiver.processCommit(commit, {})).toMatchObject({
+  expect(await receiver.processCommit({ commit, context: {} })).toMatchObject({
     advanced: false,
     refusal: 'binding',
   })
@@ -354,7 +354,7 @@ testGroupMLSConformance({
       }),
     }
   },
-  createGroup: async (size, id) => {
+  createGroup: async ({ size, id }) => {
     let hintOffset = 0
     const dids = Array.from({ length: size }, (_, index) => didAt(index))
     const roster = [COMMITTER_DID, ...dids]
@@ -391,15 +391,18 @@ testGroupMLSConformance({
     )
     committerEpoch += 1
     for (const member of members) {
-      await member.mls.processCommit(seed, {
-        senderDID: COMMITTER_DID,
-        resolveLedgerEntries: async () => ledgerTokens,
+      await member.mls.processCommit({
+        commit: seed,
+        context: {
+          senderDID: COMMITTER_DID,
+          resolveLedgerEntries: async () => ledgerTokens,
+        },
       })
     }
 
     return {
       groupID: id,
-      sealVerdictPayload: async (index, request, verdict) => {
+      sealVerdictPayload: async ({ member: index, request, verdict }) => {
         const member = members[index]
         if (member == null) throw new Error('missing member')
         return sealMemoryRecoveryVerdict(request, member.did, verdict)

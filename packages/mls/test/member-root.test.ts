@@ -74,7 +74,7 @@ test('memberRootsOf reads direct, parent, holder, membership and root roots', as
     },
   ]
   for (const entry of cases) {
-    expect(memberRootsOf(entry.binding, f.device.id)).toEqual(entry.expected)
+    expect(memberRootsOf({ binding: entry.binding, leafDID: f.device.id })).toEqual(entry.expected)
   }
 })
 
@@ -132,8 +132,8 @@ async function authorityFixture() {
     add: a.add,
   })
   const removedLog = { chain: f.log.chain, events: [...f.log.events, rmv] }
-  const before = await registryForLog(f.did, f.log)
-  const after = await registryForLog(f.did, removedLog)
+  const before = await registryForLog({ controller: f.did, log: f.log })
+  const after = await registryForLog({ controller: f.did, log: removedLog })
   return { ...f, a, b, tokens, grant, direct, holder, leaf, binding, removedLog, before, after }
 }
 
@@ -171,9 +171,12 @@ test.each([
       expected = { status: 'removed' }
       break
     case 'generation':
-      registry = await registryForLog(f.did, {
-        chain: [f.inception, await createReset({ seed: f.seed, profile: 0, gen: 1 })],
-        events: [],
+      registry = await registryForLog({
+        controller: f.did,
+        log: {
+          chain: [f.inception, await createReset({ seed: f.seed, profile: 0, gen: 1 })],
+          events: [],
+        },
       })
       expected = { status: 'removed' }
       break
@@ -187,7 +190,10 @@ test.each([
         prior: f.inception.event,
         snapshot: snapshotOf({ state: await head(f.did, f.removedLog) }),
       })
-      registry = await registryForLog(f.did, { chain: [f.inception, settle], events: [] })
+      registry = await registryForLog({
+        controller: f.did,
+        log: { chain: [f.inception, settle], events: [] },
+      })
       const projection = registry.controllers.get(f.did)
       if (projection == null) throw new Error('Missing projection')
       registry = {
@@ -230,18 +236,22 @@ test.each([
       expected = { status: 'unavailable', why: row }
       break
   }
-  expect(await api.memberRootStatus(registry, f.did, root)).toEqual(expected)
+  expect(await api.memberRootStatus({ registry, controller: f.did, root })).toEqual(expected)
 })
 
 test.each(['effective', 'removed'] as const)(
   "memberRootStatus classifies another DID's %s incarnation as removed",
   async (status) => {
     expect(
-      await api.memberRootStatus(status === 'effective' ? f.before : f.after, f.did, {
-        kind: 'member',
-        did: f.b.did,
-        add: f.a.add,
-        gen: 0,
+      await api.memberRootStatus({
+        registry: status === 'effective' ? f.before : f.after,
+        controller: f.did,
+        root: {
+          kind: 'member',
+          did: f.b.did,
+          add: f.a.add,
+          gen: 0,
+        },
       }),
     ).toEqual({ status: 'removed' })
   },
@@ -249,11 +259,15 @@ test.each(['effective', 'removed'] as const)(
 
 test('memberRootStatus treats an unknown add ending in a resolver refusal as unavailable', async () => {
   expect(
-    await api.memberRootStatus(f.before, f.did, {
-      kind: 'member',
-      did: f.a.identity.id,
-      add: 'unknown is another DID',
-      gen: 0,
+    await api.memberRootStatus({
+      registry: f.before,
+      controller: f.did,
+      root: {
+        kind: 'member',
+        did: f.a.identity.id,
+        add: 'unknown is another DID',
+        gen: 0,
+      },
     }),
   ).toEqual({ status: 'unavailable', why: 'unknown-incarnation' })
 })
@@ -266,13 +280,20 @@ test('member introduced through a settlement snapshot is effective with no epoch
     prior: f.inception.event,
     snapshot: snapshotOf({ state: f.head }),
   })
-  const registry = await registryForLog(f.did, { chain: [f.inception, settle], events: [] })
+  const registry = await registryForLog({
+    controller: f.did,
+    log: { chain: [f.inception, settle], events: [] },
+  })
   expect(
-    await api.memberRootStatus(registry, f.did, {
-      kind: 'member',
-      did: f.a.did,
-      add: f.a.add,
-      gen: 0,
+    await api.memberRootStatus({
+      registry,
+      controller: f.did,
+      root: {
+        kind: 'member',
+        did: f.a.did,
+        add: f.a.add,
+        gen: 0,
+      },
     }),
   ).toEqual({ status: 'effective', key: f.a.identity.publicKey, lease: 2000 })
 })
@@ -284,24 +305,31 @@ test('memberRootStatus treats a canonically denied member as removed', async () 
     gen: 1,
     snapshot: { ...snapshotOf({ state: f.head }), deny: [f.a.identity.id] },
   })
-  const registry = await registryForLog(f.did, { chain: [f.inception, reset], events: [] })
+  const registry = await registryForLog({
+    controller: f.did,
+    log: { chain: [f.inception, reset], events: [] },
+  })
   expect(
-    await api.memberRootStatus(registry, f.did, {
-      kind: 'member',
-      did: f.a.did,
-      add: f.a.add,
-      gen: 1,
+    await api.memberRootStatus({
+      registry,
+      controller: f.did,
+      root: {
+        kind: 'member',
+        did: f.a.did,
+        add: f.a.add,
+        gen: 1,
+      },
     }),
   ).toEqual({ status: 'removed' })
 })
 
 test("effectiveAuthorityOf uses the holder substitute when the parent's member is removed", async () => {
   const leaf = { ...f.leaf, binding: { ...f.leaf.binding, holderGrant: f.holder } }
-  expect(await api.effectiveAuthorityOf(leaf, f.before, f.did)).toEqual({
+  expect(await api.effectiveAuthorityOf({ leaf, registry: f.before, controller: f.did })).toEqual({
     root: { kind: 'member', did: f.a.did, add: f.a.add, gen: 0 },
     slot: 'parent',
   })
-  expect(await api.effectiveAuthorityOf(leaf, f.after, f.did)).toEqual({
+  expect(await api.effectiveAuthorityOf({ leaf, registry: f.after, controller: f.did })).toEqual({
     root: { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 },
     slot: 'holder',
     expiry: 900,
@@ -317,7 +345,7 @@ test('effectiveAuthorityOf uses a registered survivor grant', async () => {
       [f.did, { ...projection, survivorGrants: new Map([[normalizeDID(f.leaf.did), f.holder]]) }],
     ]),
   }
-  expect(await api.effectiveAuthorityOf(f.leaf, registry, f.did)).toEqual({
+  expect(await api.effectiveAuthorityOf({ leaf: f.leaf, registry, controller: f.did })).toEqual({
     root: { kind: 'member', did: f.b.did, add: f.b.add, gen: 0 },
     slot: 'survivor',
     expiry: 900,
@@ -334,7 +362,9 @@ test.each(['aud', 'cnf'] as const)(
           : audienceConfirmation({ alg: 'EdDSA', publicKey: f.tokens.trusted.publicKey }),
     })
     const leaf = { ...f.leaf, binding: { ...f.leaf.binding, holderGrant: holder } }
-    expect(await api.effectiveAuthorityOf(leaf, f.after, f.did)).toEqual({ status: 'removed' })
+    expect(await api.effectiveAuthorityOf({ leaf, registry: f.after, controller: f.did })).toEqual({
+      status: 'removed',
+    })
     const projection = f.after.controllers.get(f.did)
     if (projection == null) throw new Error('Missing projection')
     const registry = {
@@ -343,7 +373,9 @@ test.each(['aud', 'cnf'] as const)(
         [f.did, { ...projection, survivorGrants: new Map([[f.leaf.did, holder]]) }],
       ]),
     }
-    expect(await api.effectiveAuthorityOf(f.leaf, registry, f.did)).toEqual({ status: 'removed' })
+    expect(await api.effectiveAuthorityOf({ leaf: f.leaf, registry, controller: f.did })).toEqual({
+      status: 'removed',
+    })
   },
 )
 
@@ -360,8 +392,12 @@ test('effectiveAuthorityOf reports a prefix absent from the recorded chain as un
     ...f.leaf,
     binding: { ...f.leaf.binding, prefix: [f.inception, fork], holderGrant: f.holder },
   }
-  expect(await api.effectiveAuthorityOf(leaf, f.before, f.did)).toEqual({ status: 'unavailable' })
-  expect(await api.effectiveAuthorityOf(leaf, f.after, f.did)).toEqual({ status: 'removed' })
+  expect(await api.effectiveAuthorityOf({ leaf, registry: f.before, controller: f.did })).toEqual({
+    status: 'unavailable',
+  })
+  expect(await api.effectiveAuthorityOf({ leaf, registry: f.after, controller: f.did })).toEqual({
+    status: 'removed',
+  })
 })
 
 function removal(): EffectClaim {
@@ -394,12 +430,27 @@ test('reset-only member loss emits no remove claim and cascades its leaves', asy
   const reset = await createReset({ seed: f.seed, profile: 0, gen: 1 })
   const log = { chain: [f.inception, reset], events: [] }
   expect((await head(f.did, log)).gen).toBe(1)
-  const claims = await api.claimsFor(f.did, f.log, log, 0)
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: f.log,
+    merged: log,
+    genFloor: 0,
+  })
   expect(claims).toEqual([])
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
-  const after = await registryForLog(f.did, log)
-  expect(await api.cascadeOf(removalLeaves(), claims, f.before, after, f.did)).toEqual({
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
+  const after = await registryForLog({ controller: f.did, log })
+  expect(
+    await api.cascadeOf({
+      leaves: removalLeaves(),
+      claims,
+      before: f.before,
+      after,
+      controller: f.did,
+    }),
+  ).toEqual({
     revoked: [],
     removed: [
       { did: f.tokens.trusted.id, cascadedFrom: f.a.identity.id },
@@ -420,14 +471,29 @@ test('root denial of an effective member emits only a deny claim and cascades it
   })
   const log = { chain: f.log.chain, events: [...f.log.events, rev] }
   expect((await head(f.did, log)).members.get(f.a.add)?.effective).toBe(false)
-  const claims = await api.claimsFor(f.did, f.log, log, 0)
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: f.log,
+    merged: log,
+    genFloor: 0,
+  })
   expect(claims).toEqual([
     { kind: 'deny', did: f.a.identity.id, ref: { event: digestOf(rev.event) } },
   ])
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
-  const after = await registryForLog(f.did, log)
-  expect(await api.cascadeOf(removalLeaves(), claims, f.before, after, f.did)).toEqual({
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
+  const after = await registryForLog({ controller: f.did, log })
+  expect(
+    await api.cascadeOf({
+      leaves: removalLeaves(),
+      claims,
+      before: f.before,
+      after,
+      controller: f.did,
+    }),
+  ).toEqual({
     revoked: [{ did: f.a.identity.id }],
     removed: [
       { did: f.tokens.trusted.id, cascadedFrom: f.a.identity.id },
@@ -439,7 +505,13 @@ test('root denial of an effective member emits only a deny claim and cascades it
 
 test("cascadeOf: rmv cascades a direct mbr leaf, a leaf whose parent came from the removed member, and the member's own membership leaf", async () => {
   const leaves = removalLeaves()
-  const result = await api.cascadeOf(leaves, [removal()], f.before, f.after, f.did)
+  const result = await api.cascadeOf({
+    leaves,
+    claims: [removal()],
+    before: f.before,
+    after: f.after,
+    controller: f.did,
+  })
   expect(result.removeLeafIndices).toEqual([3, 4, 6])
   expect(result.removed).toEqual(
     leaves.map((leaf) => ({
@@ -452,7 +524,15 @@ test("cascadeOf: rmv cascades a direct mbr leaf, a leaf whose parent came from t
 
 test('cascadeOf: rmv keeps a leaf whose holder grant came from another effective member', async () => {
   const leaf = { ...f.leaf, leafIndex: 1, binding: { ...f.leaf.binding, holderGrant: f.holder } }
-  expect(await api.cascadeOf([leaf], [removal()], f.before, f.after, f.did)).toEqual({
+  expect(
+    await api.cascadeOf({
+      leaves: [leaf],
+      claims: [removal()],
+      before: f.before,
+      after: f.after,
+      controller: f.did,
+    }),
+  ).toEqual({
     revoked: [],
     removed: [],
     removeLeafIndices: [],
@@ -477,7 +557,9 @@ test('cascadeOf: edge deny cascades its chained leaves only', async () => {
       binding: { ...f.binding, capability: await f.grant(f.a.identity, f.b.identity, f.a.add) },
     },
   ]
-  expect(await api.cascadeOf(leaves, claims, f.before, after, f.did)).toEqual({
+  expect(
+    await api.cascadeOf({ leaves, claims, before: f.before, after, controller: f.did }),
+  ).toEqual({
     revoked: [{ did: target }, { did: f.leaf.did, cascadedFrom: target }],
     removed: [],
     removeLeafIndices: [1],
@@ -488,7 +570,9 @@ test('cascadeOf: edge deny cascades its chained leaves only', async () => {
     leafIndex: 1,
     binding: { ...f.leaf.binding, holderGrant: f.holder },
   }
-  expect(await api.cascadeOf(leaves, claims, f.before, after, f.did)).toEqual({
+  expect(
+    await api.cascadeOf({ leaves, claims, before: f.before, after, controller: f.did }),
+  ).toEqual({
     revoked: [{ did: target }],
     removed: [],
     removeLeafIndices: [],
@@ -498,9 +582,17 @@ test('cascadeOf: edge deny cascades its chained leaves only', async () => {
 test('cascadeOf: rmv writes no revoked device records', async () => {
   const before = structuredClone(f.before)
   const after = structuredClone(f.after)
-  expect((await api.cascadeOf(removalLeaves(), [removal()], before, after, f.did)).revoked).toEqual(
-    [],
-  )
+  expect(
+    (
+      await api.cascadeOf({
+        leaves: removalLeaves(),
+        claims: [removal()],
+        before,
+        after,
+        controller: f.did,
+      })
+    ).revoked,
+  ).toEqual([])
   expect(before).toEqual(f.before)
   expect(after).toEqual(f.after)
   expect(api.denySetOf(after)).toEqual(new Set())
@@ -515,23 +607,41 @@ test('unavailable holder authority cannot keep a leaf with a tombstoned primary'
   }
   const leaf = { ...f.leaf, leafIndex: 1, binding: { ...f.leaf.binding, holderGrant: f.holder } }
   expect(
-    await api.memberRootStatus(after, f.did, {
-      kind: 'member',
-      did: f.a.did,
-      add: f.a.add,
-      gen: 0,
+    await api.memberRootStatus({
+      registry: after,
+      controller: f.did,
+      root: {
+        kind: 'member',
+        did: f.a.did,
+        add: f.a.add,
+        gen: 0,
+      },
     }),
   ).toEqual({ status: 'removed' })
   expect(
-    await api.memberRootStatus(after, f.did, {
-      kind: 'member',
-      did: f.b.did,
-      add: f.b.add,
-      gen: 0,
+    await api.memberRootStatus({
+      registry: after,
+      controller: f.did,
+      root: {
+        kind: 'member',
+        did: f.b.did,
+        add: f.b.add,
+        gen: 0,
+      },
     }),
   ).toEqual({ status: 'unavailable', why: 'saturated' })
-  expect(await api.effectiveAuthorityOf(leaf, after, f.did)).toEqual({ status: 'removed' })
-  expect(await api.cascadeOf([leaf], [removal()], f.before, after, f.did)).toEqual({
+  expect(await api.effectiveAuthorityOf({ leaf, registry: after, controller: f.did })).toEqual({
+    status: 'removed',
+  })
+  expect(
+    await api.cascadeOf({
+      leaves: [leaf],
+      claims: [removal()],
+      before: f.before,
+      after,
+      controller: f.did,
+    }),
+  ).toEqual({
     revoked: [],
     removed: [{ did: f.leaf.did, cascadedFrom: f.a.identity.id }],
     removeLeafIndices: [1],
@@ -554,7 +664,7 @@ test('registered survivor authority exempts a leaf when its former immediate iss
     target: f.tokens.trusted.id,
   })
   const log = { ...f.removedLog, events: [...f.removedLog.events, rev] }
-  const registry = await registryForLog(f.did, log)
+  const registry = await registryForLog({ controller: f.did, log })
   const updated = registry.controllers.get(f.did)
   if (updated == null) throw new Error('Missing updated projection')
   const after = {
@@ -567,17 +677,30 @@ test('registered survivor authority exempts a leaf when its former immediate iss
     slot: 'survivor',
     expiry: 900,
   }
-  expect(await api.effectiveAuthorityOf(leaf, before, f.did)).toEqual(authority)
-  expect(await api.effectiveAuthorityOf(leaf, after, f.did)).toEqual(authority)
-  const claims = await api.claimsFor(f.did, f.removedLog, log, 0)
+  expect(await api.effectiveAuthorityOf({ leaf, registry: before, controller: f.did })).toEqual(
+    authority,
+  )
+  expect(await api.effectiveAuthorityOf({ leaf, registry: after, controller: f.did })).toEqual(
+    authority,
+  )
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: f.removedLog,
+    merged: log,
+    genFloor: 0,
+  })
   expect(claims).toEqual([
     { kind: 'deny', did: f.tokens.trusted.id, ref: { event: digestOf(rev.event) } },
   ])
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
-  expect(await api.cascadeOf([leaf], claims, before, after, f.did)).toEqual({
-    revoked: [{ did: f.tokens.trusted.id }],
-    removed: [],
-    removeLeafIndices: [],
-  })
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
+  expect(await api.cascadeOf({ leaves: [leaf], claims, before, after, controller: f.did })).toEqual(
+    {
+      revoked: [{ did: f.tokens.trusted.id }],
+      removed: [],
+      removeLeafIndices: [],
+    },
+  )
 })

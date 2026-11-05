@@ -47,16 +47,18 @@ export type VerifiedLedgerEntry<TValue = unknown> = {
   entry: LedgerEntry<TValue>
 }
 
+export type SignLedgerEntryParams = {
+  identity: SigningIdentity
+  entry: LedgerEntry
+}
+
 /**
  * Sign a ledger entry. The signer fills `iss` with its DID, so the signature
  * covers every claim field — including `groupID` and `ord` — and binds the
  * author. `ord` is signed only when present, so a claim without it never signs
  * an `ord: undefined` key. Returns the stringified token.
  */
-export async function signLedgerEntry(
-  identity: SigningIdentity,
-  entry: LedgerEntry,
-): Promise<string> {
+export async function signLedgerEntry({ identity, entry }: SignLedgerEntryParams): Promise<string> {
   const signed = await identity.signToken({
     payload: {
       type: entry.type,
@@ -100,6 +102,9 @@ function observedProvider(crypto: CryptoProvider): CryptoProvider {
   }
   return observed
 }
+export type VerifyLedgerEntryParams<_TValue = unknown> = {
+  token: string
+} & CryptoOptions
 
 /**
  * Verify a signed ledger token and extract its claim. Returns `null` when the
@@ -112,10 +117,10 @@ function observedProvider(crypto: CryptoProvider): CryptoProvider {
  * `iss`. A provider failure rejects with the provider's error: it says nothing
  * about the token, and a caller reading it as invalid would drop an authentic entry.
  */
-export async function verifyLedgerEntry<TValue = unknown>(
-  token: string,
-  options?: CryptoOptions,
-): Promise<VerifiedLedgerEntry<TValue> | null> {
+export async function verifyLedgerEntry<TValue = unknown>({
+  token,
+  ...options
+}: VerifyLedgerEntryParams<TValue>): Promise<VerifiedLedgerEntry<TValue> | null> {
   let verified: Awaited<ReturnType<typeof verifyToken<LedgerEntry<TValue>>>>
   try {
     verified = await verifyToken<LedgerEntry<TValue>>({

@@ -86,7 +86,9 @@ export async function joinBoundDevice(): Promise<{
 }> {
   const tokens = new Map<string, string>()
   const creator = randomIdentity()
-  const { group: creatorGroup } = await createGroup(creator, GROUP, {
+  const { group: creatorGroup } = await createGroup({
+    identity: creator,
+    groupID: GROUP,
     resolveLedgerEntries: mapResolver(tokens),
   })
 
@@ -106,11 +108,11 @@ export async function joinBoundDevice(): Promise<{
 
   const keyPackageBundle = await buildBoundKeyPackageBundle(leaf, deviceSeed)
 
-  const { welcomeMessage, newGroup: updatedCreatorGroup } = await commitInvite(
-    creatorGroup,
-    keyPackageBundle.publicPackage,
+  const { welcomeMessage, newGroup: updatedCreatorGroup } = await commitInvite({
+    group: creatorGroup,
+    keyPackage: keyPackageBundle.publicPackage,
     invite,
-  )
+  })
 
   const { group: deviceGroup } = await processWelcome({
     identity: deviceIdentity,
@@ -185,21 +187,20 @@ export async function twoDeviceProfileGroup(): Promise<{
   const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })
   const targetKeyPackageBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
-  const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice(
-    deviceGroup,
-    deviceIdentity,
-    {
-      keyPackage: targetKeyPackageBundle.publicPackage,
-      device: targetIdentity.id,
-      controller: controllerID,
-      capability,
-    },
-  )
+  const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice({
+    group: deviceGroup,
+    identity: deviceIdentity,
+
+    keyPackage: targetKeyPackageBundle.publicPackage,
+    device: targetIdentity.id,
+    controller: controllerID,
+    capability,
+  })
 
   // Advance the creator's own group past the add via the real receive path, so it is a member
   // in good standing ready to receive the next write's commit (e.g. revokeDevice's) too.
   publishTokens(tokens, managerGroup)
-  await creatorGroup.processMessage(addCommitMessage)
+  await creatorGroup.processMessage({ message: addCommitMessage })
   managerGroup.confirmAdopted()
 
   return {

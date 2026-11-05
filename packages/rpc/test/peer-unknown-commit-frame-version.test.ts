@@ -27,14 +27,20 @@ const members = ['alice', 'bob', 'carol']
  * mean either, which is the whole reason the peer must decide what to do WITHOUT reading them.
  */
 function futureCommitFrame(): Uint8Array {
-  const payload = encodeCommitFrame(Uint8Array.from([1, 2, 3]), Uint8Array.from([4, 5]))
+  const payload = encodeCommitFrame({
+    commit: Uint8Array.from([1, 2, 3]),
+    sealedEntries: Uint8Array.from([4, 5]),
+  })
   payload[0] = COMMIT_FRAME_VERSION + 1
-  return encodeHandshakeFrame(HANDSHAKE_KIND.commit, payload)
+  return encodeHandshakeFrame({ kind: HANDSHAKE_KIND.commit, payload })
 }
 
 /** Bytes that are not a commit frame at all: shorter than its five-byte header. */
 function shortCommitFrame(): Uint8Array {
-  return encodeHandshakeFrame(HANDSHAKE_KIND.commit, Uint8Array.from([COMMIT_FRAME_VERSION, 0]))
+  return encodeHandshakeFrame({
+    kind: HANDSHAKE_KIND.commit,
+    payload: Uint8Array.from([COMMIT_FRAME_VERSION, 0]),
+  })
 }
 
 function publish(
@@ -121,9 +127,9 @@ describe('a frame whose commit-frame version this build does not know', {
     // THIS is the silent failure made observable. A peer that stepped over the frame and called
     // itself reconciled would commit happily here, win the compare-and-set at a dead epoch, and
     // land a commit on a branch of one.
-    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+    await expect(
+      bob.peer.commit({ build: buildLedgerCommit(bob, ['role:zoe=admin']) }),
+    ).rejects.toThrow(RecoveryRequiredError)
 
     expect(commitFrames(hub, rs)).toBe(framesBefore)
     expect(hub.head(commitTopic(rs))).toBe(headBefore)
@@ -146,7 +152,9 @@ describe('a frame whose commit-frame version this build does not know', {
     // strand every member of the group.
     expect(healsBy(hub, rs, 'bob')).toHaveLength(0)
     expect(bob.mls.epoch()).toBe(1)
-    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).resolves.toBeDefined()
+    await expect(
+      bob.peer.commit({ build: buildLedgerCommit(bob, ['role:zoe=admin']) }),
+    ).resolves.toBeDefined()
 
     await bob.peer.dispose()
   })

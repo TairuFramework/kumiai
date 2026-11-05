@@ -23,26 +23,34 @@ export type DeviceWriteResult = {
   epoch: bigint
 }
 
+export type RegisterDeviceParams = {
+  group: GroupHandle
+  identity: SigningIdentity
+} & { device: string; controller: string; capability?: string }
+
 /**
  * Record a `device -> controller` binding: self-attested (leaf) when `device` is the caller's own,
  * or management-capability-authorized (`capability`) when recording a co-device already in the
  * group. Proof gating runs in `commitWithEntries` (authoring side) and every receiver's pipeline —
  * no admin role is required. Returns the commit bytes to broadcast.
  */
-export async function registerDevice(
-  group: GroupHandle,
-  identity: SigningIdentity,
-  params: { device: string; controller: string; capability?: string },
-): Promise<DeviceWriteResult> {
+export async function registerDevice({
+  group,
+  identity,
+  ...params
+}: RegisterDeviceParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
-    const token = await signLedgerEntry(identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: params.device,
-      value: {
-        op: 'register',
-        controller: params.controller,
-        ...(params.capability != null ? { capability: params.capability } : {}),
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: params.device,
+        value: {
+          op: 'register',
+          controller: params.controller,
+          ...(params.capability != null ? { capability: params.capability } : {}),
+        },
       },
     })
     const result = await commitWithEntries({
@@ -61,21 +69,29 @@ export async function registerDevice(
   })
 }
 
+export type LabelDeviceParams = {
+  group: GroupHandle
+  identity: SigningIdentity
+} & { device: string; label: string; capability: string }
+
 /**
  * Rename a device already bound in the registry. A manage op — authorized by the profile's
  * management capability (the issuer is a device of `controllerOf(device)`); no admin role required.
  */
-export async function labelDevice(
-  group: GroupHandle,
-  identity: SigningIdentity,
-  params: { device: string; label: string; capability: string },
-): Promise<DeviceWriteResult> {
+export async function labelDevice({
+  group,
+  identity,
+  ...params
+}: LabelDeviceParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
-    const token = await signLedgerEntry(identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: params.device,
-      value: { op: 'label', label: params.label, capability: params.capability },
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: params.device,
+        value: { op: 'label', label: params.label, capability: params.capability },
+      },
     })
     const result = await commitWithEntries({
       group,
@@ -93,17 +109,22 @@ export async function labelDevice(
   })
 }
 
+export type AddDeviceParams = {
+  group: GroupHandle
+  identity: SigningIdentity
+} & { keyPackage: KeyPackage; device: string; controller: string; capability: string }
+
 /**
  * Bring a co-device into the group WITHOUT a group admin: an MLS Add of the new device's key
  * package plus a `kumiai.device` `add` entry, both authorized by the profile's management
  * capability. Binds the added leaf to `device`/`controller` (the key package must present `device`).
  * Returns the Commit + Welcome bytes.
  */
-export async function addDevice(
-  group: GroupHandle,
-  identity: SigningIdentity,
-  params: { keyPackage: KeyPackage; device: string; controller: string; capability: string },
-): Promise<DeviceWriteResult & { welcomeMessage: Uint8Array }> {
+export async function addDevice({
+  group,
+  identity,
+  ...params
+}: AddDeviceParams): Promise<DeviceWriteResult & { welcomeMessage: Uint8Array }> {
   return mutexFor(group).run(async () => {
     // Bind the added leaf to the entry's subject — the key package must present `device`.
     const credential = params.keyPackage.leafNode.credential
@@ -122,11 +143,14 @@ export async function addDevice(
       )
     }
 
-    const token = await signLedgerEntry(identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: params.device,
-      value: { op: 'add', controller: params.controller, capability: params.capability },
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: params.device,
+        value: { op: 'add', controller: params.controller, capability: params.capability },
+      },
     })
     const addProposal: DefaultProposal = {
       proposalType: defaultProposalTypes.add,
@@ -153,6 +177,11 @@ export async function addDevice(
   })
 }
 
+export type RevokeDeviceParams = {
+  group: GroupHandle
+  identity: SigningIdentity
+} & { device: string; capability: string }
+
 /**
  * Revoke a device: ONE commit, TWO effects, matching the two surfaces the kokuin security doc
  * sanctions. (1) a `kumiai.device` `revoke` entry — folds the subject to `revoked`, so the derived
@@ -161,17 +190,20 @@ export async function addDevice(
  * stale leaf; the Remove alone lets it rejoin on its still-valid bound-leaf capability). Both are
  * required. Authorized by the profile's management capability; no admin role.
  */
-export async function revokeDevice(
-  group: GroupHandle,
-  identity: SigningIdentity,
-  params: { device: string; capability: string },
-): Promise<DeviceWriteResult> {
+export async function revokeDevice({
+  group,
+  identity,
+  ...params
+}: RevokeDeviceParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
-    const token = await signLedgerEntry(identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: params.device,
-      value: { op: 'revoke', capability: params.capability },
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: params.device,
+        value: { op: 'revoke', capability: params.capability },
+      },
     })
     const leafIndex = group.findMemberLeafIndex(params.device)
     const proposals: Array<DefaultProposal> =
@@ -194,23 +226,31 @@ export async function revokeDevice(
   })
 }
 
+export type AnnounceControllerBeaconParams = {
+  group: GroupHandle
+  identity: SigningIdentity
+} & { controller: string; logLength: number; headDigest: string }
+
 /**
  * Announce the controller's FULL log head into the group as folded, cross-peer-consistent state.
  * Advisory only — it gates nothing. Authored by any bound device of `controller` (self-scoped, no
  * management capability). Publish only-on-change and only when the log meaningfully advances: each
  * call is a permanent ledger entry (replayed at every welcome, no compaction).
  */
-export async function announceControllerBeacon(
-  group: GroupHandle,
-  identity: SigningIdentity,
-  params: { controller: string; logLength: number; headDigest: string },
-): Promise<DeviceWriteResult> {
+export async function announceControllerBeacon({
+  group,
+  identity,
+  ...params
+}: AnnounceControllerBeaconParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
-    const token = await signLedgerEntry(identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: params.controller,
-      value: { op: 'beacon', logLength: params.logLength, headDigest: params.headDigest },
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: params.controller,
+        value: { op: 'beacon', logLength: params.logLength, headDigest: params.headDigest },
+      },
     })
     const result = await commitWithEntries({
       group,

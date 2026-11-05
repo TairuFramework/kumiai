@@ -105,10 +105,10 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle(invitee)
-  const commit = await commitInvite(admin, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: invitee })
+  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
   for (const other of others) {
-    await other.processMessage(commit.commitMessage)
+    await other.processMessage({ message: commit.commitMessage })
   }
   const { group } = await processWelcome({
     identity: invitee,
@@ -128,7 +128,9 @@ async function threeMemberGroup(groupID: string) {
   const bob = randomIdentity()
   const carol = randomIdentity()
 
-  const { group: created } = await createGroup(alice, groupID, {
+  const { group: created } = await createGroup({
+    identity: alice,
+    groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
   })
   const withBob = await inviteMember(fixture, created, alice, bob)
@@ -181,7 +183,7 @@ async function forgeGroupState(opts: {
 }): Promise<ClientState> {
   const extensions = [opts.anchorExtension, buildLedgerHeadExtension(genesisHead(opts.groupID))]
   const creatorPackage = await generateKeyPackageWithKey({
-    credential: makeMLSCredential(opts.creator),
+    credential: makeMLSCredential({ identity: opts.creator }),
     signatureKeyPair: { signKey: opts.creator.privateKey, publicKey: opts.creator.publicKey },
     cipherSuite: opts.context.cipherSuite,
     capabilities: controlCapabilities(),
@@ -279,11 +281,11 @@ describe('a forged GroupInfo reply is refused', () => {
 
     // Mallory fabricates a group under the same id, with its OWN anchor, splicing bob's
     // published key package, and signs the attestation with its own DID key.
-    const bobBundle = await createKeyPackageBundle(bob)
+    const bobBundle = await createKeyPackageBundle({ identity: bob })
     const state = await forgeGroupState({
       creator: mallory,
       groupID: bobGroup.groupID,
-      anchorExtension: buildCurrentGroupAnchorExtension(mallory.id),
+      anchorExtension: buildCurrentGroupAnchorExtension({ creatorDID: mallory.id }),
       context: carolGroup.context,
       splice: bobBundle.publicPackage,
     })
@@ -321,11 +323,11 @@ describe('a forged GroupInfo reply is refused', () => {
       identity: bob,
       requestID: 'heal-1',
     })
-    const bobBundle = await createKeyPackageBundle(bob)
+    const bobBundle = await createKeyPackageBundle({ identity: bob })
     const state = await forgeGroupState({
       creator: carol,
       groupID: bobGroup.groupID,
-      anchorExtension: buildCurrentGroupAnchorExtension(carol.id),
+      anchorExtension: buildCurrentGroupAnchorExtension({ creatorDID: carol.id }),
       context: carolGroup.context,
       splice: bobBundle.publicPackage,
     })
@@ -359,8 +361,8 @@ describe('a forged GroupInfo reply is refused', () => {
     // Carol is removed, and bob APPLIES the removal — carol is now absent from bob's own tree.
     const carolLeaf = aliceGroup.findMemberLeafIndex(carol.id)
     expect(carolLeaf).toBeDefined()
-    const removal = await removeMember(aliceGroup, carolLeaf as number)
-    await bobGroup.processMessage(removal.commitMessage)
+    const removal = await removeMember({ group: aliceGroup, leafIndex: carolLeaf as number })
+    await bobGroup.processMessage({ message: removal.commitMessage })
     expect(bobGroup.findMemberLeafIndex(carol.id)).toBeUndefined()
 
     const { ephemeralPublicKey, ephemeralPrivateKey } = await createRecoveryRequest({
@@ -377,7 +379,7 @@ describe('a forged GroupInfo reply is refused', () => {
       extensionType: GROUP_ANCHOR_EXTENSION_TYPE,
       extensionData: (realAnchor as GroupContextExtension).extensionData as Uint8Array,
     })
-    const bobBundle = await createKeyPackageBundle(bob)
+    const bobBundle = await createKeyPackageBundle({ identity: bob })
     const state = await forgeGroupState({
       creator: carol,
       groupID: bobGroup.groupID,
@@ -415,7 +417,9 @@ describe('a forged GroupInfo reply is refused', () => {
     const bob = randomIdentity()
     const dave = randomIdentity()
 
-    const { group: created } = await createGroup(alice, 'forgery-availability', {
+    const { group: created } = await createGroup({
+      identity: alice,
+      groupID: 'forgery-availability',
       resolveLedgerEntries: fixture.resolveLedgerEntries,
     })
     const withBob = await inviteMember(fixture, created, alice, bob)
@@ -449,11 +453,13 @@ describe('a forged GroupInfo reply is refused', () => {
       resync: true,
       options: { resolveLedgerEntries: fixture.resolveLedgerEntries },
     })
-    await aliceGroup.processMessage(commitMessage)
+    await aliceGroup.processMessage({ message: commitMessage })
     expect(bobRejoined.epoch).toBe(aliceGroup.epoch)
-    const traffic = await aliceGroup.encrypt(utf8.encode('welcome back'))
+    const traffic = await aliceGroup.encrypt({ plaintext: utf8.encode('welcome back') })
     expect(
-      new TextDecoder().decode((await bobRejoined.processMessage(traffic)) as Uint8Array),
+      new TextDecoder().decode(
+        (await bobRejoined.processMessage({ message: traffic })) as Uint8Array,
+      ),
     ).toBe('welcome back')
 
     // The residual availability cost, named: a responder who joined AFTER bob's last-known

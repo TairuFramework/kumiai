@@ -87,7 +87,7 @@ function roleToken(invite: Invite): string {
 describe('GroupHandle lifecycle', () => {
   test('creates a group with single member', async () => {
     const alice = randomIdentity()
-    const { group, credential } = await createGroup(alice, 'test-group-1')
+    const { group, credential } = await createGroup({ identity: alice, groupID: 'test-group-1' })
 
     expect(group.groupID).toBe('test-group-1')
     expect(group.epoch).toBe(0n)
@@ -100,7 +100,7 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'invite-group')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'invite-group' })
 
     const { invite } = await createInvite({
       group: aliceGroup,
@@ -111,12 +111,12 @@ describe('GroupHandle lifecycle', () => {
     expect(invite.groupID).toBe('invite-group')
     expect(invite.inviterID).toBe(alice.id)
 
-    const bobKeyBundle = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite(
-      aliceGroup,
-      bobKeyBundle.publicPackage,
+    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKeyBundle.publicPackage,
       invite,
-    )
+    })
 
     expect(updatedAliceGroup.epoch).toBe(1n)
     expect(updatedAliceGroup.memberCount).toBe(2)
@@ -139,19 +139,19 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'msg-group')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'msg-group' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKeyBundle = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite(
-      aliceGroup,
-      bobKeyBundle.publicPackage,
+    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKeyBundle.publicPackage,
       invite,
-    )
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite,
@@ -161,13 +161,15 @@ describe('GroupHandle lifecycle', () => {
     })
 
     // Alice sends to Bob
-    const message = await updatedAliceGroup.encrypt(new TextEncoder().encode('hello bob'))
-    const decrypted = await bobGroup.processMessage(message)
+    const message = await updatedAliceGroup.encrypt({
+      plaintext: new TextEncoder().encode('hello bob'),
+    })
+    const decrypted = await bobGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello bob')
 
     // Bob sends to Alice
-    const replyMsg = await bobGroup.encrypt(new TextEncoder().encode('hello alice'))
-    const decryptedReply = await updatedAliceGroup.processMessage(replyMsg)
+    const replyMsg = await bobGroup.encrypt({ plaintext: new TextEncoder().encode('hello alice') })
+    const decryptedReply = await updatedAliceGroup.processMessage({ message: replyMsg })
     expect(new TextDecoder().decode(decryptedReply as Uint8Array)).toBe('hello alice')
   })
 
@@ -175,19 +177,19 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'remove-group')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'remove-group' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKeyBundle = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKeyBundle.publicPackage,
+    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKeyBundle.publicPackage,
       invite,
-    )
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite,
@@ -196,31 +198,36 @@ describe('GroupHandle lifecycle', () => {
       ratchetTree: groupWithBob.state.ratchetTree,
     })
 
-    const { newGroup: groupAfterRemoval } = await removeMember(groupWithBob, 1)
+    const { newGroup: groupAfterRemoval } = await removeMember({
+      group: groupWithBob,
+      leafIndex: 1,
+    })
     expect(groupAfterRemoval.epoch).toBe(2n)
     expect(groupAfterRemoval.memberCount).toBe(1)
 
-    const secretMsg = await groupAfterRemoval.encrypt(new TextEncoder().encode('secret'))
-    await expect(bobGroup.processMessage(secretMsg)).rejects.toThrow()
+    const secretMsg = await groupAfterRemoval.encrypt({
+      plaintext: new TextEncoder().encode('secret'),
+    })
+    await expect(bobGroup.processMessage({ message: secretMsg })).rejects.toThrow()
   })
 
   test('add device (self-invite)', async () => {
     const alice = randomIdentity()
     const aliceDevice2 = randomIdentity()
 
-    const { group } = await createGroup(alice, 'alice-devices')
+    const { group } = await createGroup({ identity: alice, groupID: 'alice-devices' })
     const { invite } = await createInvite({
       group,
       identity: alice,
       recipientDID: aliceDevice2.id,
       permission: 'admin',
     })
-    const device2KeyBundle = await createKeyPackageBundle(aliceDevice2)
-    const { welcomeMessage, newGroup: updatedGroup } = await commitInvite(
+    const device2KeyBundle = await createKeyPackageBundle({ identity: aliceDevice2 })
+    const { welcomeMessage, newGroup: updatedGroup } = await commitInvite({
       group,
-      device2KeyBundle.publicPackage,
+      keyPackage: device2KeyBundle.publicPackage,
       invite,
-    )
+    })
 
     const { group: device2Group } = await processWelcome({
       identity: aliceDevice2,
@@ -230,8 +237,8 @@ describe('GroupHandle lifecycle', () => {
       ratchetTree: updatedGroup.state.ratchetTree,
     })
 
-    const message = await updatedGroup.encrypt(new TextEncoder().encode('sync data'))
-    const data = await device2Group.processMessage(message)
+    const message = await updatedGroup.encrypt({ plaintext: new TextEncoder().encode('sync data') })
+    const data = await device2Group.processMessage({ message })
     expect(new TextDecoder().decode(data as Uint8Array)).toBe('sync data')
   })
 
@@ -240,7 +247,7 @@ describe('GroupHandle lifecycle', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, '3-member')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: '3-member' })
 
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
@@ -248,12 +255,12 @@ describe('GroupHandle lifecycle', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -268,12 +275,12 @@ describe('GroupHandle lifecycle', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const { welcomeMessage: charlieWelcome, newGroup: groupWith3 } = await commitInvite(
-      groupWithBob,
-      charlieKP.publicPackage,
-      charlieInvite,
-    )
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const { welcomeMessage: charlieWelcome, newGroup: groupWith3 } = await commitInvite({
+      group: groupWithBob,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
     const { group: charlieGroup } = await processWelcome({
       identity: charlie,
       invite: charlieInvite,
@@ -286,8 +293,10 @@ describe('GroupHandle lifecycle', () => {
     expect(charlieGroup.memberCount).toBe(3)
     expect(groupWith3.epoch).toBe(2n)
 
-    const message = await groupWith3.encrypt(new TextEncoder().encode('hello everyone'))
-    const decrypted = await charlieGroup.processMessage(message)
+    const message = await groupWith3.encrypt({
+      plaintext: new TextEncoder().encode('hello everyone'),
+    })
+    const decrypted = await charlieGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello everyone')
   })
 
@@ -295,19 +304,19 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'epoch-test')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'epoch-test' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: epoch1Group } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: epoch1Group } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
       invite,
-    )
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite,
@@ -316,10 +325,10 @@ describe('GroupHandle lifecycle', () => {
       ratchetTree: epoch1Group.state.ratchetTree,
     })
 
-    const msg1 = await epoch1Group.encrypt(new TextEncoder().encode('epoch-1-msg'))
-    expect(new TextDecoder().decode((await bobGroup.processMessage(msg1)) as Uint8Array)).toBe(
-      'epoch-1-msg',
-    )
+    const msg1 = await epoch1Group.encrypt({ plaintext: new TextEncoder().encode('epoch-1-msg') })
+    expect(
+      new TextDecoder().decode((await bobGroup.processMessage({ message: msg1 })) as Uint8Array),
+    ).toBe('epoch-1-msg')
 
     const charlie = randomIdentity()
     const { invite: charlieInvite } = await createInvite({
@@ -328,16 +337,16 @@ describe('GroupHandle lifecycle', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const { newGroup: epoch2Group } = await commitInvite(
-      epoch1Group,
-      charlieKP.publicPackage,
-      charlieInvite,
-    )
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const { newGroup: epoch2Group } = await commitInvite({
+      group: epoch1Group,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
     expect(epoch2Group.epoch).toBe(2n)
 
-    const msg2 = await epoch2Group.encrypt(new TextEncoder().encode('epoch-2-msg'))
-    await expect(bobGroup.processMessage(msg2)).rejects.toThrow()
+    const msg2 = await epoch2Group.encrypt({ plaintext: new TextEncoder().encode('epoch-2-msg') })
+    await expect(bobGroup.processMessage({ message: msg2 })).rejects.toThrow()
   })
 
   test('commitInvite returns wire bytes + epoch; receiver joins and processes via bytes', async () => {
@@ -346,15 +355,19 @@ describe('GroupHandle lifecycle', () => {
     const charlie = randomIdentity()
 
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup(alice, 'wire-add')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wire-add' })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const addBob = await commitInvite(aliceGroup, bobKP.publicPackage, bobInvite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const addBob = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
 
     // Wire-ready bytes + epoch contract.
     expect(addBob.commitMessage).toBeInstanceOf(Uint8Array)
@@ -387,11 +400,15 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const addCharlie = await commitInvite(addBob.newGroup, charlieKP.publicPackage, charlieInvite)
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const addCharlie = await commitInvite({
+      group: addBob.newGroup,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
     expect(addCharlie.commitMessage).toBeInstanceOf(Uint8Array)
 
-    await bobGroup.processMessage(addCharlie.commitMessage)
+    await bobGroup.processMessage({ message: addCharlie.commitMessage })
     expect(bobGroup.epoch).toBe(2n)
     expect(bobGroup.findMemberLeafIndex(charlie.id)).toBeDefined()
   })
@@ -403,15 +420,19 @@ describe('GroupHandle lifecycle', () => {
 
     // alice + bob + charlie group, with bob joined so he can receive the remove commit.
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup(alice, 'wire-remove')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wire-remove' })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const addBob = await commitInvite(aliceGroup, bobKP.publicPackage, bobInvite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const addBob = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -428,13 +449,20 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const addCharlie = await commitInvite(addBob.newGroup, charlieKP.publicPackage, charlieInvite)
-    await bobGroup.processMessage(addCharlie.commitMessage)
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const addCharlie = await commitInvite({
+      group: addBob.newGroup,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
+    await bobGroup.processMessage({ message: addCharlie.commitMessage })
 
     const charlieLeaf = addCharlie.newGroup.findMemberLeafIndex(charlie.id)
     expect(charlieLeaf).toBeDefined()
-    const removeRes = await removeMember(addCharlie.newGroup, charlieLeaf as number)
+    const removeRes = await removeMember({
+      group: addCharlie.newGroup,
+      leafIndex: charlieLeaf as number,
+    })
 
     expect(removeRes.commitMessage).toBeInstanceOf(Uint8Array)
     expect(removeRes.epoch).toBe(removeRes.newGroup.epoch)
@@ -442,7 +470,7 @@ describe('GroupHandle lifecycle', () => {
     const decoded = decode(mlsMessageDecoder, removeRes.commitMessage)
     expect(decoded?.wireformat).toBe(wireformats.mls_private_message)
 
-    await bobGroup.processMessage(removeRes.commitMessage)
+    await bobGroup.processMessage({ message: removeRes.commitMessage })
     expect(bobGroup.epoch).toBe(3n)
     expect(bobGroup.findMemberLeafIndex(charlie.id)).toBeUndefined()
   })
@@ -457,23 +485,30 @@ describe('GroupHandle lifecycle', () => {
     const bob = randomIdentity()
     const mallory = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'nonadmin-invite')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'nonadmin-invite' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite,
+    })
 
     // Mallory (never an admin) forges a role entry granting Bob membership and swaps
     // it in for the admin-signed entry the real invite carried.
-    const forgedRole = await signLedgerEntry(mallory, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: 'nonadmin-invite',
-      subject: bob.id,
-      value: 'member',
+    const forgedRole = await signLedgerEntry({
+      identity: mallory,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: 'nonadmin-invite',
+        subject: bob.id,
+        value: 'member',
+      },
     })
     const forgedInvite: Invite = {
       groupID: 'nonadmin-invite',
@@ -501,15 +536,19 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'peek-epoch')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'peek-epoch' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const addBob = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const addBob = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite,
+    })
 
     // A Commit is FRAMED at the sender's epoch BEFORE it advances the group
     // (RFC 9420 FramedContent.epoch). So the header epoch readMessageEpoch
@@ -522,7 +561,7 @@ describe('GroupHandle lifecycle', () => {
     expect(readMessageEpoch(addBob.commitMessage)).toBe(addBob.epoch - 1n)
 
     const bobLeaf = addBob.newGroup.findMemberLeafIndex(bob.id)
-    const removeRes = await removeMember(addBob.newGroup, bobLeaf as number)
+    const removeRes = await removeMember({ group: addBob.newGroup, leafIndex: bobLeaf as number })
     expect(readMessageEpoch(removeRes.commitMessage)).toBe(removeRes.epoch - 1n)
 
     // Garbage / non-message bytes yield undefined, not a throw.
@@ -540,15 +579,19 @@ describe('GroupHandle lifecycle', () => {
     const charlie = randomIdentity()
 
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup(alice, 'wire-stale')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wire-stale' })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const addBob = await commitInvite(aliceGroup, bobKP.publicPackage, bobInvite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const addBob = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -566,15 +609,19 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const addCharlie = await commitInvite(addBob.newGroup, charlieKP.publicPackage, charlieInvite)
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const addCharlie = await commitInvite({
+      group: addBob.newGroup,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
 
     // Bob applies it, advancing to epoch 2.
-    await bobGroup.processMessage(addCharlie.commitMessage)
+    await bobGroup.processMessage({ message: addCharlie.commitMessage })
     expect(bobGroup.epoch).toBe(2n)
 
     // Re-applying the same epoch-1->2 commit bytes must be rejected (Bob is now at epoch 2).
-    await expect(bobGroup.processMessage(addCharlie.commitMessage)).rejects.toThrow()
+    await expect(bobGroup.processMessage({ message: addCharlie.commitMessage })).rejects.toThrow()
   })
 })
 
@@ -585,19 +632,19 @@ describe('ratchet tree extension', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'ext-join')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'ext-join' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: updatedAlice } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: updatedAlice } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
       invite,
-    )
+    })
 
     // No ratchetTree param — tree comes from the Welcome message
     const { group: bobGroup } = await processWelcome({
@@ -609,8 +656,10 @@ describe('ratchet tree extension', () => {
 
     expect(bobGroup.memberCount).toBe(2)
 
-    const message = await updatedAlice.encrypt(new TextEncoder().encode('no tree needed'))
-    const decrypted = await bobGroup.processMessage(message)
+    const message = await updatedAlice.encrypt({
+      plaintext: new TextEncoder().encode('no tree needed'),
+    })
+    const decrypted = await bobGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('no tree needed')
   })
 
@@ -619,7 +668,7 @@ describe('ratchet tree extension', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: g1 } = await createGroup(alice, 'ext-3m')
+    const { group: g1 } = await createGroup({ identity: alice, groupID: 'ext-3m' })
 
     const { invite: bobInvite } = await createInvite({
       group: g1,
@@ -627,12 +676,12 @@ describe('ratchet tree extension', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: g2 } = await commitInvite(
-      g1,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: g2 } = await commitInvite({
+      group: g1,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -646,12 +695,12 @@ describe('ratchet tree extension', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const { welcomeMessage: charlieWelcome, newGroup: g3 } = await commitInvite(
-      g2,
-      charlieKP.publicPackage,
-      charlieInvite,
-    )
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const { welcomeMessage: charlieWelcome, newGroup: g3 } = await commitInvite({
+      group: g2,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
     const { group: charlieGroup } = await processWelcome({
       identity: charlie,
       invite: charlieInvite,
@@ -662,8 +711,8 @@ describe('ratchet tree extension', () => {
     expect(g3.memberCount).toBe(3)
     expect(charlieGroup.memberCount).toBe(3)
 
-    const message = await g3.encrypt(new TextEncoder().encode('extension works'))
-    const decrypted = await charlieGroup.processMessage(message)
+    const message = await g3.encrypt({ plaintext: new TextEncoder().encode('extension works') })
+    const decrypted = await charlieGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('extension works')
   })
 })
@@ -681,19 +730,19 @@ describe('JSON serialization null safety', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'null-2m')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'null-2m' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: updatedAlice } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: updatedAlice } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
       invite,
-    )
+    })
 
     const { group: bobGroup } = await processWelcome({
       identity: bob,
@@ -706,8 +755,8 @@ describe('JSON serialization null safety', () => {
     expect(bobGroup.memberCount).toBe(2)
 
     // Verify full participation — not just memberCount
-    const message = await updatedAlice.encrypt(new TextEncoder().encode('hello bob'))
-    const decrypted = await bobGroup.processMessage(message)
+    const message = await updatedAlice.encrypt({ plaintext: new TextEncoder().encode('hello bob') })
+    const decrypted = await bobGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello bob')
   })
 
@@ -716,7 +765,7 @@ describe('JSON serialization null safety', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'null-3m')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'null-3m' })
 
     // Add Bob normally
     const { invite: bobInvite } = await createInvite({
@@ -725,12 +774,12 @@ describe('JSON serialization null safety', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -746,12 +795,12 @@ describe('JSON serialization null safety', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const { welcomeMessage: charlieWelcome, newGroup: groupWith3 } = await commitInvite(
-      groupWithBob,
-      charlieKP.publicPackage,
-      charlieInvite,
-    )
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const { welcomeMessage: charlieWelcome, newGroup: groupWith3 } = await commitInvite({
+      group: groupWithBob,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
 
     const nullified = nullifyTree(groupWith3.state.ratchetTree)
     // Verify the tree actually has null entries (blank parent nodes)
@@ -767,8 +816,8 @@ describe('JSON serialization null safety', () => {
 
     expect(charlieGroup.memberCount).toBe(3)
 
-    const message = await groupWith3.encrypt(new TextEncoder().encode('to charlie'))
-    const decrypted = await charlieGroup.processMessage(message)
+    const message = await groupWith3.encrypt({ plaintext: new TextEncoder().encode('to charlie') })
+    const decrypted = await charlieGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('to charlie')
   })
 
@@ -778,7 +827,7 @@ describe('JSON serialization null safety', () => {
     const charlie = randomIdentity()
     const dave = randomIdentity()
 
-    const { group: g1 } = await createGroup(alice, 'null-remove')
+    const { group: g1 } = await createGroup({ identity: alice, groupID: 'null-remove' })
 
     // Add Bob
     const { invite: bobInvite } = await createInvite({
@@ -787,12 +836,12 @@ describe('JSON serialization null safety', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: g2 } = await commitInvite(
-      g1,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: g2 } = await commitInvite({
+      group: g1,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -808,11 +857,15 @@ describe('JSON serialization null safety', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const { newGroup: g3 } = await commitInvite(g2, charlieKP.publicPackage, charlieInvite)
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const { newGroup: g3 } = await commitInvite({
+      group: g2,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
 
     // Remove Bob — creates blank leaf node in tree
-    const { newGroup: g4 } = await removeMember(g3, 1)
+    const { newGroup: g4 } = await removeMember({ group: g3, leafIndex: 1 })
     expect(g4.memberCount).toBe(2)
 
     // Invite Dave — tree now has both blank leaf (from removal) and blank parents
@@ -822,12 +875,12 @@ describe('JSON serialization null safety', () => {
       recipientDID: dave.id,
       permission: 'member',
     })
-    const daveKP = await createKeyPackageBundle(dave)
-    const { welcomeMessage: daveWelcome, newGroup: g5 } = await commitInvite(
-      g4,
-      daveKP.publicPackage,
-      daveInvite,
-    )
+    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const { welcomeMessage: daveWelcome, newGroup: g5 } = await commitInvite({
+      group: g4,
+      keyPackage: daveKP.publicPackage,
+      invite: daveInvite,
+    })
 
     const nullified = nullifyTree(g5.state.ratchetTree)
     expect(nullified.some((entry) => entry === null)).toBe(true)
@@ -842,8 +895,8 @@ describe('JSON serialization null safety', () => {
 
     expect(daveGroup.memberCount).toBe(3)
 
-    const message = await g5.encrypt(new TextEncoder().encode('welcome dave'))
-    const decrypted = await daveGroup.processMessage(message)
+    const message = await g5.encrypt({ plaintext: new TextEncoder().encode('welcome dave') })
+    const decrypted = await daveGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('welcome dave')
   })
 
@@ -851,19 +904,19 @@ describe('JSON serialization null safety', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'null-find')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'null-find' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: updatedAlice } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: updatedAlice } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
       invite,
-    )
+    })
 
     const { group: bobGroup } = await processWelcome({
       identity: bob,
@@ -887,7 +940,7 @@ describe('GroupHandle.listMembers', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'list-members')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'list-members' })
 
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
@@ -895,12 +948,12 @@ describe('GroupHandle.listMembers', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
 
     const { invite: charlieInvite } = await createInvite({
       group: groupWithBob,
@@ -908,12 +961,12 @@ describe('GroupHandle.listMembers', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const { newGroup: groupWith3 } = await commitInvite(
-      groupWithBob,
-      charlieKP.publicPackage,
-      charlieInvite,
-    )
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const { newGroup: groupWith3 } = await commitInvite({
+      group: groupWithBob,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
 
     const members = groupWith3.listMembers()
     expect(members).toHaveLength(3)
@@ -934,19 +987,19 @@ describe('GroupHandle.listMembers', () => {
 
     // Alice creates, adds Bob. Bob joins via Welcome.
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup(alice, 'diff-group')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'diff-group' })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: aliceWithBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: aliceWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -966,15 +1019,15 @@ describe('GroupHandle.listMembers', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle(charlie)
-    const { commitMessage: addCommit, newGroup: aliceWith3 } = await commitInvite(
-      aliceWithBob,
-      charlieKP.publicPackage,
-      charlieInvite,
-    )
+    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const { commitMessage: addCommit, newGroup: aliceWith3 } = await commitInvite({
+      group: aliceWithBob,
+      keyPackage: charlieKP.publicPackage,
+      invite: charlieInvite,
+    })
 
     const beforeAdd = new Set(bobGroup.listMembers().map((m) => m.id))
-    await bobGroup.processMessage(addCommit)
+    await bobGroup.processMessage({ message: addCommit })
     const afterAdd = new Set(bobGroup.listMembers().map((m) => m.id))
     const added = [...afterAdd].filter((id) => !beforeAdd.has(id))
     expect(added).toEqual([charlie.id])
@@ -983,10 +1036,13 @@ describe('GroupHandle.listMembers', () => {
     // is now on); Bob receives that commit and diffs.
     const charlieLeaf = aliceWith3.findMemberLeafIndex(charlie.id)
     expect(charlieLeaf).toBeDefined()
-    const { commitMessage: removeCommit } = await removeMember(aliceWith3, charlieLeaf as number)
+    const { commitMessage: removeCommit } = await removeMember({
+      group: aliceWith3,
+      leafIndex: charlieLeaf as number,
+    })
 
     const beforeRemove = new Set(bobGroup.listMembers().map((m) => m.id))
-    await bobGroup.processMessage(removeCommit)
+    await bobGroup.processMessage({ message: removeCommit })
     const afterRemove = new Set(bobGroup.listMembers().map((m) => m.id))
     const removed = [...beforeRemove].filter((id) => !afterRemove.has(id))
     expect(removed).toEqual([charlie.id])
@@ -996,15 +1052,19 @@ describe('GroupHandle.listMembers', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'garbage-leaf')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'garbage-leaf' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { newGroup: groupWithBob } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite,
+    })
 
     expect(groupWithBob.listMembers()).toHaveLength(2)
 
@@ -1036,16 +1096,20 @@ describe('peer4 MLS group end-to-end', () => {
   it('two peer4 members exchange application messages', async () => {
     const alice = await makePeer4()
     const bob = await makePeer4()
-    const { group: aliceGroup } = await createGroup(alice, 'g-peer4-1')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g-peer4-1' })
 
-    const bobBundle = await createKeyPackageBundle(bob)
+    const bobBundle = await createKeyPackageBundle({ identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const commit = await commitInvite(aliceGroup, bobBundle.publicPackage, invite)
+    const commit = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobBundle.publicPackage,
+      invite,
+    })
 
     const { group: bobGroup } = await processWelcome({
       identity: bob,
@@ -1055,8 +1119,8 @@ describe('peer4 MLS group end-to-end', () => {
     })
 
     const plaintext = new TextEncoder().encode('hello bob')
-    const message = await commit.newGroup.encrypt(plaintext)
-    const decrypted = await bobGroup.processMessage(message)
+    const message = await commit.newGroup.encrypt({ plaintext })
+    const decrypted = await bobGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello bob')
   })
 
@@ -1066,15 +1130,19 @@ describe('peer4 MLS group end-to-end', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'key',
     })
-    const { group: aliceGroup } = await createGroup(alice, 'g-mixed-1')
-    const bobBundle = await createKeyPackageBundle(bob)
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g-mixed-1' })
+    const bobBundle = await createKeyPackageBundle({ identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const commit = await commitInvite(aliceGroup, bobBundle.publicPackage, invite)
+    const commit = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobBundle.publicPackage,
+      invite,
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite,
@@ -1082,14 +1150,14 @@ describe('peer4 MLS group end-to-end', () => {
       keyPackageBundle: bobBundle,
     })
 
-    const message = await commit.newGroup.encrypt(new TextEncoder().encode('hi'))
-    const decrypted = await bobGroup.processMessage(message)
+    const message = await commit.newGroup.encrypt({ plaintext: new TextEncoder().encode('hi') })
+    const decrypted = await bobGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hi')
   })
 
   it('binds an MLS leaf for a peer4 identity with multiple sig keys', async () => {
     const alice = await makePeer4(2)
-    const { group: aliceGroup } = await createGroup(alice, 'g-multisig-1')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g-multisig-1' })
     // group creation succeeds → auth service bound the primary sig key successfully.
     expect(aliceGroup.memberCount).toBe(1)
     expect(aliceGroup.findMemberLeafIndex(alice.id)).toBe(0)
@@ -1098,15 +1166,19 @@ describe('peer4 MLS group end-to-end', () => {
   it('removes a peer4 member and rejects subsequent traffic from them', async () => {
     const alice = await makePeer4()
     const bob = await makePeer4()
-    const { group: aliceGroup0 } = await createGroup(alice, 'g-remove-1')
-    const bobBundle = await createKeyPackageBundle(bob)
+    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID: 'g-remove-1' })
+    const bobBundle = await createKeyPackageBundle({ identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup0,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const addCommit = await commitInvite(aliceGroup0, bobBundle.publicPackage, invite)
+    const addCommit = await commitInvite({
+      group: aliceGroup0,
+      keyPackage: bobBundle.publicPackage,
+      invite,
+    })
     await processWelcome({
       identity: bob,
       invite,
@@ -1116,7 +1188,7 @@ describe('peer4 MLS group end-to-end', () => {
 
     const bobLeaf = addCommit.newGroup.findMemberLeafIndex(bob.id)
     if (bobLeaf == null) throw new Error('bob leaf not found')
-    const removeResult = await removeMember(addCommit.newGroup, bobLeaf)
+    const removeResult = await removeMember({ group: addCommit.newGroup, leafIndex: bobLeaf })
     expect(removeResult.newGroup.memberCount).toBe(1)
     expect(removeResult.newGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
   })
@@ -1133,7 +1205,7 @@ function creatorLeafExtensions(state: { ratchetTree: ReadonlyArray<unknown> }): 
 describe('GroupHandle control state', () => {
   test('createGroup seeds the roster, anchor, and ledger head from the genesis anchor', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup(alice, 'seeded')
+    const { group } = await createGroup({ identity: alice, groupID: 'seeded' })
 
     expect([...group.roster.roles.entries()]).toEqual([[normalizeDID(alice.id), 'admin']])
     expect(group.anchor.creatorDID).toBe(alice.id)
@@ -1148,13 +1220,16 @@ describe('GroupHandle control state', () => {
   test('applyLedgerEntries promotes a member and appends a repeated token', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group } = await createGroup(alice, 'promote')
+    const { group } = await createGroup({ identity: alice, groupID: 'promote' })
 
-    const token = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: group.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const token = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: group.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
 
     await group.applyLedgerEntries([token])
@@ -1173,21 +1248,27 @@ describe('GroupHandle control state', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const charlie = randomIdentity()
-    const { group } = await createGroup(alice, 'defensive')
+    const { group } = await createGroup({ identity: alice, groupID: 'defensive' })
 
     // Signed for a different group — a replayed grant, dropped on the groupID guard.
-    const crossGroup = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: 'some-other-group',
-      subject: bob.id,
-      value: 'admin',
+    const crossGroup = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: 'some-other-group',
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     // Signed by a non-admin — authority fails against the seeded roster.
-    const memberSigned = await signLedgerEntry(bob, {
-      type: 'kumiai.role',
-      groupID: group.groupID,
-      subject: charlie.id,
-      value: 'admin',
+    const memberSigned = await signLedgerEntry({
+      identity: bob,
+      entry: {
+        type: 'kumiai.role',
+        groupID: group.groupID,
+        subject: charlie.id,
+        value: 'admin',
+      },
     })
 
     const appended = await group.applyLedgerEntries([crossGroup, memberSigned])
@@ -1199,15 +1280,21 @@ describe('GroupHandle control state', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'derived-ledger')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'derived-ledger' })
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: aliceGroup.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: aliceGroup.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
-    const { newGroup: alicePromoted } = await commitLedgerEntries(aliceGroup, [promoteBob])
+    const { newGroup: alicePromoted } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob],
+    })
     expect(alicePromoted.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
 
     const { invite } = await createInvite({
@@ -1216,8 +1303,12 @@ describe('GroupHandle control state', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol)
-    const { newGroup } = await commitInvite(alicePromoted, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const { newGroup } = await commitInvite({
+      group: alicePromoted,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
 
     // The derived handle folds the parent's ledger, not the anchor alone.
     expect(newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
@@ -1226,7 +1317,7 @@ describe('GroupHandle control state', () => {
 
   test('restoreGroup over an anchorless state fails closed', async () => {
     const alice = randomIdentity()
-    const { group, credential } = await createGroup(alice, 'strip-anchor')
+    const { group, credential } = await createGroup({ identity: alice, groupID: 'strip-anchor' })
 
     // Hand-strip the anchor extension from the restored state. Without a seed the
     // roster cannot be established, so construction must throw rather than install
@@ -1247,13 +1338,16 @@ describe('GroupHandle control state', () => {
   test('restoreGroup rehydrates the roster from persisted ledger entries', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group, credential } = await createGroup(alice, 'rehydrate')
+    const { group, credential } = await createGroup({ identity: alice, groupID: 'rehydrate' })
 
-    const token = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: group.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const token = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: group.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     await group.applyLedgerEntries([token])
 
@@ -1277,19 +1371,23 @@ async function twoMemberGroup(opts?: { aliceOptions?: GroupOptions; bobOptions?:
   const alice = randomIdentity()
   const bob = randomIdentity()
   const groupID = `enforce-${Math.random().toString(36).slice(2)}`
-  const { group: aliceGroup0 } = await createGroup(alice, groupID, opts?.aliceOptions)
+  const { group: aliceGroup0 } = await createGroup({
+    identity: alice,
+    groupID,
+    ...opts?.aliceOptions,
+  })
   const { invite } = await createInvite({
     group: aliceGroup0,
     identity: alice,
     recipientDID: bob.id,
     permission: 'member',
   })
-  const bobKP = await createKeyPackageBundle(bob)
-  const { welcomeMessage, newGroup: aliceGroup } = await commitInvite(
-    aliceGroup0,
-    bobKP.publicPackage,
+  const bobKP = await createKeyPackageBundle({ identity: bob })
+  const { welcomeMessage, newGroup: aliceGroup } = await commitInvite({
+    group: aliceGroup0,
+    keyPackage: bobKP.publicPackage,
     invite,
-  )
+  })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -1324,7 +1422,7 @@ async function entryCommitBytes(group: GroupHandle, tokens: Array<string>): Prom
   const entryIDs = tokens.map(ledgerEntryDigest)
   const current = readLedgerHead(group)
   if (current == null) throw new Error('expected the group to carry a ledger head')
-  const head = buildLedgerHeadExtension(extendHead(current.head, entryIDs))
+  const head = buildLedgerHeadExtension(extendHead({ head: current.head, entryIDs }))
   const result = await createCommit({
     context: group.context,
     state: group.state,
@@ -1409,12 +1507,14 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     // Bob (member) commits an Add of Carol. commitInvite refuses to build it for a
     // non-admin, so the raw commit stands in for a client that skipped that guard —
     // the receiving side must reject it on its own.
-    const carolKP = await createKeyPackageBundle(carol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
     const bobCommit = await addCommitBytes(bobGroup, carolKP.publicPackage)
 
     const epochBefore = aliceGroup.epoch
     const rosterBefore = [...aliceGroup.roster.roles.entries()]
-    await expect(aliceGroup.processMessage(bobCommit)).rejects.toThrow(CommitRejectedError)
+    await expect(aliceGroup.processMessage({ message: bobCommit })).rejects.toThrow(
+      CommitRejectedError,
+    )
     expect(aliceGroup.epoch).toBe(epochBefore)
     expect([...aliceGroup.roster.roles.entries()]).toEqual(rosterBefore)
     // Bob is still a member — nothing was applied.
@@ -1435,10 +1535,14 @@ describe('GroupHandle commit enforcement (default-on)', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
 
-    await bobGroup.processMessage(addCarol.commitMessage)
+    await bobGroup.processMessage({ message: addCarol.commitMessage })
     expect(bobGroup.epoch).toBe(2n)
     expect(bobGroup.findMemberLeafIndex(carol.id)).toBeDefined()
   })
@@ -1446,7 +1550,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
   test("rejects an admin's Add of a DID the roster never granted a role to, on receipt", async () => {
     const { aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle(dave)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
 
     // Alice is admin here, so this clears the admin gate the two `CommitRejectedError` tests
     // above (and below) stop at. Dave never appears in any roster entry, so this exercises the
@@ -1455,7 +1559,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     const bytes = await addCommitBytes(aliceGroup, daveKP.publicPackage)
 
     const epochBefore = carolGroup.epoch
-    await expect(carolGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    await expect(carolGroup.processMessage({ message: bytes })).rejects.toThrow(CommitRejectedError)
     expect(carolGroup.epoch).toBe(epochBefore)
     expect(carolGroup.findMemberLeafIndex(dave.id)).toBeUndefined()
   })
@@ -1473,24 +1577,33 @@ describe('GroupHandle commit enforcement (default-on)', () => {
       },
     })
 
-    const roleToken = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const roleToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
-    const appToken = await signLedgerEntry(alice, {
-      type: 'note',
-      groupID,
-      subject: bob.id,
-      value: 'welcome',
+    const appToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'note',
+        groupID,
+        subject: bob.id,
+        value: 'welcome',
+      },
     })
     tokens.set(ledgerEntryDigest(roleToken), roleToken)
     tokens.set(ledgerEntryDigest(appToken), appToken)
 
-    const { commitMessage } = await commitLedgerEntries(aliceGroup, [roleToken, appToken])
+    const { commitMessage } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [roleToken, appToken],
+    })
 
-    await bobGroup.processMessage(commitMessage)
+    await bobGroup.processMessage({ message: commitMessage })
 
     expect(bobGroup.epoch).toBe(2n)
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
@@ -1502,17 +1615,20 @@ describe('GroupHandle commit enforcement (default-on)', () => {
   test('MissingLedgerEntriesError names the entry, leaves epoch, then retries green', async () => {
     const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup()
 
-    const roleToken = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const roleToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     const roleID = ledgerEntryDigest(roleToken)
-    const { commitMessage } = await commitLedgerEntries(aliceGroup, [roleToken])
+    const { commitMessage } = await commitLedgerEntries({ group: aliceGroup, tokens: [roleToken] })
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(commitMessage)).rejects.toMatchObject({
+    await expect(bobGroup.processMessage({ message: commitMessage })).rejects.toMatchObject({
       name: 'MissingLedgerEntriesError',
       ids: [roleID],
     })
@@ -1520,7 +1636,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
 
     // Supply the body and re-process the same commit — now accepted.
     await bobGroup.applyLedgerEntries([roleToken])
-    await bobGroup.processMessage(commitMessage)
+    await bobGroup.processMessage({ message: commitMessage })
     expect(bobGroup.epoch).toBe(2n)
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
   })
@@ -1532,7 +1648,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     const bytes = await pathCommitBytes(aliceGroup, ad)
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    await expect(bobGroup.processMessage({ message: bytes })).rejects.toThrow(CommitRejectedError)
     expect(bobGroup.epoch).toBe(epochBefore)
   })
 
@@ -1550,11 +1666,14 @@ describe('GroupHandle commit enforcement (default-on)', () => {
       },
     })
 
-    const bobToken = await signLedgerEntry(bob, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const bobToken = await signLedgerEntry({
+      identity: bob,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     bobTokenBox.token = bobToken
     const bobID = ledgerEntryDigest(bobToken)
@@ -1565,7 +1684,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     )
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    await expect(bobGroup.processMessage({ message: bytes })).rejects.toThrow(CommitRejectedError)
     expect(bobGroup.epoch).toBe(epochBefore)
     expect(surfaced).toEqual([])
   })
@@ -1596,11 +1715,14 @@ describe('GroupHandle commit enforcement (default-on)', () => {
       },
     })
 
-    const crossGroupToken = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: `${groupID}-elsewhere`,
-      subject: bob.id,
-      value: 'admin',
+    const crossGroupToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: `${groupID}-elsewhere`,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     bobTokenBox.token = crossGroupToken
 
@@ -1608,7 +1730,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
 
     const epochBefore = bobGroup.epoch
     const rosterBefore = [...bobGroup.roster.roles.entries()]
-    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    await expect(bobGroup.processMessage({ message: bytes })).rejects.toThrow(CommitRejectedError)
     expect(bobGroup.epoch).toBe(epochBefore)
     expect([...bobGroup.roster.roles.entries()]).toEqual(rosterBefore)
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
@@ -1625,8 +1747,8 @@ describe('GroupHandle commit enforcement (default-on)', () => {
       },
     })
 
-    const message = await aliceGroup.encrypt(new TextEncoder().encode('hi'))
-    const decrypted = await bobGroup.processMessage(message)
+    const message = await aliceGroup.encrypt({ plaintext: new TextEncoder().encode('hi') })
+    const decrypted = await bobGroup.processMessage({ message })
     expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hi')
   })
 })
@@ -1635,37 +1757,38 @@ describe('encrypt/decrypt AAD', () => {
   test('round-trips AAD and returns it on decrypt', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup()
     const aad = new TextEncoder().encode('topic-x')
-    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { aad })
-    const opened = await bobGroup.decrypt(sealed, { expectedAAD: aad })
+    const sealed = await aliceGroup.encrypt({ plaintext: new TextEncoder().encode('hi'), aad })
+    const opened = await bobGroup.decrypt({ message: sealed, expectedAAD: aad })
     expect(new TextDecoder().decode(opened.payload)).toBe('hi')
     expect(opened.aad).toEqual(aad)
   })
 
   test('decrypt throws on expectedAAD mismatch, distinct from not-my-epoch', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup()
-    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), {
+    const sealed = await aliceGroup.encrypt({
+      plaintext: new TextEncoder().encode('hi'),
       aad: new TextEncoder().encode('topic-a'),
     })
     await expect(
-      bobGroup.decrypt(sealed, { expectedAAD: new TextEncoder().encode('topic-b') }),
+      bobGroup.decrypt({ message: sealed, expectedAAD: new TextEncoder().encode('topic-b') }),
     ).rejects.toThrow(/authenticated data|expected AAD/i)
   })
 
   test('pre-open compare preserves the ratchet: same ciphertext opens after a rejected wrong-AAD attempt', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup()
     const aad = new TextEncoder().encode('topic-x')
-    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { aad })
+    const sealed = await aliceGroup.encrypt({ plaintext: new TextEncoder().encode('hi'), aad })
     await expect(
-      bobGroup.decrypt(sealed, { expectedAAD: new TextEncoder().encode('wrong') }),
+      bobGroup.decrypt({ message: sealed, expectedAAD: new TextEncoder().encode('wrong') }),
     ).rejects.toThrow()
-    const opened = await bobGroup.decrypt(sealed, { expectedAAD: aad })
+    const opened = await bobGroup.decrypt({ message: sealed, expectedAAD: aad })
     expect(new TextDecoder().decode(opened.payload)).toBe('hi')
   })
 
   test('no-AAD default round-trips (empty AAD)', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup()
-    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'))
-    const opened = await bobGroup.decrypt(sealed)
+    const sealed = await aliceGroup.encrypt({ plaintext: new TextEncoder().encode('hi') })
+    const opened = await bobGroup.decrypt({ message: sealed })
     expect(new TextDecoder().decode(opened.payload)).toBe('hi')
     expect(opened.aad).toEqual(new Uint8Array())
   })
@@ -1686,11 +1809,15 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(addCarol.commitMessage)).rejects.toThrow(
+    await expect(bobGroup.processMessage({ message: addCarol.commitMessage })).rejects.toThrow(
       CommitRejectedError,
     )
     expect(bobGroup.epoch).toBe(epochBefore)
@@ -1704,10 +1831,10 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
     })
     const carol = randomIdentity()
 
-    const carolKP = await createKeyPackageBundle(carol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
     const bobCommit = await addCommitBytes(bobGroup, carolKP.publicPackage)
 
-    await aliceGroup.processMessage(bobCommit)
+    await aliceGroup.processMessage({ message: bobCommit })
     expect(aliceGroup.epoch).toBe(2n)
     expect(aliceGroup.findMemberLeafIndex(carol.id)).toBeDefined()
   })
@@ -1718,11 +1845,14 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
     })
     void bob
 
-    const roleToken = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const roleToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     const roleID = ledgerEntryDigest(roleToken)
     const bytes = await pathCommitBytes(
@@ -1731,7 +1861,9 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
     )
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(MissingLedgerEntriesError)
+    await expect(bobGroup.processMessage({ message: bytes })).rejects.toThrow(
+      MissingLedgerEntriesError,
+    )
     expect(bobGroup.epoch).toBe(epochBefore)
   })
 })
@@ -1747,11 +1879,14 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     // entry resolves — so the rejection is the fold's authority rule, not a
     // missing body: the issuer is judged against the state so far, where Bob is
     // not an admin, so the whole commit is rejected. Bob cannot lift himself.
-    const selfPromote = await signLedgerEntry(bob, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const selfPromote = await signLedgerEntry({
+      identity: bob,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(selfPromote), selfPromote)
     const bytes = await pathCommitBytes(
@@ -1760,7 +1895,7 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     )
 
     const epochBefore = aliceGroup.epoch
-    await expect(aliceGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    await expect(aliceGroup.processMessage({ message: bytes })).rejects.toThrow(CommitRejectedError)
     expect(aliceGroup.epoch).toBe(epochBefore)
     expect(aliceGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
   })
@@ -1775,16 +1910,19 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     // himself authors to Add Carol. The entry folds (Alice is admin), so the
     // candidate roster makes Bob admin — but the Add's sender authority is judged
     // against the base roster, where Bob is still a member, so it is rejected.
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
 
     const carol = randomIdentity()
-    const carolKP = await createKeyPackageBundle(carol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
     const bobAddCommit = await addCommitBytes(
       bobGroup,
       carolKP.publicPackage,
@@ -1792,7 +1930,9 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     )
 
     const epochBefore = aliceGroup.epoch
-    await expect(aliceGroup.processMessage(bobAddCommit)).rejects.toThrow(CommitRejectedError)
+    await expect(aliceGroup.processMessage({ message: bobAddCommit })).rejects.toThrow(
+      CommitRejectedError,
+    )
     expect(aliceGroup.epoch).toBe(epochBefore)
     // The rejected commit applied nothing: Bob is still a member, Carol was not added.
     expect(aliceGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
@@ -1804,11 +1944,14 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
       bobOptions: { resolveLedgerEntries: mapResolver(tokens) },
     })
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
 
@@ -1826,10 +1969,14 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
       ledgerEntries: [...invite.ledgerEntries.slice(0, -1), promoteBob, roleToken(invite)],
     }
     publishInvite(tokens, withPromotion)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, withPromotion)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolKP.publicPackage,
+      invite: withPromotion,
+    })
 
-    await bobGroup.processMessage(addCarol.commitMessage)
+    await bobGroup.processMessage({ message: addCarol.commitMessage })
     expect(bobGroup.epoch).toBe(2n)
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
     expect(bobGroup.listMembers().some((m) => normalizeDID(m.id) === normalizeDID(carol.id))).toBe(
@@ -1866,11 +2013,15 @@ describe('an invite seeds the roster', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
 
     // The commit carries the entry id; Bob resolves the body out of band and folds it.
-    const outcome = await bobGroup.processMessage(addCarol.commitMessage)
+    const outcome = await bobGroup.processMessage({ message: addCarol.commitMessage })
     expect(outcome).toBeNull()
     expect(bobGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
     expect(addCarol.newGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
@@ -1888,11 +2039,17 @@ describe('an invite seeds the roster', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(addCarol.commitMessage)).rejects.toMatchObject({
+    await expect(
+      bobGroup.processMessage({ message: addCarol.commitMessage }),
+    ).rejects.toMatchObject({
       name: 'MissingLedgerEntriesError',
       ids: [ledgerEntryDigest(roleToken(invite))],
     })
@@ -1918,7 +2075,7 @@ describe('an invite seeds the roster', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'wrong-invitee')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wrong-invitee' })
 
     // The Add is Bob's, but the invite handed to him names Carol.
     const { invite: carolInvite } = await createInvite({
@@ -1927,20 +2084,23 @@ describe('an invite seeds the roster', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
 
     // The refusal is the inviter's now: the leaf that would join is not the identity the
     // invite grants a role to, so the commit is never built.
-    await expect(commitInvite(aliceGroup, bobKP.publicPackage, carolInvite)).rejects.toThrow(
-      InviteRecipientMismatchError,
-    )
+    await expect(
+      commitInvite({ group: aliceGroup, keyPackage: bobKP.publicPackage, invite: carolInvite }),
+    ).rejects.toThrow(InviteRecipientMismatchError)
   })
 
   test('a joiner refuses a Welcome whose invite names someone else', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'wrong-invite-at-joiner')
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'wrong-invite-at-joiner',
+    })
 
     // Bob's own, honest invite — this is the leg commitInvite's guard permits.
     const { invite: bobInvite } = await createInvite({
@@ -1949,12 +2109,12 @@ describe('an invite seeds the roster', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
 
     // A second, unrelated invite that never named Bob. This is the joiner-side half of
     // the same invariant: it protects a joiner when the inviter is the malicious party,
@@ -1988,15 +2148,24 @@ describe('an invite carries the group ledger', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'ledger-before-join')
-
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: aliceGroup.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'ledger-before-join',
     })
-    const { newGroup: alicePromoted } = await commitLedgerEntries(aliceGroup, [promoteBob])
+
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: aliceGroup.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
+    })
+    const { newGroup: alicePromoted } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob],
+    })
 
     const { invite } = await createInvite({
       group: alicePromoted,
@@ -2004,8 +2173,12 @@ describe('an invite carries the group ledger', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(alicePromoted, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: alicePromoted,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
     const { group: carolGroup } = await processWelcome({
       identity: carol,
       invite,
@@ -2031,15 +2204,18 @@ describe('an invite carries the group ledger', () => {
     const carol = randomIdentity()
     const dave = randomIdentity()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
 
     // Carol joins after the promotion.
     const { invite: carolInvite } = await createInvite({
@@ -2049,8 +2225,12 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publishInvite(tokens, carolInvite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(promotion.newGroup, carolKP.publicPackage, carolInvite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: promotion.newGroup,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
     const { group: carolGroup } = await processWelcome({
       identity: carol,
       invite: carolInvite,
@@ -2059,7 +2239,7 @@ describe('an invite carries the group ledger', () => {
       ratchetTree: addCarol.newGroup.state.ratchetTree,
       options: { resolveLedgerEntries: mapResolver(tokens) },
     })
-    await bobGroup.processMessage(addCarol.commitMessage)
+    await bobGroup.processMessage({ message: addCarol.commitMessage })
 
     // Bob — an admin the group agrees on — adds Dave, and Carol applies his commit.
     const { invite: daveInvite } = await createInvite({
@@ -2069,10 +2249,14 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publishInvite(tokens, daveInvite)
-    const daveKP = await createKeyPackageBundle(dave)
-    const addDave = await commitInvite(bobGroup, daveKP.publicPackage, daveInvite)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const addDave = await commitInvite({
+      group: bobGroup,
+      keyPackage: daveKP.publicPackage,
+      invite: daveInvite,
+    })
 
-    await carolGroup.processMessage(addDave.commitMessage)
+    await carolGroup.processMessage({ message: addDave.commitMessage })
     expect(carolGroup.epoch).toBe(addDave.newGroup.epoch)
     expect(carolGroup.findMemberLeafIndex(dave.id)).toBeDefined()
     expect(rosterEntries(carolGroup)).toEqual(rosterEntries(addDave.newGroup))
@@ -2085,15 +2269,18 @@ describe('an invite carries the group ledger', () => {
     })
     const carol = randomIdentity()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
 
     const { invite } = await createInvite({
       group: promotion.newGroup,
@@ -2102,8 +2289,12 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(promotion.newGroup, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: promotion.newGroup,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
     const { group: carolGroup } = await processWelcome({
       identity: carol,
       invite,
@@ -2111,7 +2302,7 @@ describe('an invite carries the group ledger', () => {
       keyPackageBundle: carolKP,
       ratchetTree: addCarol.newGroup.state.ratchetTree,
     })
-    await bobGroup.processMessage(addCarol.commitMessage)
+    await bobGroup.processMessage({ message: addCarol.commitMessage })
 
     const expected = [
       [normalizeDID(alice.id), 'admin'],
@@ -2127,23 +2318,33 @@ describe('an invite carries the group ledger', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'token-roundtrip')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'token-roundtrip' })
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: aliceGroup.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: aliceGroup.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
-    const { newGroup: alicePromoted } = await commitLedgerEntries(aliceGroup, [promoteBob])
+    const { newGroup: alicePromoted } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob],
+    })
     const { invite } = await createInvite({
       group: alicePromoted,
       identity: alice,
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol)
-    const { newGroup } = await commitInvite(alicePromoted, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const { newGroup } = await commitInvite({
+      group: alicePromoted,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
 
     // The tokens are the ledger's whole persistent form: replaying them re-verifies
     // every entry and reproduces the roster, with no import path for the cache.
@@ -2165,11 +2366,14 @@ describe('an invite carries the group ledger', () => {
 
     // Bob is only a member: his role entry verifies, but authority is rooted at the
     // anchor and grows only through admins-so-far, so no fold will ever apply it.
-    const bobPromotesCarol = await signLedgerEntry(bob, {
-      type: 'kumiai.role',
-      groupID,
-      subject: carol.id,
-      value: 'admin',
+    const bobPromotesCarol = await signLedgerEntry({
+      identity: bob,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: carol.id,
+        value: 'admin',
+      },
     })
 
     const { invite } = await createInvite({
@@ -2186,10 +2390,10 @@ describe('an invite carries the group ledger', () => {
     // Alice is an honest admin, but the entries she would enact are not hers to vouch
     // for: she folds them as her receivers would and refuses to author a commit they
     // would reject. An entry the fold drops must never reach the head chain.
-    const daveKP = await createKeyPackageBundle(dave)
-    await expect(commitInvite(aliceGroup, daveKP.publicPackage, tampered)).rejects.toThrow(
-      /cannot enact ledger entry/,
-    )
+    const daveKP = await createKeyPackageBundle({ identity: dave })
+    await expect(
+      commitInvite({ group: aliceGroup, keyPackage: daveKP.publicPackage, invite: tampered }),
+    ).rejects.toThrow(/cannot enact ledger entry/)
     expect(aliceGroup.roster.roles.get(normalizeDID(carol.id))).toBeUndefined()
   })
 
@@ -2197,24 +2401,30 @@ describe('an invite carries the group ledger', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'ordered-ledger')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'ordered-ledger' })
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: aliceGroup.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: aliceGroup.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
-    const demoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: aliceGroup.groupID,
-      subject: bob.id,
-      value: 'member',
+    const demoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: aliceGroup.groupID,
+        subject: bob.id,
+        value: 'member',
+      },
     })
-    const { newGroup: aliceRotated } = await commitLedgerEntries(aliceGroup, [
-      promoteBob,
-      demoteBob,
-    ])
+    const { newGroup: aliceRotated } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob, demoteBob],
+    })
     expect(aliceRotated.roster.roles.get(normalizeDID(bob.id))).toBe('member')
 
     const { invite } = await createInvite({
@@ -2226,12 +2436,12 @@ describe('an invite carries the group ledger', () => {
     // Order survives the wire, so the joiner folds the pair the same way round.
     expect(invite.ledgerEntries.slice(0, 2)).toEqual([promoteBob, demoteBob])
 
-    const carolKP = await createKeyPackageBundle(carol)
-    const { welcomeMessage, newGroup } = await commitInvite(
-      aliceRotated,
-      carolKP.publicPackage,
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const { welcomeMessage, newGroup } = await commitInvite({
+      group: aliceRotated,
+      keyPackage: carolKP.publicPackage,
       invite,
-    )
+    })
     const { group: carolGroup } = await processWelcome({
       identity: carol,
       invite,
@@ -2257,15 +2467,25 @@ describe('an invite carries the group ledger', () => {
       for (const token of list) tokens.set(ledgerEntryDigest(token), token)
     }
 
-    const { group: aliceGroup } = await createGroup(alice, 'rotation-group', options)
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: aliceGroup.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'rotation-group',
+      ...options,
+    })
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: aliceGroup.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     publish([promoteBob])
-    const { newGroup: alicePromoted } = await commitLedgerEntries(aliceGroup, [promoteBob])
+    const { newGroup: alicePromoted } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob],
+    })
 
     const { invite: bobInvite } = await createInvite({
       group: alicePromoted,
@@ -2274,8 +2494,12 @@ describe('an invite carries the group ledger', () => {
       permission: 'admin',
     })
     publish(bobInvite.ledgerEntries)
-    const bobKP = await createKeyPackageBundle(bob)
-    const addBob = await commitInvite(alicePromoted, bobKP.publicPackage, bobInvite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const addBob = await commitInvite({
+      group: alicePromoted,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -2288,15 +2512,18 @@ describe('an invite carries the group ledger', () => {
     // Bob, now an admin, demotes Alice. The demotion rides his commit, which Alice
     // applies — so she is an up-to-date receiver rather than a stale one, the case that
     // actually reproduces.
-    const demoteAlice = await signLedgerEntry(bob, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: bobGroup.groupID,
-      subject: alice.id,
-      value: 'member',
+    const demoteAlice = await signLedgerEntry({
+      identity: bob,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: bobGroup.groupID,
+        subject: alice.id,
+        value: 'member',
+      },
     })
     publish([demoteAlice])
-    const demotion = await commitLedgerEntries(bobGroup, [demoteAlice])
-    await addBob.newGroup.processMessage(demotion.commitMessage)
+    const demotion = await commitLedgerEntries({ group: bobGroup, tokens: [demoteAlice] })
+    await addBob.newGroup.processMessage({ message: demotion.commitMessage })
     expect(demotion.newGroup.roster.roles.get(normalizeDID(alice.id))).toBe('member')
     expect(addBob.newGroup.roster.roles.get(normalizeDID(alice.id))).toBe('member')
 
@@ -2308,10 +2535,14 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publish(carolInvite.ledgerEntries)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(demotion.newGroup, carolKP.publicPackage, carolInvite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: demotion.newGroup,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
 
-    await addBob.newGroup.processMessage(addCarol.commitMessage)
+    await addBob.newGroup.processMessage({ message: addCarol.commitMessage })
     expect(addBob.newGroup.epoch).toBe(addCarol.newGroup.epoch)
     expect(addBob.newGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
     expect(addBob.newGroup.roster.roles.get(normalizeDID(alice.id))).toBe('member')
@@ -2337,8 +2568,12 @@ async function threeMemberGroup() {
     permission: 'member',
   })
   publishInvite(tokens, invite)
-  const carolKP = await createKeyPackageBundle(carol)
-  const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+  const carolKP = await createKeyPackageBundle({ identity: carol })
+  const addCarol = await commitInvite({
+    group: aliceGroup,
+    keyPackage: carolKP.publicPackage,
+    invite,
+  })
   const { group: carolGroup } = await processWelcome({
     identity: carol,
     invite,
@@ -2347,7 +2582,7 @@ async function threeMemberGroup() {
     ratchetTree: addCarol.newGroup.state.ratchetTree,
     options,
   })
-  await bobGroup.processMessage(addCarol.commitMessage)
+  await bobGroup.processMessage({ message: addCarol.commitMessage })
   return {
     alice,
     bob,
@@ -2369,15 +2604,18 @@ describe("a non-creator admin's invite authority follows the roster", () => {
     const carol = randomIdentity()
 
     // Alice promotes Bob: he is now an admin the group agrees on, though not the creator.
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
 
     // Bob — not the creator — signs Carol's invite, and Carol joins through the Welcome
     // path. Authority to invite rests on Bob's admin role, not on who opened the group.
@@ -2388,8 +2626,12 @@ describe("a non-creator admin's invite authority follows the roster", () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(bobGroup, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({
+      group: bobGroup,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
     const { group: carolGroup } = await processWelcome({
       identity: carol,
       invite,
@@ -2413,24 +2655,30 @@ describe("a non-creator admin's invite authority follows the roster", () => {
     })
     const carol = randomIdentity()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
-    const demoteBob = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID,
-      subject: bob.id,
-      value: 'member',
+    const demoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID,
+        subject: bob.id,
+        value: 'member',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
     tokens.set(ledgerEntryDigest(demoteBob), demoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
-    const demotion = await commitLedgerEntries(promotion.newGroup, [demoteBob])
-    await bobGroup.processMessage(demotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
+    const demotion = await commitLedgerEntries({ group: promotion.newGroup, tokens: [demoteBob] })
+    await bobGroup.processMessage({ message: demotion.commitMessage })
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
 
     // Authority is the current roster, not Bob's past admin-ness or his stored credential:
@@ -2452,18 +2700,24 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     const { alice, bob, aliceGroup, bobGroup, carolGroup, groupID, tokens } =
       await threeMemberGroup()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
 
     const before = head(aliceGroup)
-    const { commitMessage, newGroup } = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(commitMessage)
-    await carolGroup.processMessage(commitMessage)
+    const { commitMessage, newGroup } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob],
+    })
+    await bobGroup.processMessage({ message: commitMessage })
+    await carolGroup.processMessage({ message: commitMessage })
 
     // Committer and receivers agree on the new role...
     expect(newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
@@ -2473,22 +2727,25 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     expect(head(newGroup)).not.toEqual(before)
     expect(head(bobGroup)).toEqual(head(newGroup))
     expect(head(carolGroup)).toEqual(head(newGroup))
-    expect(head(newGroup)).toEqual(computeHead(groupID, ledgerIDs(newGroup)))
+    expect(head(newGroup)).toEqual(computeHead({ groupID, entryIDs: ledgerIDs(newGroup) }))
   })
 
   test('the head still matches after an entry commit and an invite', async () => {
     const { alice, bob, aliceGroup, bobGroup, groupID, tokens } = await threeMemberGroup()
     const dave = randomIdentity()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
 
     const { invite } = await createInvite({
       group: promotion.newGroup,
@@ -2497,8 +2754,12 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const daveKP = await createKeyPackageBundle(dave)
-    const addDave = await commitInvite(promotion.newGroup, daveKP.publicPackage, invite)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const addDave = await commitInvite({
+      group: promotion.newGroup,
+      keyPackage: daveKP.publicPackage,
+      invite,
+    })
     const { group: daveGroup } = await processWelcome({
       identity: dave,
       invite,
@@ -2507,9 +2768,9 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
       ratchetTree: addDave.newGroup.state.ratchetTree,
       options: { resolveLedgerEntries: mapResolver(tokens) },
     })
-    await bobGroup.processMessage(addDave.commitMessage)
+    await bobGroup.processMessage({ message: addDave.commitMessage })
 
-    const expected = computeHead(groupID, invite.ledgerEntries.map(ledgerEntryDigest))
+    const expected = computeHead({ groupID, entryIDs: invite.ledgerEntries.map(ledgerEntryDigest) })
     expect(head(addDave.newGroup)).toEqual(expected)
     expect(head(bobGroup)).toEqual(expected)
     expect(head(daveGroup)).toEqual(expected)
@@ -2520,19 +2781,26 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     const { bob, bobGroup, groupID } = await twoMemberGroup()
     const carol = randomIdentity()
 
-    const promoteCarol = await signLedgerEntry(bob, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: carol.id,
-      value: 'admin',
+    const promoteCarol = await signLedgerEntry({
+      identity: bob,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: carol.id,
+        value: 'admin',
+      },
     })
-    await expect(commitLedgerEntries(bobGroup, [promoteCarol])).rejects.toThrow(/admin/)
+    await expect(commitLedgerEntries({ group: bobGroup, tokens: [promoteCarol] })).rejects.toThrow(
+      /admin/,
+    )
   })
 
   test('commitLedgerEntries refuses to author a commit that enacts nothing', async () => {
     const { aliceGroup } = await twoMemberGroup()
 
-    await expect(commitLedgerEntries(aliceGroup, [])).rejects.toThrow(/no ledger entries/)
+    await expect(commitLedgerEntries({ group: aliceGroup, tokens: [] })).rejects.toThrow(
+      /no ledger entries/,
+    )
   })
 
   test('an inviter that omits an entry is caught by the joiner', async () => {
@@ -2541,14 +2809,20 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
 
     // The entry the inviter would rather the joiner never folded: without it Dave reads
     // Bob as a plain member and refuses every commit Bob makes, forever.
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const { newGroup: afterPromotion } = await commitLedgerEntries(aliceGroup, [promoteBob])
+    const { newGroup: afterPromotion } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob],
+    })
 
     const { invite } = await createInvite({
       group: afterPromotion,
@@ -2556,8 +2830,12 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
       recipientDID: dave.id,
       permission: 'member',
     })
-    const daveKP = await createKeyPackageBundle(dave)
-    const addDave = await commitInvite(afterPromotion, daveKP.publicPackage, invite)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const addDave = await commitInvite({
+      group: afterPromotion,
+      keyPackage: daveKP.publicPackage,
+      invite,
+    })
 
     const truncated: Invite = {
       ...invite,
@@ -2580,14 +2858,20 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     const { alice, bob, aliceGroup, groupID, tokens } = await threeMemberGroup()
     const dave = randomIdentity()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const { newGroup: afterPromotion } = await commitLedgerEntries(aliceGroup, [promoteBob])
+    const { newGroup: afterPromotion } = await commitLedgerEntries({
+      group: aliceGroup,
+      tokens: [promoteBob],
+    })
 
     const { invite } = await createInvite({
       group: afterPromotion,
@@ -2595,8 +2879,12 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
       recipientDID: dave.id,
       permission: 'member',
     })
-    const daveKP = await createKeyPackageBundle(dave)
-    const addDave = await commitInvite(afterPromotion, daveKP.publicPackage, invite)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const addDave = await commitInvite({
+      group: afterPromotion,
+      keyPackage: daveKP.publicPackage,
+      invite,
+    })
 
     // The same entries, one pair swapped: the head is order-sensitive, so it cannot
     // be reproduced from a list whose order was rewritten.
@@ -2620,11 +2908,14 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
   test('a commit that enacts entries without moving the head is rejected', async () => {
     const { alice, bob, aliceGroup, bobGroup, groupID, tokens } = await threeMemberGroup()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
 
@@ -2637,7 +2928,7 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     )
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(forged)).rejects.toThrow(CommitRejectedError)
+    await expect(bobGroup.processMessage({ message: forged })).rejects.toThrow(CommitRejectedError)
     expect(bobGroup.epoch).toBe(epochBefore)
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
   })
@@ -2645,11 +2936,14 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
   test('a commit that moves the head to a value the envelope does not account for is rejected', async () => {
     const { alice, bob, aliceGroup, bobGroup, groupID, tokens } = await threeMemberGroup()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
 
@@ -2659,12 +2953,17 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     if (anchor == null) throw new Error('expected the group to carry an anchor')
     const forged = await gceCommitBytes(
       aliceGroup,
-      [anchor, buildLedgerHeadExtension(extendHead(head(aliceGroup), ['not-in-the-envelope']))],
+      [
+        anchor,
+        buildLedgerHeadExtension(
+          extendHead({ head: head(aliceGroup), entryIDs: ['not-in-the-envelope'] }),
+        ),
+      ],
       encodeControlEnvelope({ v: 1, entries: [ledgerEntryDigest(promoteBob)] }),
     )
 
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(forged)).rejects.toThrow(CommitRejectedError)
+    await expect(bobGroup.processMessage({ message: forged })).rejects.toThrow(CommitRejectedError)
     expect(bobGroup.epoch).toBe(epochBefore)
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
   })
@@ -2673,45 +2972,59 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     const { alice, bob, aliceGroup, bobGroup, carolGroup, groupID, tokens } =
       await threeMemberGroup()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
-    await carolGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
+    await carolGroup.processMessage({ message: promotion.commitMessage })
 
     // Removal must demote: without the demotion entry the removal is refused by every
     // receiver, because the target is still admin in the roster the commit folds to.
     const bobLeaf = promotion.newGroup.findMemberLeafIndex(bob.id)
     expect(bobLeaf).toBeDefined()
-    const bare = await removeMember(promotion.newGroup, bobLeaf as number)
+    const bare = await removeMember({ group: promotion.newGroup, leafIndex: bobLeaf as number })
     const epochBefore = bobGroup.epoch
-    await expect(bobGroup.processMessage(bare.commitMessage)).rejects.toThrow(CommitRejectedError)
+    await expect(bobGroup.processMessage({ message: bare.commitMessage })).rejects.toThrow(
+      CommitRejectedError,
+    )
     expect(bobGroup.epoch).toBe(epochBefore)
 
     // With the demotion riding the same commit, the removal goes through — even though
     // demoting Bob back to the role his invite granted him re-signs that very entry, so
     // the log carries the same content id twice. The later position is what counts.
-    const demoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'member',
+    const demoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'member',
+      },
     })
     tokens.set(ledgerEntryDigest(demoteBob), demoteBob)
-    const removal = await removeMember(promotion.newGroup, bobLeaf as number, [demoteBob])
+    const removal = await removeMember({
+      group: promotion.newGroup,
+      leafIndex: bobLeaf as number,
+      ledgerEntries: [demoteBob],
+    })
 
-    await carolGroup.processMessage(removal.commitMessage)
+    await carolGroup.processMessage({ message: removal.commitMessage })
     expect(carolGroup.epoch).toBe(removal.epoch)
     expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
     expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
     expect(removal.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
     expect(head(carolGroup)).toEqual(head(removal.newGroup))
-    expect(head(removal.newGroup)).toEqual(computeHead(groupID, ledgerIDs(removal.newGroup)))
+    expect(head(removal.newGroup)).toEqual(
+      computeHead({ groupID, entryIDs: ledgerIDs(removal.newGroup) }),
+    )
   })
 })
 
@@ -2722,13 +3035,22 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
 async function demotedThroughRepeat(groupID: string) {
   const alice = randomIdentity()
   const bob = randomIdentity()
-  const { group, credential } = await createGroup(alice, groupID)
+  const { group, credential } = await createGroup({ identity: alice, groupID })
   const role = async (value: 'admin' | 'member') =>
-    await signLedgerEntry(alice, { type: ROLE_ENTRY_TYPE, groupID, subject: bob.id, value })
+    await signLedgerEntry({
+      identity: alice,
+      entry: { type: ROLE_ENTRY_TYPE, groupID, subject: bob.id, value },
+    })
 
-  const granted = await commitLedgerEntries(group, [await role('member')])
-  const promoted = await commitLedgerEntries(granted.newGroup, [await role('admin')])
-  const demoted = await commitLedgerEntries(promoted.newGroup, [await role('member')])
+  const granted = await commitLedgerEntries({ group, tokens: [await role('member')] })
+  const promoted = await commitLedgerEntries({
+    group: granted.newGroup,
+    tokens: [await role('admin')],
+  })
+  const demoted = await commitLedgerEntries({
+    group: promoted.newGroup,
+    tokens: [await role('member')],
+  })
   return { alice, bob, credential, group: demoted.newGroup }
 }
 
@@ -2736,78 +3058,95 @@ describe('the ledger is an ordered log, not a set of claims', () => {
   test('an admin can be demoted back to a role they previously held', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group } = await createGroup(alice, 'redemotion')
+    const { group } = await createGroup({ identity: alice, groupID: 'redemotion' })
 
-    const grantMember = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: bob.id,
-      value: 'member',
+    const grantMember = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: bob.id,
+        value: 'member',
+      },
     })
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
-    const demoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: bob.id,
-      value: 'member',
+    const demoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: bob.id,
+        value: 'member',
+      },
     })
     // Signing is deterministic, so the demotion is the byte-identical token the first
     // grant was: the same claim at a later position, which is the only way a demotion
     // back to a previously-held role can express itself.
     expect(demoteBob).toBe(grantMember)
 
-    const granted = await commitLedgerEntries(group, [grantMember])
+    const granted = await commitLedgerEntries({ group, tokens: [grantMember] })
     expect(granted.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
 
-    const promoted = await commitLedgerEntries(granted.newGroup, [promoteBob])
+    const promoted = await commitLedgerEntries({ group: granted.newGroup, tokens: [promoteBob] })
     expect(promoted.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
 
-    const demoted = await commitLedgerEntries(promoted.newGroup, [demoteBob])
+    const demoted = await commitLedgerEntries({ group: promoted.newGroup, tokens: [demoteBob] })
     expect(demoted.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
 
     // The log holds the repeated claim at both positions, and the head chains both.
     expect(demoted.newGroup.ledgerTokens).toEqual([grantMember, promoteBob, demoteBob])
-    expect(head(demoted.newGroup)).toEqual(computeHead(group.groupID, ledgerIDs(demoted.newGroup)))
+    expect(head(demoted.newGroup)).toEqual(
+      computeHead({ groupID: group.groupID, entryIDs: ledgerIDs(demoted.newGroup) }),
+    )
   })
 
   test('every receiver folds the demotion the same way, and the head covers the repeat', async () => {
     const { alice, bob, aliceGroup, bobGroup, carolGroup, groupID, tokens } =
       await threeMemberGroup()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
-    await carolGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
+    await carolGroup.processMessage({ message: promotion.commitMessage })
     expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
 
     // Demoting Bob back to `member` re-signs the very entry his invite carried, so this
     // commit enacts a content id every receiver already holds.
-    const demoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'member',
+    const demoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'member',
+      },
     })
     tokens.set(ledgerEntryDigest(demoteBob), demoteBob)
-    const demotion = await commitLedgerEntries(promotion.newGroup, [demoteBob])
-    await bobGroup.processMessage(demotion.commitMessage)
-    await carolGroup.processMessage(demotion.commitMessage)
+    const demotion = await commitLedgerEntries({ group: promotion.newGroup, tokens: [demoteBob] })
+    await bobGroup.processMessage({ message: demotion.commitMessage })
+    await carolGroup.processMessage({ message: demotion.commitMessage })
 
     for (const receiver of [demotion.newGroup, bobGroup, carolGroup]) {
       expect(receiver.roster.roles.get(normalizeDID(bob.id))).toBe('member')
       expect(receiver.epoch).toBe(demotion.epoch)
-      expect(head(receiver)).toEqual(computeHead(groupID, ledgerIDs(receiver)))
+      expect(head(receiver)).toEqual(computeHead({ groupID, entryIDs: ledgerIDs(receiver) }))
     }
 
     // The log and the head chain agree on a list holding one id twice.
@@ -2822,51 +3161,62 @@ describe('the ledger is an ordered log, not a set of claims', () => {
     const dave = randomIdentity()
 
     // Alice signs a promotion of Dave while she is still an admin, and never commits it.
-    const alicePromotesDave = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: dave.id,
-      value: 'admin',
+    const alicePromotesDave = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: dave.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(alicePromotesDave), alicePromotesDave)
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
-    await carolGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
+    await carolGroup.processMessage({ message: promotion.commitMessage })
 
-    const demoteAlice = await signLedgerEntry(bob, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: alice.id,
-      value: 'member',
+    const demoteAlice = await signLedgerEntry({
+      identity: bob,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: alice.id,
+        value: 'member',
+      },
     })
     tokens.set(ledgerEntryDigest(demoteAlice), demoteAlice)
-    const demotion = await commitLedgerEntries(bobGroup, [demoteAlice])
-    await carolGroup.processMessage(demotion.commitMessage)
-    await promotion.newGroup.processMessage(demotion.commitMessage)
+    const demotion = await commitLedgerEntries({ group: bobGroup, tokens: [demoteAlice] })
+    await carolGroup.processMessage({ message: demotion.commitMessage })
+    await promotion.newGroup.processMessage({ message: demotion.commitMessage })
     expect(carolGroup.roster.roles.get(normalizeDID(alice.id))).toBe('member')
 
     // Bob is a current admin, so he may enact entries — but every entry is judged by its
     // own issuer at its own position, and Alice is no longer an admin there. Her stale
     // token is dead, whoever carries it. The write path folds before it commits, so it
     // refuses to author a commit the group would reject rather than forking Bob off it.
-    await expect(commitLedgerEntries(demotion.newGroup, [alicePromotesDave])).rejects.toThrow(
-      /cannot enact ledger entry/,
-    )
+    await expect(
+      commitLedgerEntries({ group: demotion.newGroup, tokens: [alicePromotesDave] }),
+    ).rejects.toThrow(/cannot enact ledger entry/)
     expect(demotion.newGroup.roster.roles.get(normalizeDID(dave.id))).toBeUndefined()
 
     // And a client that skipped that guard gets nowhere: the receivers fold the entry
     // themselves and reject the commit on its issuer, not on who carried it.
     const forged = await entryCommitBytes(demotion.newGroup, [alicePromotesDave])
     const epochBefore = carolGroup.epoch
-    await expect(carolGroup.processMessage(forged)).rejects.toThrow(CommitRejectedError)
+    await expect(carolGroup.processMessage({ message: forged })).rejects.toThrow(
+      CommitRejectedError,
+    )
     expect(carolGroup.epoch).toBe(epochBefore)
     expect(carolGroup.roster.roles.get(normalizeDID(dave.id))).toBeUndefined()
   })
@@ -2874,11 +3224,14 @@ describe('the ledger is an ordered log, not a set of claims', () => {
   test('a member cannot enact an admin-signed entry naming himself', async () => {
     const { alice, bob, bobGroup, carolGroup, groupID, tokens } = await threeMemberGroup()
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
 
@@ -2892,7 +3245,9 @@ describe('the ledger is an ordered log, not a set of claims', () => {
     )
 
     const epochBefore = carolGroup.epoch
-    await expect(carolGroup.processMessage(forged)).rejects.toThrow(CommitRejectedError)
+    await expect(carolGroup.processMessage({ message: forged })).rejects.toThrow(
+      CommitRejectedError,
+    )
     expect(carolGroup.epoch).toBe(epochBefore)
     expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
   })
@@ -2911,7 +3266,7 @@ describe('the ledger is an ordered log, not a set of claims', () => {
     expect(restored.ledgerTokens).toEqual(group.ledgerTokens)
     expect(rosterEntries(restored)).toEqual(rosterEntries(group))
     expect(restored.roster.roles.get(normalizeDID(bob.id))).toBe('member')
-    expect(head(restored)).toEqual(computeHead(groupID, ledgerIDs(restored)))
+    expect(head(restored)).toEqual(computeHead({ groupID, entryIDs: ledgerIDs(restored) }))
   })
 
   test('an invite carries the repeats faithfully, and the joiner folds the same roster', async () => {
@@ -2927,8 +3282,8 @@ describe('the ledger is an ordered log, not a set of claims', () => {
     })
     expect(invite.ledgerEntries.slice(0, 3)).toEqual(group.ledgerTokens)
 
-    const carolKP = await createKeyPackageBundle(carol)
-    const addCarol = await commitInvite(group, carolKP.publicPackage, invite)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const addCarol = await commitInvite({ group, keyPackage: carolKP.publicPackage, invite })
     // The joiner recomputes the head over the invite's list; a repeat that did not
     // reproduce it would throw LedgerIncompleteError here.
     const { group: carolGroup } = await processWelcome({
@@ -2942,7 +3297,7 @@ describe('the ledger is an ordered log, not a set of claims', () => {
     expect(carolGroup.ledgerTokens).toEqual(addCarol.newGroup.ledgerTokens)
     expect(rosterEntries(carolGroup)).toEqual(rosterEntries(addCarol.newGroup))
     expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
-    expect(head(carolGroup)).toEqual(computeHead(groupID, ledgerIDs(carolGroup)))
+    expect(head(carolGroup)).toEqual(computeHead({ groupID, entryIDs: ledgerIDs(carolGroup) }))
   })
 })
 
@@ -2965,7 +3320,7 @@ describe('GroupHandle external-join commit enforcement', () => {
     // external_init that adds her own leaf, with no self-remove (she has no stale
     // leaf). This is the RFC join-via-external-commit flow a stranger would use.
     const { groupInfo } = await exportGroupInfo({ group: aliceGroup })
-    const malloryKP = await createKeyPackageBundle(mallory)
+    const malloryKP = await createKeyPackageBundle({ identity: mallory })
     const { publicMessage } = await mlsJoinGroupExternal({
       context: aliceGroup.context,
       groupInfo: decodeGroupInfo(groupInfo),
@@ -2981,7 +3336,9 @@ describe('GroupHandle external-join commit enforcement', () => {
 
     const epochBefore = aliceGroup.epoch
     const rosterBefore = [...aliceGroup.roster.roles.entries()]
-    await expect(aliceGroup.processMessage(commitBytes)).rejects.toThrow(CommitRejectedError)
+    await expect(aliceGroup.processMessage({ message: commitBytes })).rejects.toThrow(
+      CommitRejectedError,
+    )
     // Nothing moved: no epoch advance, no new member, roster unchanged.
     expect(aliceGroup.epoch).toBe(epochBefore)
     expect(aliceGroup.findMemberLeafIndex(mallory.id)).toBeUndefined()
@@ -2996,19 +3353,22 @@ describe('GroupHandle external-join commit enforcement', () => {
     const bob = randomIdentity()
     const carol = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'resync-accept-group')
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'resync-accept-group',
+    })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { credential: bobCred } = await processWelcome({
       identity: bob,
       invite: bobInvite,
@@ -3024,15 +3384,18 @@ describe('GroupHandle external-join commit enforcement', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle(carol)
-    const { newGroup: aliceAfterCarol } = await commitInvite(
-      aliceAfterBob,
-      carolKP.publicPackage,
-      carolInvite,
-    )
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const { newGroup: aliceAfterCarol } = await commitInvite({
+      group: aliceAfterBob,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
     const carolLeaf = aliceAfterCarol.findMemberLeafIndex(carol.id)
     if (carolLeaf == null) throw new Error('expected Carol to hold a leaf')
-    const { newGroup: aliceAdvanced } = await removeMember(aliceAfterCarol, carolLeaf)
+    const { newGroup: aliceAdvanced } = await removeMember({
+      group: aliceAfterCarol,
+      leafIndex: carolLeaf,
+    })
 
     // Bob external-rejoins and Alice processes the commit: accepted, Bob still present.
     const { groupInfo } = await exportGroupInfo({ group: aliceAdvanced })
@@ -3044,7 +3407,7 @@ describe('GroupHandle external-join commit enforcement', () => {
     })
 
     const epochBefore = aliceAdvanced.epoch
-    await aliceAdvanced.processMessage(commitMessage)
+    await aliceAdvanced.processMessage({ message: commitMessage })
     expect(aliceAdvanced.epoch).toBe(epochBefore + 1n)
     expect(aliceAdvanced.epoch).toBe(bobRejoined.epoch)
     expect(aliceAdvanced.findMemberLeafIndex(bob.id)).toBeDefined()
@@ -3061,14 +3424,14 @@ describe('a handle serializes its state mutations', () => {
     // lets both read the same #state and clobber one advance, reusing a
     // secret-tree generation so one ciphertext fails to decrypt on the peer.
     const [m1, m2] = await Promise.all([
-      aliceGroup.encrypt(enc.encode('one')),
-      aliceGroup.encrypt(enc.encode('two')),
+      aliceGroup.encrypt({ plaintext: enc.encode('one') }),
+      aliceGroup.encrypt({ plaintext: enc.encode('two') }),
     ])
 
     const d = new TextDecoder()
     const got = new Set<string>()
     for (const message of [m1, m2]) {
-      got.add(d.decode((await bobGroup.processMessage(message)) as Uint8Array))
+      got.add(d.decode((await bobGroup.processMessage({ message })) as Uint8Array))
     }
     expect(got).toEqual(new Set(['one', 'two']))
   })
@@ -3083,19 +3446,22 @@ describe('a handle serializes its state mutations', () => {
     // authorizes him to commit. Only then can bob hand alice real, independently
     // authored commit bytes to race against her own encrypt — the more realistic
     // interleaving of an incoming commit and a locally-authored application message.
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID,
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
-    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
-    await bobGroup.processMessage(promotion.commitMessage)
+    const promotion = await commitLedgerEntries({ group: aliceGroup, tokens: [promoteBob] })
+    await bobGroup.processMessage({ message: promotion.commitMessage })
 
     // Bob (now admin) removes carol — a real commit alice has not seen yet.
     const carolLeaf = bobGroup.findMemberLeafIndex(carol.id)
-    const removal = await removeMember(bobGroup, carolLeaf as number)
+    const removal = await removeMember({ group: bobGroup, leafIndex: carolLeaf as number })
 
     const epochBefore = promotion.newGroup.epoch
 
@@ -3104,8 +3470,8 @@ describe('a handle serializes its state mutations', () => {
     // secret tree (undecryptable once the peer has advanced past the commit) or
     // clobbers the commit's state advance outright (carol never actually removed).
     const [, ciphertext] = await Promise.all([
-      promotion.newGroup.processMessage(removal.commitMessage),
-      promotion.newGroup.encrypt(enc.encode('after the race')),
+      promotion.newGroup.processMessage({ message: removal.commitMessage }),
+      promotion.newGroup.encrypt({ plaintext: enc.encode('after the race') }),
     ])
 
     // The commit applied on alice's handle: epoch advanced and carol is gone from
@@ -3120,14 +3486,14 @@ describe('a handle serializes its state mutations', () => {
     // Bob's own post-removal handle is already at the matching epoch (he authored
     // the commit), so it decrypts alice's message only if her encrypt actually ran
     // at the post-commit epoch — the serialization the mutex guarantees.
-    const plaintext = await removal.newGroup.processMessage(ciphertext)
+    const plaintext = await removal.newGroup.processMessage({ message: ciphertext })
     expect(dec.decode(plaintext as Uint8Array)).toBe('after the race')
   })
 
   test('encrypt wipes the retired secrets it consumed', async () => {
     const { aliceGroup } = await twoMemberGroup()
     consumedCapture.last = null
-    await aliceGroup.encrypt(new TextEncoder().encode('x'))
+    await aliceGroup.encrypt({ plaintext: new TextEncoder().encode('x') })
     const consumed = consumedCapture.last
     expect(consumed).not.toBeNull()
     // TS narrows `consumedCapture.last` to its pre-`encrypt` literal `null` here — it
@@ -3162,7 +3528,7 @@ describe('standalone proposals are judged by the same commit policy', () => {
   it("rejects a non-admin member's standalone add on receipt and never stores it", async () => {
     const { bobGroup, aliceGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle(dave)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
     const bobAdd = await createProposal({
       context: bobGroup.context,
       state: bobGroup.state,
@@ -3170,7 +3536,9 @@ describe('standalone proposals are judged by the same commit policy', () => {
     })
     const bobAddBytes = encode(mlsMessageEncoder, bobAdd.message)
 
-    await expect(aliceGroup.processMessage(bobAddBytes)).rejects.toThrow(CommitRejectedError)
+    await expect(aliceGroup.processMessage({ message: bobAddBytes })).rejects.toThrow(
+      CommitRejectedError,
+    )
     // Rejection leaves nothing in the pending set: the griefer's proposal never lands.
     expect(Object.keys(aliceGroup.state.unappliedProposals)).toHaveLength(0)
   })
@@ -3187,7 +3555,9 @@ describe('standalone proposals are judged by the same commit policy', () => {
     })
     const gceBytes = encode(mlsMessageEncoder, gce.message)
 
-    await expect(aliceGroup.processMessage(gceBytes)).rejects.toThrow(CommitRejectedError)
+    await expect(aliceGroup.processMessage({ message: gceBytes })).rejects.toThrow(
+      CommitRejectedError,
+    )
     expect(Object.keys(aliceGroup.state.unappliedProposals)).toHaveLength(0)
   })
 
@@ -3201,7 +3571,7 @@ describe('standalone proposals are judged by the same commit policy', () => {
 
     // Any member may rotate their own leaf: the update is admissible, so processMessage
     // does not throw and the proposal is held pending.
-    await expect(aliceGroup.processMessage(updateBytes)).resolves.toBeNull()
+    await expect(aliceGroup.processMessage({ message: updateBytes })).resolves.toBeNull()
     expect(Object.keys(aliceGroup.state.unappliedProposals).length).toBeGreaterThan(0)
   })
 })
@@ -3210,7 +3580,7 @@ describe('the committer excludes pending proposals when authoring a commit', () 
   it("drops a non-admin's pending proposal from an admin's eviction commit", async () => {
     const { bob, bobGroup, aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle(dave)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
 
     // A non-admin proposal that — on a peer without receipt enforcement, or one that
     // stored it before this fix — sits in the honest committer's pending set. Seed it
@@ -3227,12 +3597,12 @@ describe('the committer excludes pending proposals when authoring a commit', () 
 
     const bobLeaf = aliceGroup.findMemberLeafIndex(bob.id)
     if (bobLeaf == null) throw new Error('expected bob to be a member')
-    const removal = await removeMember(aliceGroup, bobLeaf)
+    const removal = await removeMember({ group: aliceGroup, leafIndex: bobLeaf })
 
     // Carol never held Bob's proposal. Had the eviction commit absorbed it, Carol could
     // not resolve the by-reference proposal and processMessage would throw. It does not:
     // the filter kept the griefer's proposal out of the commit.
-    await carolGroup.processMessage(removal.commitMessage)
+    await carolGroup.processMessage({ message: removal.commitMessage })
 
     expect(removal.newGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
     expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
@@ -3246,20 +3616,23 @@ describe('the committer excludes pending proposals when authoring a commit', () 
   it("excludes an admin's pending proposal from an unrelated commit", async () => {
     const { alice, bob, aliceGroup, carolGroup, tokens } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle(dave)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
 
     // Dave's grant lands FIRST, in its own commit. The receive-side add rule binds an Add to
     // the roster the commit produces, so an Add absorbed by an unrelated commit — which enacts
     // no grant of its own — can only name a DID the roster already carries.
-    const grantDave = await signLedgerEntry(alice, {
-      type: 'kumiai.role',
-      groupID: aliceGroup.groupID,
-      subject: dave.id,
-      value: 'member',
+    const grantDave = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.role',
+        groupID: aliceGroup.groupID,
+        subject: dave.id,
+        value: 'member',
+      },
     })
     tokens.set(ledgerEntryDigest(grantDave), grantDave)
-    const granted = await commitLedgerEntries(aliceGroup, [grantDave])
-    await carolGroup.processMessage(granted.commitMessage)
+    const granted = await commitLedgerEntries({ group: aliceGroup, tokens: [grantDave] })
+    await carolGroup.processMessage({ message: granted.commitMessage })
     const daveNorm = normalizeDID(dave.id)
     expect(granted.newGroup.roster.roles.get(daveNorm)).toBe('member')
     expect(carolGroup.roster.roles.get(daveNorm)).toBe('member')
@@ -3280,9 +3653,9 @@ describe('the committer excludes pending proposals when authoring a commit', () 
 
     const bobLeaf = granted.newGroup.findMemberLeafIndex(bob.id)
     if (bobLeaf == null) throw new Error('expected bob to be a member')
-    const removal = await removeMember(granted.newGroup, bobLeaf)
+    const removal = await removeMember({ group: granted.newGroup, leafIndex: bobLeaf })
 
-    await carolGroup.processMessage(removal.commitMessage)
+    await carolGroup.processMessage({ message: removal.commitMessage })
 
     // The explicit Remove lands without admitting the pending Add.
     expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(false)
@@ -3294,7 +3667,7 @@ describe('the committer excludes pending proposals when authoring a commit', () 
   it("drops an admin's pending add of a DID the roster never granted", async () => {
     const { bob, aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle(dave)
+    const daveKP = await createKeyPackageBundle({ identity: dave })
 
     // No grant for Dave anywhere. Before the receive-side add rule this add rode the eviction
     // commit and Dave joined a group whose roster named him nothing; now the committer's own
@@ -3312,9 +3685,9 @@ describe('the committer excludes pending proposals when authoring a commit', () 
 
     const bobLeaf = aliceGroup.findMemberLeafIndex(bob.id)
     if (bobLeaf == null) throw new Error('expected bob to be a member')
-    const removal = await removeMember(aliceGroup, bobLeaf)
+    const removal = await removeMember({ group: aliceGroup, leafIndex: bobLeaf })
 
-    await carolGroup.processMessage(removal.commitMessage)
+    await carolGroup.processMessage({ message: removal.commitMessage })
 
     const daveNorm = normalizeDID(dave.id)
     expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(false)
@@ -3332,7 +3705,9 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   })
   const controller = parseMLSCredentialIdentity(leaf.identity).controller
   if (controller == null) throw new Error('fixture has no controller binding')
-  const { group } = await createGroup(identity, 'lifecycle-genesis', {
+  const { group } = await createGroup({
+    identity,
+    groupID: 'lifecycle-genesis',
     controller,
     controllerLog: { chain: controller.prefix, events: [] },
   })
@@ -3344,7 +3719,9 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   expect(anchor.version).toBe(1)
   expect([...group.roster.roles]).toEqual([[leaf.controllerID, 'admin']])
   expect(group.listMembers()[0]?.controller).toBe(leaf.controllerID)
-  const { group: maximum } = await createGroup(identity, 'maximum-genesis', {
+  const { group: maximum } = await createGroup({
+    identity,
+    groupID: 'maximum-genesis',
     controller,
     controllerLog: { chain: controller.prefix, events: [] },
     leafLifetime: 604_800,
@@ -3354,7 +3731,7 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
     leafLifetime: 604_800,
     trustedGrantLifetime: 31_536_000,
   })
-  const { group: standard } = await createGroup(identity, 'standard-genesis')
+  const { group: standard } = await createGroup({ identity, groupID: 'standard-genesis' })
   expect([...standard.roster.roles]).toEqual([[identity.id, 'admin']])
   expect(readGroupAnchor(standard)?.controller).toBeUndefined()
   for (const [field, maximum] of [
@@ -3363,7 +3740,9 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   ] as const) {
     for (const value of [0, maximum + 1, Number.POSITIVE_INFINITY, Number.NaN, 1.5]) {
       await expect(
-        createGroup(identity, 'invalid-genesis', {
+        createGroup({
+          identity,
+          groupID: 'invalid-genesis',
           controller,
           controllerLog: { chain: controller.prefix, events: [] },
           [field]: value,
@@ -3372,7 +3751,9 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
     }
   }
   await expect(
-    createGroup(identity, 'short-genesis', {
+    createGroup({
+      identity,
+      groupID: 'short-genesis',
       controller,
       controllerLog: { chain: controller.prefix, events: [] },
       leafLifetime: 3599,
@@ -3389,7 +3770,9 @@ test('lifecycle authentication uses anchored lifetimes after creation and restor
   const leaf = await buildBoundLeaf()
   const controller = parseMLSCredentialIdentity(leaf.identity).controller
   if (controller == null) throw new Error('fixture has no controller binding')
-  const created = await createGroup(identity, 'anchored-auth', {
+  const created = await createGroup({
+    identity,
+    groupID: 'anchored-auth',
     controller,
     controllerLog: { chain: controller.prefix, events: [] },
   })

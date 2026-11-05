@@ -7,7 +7,6 @@ import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type {
-  CommitContext,
   CommitHeader,
   GroupMLS,
   OpenedRecoveryVerdict,
@@ -889,7 +888,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ...(isExternal ? { external: true } : {}),
       }
     },
-    async processCommit(commit: Uint8Array, context: CommitContext) {
+    async processCommit({ commit, context }) {
       lastSender = context.senderDID
       seen += 1
       const parsed = decodeMemoryCommit(commit)
@@ -1012,7 +1011,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // group's entire ledger, in order.
       ledger = entryIDs
     },
-    async createRecoveryRequest(requestID: string) {
+    async createRecoveryRequest({ requestID }) {
       // The ephemeral keypair, minted per request: the private half is retained here and the
       // public half goes on the wire. It is the only key a reply is ever sealed to, and it is
       // nothing this peer's leaf can be read out of — the peers that most need a heal no
@@ -1034,10 +1033,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         } satisfies MemoryRecoveryRequest),
       )
     },
-    async confirmationKey(position, commitDigest) {
+    async confirmationKey({ position, commitDigest }) {
       return { epoch, key: confirmationKeyAt(epoch, position, commitDigest) }
     },
-    async sealRecoveryVerdict(request, verdict: RecoveryVerdict) {
+    async sealRecoveryVerdict({ request, verdict }) {
       const to = authorize(request, 'sealRecoveryVerdict', false)
       if (
         !isRecoveryVerdict(verdict) ||
@@ -1051,7 +1050,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         fromUTF(JSON.stringify({ signer: localDID, verdict })),
       )
     },
-    async openRecoveryVerdict(sealed, requestID) {
+    async openRecoveryVerdict({ sealed, requestID }) {
       const opened = openReply(SEAL_DOMAIN.verdict, sealed, requestID)
       if (opened == null) return null
       try {
@@ -1098,7 +1097,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // is a peer left stranded with an empty ledger, reporting itself healthy.
       return sealReply(SEAL_DOMAIN.ledger, to, fromUTF(JSON.stringify(serveLedger(ledgerTokens()))))
     },
-    async openSealedLedger(sealed: Uint8Array, requestID: string) {
+    async openSealedLedger({ sealed, requestID }) {
       // The key is NOT consumed: every responder answers a gather, and a requester that drops
       // a lying responder's reply must still be able to open the next honest one.
       const opened = openReply(SEAL_DOMAIN.ledger, sealed, requestID)
@@ -1111,10 +1110,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return null
       }
     },
-    async applyRecovery(
-      sealed: Uint8Array,
-      requestID: string,
-    ): Promise<PendingRecovery | { renewalRequired: true } | null> {
+    async applyRecovery({
+      sealed,
+      requestID,
+    }): Promise<PendingRecovery | { renewalRequired: true } | null> {
       const info = open(sealed, requestID)
       if (info == null) return null
       if (controllerLog != null) {
@@ -1173,7 +1172,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             if (oldest != null) unusable.delete(oldest)
           }
         },
-        confirmationKey: async (position, commitDigest) => {
+        confirmationKey: async ({ position, commitDigest }) => {
           if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
             throw new Error('Pending recovery already bound to another commit')
           const key = confirmationKeyAt(info.epoch + 1, position, commitDigest)

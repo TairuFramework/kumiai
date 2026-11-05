@@ -52,7 +52,7 @@ const _mlsCoversPort = (mls: ConformanceMLSMember['mls']): GroupMLS => mls
 
 testGroupCryptoConformance({
   label: 'createGroupCrypto over a real GroupHandle',
-  createGroup: async (size, id) => {
+  createGroup: async ({ size, id }) => {
     const group = await createRealGroup(size, `crypto-conformance-${id}`)
     let hintOffset = 0
     const accesses = group.members.map((member) =>
@@ -78,13 +78,17 @@ testGroupCryptoConformance({
       advance: async () => {
         const commit = await buildRealCommit(group, {})
         for (const access of accesses)
-          await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+          await access.mutate((handle, persist) =>
+            handle.processMessage({ message: commit, persist }),
+          )
       },
       removeMember: async (index) => {
         const commit = await buildRealCommit(group, { removes: index })
         for (const [at, access] of accesses.entries()) {
           if (at === index) continue
-          await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+          await access.mutate((handle, persist) =>
+            handle.processMessage({ message: commit, persist }),
+          )
         }
       },
     }
@@ -182,7 +186,7 @@ testPendingGroupCryptoConformance({
       },
       advance: async () => {
         const commit = await buildRealCommit(group, {})
-        await member.handle.processMessage(commit)
+        await member.handle.processMessage({ message: commit })
       },
     }
   },
@@ -191,12 +195,12 @@ testPendingGroupCryptoConformance({
 testGroupMLSConformance({
   label: 'createGroupMLS over a real GroupHandle',
   createBoundRecovery: (binding) => createRealBoundRecovery(undefined, {}, binding),
-  createGroup: async (size, id) => {
+  createGroup: async ({ size, id }) => {
     const group = await createRealGroup(size, `mls-conformance-${id}`)
     let hintOffset = 0
     return {
       groupID: group.committer.handle.groupID,
-      sealVerdictPayload: async (index, request, verdict) => {
+      sealVerdictPayload: async ({ member: index, request, verdict }) => {
         const member = group.members[index]
         if (member == null) throw new Error('missing member')
         return await sealRealRecoveryVerdict(member, request, verdict)

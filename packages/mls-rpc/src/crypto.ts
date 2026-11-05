@@ -51,15 +51,30 @@ const ENTRY_NONCE_BYTES = 24
  */
 const ENTRY_VERSION = 1
 
-export function deriveEntryKey(handle: GroupHandle, label?: string): Promise<Uint8Array> {
-  return handle.exportSecret(label ?? ENTRY_SEAL_LABEL, new Uint8Array(), SECRET_LENGTH)
+export type DeriveEntryKeyParams = {
+  handle: GroupHandle
+  label?: string
 }
 
-export function sealEntries(
-  key: Uint8Array,
-  entries: Uint8Array,
-  runtime: Runtime = createRuntime(),
-): Uint8Array {
+export function deriveEntryKey({ handle, label }: DeriveEntryKeyParams): Promise<Uint8Array> {
+  return handle.exportSecret({
+    label: label ?? ENTRY_SEAL_LABEL,
+    context: new Uint8Array(),
+    length: SECRET_LENGTH,
+  })
+}
+
+export type SealEntriesParams = {
+  key: Uint8Array
+  entries: Uint8Array
+  runtime?: Runtime
+}
+
+export function sealEntries({
+  key,
+  entries,
+  runtime = createRuntime(),
+}: SealEntriesParams): Uint8Array {
   // Random per seal: two members can frame a commit at the same epoch.
   const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
   const ciphertext = xchacha20poly1305(key, nonce).encrypt(entries)
@@ -77,7 +92,12 @@ function assertSealedEntryBlob(sealed: Uint8Array): void {
   }
 }
 
-export function openEntries(key: Uint8Array, sealed: Uint8Array): Uint8Array {
+export type OpenEntriesParams = {
+  key: Uint8Array
+  sealed: Uint8Array
+}
+
+export function openEntries({ key, sealed }: OpenEntriesParams): Uint8Array {
   assertSealedEntryBlob(sealed)
   return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
     sealed.subarray(1 + ENTRY_NONCE_BYTES),
@@ -135,25 +155,26 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     // not be an independent export — it's the exact exporter call `sealEntries`/`openEntries`
     // make below (same context, same `SECRET_LENGTH`), so it would hand back the ledger-entry
     // seal key under another name. Refused here, loudly, rather than left to the doc alone.
-    exportSecret: (label, length = SECRET_LENGTH) => {
+    exportSecret: ({ label, length = SECRET_LENGTH }) => {
       if (label === entryLabel) {
         throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
       }
       return access.read(async (group) => ({
-        secret: await group.exportSecret(label, EXPORT_CONTEXT, length),
+        secret: await group.exportSecret({ label, context: EXPORT_CONTEXT, length }),
         epoch: Number(group.epoch),
       }))
     },
 
-    wrap: (bytes, opts) => access.mutate((group) => group.encrypt(bytes, opts)),
+    wrap: ({ bytes, ...opts }) =>
+      access.mutate((group) => group.encrypt({ plaintext: bytes, ...opts })),
 
     sealEntries: async (bytes) => {
       const { key, epoch } = await access.read(async (group) => ({
-        key: await deriveEntryKey(group, entryLabel),
+        key: await deriveEntryKey({ handle: group, label: entryLabel }),
         epoch: Number(group.epoch),
       }))
       try {
-        return { sealed: sealEntries(key, bytes, runtime), epoch }
+        return { sealed: sealEntries({ key, entries: bytes, runtime }), epoch }
       } finally {
         key.fill(0)
       }
@@ -161,15 +182,15 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
 
     openEntries: async (sealed) => {
       assertSealedEntryBlob(sealed)
-      const key = await access.read((group) => deriveEntryKey(group, entryLabel))
+      const key = await access.read((group) => deriveEntryKey({ handle: group, label: entryLabel }))
       try {
-        return openEntries(key, sealed)
+        return openEntries({ key, sealed })
       } finally {
         key.fill(0)
       }
     },
 
-    unwrap: async (bytes, opts) => {
+    unwrap: async ({ bytes, ...opts }) => {
       if (opts?.frame != null) {
         if (pending == null) throw new Error('unwrap: pending store required for durable open')
         const frame = opts.frame
@@ -178,7 +199,10 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           try {
             await pending.persistOpened(state, record)
           } catch (error) {
-            throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
+            throw new AppFrameStorageError({
+              message: 'failed to persist opened app frame',
+              cause: error,
+            })
           }
         }
         let openError: unknown
@@ -186,39 +210,50 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           const epoch = Number(group.epoch)
           const frameEpoch = readMessageEpoch(bytes)
           if (frameEpoch != null && Number(frameEpoch) !== epoch) {
-            throw new FrameEpochError(Number(frameEpoch), epoch)
+            throw new FrameEpochError({ frameEpoch: Number(frameEpoch), handleEpoch: epoch })
           }
-          const result = await group.decryptStaged(bytes, opts, async (stagedState, result) => {
-            // The handle adopts the staged state only after this returns: a fault here leaves
-            // the key unspent, so the frame must be retried, not dropped.
-            try {
-              await persistStaged(stagedState, {
-                frame,
-                payload: result.payload,
-                senderDID: result.senderDID,
-              })
-            } catch (error) {
-              if (isAppFrameStorageError(error)) throw error
-              throw new AppFrameStorageError('failed to stage opened app frame', { cause: error })
-            }
+          const result = await group.decryptStaged({
+            message: bytes,
+            opts,
+            persist: async (stagedState, result) => {
+              // The handle adopts the staged state only after this returns: a fault here leaves
+              // the key unspent, so the frame must be retried, not dropped.
+              try {
+                await persistStaged(stagedState, {
+                  frame,
+                  payload: result.payload,
+                  senderDID: result.senderDID,
+                })
+              } catch (error) {
+                if (isAppFrameStorageError(error)) throw error
+                throw new AppFrameStorageError({
+                  message: 'failed to stage opened app frame',
+                  cause: error,
+                })
+              }
+            },
           })
           return { ...result, epoch }
         }
         let opened: Awaited<ReturnType<typeof open>>
         try {
-          opened = await access.open(async (group, persistStaged) => {
-            try {
-              return await open(group, persistStaged)
-            } catch (error) {
-              openError = error
-              throw error
-            }
-          }, persistOpened)
+          opened = await access.open({
+            fn: async (group, persistStaged) => {
+              try {
+                return await open(group, persistStaged)
+              } catch (error) {
+                openError = error
+                throw error
+              }
+            },
+            persistOpened,
+          })
         } catch (error) {
           // The open's own refusal says whether the frame is dead. Anything the adapter raised
           // around it (a restore, a read) left the key unspent, so the lane must retry.
           if (error === openError || isAppFrameStorageError(error)) throw error
-          throw new AppFrameStorageError('handle access failed during durable open', {
+          throw new AppFrameStorageError({
+            message: 'handle access failed during durable open',
             cause: error,
           })
         }
@@ -228,9 +263,9 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         const epoch = Number(group.epoch)
         const frameEpoch = readMessageEpoch(bytes)
         if (frameEpoch != null && Number(frameEpoch) !== epoch) {
-          throw new FrameEpochError(Number(frameEpoch), epoch)
+          throw new FrameEpochError({ frameEpoch: Number(frameEpoch), handleEpoch: epoch })
         }
-        const opened = await group.decrypt(bytes, opts)
+        const opened = await group.decrypt({ message: bytes, ...opts })
         return { ...opened, epoch }
       })
       if (senderDID == null) {

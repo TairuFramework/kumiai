@@ -57,7 +57,7 @@ test('mergeReceiveSecretTreeKeepsUnconsumedGenerations', () => {
     const targetTree = tree(target, source)
     const sourceTree = tree(source, target)
     const before = structuredClone([targetTree, sourceTree])
-    const merged = mergeReceiveSecretTree(targetTree, sourceTree)
+    const merged = mergeReceiveSecretTree({ target: targetTree, source: sourceTree })
     for (const result of [merged.leafNodes[0]?.application, merged.leafNodes[0]?.handshake]) {
       expect(result).toEqual(ratchet(generation, unused))
     }
@@ -75,8 +75,8 @@ test('mergeReceiveSecretTreeKeepsExpandedBranchesAndSiblingSecrets', () => {
   }
   const before = structuredClone([target, source])
   for (const merged of [
-    mergeReceiveSecretTree(target, source),
-    mergeReceiveSecretTree(source, target),
+    mergeReceiveSecretTree({ target, source }),
+    mergeReceiveSecretTree({ target: source, source: target }),
   ]) {
     expect(merged.leafWidth).toBe(4)
     expect(merged.intermediateNodes).toEqual({ 2: new Uint8Array([2]) })
@@ -95,7 +95,7 @@ test('mergeReceiveSecretTreeKeepsUnexpandedSiblingBranches', () => {
   }
   const source = tree(ratchet(1, []))
   source.intermediateNodes = { 2: new Uint8Array([2]), 5: new Uint8Array([5]) }
-  const merged = mergeReceiveSecretTree(target, source)
+  const merged = mergeReceiveSecretTree({ target, source })
   expect(merged.intermediateNodes).toEqual({ 2: new Uint8Array([2]), 5: new Uint8Array([5]) })
   expect(merged.leafNodes[0]).toEqual(source.leafNodes[0])
 })

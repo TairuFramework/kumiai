@@ -36,7 +36,7 @@ async function twoMemberGroup(groupID: string) {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
 
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -44,8 +44,8 @@ async function twoMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle(bob)
-  const added = await commitInvite(created, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: bob })
+  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -76,8 +76,12 @@ async function addMember(params: {
     permission: 'member',
   })
   params.publish(invite)
-  const bundle = await createKeyPackageBundle(params.invitee)
-  const added = await commitInvite(params.group, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: params.invitee })
+  const added = await commitInvite({
+    group: params.group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: joinedGroup } = await processWelcome({
     identity: params.invitee,
     invite,
@@ -100,7 +104,7 @@ function cryptoOver(initial: GroupHandle) {
   })
   return {
     crypto: createGroupCrypto({ access }),
-    adopt: (next: GroupHandle) => guardedReplace(access, next),
+    adopt: (next: GroupHandle) => guardedReplace({ access, next }),
     current: () => handle,
   }
 }
@@ -136,10 +140,10 @@ describe('createGroupCrypto', () => {
     const alice = cryptoOver(aliceGroup)
     const bob = cryptoOver(bobGroup)
     const aad = new Uint8Array([1, 1, 97])
-    const sealed = await alice.crypto.wrap(utf8.encode('hello'), { aad })
+    const sealed = await alice.crypto.wrap({ bytes: utf8.encode('hello'), aad })
     expect(bob.crypto.frameAAD(sealed)).toEqual(aad)
     expect(bob.crypto.frameAAD(new Uint8Array([0xff]))).toBeNull()
-    await expect(bob.crypto.unwrap(sealed, { expectedAAD: aad })).resolves.toMatchObject({
+    await expect(bob.crypto.unwrap({ bytes: sealed, expectedAAD: aad })).resolves.toMatchObject({
       payload: utf8.encode('hello'),
     })
   })
@@ -151,26 +155,26 @@ describe('createGroupCrypto', () => {
 
     expect(alice.crypto.epoch()).toBe(1)
     expect(bob.crypto.epoch()).toBe(1)
-    const { secret: shared } = await alice.crypto.exportSecret(LABEL)
-    expect((await bob.crypto.exportSecret(LABEL)).secret).toEqual(shared)
+    const { secret: shared } = await alice.crypto.exportSecret({ label: LABEL })
+    expect((await bob.crypto.exportSecret({ label: LABEL })).secret).toEqual(shared)
 
     // A different label at the SAME epoch is a different secret — the caller's label reaches the
     // handle's own exporter untouched, rather than this implementation closing over one of its own.
-    expect((await alice.crypto.exportSecret(OTHER_LABEL)).secret).not.toEqual(shared)
+    expect((await alice.crypto.exportSecret({ label: OTHER_LABEL })).secret).not.toEqual(shared)
 
     // The handle swap a peer makes when it adopts its own commit: the port follows it, and the
     // secret moves with the epoch. A crypto closing over the handle it was built with would
     // still be exporting the line above.
-    const removed = await removeMember(aliceGroup, 1)
+    const removed = await removeMember({ group: aliceGroup, leafIndex: 1 })
     await alice.adopt(removed.newGroup)
     expect(alice.crypto.epoch()).toBe(2)
-    const { secret: rotated } = await alice.crypto.exportSecret(LABEL)
+    const { secret: rotated } = await alice.crypto.exportSecret({ label: LABEL })
     expect(rotated).not.toEqual(shared)
 
     // Bob, removed, is left holding the old one for life and cannot reach the new one. This is
     // the property the whole app-lane topic rests on, and the only implementation that has it.
-    expect((await bob.crypto.exportSecret(LABEL)).secret).toEqual(shared)
-    expect((await bob.crypto.exportSecret(LABEL)).secret).not.toEqual(rotated)
+    expect((await bob.crypto.exportSecret({ label: LABEL })).secret).toEqual(shared)
+    expect((await bob.crypto.exportSecret({ label: LABEL })).secret).not.toEqual(rotated)
   })
 
   /**
@@ -186,7 +190,7 @@ describe('createGroupCrypto', () => {
 
     // Thrown synchronously — a validation failure ahead of any exporter call, same as any other
     // guard clause in this file — so it is asserted the way a synchronous throw is asserted.
-    expect(() => alice.crypto.exportSecret(ENTRY_SEAL_LABEL)).toThrow(
+    expect(() => alice.crypto.exportSecret({ label: ENTRY_SEAL_LABEL })).toThrow(
       `label '${ENTRY_SEAL_LABEL}' is reserved for the ledger-entry seal`,
     )
 
@@ -197,11 +201,11 @@ describe('createGroupCrypto', () => {
       access: simpleHandleAccess({ handle: () => aliceGroup, adopt: () => {} }),
       entryLabel: customLabel,
     })
-    expect(() => customCrypto.exportSecret(customLabel)).toThrow(
+    expect(() => customCrypto.exportSecret({ label: customLabel })).toThrow(
       `label '${customLabel}' is reserved for the ledger-entry seal`,
     )
     // Every other label is unaffected.
-    expect((await customCrypto.exportSecret(LABEL)).secret).toBeInstanceOf(Uint8Array)
+    expect((await customCrypto.exportSecret({ label: LABEL })).secret).toBeInstanceOf(Uint8Array)
   })
 
   test('wrap and unwrap round-trip and name the authenticated sender', async () => {
@@ -209,10 +213,10 @@ describe('createGroupCrypto', () => {
     const alice = cryptoOver(aliceGroup)
     const bob = cryptoOver(bobGroup)
 
-    const sealed = await alice.crypto.wrap(utf8.encode('hello'))
+    const sealed = await alice.crypto.wrap({ bytes: utf8.encode('hello') })
     // `unwrap` returns `GroupUnwrapResult` directly now — `senderDID` is REQUIRED, so no cast or
     // narrowing is needed to read it.
-    const result = await bob.crypto.unwrap(sealed)
+    const result = await bob.crypto.unwrap({ bytes: sealed })
     expect(new TextDecoder().decode(result.payload)).toBe('hello')
     expect(result.senderDID).toBe(aliceID.id)
   })
@@ -255,16 +259,16 @@ describe('createGroupCrypto', () => {
     expect(alice.crypto.epoch()).toBe(2)
     expect(carol.crypto.epoch()).toBe(2)
 
-    const sealed = await alice.crypto.wrap(utf8.encode('after the adopt'))
+    const sealed = await alice.crypto.wrap({ bytes: utf8.encode('after the adopt') })
 
-    const opened = await carol.crypto.unwrap(sealed)
+    const opened = await carol.crypto.unwrap({ bytes: sealed })
     expect(new TextDecoder().decode(opened.payload)).toBe('after the adopt')
     expect(opened.senderDID).toBe(aliceID.id)
 
     // And Bob, who never applied the add, is left below it — the frame is not readable by the
     // epoch the stale handle would have sealed at either.
     expect(bob.crypto.epoch()).toBe(1)
-    await expect(bob.crypto.unwrap(sealed)).rejects.toThrow()
+    await expect(bob.crypto.unwrap({ bytes: sealed })).rejects.toThrow()
   })
 
   /**
@@ -295,7 +299,7 @@ describe('createGroupCrypto', () => {
     const crypto = createGroupCrypto({
       access: simpleHandleAccess({ handle: () => senderlessHandle, adopt: () => {} }),
     })
-    await expect(crypto.unwrap(new Uint8Array([0]))).rejects.toThrow(
+    await expect(crypto.unwrap({ bytes: new Uint8Array([0]) })).rejects.toThrow(
       'unwrap: opened frame has no authenticated sender',
     )
   })
@@ -315,17 +319,17 @@ describe('createGroupCrypto', () => {
     const alice = cryptoOver(aliceGroup)
     const bob = cryptoOver(bobGroup)
 
-    const sealed = await alice.crypto.wrap(utf8.encode('once'))
-    await expect(bob.crypto.unwrap(sealed)).resolves.toBeDefined()
-    await expect(bob.crypto.unwrap(sealed)).rejects.toThrow()
+    const sealed = await alice.crypto.wrap({ bytes: utf8.encode('once') })
+    await expect(bob.crypto.unwrap({ bytes: sealed })).resolves.toBeDefined()
+    await expect(bob.crypto.unwrap({ bytes: sealed })).rejects.toThrow()
   })
 
   /** DIVERGENCE: the fake's `wrap` is pure; this one consumes a ratchet key. */
   test('wrap is not pure: the same plaintext seals to different bytes each time', async () => {
     const { aliceGroup } = await twoMemberGroup('ports-wrap-impure')
     const alice = cryptoOver(aliceGroup)
-    const first = await alice.crypto.wrap(utf8.encode('same'))
-    const second = await alice.crypto.wrap(utf8.encode('same'))
+    const first = await alice.crypto.wrap({ bytes: utf8.encode('same') })
+    const second = await alice.crypto.wrap({ bytes: utf8.encode('same') })
     expect(first).not.toEqual(second)
   })
 
@@ -334,16 +338,16 @@ describe('createGroupCrypto', () => {
     const alice = cryptoOver(aliceGroup)
     const bob = cryptoOver(bobGroup)
 
-    const atOne = await alice.crypto.wrap(utf8.encode('epoch one'))
-    const removed = await removeMember(aliceGroup, 1)
+    const atOne = await alice.crypto.wrap({ bytes: utf8.encode('epoch one') })
+    const removed = await removeMember({ group: aliceGroup, leafIndex: 1 })
     alice.adopt(removed.newGroup)
-    const atTwo = await alice.crypto.wrap(utf8.encode('epoch two'))
+    const atTwo = await alice.crypto.wrap({ bytes: utf8.encode('epoch two') })
 
     // Bob never applied the removal, so he is still at epoch 1.
     expect(bob.crypto.epoch()).toBe(1)
-    await expect(bob.crypto.unwrap(atTwo)).rejects.toThrow()
+    await expect(bob.crypto.unwrap({ bytes: atTwo })).rejects.toThrow()
     // And the handle that ratcheted forward cannot go back for the epoch-1 frame.
-    await expect(alice.crypto.unwrap(atOne)).rejects.toThrow()
+    await expect(alice.crypto.unwrap({ bytes: atOne })).rejects.toThrow()
   })
 
   /**
@@ -359,7 +363,7 @@ describe('createGroupCrypto', () => {
       const bob = cryptoOver(bobGroup)
 
       const { sealed: atOne } = await alice.crypto.sealEntries(utf8.encode('entries at one'))
-      const removed = await removeMember(aliceGroup, 1)
+      const removed = await removeMember({ group: aliceGroup, leafIndex: 1 })
       alice.adopt(removed.newGroup)
       const { sealed: atTwo } = await alice.crypto.sealEntries(utf8.encode('entries at two'))
 
@@ -424,8 +428,8 @@ describe('createGroupCrypto', () => {
 
       // Nothing the open could have spent: an application frame sealed after those opens still
       // opens, which it would not if the entry open had taken a generation off the same chain.
-      const frame = await alice.crypto.wrap(utf8.encode('still works'))
-      const opened = await bob.crypto.unwrap(frame)
+      const frame = await alice.crypto.wrap({ bytes: utf8.encode('still works') })
+      const opened = await bob.crypto.unwrap({ bytes: frame })
       expect(new TextDecoder().decode(opened.payload)).toBe('still works')
     })
   })
@@ -436,12 +440,12 @@ describe('createGroupCrypto', () => {
       const alice = cryptoOver(aliceGroup)
       const bob = cryptoOver(bobGroup)
 
-      const appFrame = await alice.crypto.wrap(utf8.encode('framed'))
+      const appFrame = await alice.crypto.wrap({ bytes: utf8.encode('framed') })
       expect(alice.crypto.frameEpoch(appFrame)).toBe(1)
 
-      const removed = await removeMember(aliceGroup, 1)
+      const removed = await removeMember({ group: aliceGroup, leafIndex: 1 })
       alice.adopt(removed.newGroup)
-      const laterFrame = await alice.crypto.wrap(utf8.encode('later'))
+      const laterFrame = await alice.crypto.wrap({ bytes: utf8.encode('later') })
 
       // A COMMIT is an MLSMessage too and carries the same field: one format, one epoch.
       expect(alice.crypto.frameEpoch(removed.commitMessage)).toBe(1)
@@ -451,7 +455,7 @@ describe('createGroupCrypto', () => {
       // whole point — it is what lets a reader tell "ahead of me" from "below me".
       expect(bob.crypto.epoch()).toBe(1)
       expect(bob.crypto.frameEpoch(laterFrame)).toBe(2)
-      await expect(bob.crypto.unwrap(laterFrame)).rejects.toThrow()
+      await expect(bob.crypto.unwrap({ bytes: laterFrame })).rejects.toThrow()
     })
 
     test('never throws, and answers null for bytes that are not a readable frame', async () => {

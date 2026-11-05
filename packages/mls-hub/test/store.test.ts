@@ -19,7 +19,7 @@ function record(ref: string, notAfter = 1_000): LastResortRecord {
 describe('createMemoryLastResortStore', () => {
   test('put then list returns the record', async () => {
     const store = createMemoryLastResortStore()
-    await store.put(ALICE, record('a'))
+    await store.put({ ownerDID: ALICE, record: record('a') })
     expect(await store.list(ALICE)).toEqual([record('a')])
   })
 
@@ -35,8 +35,8 @@ describe('createMemoryLastResortStore', () => {
    */
   test('put replaces a record with the same ref rather than duplicating it', async () => {
     const store = createMemoryLastResortStore()
-    await store.put(ALICE, record('a'))
-    await store.put(ALICE, { ...record('a'), uploadedAt: 42 })
+    await store.put({ ownerDID: ALICE, record: record('a') })
+    await store.put({ ownerDID: ALICE, record: { ...record('a'), uploadedAt: 42 } })
     const listed = await store.list(ALICE)
     expect(listed).toHaveLength(1)
     expect(listed[0]?.uploadedAt).toBe(42)
@@ -49,17 +49,17 @@ describe('createMemoryLastResortStore', () => {
    */
   test("one owner's records are never listed for another", async () => {
     const store = createMemoryLastResortStore()
-    await store.put(ALICE, record('a'))
+    await store.put({ ownerDID: ALICE, record: record('a') })
     expect(await store.list(BOB)).toEqual([])
   })
 
   test('delete removes only the named record for the named owner', async () => {
     const store = createMemoryLastResortStore()
-    await store.put(ALICE, record('a'))
-    await store.put(ALICE, record('b'))
-    await store.put(BOB, record('a'))
+    await store.put({ ownerDID: ALICE, record: record('a') })
+    await store.put({ ownerDID: ALICE, record: record('b') })
+    await store.put({ ownerDID: BOB, record: record('a') })
 
-    await store.delete(ALICE, 'a')
+    await store.delete({ ownerDID: ALICE, ref: 'a' })
 
     expect((await store.list(ALICE)).map((r) => r.ref)).toEqual(['b'])
     expect((await store.list(BOB)).map((r) => r.ref)).toEqual(['a'])
@@ -67,15 +67,15 @@ describe('createMemoryLastResortStore', () => {
 
   test('deleting a ref the owner does not hold is a no-op', async () => {
     const store = createMemoryLastResortStore()
-    await store.put(ALICE, record('a'))
-    await store.delete(ALICE, 'missing')
+    await store.put({ ownerDID: ALICE, record: record('a') })
+    await store.delete({ ownerDID: ALICE, ref: 'missing' })
     expect((await store.list(ALICE)).map((r) => r.ref)).toEqual(['a'])
   })
 
   /** A returned record must not alias stored state, or a caller's edit silently rewrites the store. */
   test('mutating a listed record does not change what is stored', async () => {
     const store = createMemoryLastResortStore()
-    await store.put(ALICE, record('a'))
+    await store.put({ ownerDID: ALICE, record: record('a') })
     const [listed] = await store.list(ALICE)
     if (listed != null) listed.uploadedAt = 999
     expect((await store.list(ALICE))[0]?.uploadedAt).toBeNull()

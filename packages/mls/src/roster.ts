@@ -47,13 +47,20 @@ export const roleReducer: LedgerReducer<RoleValue, RosterState> = {
   seed: (anchor) => ({
     roles: new Map([[normalizeDID(anchor.controller ?? anchor.creatorDID), 'admin']]),
   }),
-  verifyAuthority: (verified, stateSoFar) =>
+  verifyAuthority: ({ verified, stateSoFar }) =>
     stateSoFar.roles.get(normalizeDID(verified.issuer)) === 'admin',
-  apply: (verified, stateSoFar) => {
+  apply: ({ verified, stateSoFar }) => {
     const roles = new Map(stateSoFar.roles)
     roles.set(normalizeDID(verified.entry.subject), verified.entry.value)
     return { roles }
   },
+}
+
+export type FoldRosterParams = {
+  entries: Array<FoldInput<RoleValue>>
+  anchor: GroupAnchor
+  groupID: string
+  onDrop?: (drop: FoldDrop) => void
 }
 
 /**
@@ -69,26 +76,21 @@ export const roleReducer: LedgerReducer<RoleValue, RosterState> = {
  * through `verifyAuthority` so they reach the optional `onDrop` observer that
  * {@link foldLedger} calls; only there does the fold surface a skip.
  */
-export function foldRoster(
-  entries: Array<FoldInput<RoleValue>>,
-  anchor: GroupAnchor,
-  groupID: string,
-  onDrop?: (drop: FoldDrop) => void,
-): RosterState {
+export function foldRoster({ entries, anchor, groupID, onDrop }: FoldRosterParams): RosterState {
   const scoped: LedgerReducer<RoleValue, RosterState> = {
     type: roleReducer.type,
     seed: roleReducer.seed,
-    verifyAuthority: (verified, stateSoFar) => {
+    verifyAuthority: ({ verified, stateSoFar }) => {
       if (verified.entry.groupID !== groupID) {
         return false
       }
-      if (!roleReducer.verifyAuthority(verified, stateSoFar)) {
+      if (!roleReducer.verifyAuthority({ verified, stateSoFar })) {
         return false
       }
       // Fold-step guard: reject a claim whose would-be next state has no admin.
-      return adminCount(roleReducer.apply(verified, stateSoFar)) > 0
+      return adminCount(roleReducer.apply({ verified, stateSoFar })) > 0
     },
     apply: roleReducer.apply,
   }
-  return foldLedger(entries, anchor, scoped, onDrop)
+  return foldLedger({ entries, anchor, reducer: scoped, onDrop })
 }

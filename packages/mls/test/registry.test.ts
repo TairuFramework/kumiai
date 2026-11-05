@@ -73,7 +73,7 @@ describe('registryApply', () => {
       },
       registrySeed(),
     )
-    expect(controllerOf(r, DEV_A)).toBe(normalizeDID(PROFILE))
+    expect(controllerOf({ registry: r, deviceDID: DEV_A })).toBe(normalizeDID(PROFILE))
     expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('active')
   })
 
@@ -98,7 +98,7 @@ describe('registryApply', () => {
       r,
     )
     expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('revoked')
-    expect(controllerOf(r, DEV_A)).toBe(normalizeDID(PROFILE))
+    expect(controllerOf({ registry: r, deviceDID: DEV_A })).toBe(normalizeDID(PROFILE))
     expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
   })
 
@@ -198,11 +198,11 @@ describe('authority', () => {
       },
       registrySeed(),
     )
-    expect(authority(r, DEV_A)).toBe(normalizeDID(PROFILE))
+    expect(authority({ registry: r, issuer: DEV_A })).toBe(normalizeDID(PROFILE))
   })
 
   test('falls back to the issuer when unbound', () => {
-    expect(authority(registrySeed(), DEV_A)).toBe(normalizeDID(DEV_A))
+    expect(authority({ registry: registrySeed(), issuer: DEV_A })).toBe(normalizeDID(DEV_A))
   })
 
   test('a revoked device confers no authority, though its raw binding and deny-set membership persist', async () => {
@@ -231,9 +231,9 @@ describe('authority', () => {
       r,
     )
     // authority drops to the device's own DID: a revoked binding confers no authority.
-    expect(authority(r, DEV_A)).toBe(normalizeDID(DEV_A))
+    expect(authority({ registry: r, issuer: DEV_A })).toBe(normalizeDID(DEV_A))
     // but the raw binding is deliberately preserved (deviceRevoked emission + revoke gate read it)…
-    expect(controllerOf(r, DEV_A)).toBe(normalizeDID(PROFILE))
+    expect(controllerOf({ registry: r, deviceDID: DEV_A })).toBe(normalizeDID(PROFILE))
     // …and the device stays in the deny set.
     expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
   })
@@ -243,7 +243,7 @@ describe('foldControl', () => {
   const anchor: GroupAnchor = { creatorDID: CREATOR, version: 1 }
 
   test('empty ledger seeds creator-admin and an empty registry', async () => {
-    const { roster, registry } = await foldControl([], anchor, GROUP)
+    const { roster, registry } = await foldControl({ entries: [], anchor, groupID: GROUP })
     expect(roster.roles.get(normalizeDID(CREATOR))).toBe('admin')
     expect(registry.devices.size).toBe(0)
   })
@@ -251,29 +251,29 @@ describe('foldControl', () => {
   test('admin-as-controller: a device of an admin profile authors a role entry', async () => {
     // Creator makes PROFILE an admin; DEV_A registers under PROFILE; DEV_A (a device of the
     // admin profile) promotes DEV_B's controller. authority(DEV_A) === PROFILE === admin.
-    const { roster } = await foldControl(
-      [
+    const { roster } = await foldControl({
+      entries: [
         roleInput(CREATOR, PROFILE, 'admin', 'e1'),
         deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e2'),
         roleInput(DEV_A, DEV_B, 'member', 'e3'),
       ],
       anchor,
-      GROUP,
-    )
+      groupID: GROUP,
+    })
     expect(roster.roles.get(normalizeDID(DEV_B))).toBe('member')
   })
 
   test('a device of a NON-admin profile cannot author a role entry (dropped)', async () => {
     const drops: Array<{ entryID: string }> = []
-    const { roster } = await foldControl(
-      [
+    const { roster } = await foldControl({
+      entries: [
         deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e1'),
         roleInput(DEV_A, DEV_B, 'admin', 'e2'),
       ],
       anchor,
-      GROUP,
-      (d) => drops.push(d),
-    )
+      groupID: GROUP,
+      onDrop: (d) => drops.push(d),
+    })
     expect(roster.roles.get(normalizeDID(DEV_B))).toBeUndefined()
     expect(drops.map((d) => d.entryID)).toContain('e2')
   })
@@ -281,15 +281,15 @@ describe('foldControl', () => {
   test('registry-so-far, not final: a role entry authored BEFORE its issuer registers is dropped', async () => {
     // Order matters — determinism. The role entry at e1 must NOT resolve authority against a
     // binding registered later at e2.
-    const { roster } = await foldControl(
-      [
+    const { roster } = await foldControl({
+      entries: [
         roleInput(CREATOR, PROFILE, 'admin', 'a0'),
         roleInput(DEV_A, DEV_B, 'member', 'e1'),
         deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e2'),
       ],
       anchor,
-      GROUP,
-    )
+      groupID: GROUP,
+    })
     expect(roster.roles.get(normalizeDID(DEV_B))).toBeUndefined()
   })
 
@@ -299,22 +299,24 @@ describe('foldControl', () => {
     // entry is dropped (never thrown) and creator stays admin. This is the invariant guarding
     // against a group locking itself out of all membership authority.
     const drops: Array<{ entryID: string }> = []
-    const { roster } = await foldControl(
-      [roleInput(CREATOR, CREATOR, 'member', 'e1')],
+    const { roster } = await foldControl({
+      entries: [roleInput(CREATOR, CREATOR, 'member', 'e1')],
       anchor,
-      GROUP,
-      (d) => drops.push(d),
-    )
+      groupID: GROUP,
+      onDrop: (d) => drops.push(d),
+    })
     expect(roster.roles.get(normalizeDID(CREATOR))).toBe('admin')
     expect(drops.map((d) => d.entryID)).toContain('e1')
   })
 
   test('a cross-group entry is dropped by both projections', async () => {
-    const { roster, registry } = await foldControl(
-      [deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e1', 'other-group')],
+    const { roster, registry } = await foldControl({
+      entries: [
+        deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e1', 'other-group'),
+      ],
       anchor,
-      GROUP,
-    )
+      groupID: GROUP,
+    })
     expect(registry.devices.size).toBe(0)
     expect(roster.roles.get(normalizeDID(CREATOR))).toBe('admin')
   })
@@ -335,7 +337,7 @@ describe('beacon', () => {
       registrySeed(),
     )
     const expected: ControllerBeacon = { logLength: 7, headDigest: 'zHead1' }
-    expect(beaconOf(r, PROFILE)).toEqual(expected)
+    expect(beaconOf({ registry: r, controllerDID: PROFILE })).toEqual(expected)
     // A beacon touches only the controllers projection, never devices or the deny set.
     expect(r.devices.size).toBe(0)
     expect(denySetOf(r).size).toBe(0)
@@ -366,7 +368,10 @@ describe('beacon', () => {
       },
       r,
     )
-    expect(beaconOf(r, PROFILE)).toEqual({ logLength: 9, headDigest: 'zNew' })
+    expect(beaconOf({ registry: r, controllerDID: PROFILE })).toEqual({
+      logLength: 9,
+      headDigest: 'zNew',
+    })
   })
 
   test('a device register/revoke leaves the controllers projection untouched', async () => {
@@ -402,7 +407,10 @@ describe('beacon', () => {
       r,
     )
     // The revoke changed device status but not the controller beacon.
-    expect(beaconOf(r, PROFILE)).toEqual({ logLength: 2, headDigest: 'zH' })
+    expect(beaconOf({ registry: r, controllerDID: PROFILE })).toEqual({
+      logLength: 2,
+      headDigest: 'zH',
+    })
     expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('revoked')
   })
 
@@ -442,7 +450,7 @@ describe('authenticated lifecycle projections', async () => {
         'revoke',
       ),
     ]
-    const { registry } = await foldControl(entries, anchor, GROUP)
+    const { registry } = await foldControl({ entries, anchor, groupID: GROUP })
     expect(registry.devices.get(DEV_A)).toEqual({
       controller,
       status: 'revoked',
@@ -476,25 +484,28 @@ describe('authenticated lifecycle projections', async () => {
       deviceInput(DEV_B, controller, { op: 'clock', time: 100 }, 'c'),
       deviceInput(DEV_B, controller, { op: 'beacon', logLength: 999, headDigest: 'advisory' }, 'b'),
     ]
-    const { registry } = await foldControl(entries, anchor, GROUP)
+    const { registry } = await foldControl({ entries, anchor, groupID: GROUP })
     expect(registry.controllers.get(controller)).toMatchObject({
       recordedLog: { chain: [inception, rev], events: [] },
       genFloor: 0,
       timeFloor: 100,
     })
-    expect(beaconOf(registry, controller)).toEqual({ logLength: 999, headDigest: 'advisory' })
+    expect(beaconOf({ registry, controllerDID: controller })).toEqual({
+      logLength: 999,
+      headDigest: 'advisory',
+    })
     expect(denySetOf(registry)).toEqual(new Set([DEV_A]))
   })
 
   test('a lifecycle replay cannot add a discretionary role or device binding', async () => {
-    const { roster, registry } = await foldControl(
-      [
+    const { roster, registry } = await foldControl({
+      entries: [
         roleInput(controller, DEV_A, 'admin', 'role'),
         deviceInput(DEV_A, DEV_A, { op: 'register', controller }, 'register'),
       ],
       anchor,
-      GROUP,
-    )
+      groupID: GROUP,
+    })
     expect(roster.roles).toEqual(new Map([[controller, 'admin']]))
     expect(registry.devices.size).toBe(0)
   })

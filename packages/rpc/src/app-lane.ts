@@ -363,7 +363,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     let cursor = cursors.get(name)
     if (cursor == null) {
       const at = anchor()
-      const topicID = protocolTopic(at.secret, at.epoch, name)
+      const topicID = protocolTopic({ secret: at.secret, epoch: at.epoch, protocol: name })
       const stored = (await appCursorStore?.load(topicID)) ?? null
       cursor = { topicID, position: stored != null ? asLogPosition(stored) : null, fetched: null }
       cursors.set(name, cursor)
@@ -478,7 +478,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (passed > 0) frames.splice(0, passed)
     if (position == null || position === cursor.position) return
     cursor.position = position
-    await appCursorStore?.save(cursor.topicID, position)
+    await appCursorStore?.save({ topicID: cursor.topicID, position })
   }
 
   const orderedRecords = (name: string): Array<PendingAppFrame> =>
@@ -535,7 +535,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       message?.payload?.typ === 'event' &&
       typeof prc === 'string' &&
       protocol != null &&
-      retentionOf(protocol, prc) === 'log' &&
+      retentionOf({ protocol, procedureName: prc }) === 'log' &&
       events != null
     ) {
       const event = {
@@ -740,7 +740,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
           // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
           // no bare-`Uint8Array` shortcut left to normalize away here. `expectedAAD` is bound to
           // the cursor's own topic, the authoritative answer to "what lane is this drain reading".
-          opened = await crypto.unwrap(sealed, {
+          opened = await crypto.unwrap({
+            bytes: sealed,
             expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
             ...(ref == null ? {} : { frame: ref }),
           })
@@ -803,7 +804,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         // whose dispatch would never do that. Retention is the protocol's word, not the frame's.
         const protocol = protocols[name]
         if (protocol === undefined) continue
-        if (retentionOf(protocol, prc) !== 'log') continue
+        if (retentionOf({ protocol, procedureName: prc }) !== 'log') continue
         try {
           // Same door as the live push: emit the retained frame's plaintext into the
           // per-protocol emitter the live bus is also built from. No listener → no-op.

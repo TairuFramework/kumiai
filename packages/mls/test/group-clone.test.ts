@@ -47,7 +47,9 @@ async function fixture() {
     })
   const onLedgerEntries = vi.fn()
   const commitPolicy = vi.fn(() => 'accept' as const)
-  const { group: created } = await createGroup(alice, 'clone', {
+  const { group: created } = await createGroup({
+    identity: alice,
+    groupID: 'clone',
     resolveLedgerEntries,
     onLedgerEntries,
     commitPolicy,
@@ -59,8 +61,8 @@ async function fixture() {
     permission: 'member',
   })
   for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-  const bundle = await createKeyPackageBundle(bob)
-  const added = await commitInvite(created, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: bob })
+  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
   const { group: receiver } = await processWelcome({
     identity: bob,
     invite,
@@ -132,7 +134,7 @@ describe('GroupHandle.clone', () => {
     async (side) => {
       const { sender, receiver } = await fixture()
       const proposal = await receiver.proposeSelfRemoval()
-      await sender.processMessage(proposal.frame)
+      await sender.processMessage({ message: proposal.frame })
       sender.state.handshakeReservation = { epoch: sender.epoch, generation: 3, consumed: false }
       expect(Object.keys(sender.state.unappliedProposals).length).toBeGreaterThan(0)
       expect(sender.state.historicalReceiverData.size).toBeGreaterThan(0)
@@ -159,21 +161,29 @@ describe('GroupHandle.clone', () => {
     const { sender, receiver } = await fixture()
     const clone = receiver.clone()
     const before = encodeClientState(receiver.state)
-    const first = await sender.encrypt(utf8.encode('first'))
-    await expect(clone.decrypt(first)).resolves.toMatchObject({ payload: utf8.encode('first') })
+    const first = await sender.encrypt({ plaintext: utf8.encode('first') })
+    await expect(clone.decrypt({ message: first })).resolves.toMatchObject({
+      payload: utf8.encode('first'),
+    })
     expect(encodeClientState(receiver.state)).toEqual(before)
-    await expect(receiver.decrypt(first)).resolves.toMatchObject({ payload: utf8.encode('first') })
+    await expect(receiver.decrypt({ message: first })).resolves.toMatchObject({
+      payload: utf8.encode('first'),
+    })
     const clonedBefore = encodeClientState(clone.state)
-    const second = await sender.encrypt(utf8.encode('second'))
-    await receiver.decrypt(second)
+    const second = await sender.encrypt({ plaintext: utf8.encode('second') })
+    await receiver.decrypt({ message: second })
     expect(encodeClientState(clone.state)).toEqual(clonedBefore)
-    await expect(clone.decrypt(second)).resolves.toMatchObject({ payload: utf8.encode('second') })
+    await expect(clone.decrypt({ message: second })).resolves.toMatchObject({
+      payload: utf8.encode('second'),
+    })
     const receiverBeforeSend = encodeClientState(receiver.state)
-    const sent = await clone.encrypt(utf8.encode('reply'))
+    const sent = await clone.encrypt({ plaintext: utf8.encode('reply') })
     expect(encodeClientState(receiver.state)).toEqual(receiverBeforeSend)
-    await expect(sender.decrypt(sent)).resolves.toMatchObject({ payload: utf8.encode('reply') })
+    await expect(sender.decrypt({ message: sent })).resolves.toMatchObject({
+      payload: utf8.encode('reply'),
+    })
     const cloneBeforeSend = encodeClientState(clone.state)
-    await receiver.encrypt(utf8.encode('independent reply'))
+    await receiver.encrypt({ plaintext: utf8.encode('independent reply') })
     expect(encodeClientState(clone.state)).toEqual(cloneBeforeSend)
   })
 
@@ -186,25 +196,28 @@ describe('GroupHandle.clone', () => {
       const untouched = side === 'original' ? clone : receiver
       const before = encodeClientState(untouched.state)
       const ledger = untouched.ledgerTokens
-      const role = await signLedgerEntry(alice, {
-        type: 'kumiai.role',
-        groupID: sender.groupID,
-        subject: bob.id,
-        value: 'admin',
+      const role = await signLedgerEntry({
+        identity: alice,
+        entry: {
+          type: 'kumiai.role',
+          groupID: sender.groupID,
+          subject: bob.id,
+          value: 'admin',
+        },
       })
       tokens.set(ledgerEntryDigest(role), role)
-      const commit = await commitLedgerEntries(sender, [role])
-      await advanced.processMessage(commit.commitMessage)
+      const commit = await commitLedgerEntries({ group: sender, tokens: [role] })
+      await advanced.processMessage({ message: commit.commitMessage })
       expect(advanced.epoch).toBe(untouched.epoch + 1n)
       expect(advanced.ledgerTokens).toHaveLength(ledger.length + 1)
       expect(untouched.ledgerTokens).toEqual(ledger)
       expect(encodeClientState(untouched.state)).toEqual(before)
-      await untouched.processMessage(commit.commitMessage)
-      const sealed = await commit.newGroup.encrypt(utf8.encode('after commit'))
-      await expect(receiver.decrypt(sealed)).resolves.toMatchObject({
+      await untouched.processMessage({ message: commit.commitMessage })
+      const sealed = await commit.newGroup.encrypt({ plaintext: utf8.encode('after commit') })
+      await expect(receiver.decrypt({ message: sealed })).resolves.toMatchObject({
         payload: utf8.encode('after commit'),
       })
-      await expect(clone.decrypt(sealed)).resolves.toMatchObject({
+      await expect(clone.decrypt({ message: sealed })).resolves.toMatchObject({
         payload: utf8.encode('after commit'),
       })
     },
@@ -231,7 +244,7 @@ describe('GroupHandle.clone', () => {
     expect(holder?.provider()).toBe(originalDeny)
     expect(deviceDenyHolderFor(clone.context)?.provider()).toBe(clonedDeny)
     if (clone.context.clientConfig == null) throw new Error('Missing config')
-    const bundle = await createKeyPackageBundle(randomIdentity())
+    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
     const equality = clone.context.clientConfig.keyPackageEqualityConfig
     expect(equality.compareKeyPackages(bundle.publicPackage, bundle.publicPackage)).toBe(true)
     expect(
@@ -345,15 +358,21 @@ describe('GroupHandle.clone', () => {
   test('retains verification provenance independently of exposed claims', async () => {
     const { receiver, alice } = await fixture()
     // Evict the content cache so only the per-entry provenance can preserve this snapshot.
-    const { group: filler } = await createGroup(alice, 'clone-cache-eviction')
+    const { group: filler } = await createGroup({
+      identity: alice,
+      groupID: 'clone-cache-eviction',
+    })
     const fillers: Array<string> = []
     for (let index = 0; index <= VERIFIED_LEDGER_TOKEN_CACHE_SIZE; index++) {
       fillers.push(
-        await signLedgerEntry(alice, {
-          type: 'app.record',
-          groupID: filler.groupID,
-          subject: alice.id,
-          value: index,
+        await signLedgerEntry({
+          identity: alice,
+          entry: {
+            type: 'app.record',
+            groupID: filler.groupID,
+            subject: alice.id,
+            value: index,
+          },
         }),
       )
     }

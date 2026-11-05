@@ -14,7 +14,7 @@ describe('createDIDAuthenticationService', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'key',
     })
-    const credential = makeMLSCredential(alice)
+    const credential = makeMLSCredential({ identity: alice })
     const result = await authService.validateCredential(credential, alice.publicKey)
     expect(result).toBe(true)
   })
@@ -28,7 +28,7 @@ describe('createDIDAuthenticationService', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'key',
     })
-    const credential = makeMLSCredential(alice)
+    const credential = makeMLSCredential({ identity: alice })
     const result = await authService.validateCredential(credential, bob.publicKey)
     expect(result).toBe(false)
   })
@@ -70,7 +70,7 @@ describe('createDIDAuthenticationService', () => {
     expect(publicKeyFromDID).toEqual(publicKeyFromEd25519)
 
     // And that the auth service accepts this via makeMLSCredential
-    const credential = makeMLSCredential(alice)
+    const credential = makeMLSCredential({ identity: alice })
     const result = await authService.validateCredential(credential, publicKeyFromEd25519)
     expect(result).toBe(true)
   })
@@ -82,7 +82,7 @@ describe('createDIDAuthenticationService — peer4', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'peer:4',
     })
-    const credential = makeMLSCredential(identity)
+    const credential = makeMLSCredential({ identity })
     const service = createDIDAuthenticationService()
     const ok = await service.validateCredential(credential, identity.publicKey)
     expect(ok).toBe(true)
@@ -96,7 +96,7 @@ describe('createDIDAuthenticationService — peer4', () => {
       ],
       didMethod: 'peer:4',
     })
-    const credential = makeMLSCredential(identity)
+    const credential = makeMLSCredential({ identity })
     const service = createDIDAuthenticationService()
     const sigKeys = identity.keys.filter((k) => k.purpose === 'sig')
     const secondSigKey = sigKeys[1]
@@ -139,7 +139,7 @@ describe('createDIDAuthenticationService — peer4', () => {
       didMethod: 'peer:4',
     })
     const wrongKey = new Uint8Array(32)
-    const credential = makeMLSCredential(a)
+    const credential = makeMLSCredential({ identity: a })
     const service = createDIDAuthenticationService()
     const ok = await service.validateCredential(credential, wrongKey)
     expect(ok).toBe(false)
@@ -163,7 +163,7 @@ describe('createDIDAuthenticationService — peer4', () => {
       ],
       didMethod: 'peer:4',
     })
-    const credential = makeMLSCredential(identity)
+    const credential = makeMLSCredential({ identity })
     const service = createDIDAuthenticationService()
     // Sig key still binds despite a KEM key being present in verificationMethod.
     expect(await service.validateCredential(credential, identity.publicKey)).toBe(true)
@@ -205,7 +205,7 @@ describe('createDIDAuthenticationService — peer4', () => {
     })
     const credential = {
       credentialType: 99 as unknown as typeof defaultCredentialTypes.basic,
-      identity: (makeMLSCredential(identity) as { identity: Uint8Array }).identity,
+      identity: (makeMLSCredential({ identity }) as { identity: Uint8Array }).identity,
     }
     const service = createDIDAuthenticationService()
     const ok = await service.validateCredential(credential, identity.publicKey)

@@ -130,14 +130,14 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
           credential: group.credential,
           resync: true,
           controller,
-          beforeBinding: async (pending, source) => {
+          beforeBinding: async ({ pending, source }) => {
             if (group.anchor.controller == null) return
-            await assertRetainsKnownEffects(
-              group.anchor.controller,
-              group.registry,
-              source.registry,
-              { crypto: group.crypto },
-            )
+            await assertRetainsKnownEffects({
+              controller: group.anchor.controller,
+              known: group.registry,
+              candidate: source.registry,
+              crypto: group.crypto,
+            })
             if (
               !(await recoverySignerEligible({
                 group: pending,
@@ -205,8 +205,8 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
         throw new Error('Pending recovery already bound to another commit')
       tuple ??= { position, commitDigest }
-      const key = await confirmationKey(group, position, commitDigest)
-      tuple.tag = confirmationTag(key, requestID)
+      const key = await confirmationKey({ group, position, commitDigest })
+      tuple.tag = confirmationTag({ key, requestID })
       return key
     },
     async judgeVerdict(opened: OpenedRecoveryVerdict): Promise<'authoritative' | 'advisory'> {

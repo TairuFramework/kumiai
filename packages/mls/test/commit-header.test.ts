@@ -16,10 +16,15 @@ import {
 async function twoMemberGroup() {
   const alice = randomIdentity()
   const bob = randomIdentity()
-  const { group: aliceGroup } = await createGroup(alice, 'g', {
+  const { group: aliceGroup } = await createGroup({
+    identity: alice,
+    groupID: 'g',
     capabilities: controlCapabilities(),
   })
-  const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+  const bobBundle = await createKeyPackageBundle({
+    identity: bob,
+    capabilities: controlCapabilities(),
+  })
   const { invite } = await createInvite({
     group: aliceGroup,
     identity: alice,
@@ -30,7 +35,7 @@ async function twoMemberGroup() {
     welcomeMessage,
     commitMessage,
     newGroup: aliceAfterBob,
-  } = await commitInvite(aliceGroup, bobBundle.publicPackage, invite)
+  } = await commitInvite({ group: aliceGroup, keyPackage: bobBundle.publicPackage, invite })
   const { group: bobGroup, credential: bobCred } = await processWelcome({
     identity: bob,
     invite,
@@ -49,14 +54,17 @@ async function addSomeone(
   alice: ReturnType<typeof randomIdentity>,
 ) {
   const newcomer = randomIdentity()
-  const bundle = await createKeyPackageBundle(newcomer, { capabilities: controlCapabilities() })
+  const bundle = await createKeyPackageBundle({
+    identity: newcomer,
+    capabilities: controlCapabilities(),
+  })
   const { invite } = await createInvite({
     group,
     identity: alice,
     recipientDID: newcomer.id,
     permission: 'member',
   })
-  return await commitInvite(group, bundle.publicPackage, invite)
+  return await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
 }
 
 /**
@@ -102,7 +110,8 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
   test('returns the MLS-authenticated committer DID and epoch', async () => {
     const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
     const carol = randomIdentity()
-    const carolBundle = await createKeyPackageBundle(carol, {
+    const carolBundle = await createKeyPackageBundle({
+      identity: carol,
       capabilities: controlCapabilities(),
     })
     const { invite: carolInvite } = await createInvite({
@@ -112,11 +121,11 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
       permission: 'member',
     })
     // Alice authors this commit at the epoch Bob is at, so Bob can read it.
-    const { commitMessage } = await commitInvite(
-      aliceAfterBob,
-      carolBundle.publicPackage,
-      carolInvite,
-    )
+    const { commitMessage } = await commitInvite({
+      group: aliceAfterBob,
+      keyPackage: carolBundle.publicPackage,
+      invite: carolInvite,
+    })
 
     const header = await bobGroup.readCommitHeader(commitMessage)
     expect(header).not.toBeNull()
@@ -131,7 +140,8 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
   test('is non-mutating — the handle epoch is unchanged after a read', async () => {
     const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
     const carol = randomIdentity()
-    const carolBundle = await createKeyPackageBundle(carol, {
+    const carolBundle = await createKeyPackageBundle({
+      identity: carol,
       capabilities: controlCapabilities(),
     })
     const { invite: carolInvite } = await createInvite({
@@ -140,11 +150,11 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const { commitMessage } = await commitInvite(
-      aliceAfterBob,
-      carolBundle.publicPackage,
-      carolInvite,
-    )
+    const { commitMessage } = await commitInvite({
+      group: aliceAfterBob,
+      keyPackage: carolBundle.publicPackage,
+      invite: carolInvite,
+    })
     const before = bobGroup.epoch
     await bobGroup.readCommitHeader(commitMessage)
     expect(bobGroup.epoch).toBe(before)
@@ -267,7 +277,7 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
   test('returns null for a non-commit frame and for garbage bytes', async () => {
     const { aliceAfterBob, bobGroup } = await twoMemberGroup()
     // An application message is a PrivateMessage that is NOT a commit.
-    const appMessage = await aliceAfterBob.encrypt(new TextEncoder().encode('hi'))
+    const appMessage = await aliceAfterBob.encrypt({ plaintext: new TextEncoder().encode('hi') })
     expect(await bobGroup.readCommitHeader(appMessage)).toBeNull()
     expect(await bobGroup.readCommitHeader(new Uint8Array([0xff, 0xff]))).toBeNull()
     expect(await bobGroup.readCommitHeader(new Uint8Array())).toBeNull()
@@ -276,7 +286,8 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
   test('returns null (does not reject) for a truncated commit frame that makes ts-mls decode throw', async () => {
     const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
     const carol = randomIdentity()
-    const carolBundle = await createKeyPackageBundle(carol, {
+    const carolBundle = await createKeyPackageBundle({
+      identity: carol,
       capabilities: controlCapabilities(),
     })
     const { invite: carolInvite } = await createInvite({
@@ -285,11 +296,11 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
       recipientDID: carol.id,
       permission: 'member',
     })
-    const { commitMessage } = await commitInvite(
-      aliceAfterBob,
-      carolBundle.publicPackage,
-      carolInvite,
-    )
+    const { commitMessage } = await commitInvite({
+      group: aliceAfterBob,
+      keyPackage: carolBundle.publicPackage,
+      invite: carolInvite,
+    })
 
     // Slicing 3 bytes off the end leaves an inner variable-length prefix claiming more
     // data than remains in the buffer. ts-mls `decode` throws a CodecError ("Data length

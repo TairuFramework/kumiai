@@ -119,6 +119,10 @@ export function decodePrivateKeyPackage(encoded: string): PrivateKeyPackage | nu
   return decoded[0]
 }
 
+export type KeyPackageRefParams = {
+  keyPackage: KeyPackage
+} & GroupOptions
+
 /**
  * The KeyPackageRef for a key package, base64 — the value a Welcome names to say which package its
  * encrypted group secrets are for, and the stable identity of a stored package.
@@ -126,10 +130,10 @@ export function decodePrivateKeyPackage(encoded: string): PrivateKeyPackage | nu
  * A hash over the package's canonical encoding, so a codec round trip does not change it. Derived
  * under the ciphersuite's hash, so `options` is threaded through rather than defaulted.
  */
-export async function keyPackageRef(
-  keyPackage: KeyPackage,
-  options?: GroupOptions,
-): Promise<string> {
+export async function keyPackageRef({
+  keyPackage,
+  ...options
+}: KeyPackageRefParams): Promise<string> {
   const { cipherSuite } = await resolveMlsContext(options)
   return toB64(await makeKeyPackageRef(keyPackage, cipherSuite.hash))
 }

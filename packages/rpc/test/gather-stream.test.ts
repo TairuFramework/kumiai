@@ -52,9 +52,9 @@ function stalledPeer(hub: FakeHub) {
   })
   const crypto: FakeCrypto = {
     ...base,
-    exportSecret: async (label, length) => {
+    exportSecret: async ({ label, length }) => {
       await gate
-      return base.exportSecret(label, length)
+      return base.exportSecret({ label, length })
     },
   }
   return { peer: makePeer(hub, 'alice', {}, crypto), release }

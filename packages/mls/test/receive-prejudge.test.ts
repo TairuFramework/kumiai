@@ -26,7 +26,7 @@ async function threeMemberGroup(groupID: string) {
   const publish = (invite: Invite) => {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
   const { invite: bobInvite } = await createInvite({
     group: created,
     identity: alice,
@@ -34,8 +34,12 @@ async function threeMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(bobInvite)
-  const bobBundle = await createKeyPackageBundle(bob)
-  const added = await commitInvite(created, bobBundle.publicPackage, bobInvite)
+  const bobBundle = await createKeyPackageBundle({ identity: bob })
+  const added = await commitInvite({
+    group: created,
+    keyPackage: bobBundle.publicPackage,
+    invite: bobInvite,
+  })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite: bobInvite,
@@ -51,8 +55,12 @@ async function threeMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(carolInvite)
-  const carolBundle = await createKeyPackageBundle(carol)
-  const next = await commitInvite(added.newGroup, carolBundle.publicPackage, carolInvite)
+  const carolBundle = await createKeyPackageBundle({ identity: carol })
+  const next = await commitInvite({
+    group: added.newGroup,
+    keyPackage: carolBundle.publicPackage,
+    invite: carolInvite,
+  })
   return { aliceGroup: next.newGroup, bobGroup, commit: next.commitMessage }
 }
 
@@ -78,10 +86,12 @@ test('the judging pass leaves the receiver state unchanged and burns no generati
   expect(judged).toBe(1)
   expect(bobGroup.state).toEqual(before)
 
-  await bobGroup.processMessage(commit)
+  await bobGroup.processMessage({ message: commit })
   expect(bobGroup.epoch).toBe(aliceGroup.epoch)
-  const sealed = await aliceGroup.encrypt(new TextEncoder().encode('after the commit'))
-  expect(new TextDecoder().decode((await bobGroup.decrypt(sealed)).payload)).toBe(
+  const sealed = await aliceGroup.encrypt({
+    plaintext: new TextEncoder().encode('after the commit'),
+  })
+  expect(new TextDecoder().decode((await bobGroup.decrypt({ message: sealed })).payload)).toBe(
     'after the commit',
   )
 })
@@ -90,7 +100,8 @@ test('receiving a commit judges it once before applying it', async () => {
   const { aliceGroup, bobGroup, commit } = await threeMemberGroup('prejudge-order')
   const events: Array<string> = []
   const before = bobGroup.epoch
-  await bobGroup.processMessage(commit, {
+  await bobGroup.processMessage({
+    message: commit,
     commitPolicy: (incoming) => {
       events.push(incoming.kind)
       expect(bobGroup.epoch).toBe(before)

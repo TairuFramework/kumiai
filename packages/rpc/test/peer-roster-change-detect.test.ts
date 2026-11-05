@@ -159,7 +159,7 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.leaves()).toEqual(['bob', 'dave']) // one leaf for dave, and the same DIDs
     // The diff saw nothing — the DIDs are identical before and after — and Bob rotated regardless.
-    expect(detectRosterChange(['bob', 'dave'], bob.mls.leaves())).toBe(false)
+    expect(detectRosterChange({ before: ['bob', 'dave'], after: bob.mls.leaves() })).toBe(false)
     expect(bob.peer.anchorEpoch()).toBe(2)
 
     await bob.peer.dispose()
@@ -186,7 +186,7 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
 
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.leaves()).toEqual(['bob', 'carol'])
-    expect(detectRosterChange(['bob', 'carol'], bob.mls.leaves())).toBe(false)
+    expect(detectRosterChange({ before: ['bob', 'carol'], after: bob.mls.leaves() })).toBe(false)
     expect(bob.peer.anchorEpoch()).toBe(2)
 
     await bob.peer.dispose()
@@ -223,46 +223,46 @@ describe('a commit that changes the roster or rejoins a member rotates the app-l
 
 describe('detectRosterChange — set-inequality semantics', () => {
   test('a DID present before and absent after is a change', () => {
-    expect(detectRosterChange(['a', 'b', 'c'], ['a', 'c'])).toBe(true)
+    expect(detectRosterChange({ before: ['a', 'b', 'c'], after: ['a', 'c'] })).toBe(true)
   })
 
   test('a self-removal — the leaf gone for everyone — is a change', () => {
-    expect(detectRosterChange(['a', 'b'], ['a'])).toBe(true)
+    expect(detectRosterChange({ before: ['a', 'b'], after: ['a'] })).toBe(true)
   })
 
   test('an Add and a Remove together is a change, though the count is unchanged', () => {
-    expect(detectRosterChange(['a', 'b'], ['a', 'c'])).toBe(true)
+    expect(detectRosterChange({ before: ['a', 'b'], after: ['a', 'c'] })).toBe(true)
   })
 
   test('an add-only is a change: the set-difference predicate missed exactly this', () => {
-    expect(detectRosterChange(['a'], ['a', 'b'])).toBe(true)
+    expect(detectRosterChange({ before: ['a'], after: ['a', 'b'] })).toBe(true)
   })
 
   test('an unchanged roster is not a change', () => {
-    expect(detectRosterChange(['a', 'b'], ['a', 'b'])).toBe(false)
+    expect(detectRosterChange({ before: ['a', 'b'], after: ['a', 'b'] })).toBe(false)
   })
 
   test('order and duplicates do not matter', () => {
-    expect(detectRosterChange(['a', 'b', 'a'], ['b', 'a'])).toBe(false)
-    expect(detectRosterChange(['b', 'a'], ['a'])).toBe(true)
-    expect(detectRosterChange(['a'], ['a', 'a'])).toBe(false)
+    expect(detectRosterChange({ before: ['a', 'b', 'a'], after: ['b', 'a'] })).toBe(false)
+    expect(detectRosterChange({ before: ['b', 'a'], after: ['a'] })).toBe(true)
+    expect(detectRosterChange({ before: ['a'], after: ['a', 'a'] })).toBe(false)
   })
 
   test('an empty before roster gaining a DID is a change', () => {
-    expect(detectRosterChange([], ['a', 'b'])).toBe(true)
-    expect(detectRosterChange([], [])).toBe(false)
+    expect(detectRosterChange({ before: [], after: ['a', 'b'] })).toBe(true)
+    expect(detectRosterChange({ before: [], after: [] })).toBe(false)
   })
 })
 
 describe('detectLeafAdmission — a value that appears is an Add', () => {
   test('a fresh admission is an Add, even for a DID the roster held', () => {
-    expect(detectLeafAdmission(['carol#1'], ['carol#2'])).toBe(true)
-    expect(detectLeafAdmission([], ['dave#2'])).toBe(true)
+    expect(detectLeafAdmission({ before: ['carol#1'], after: ['carol#2'] })).toBe(true)
+    expect(detectLeafAdmission({ before: [], after: ['dave#2'] })).toBe(true)
   })
 
   test('an admission that only disappears is a path, an Update or a Remove', () => {
-    expect(detectLeafAdmission(['carol#1'], [])).toBe(false)
-    expect(detectLeafAdmission(['carol#1', 'dave#1'], ['dave#1'])).toBe(false)
-    expect(detectLeafAdmission([], [])).toBe(false)
+    expect(detectLeafAdmission({ before: ['carol#1'], after: [] })).toBe(false)
+    expect(detectLeafAdmission({ before: ['carol#1', 'dave#1'], after: ['dave#1'] })).toBe(false)
+    expect(detectLeafAdmission({ before: [], after: [] })).toBe(false)
   })
 })

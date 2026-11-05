@@ -19,7 +19,11 @@ async function createGroupMessage(): Promise<string> {
   const bob = randomIdentity()
 
   // Alice creates a group
-  const { group: aliceGroup } = await createGroup(alice, 'e2e-test', options)
+  const { group: aliceGroup } = await createGroup({
+    identity: alice,
+    groupID: 'e2e-test',
+    ...options,
+  })
 
   // Create invite for Bob
   const { invite } = await createInvite({
@@ -30,10 +34,14 @@ async function createGroupMessage(): Promise<string> {
   })
 
   // Bob generates a key package
-  const bobKP = await createKeyPackageBundle(bob, options)
+  const bobKP = await createKeyPackageBundle({ identity: bob, ...options })
 
   // Alice commits the invite
-  const { welcomeMessage, newGroup } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
+  const { welcomeMessage, newGroup } = await commitInvite({
+    group: aliceGroup,
+    keyPackage: bobKP.publicPackage,
+    invite,
+  })
 
   // Bob joins via Welcome
   const { group: bobGroup } = await processWelcome({
@@ -47,8 +55,8 @@ async function createGroupMessage(): Promise<string> {
 
   // Alice encrypts, Bob decrypts
   const msg = new TextEncoder().encode('hello from expo')
-  const message = await newGroup.encrypt(msg)
-  const decrypted = await bobGroup.processMessage(message)
+  const message = await newGroup.encrypt({ plaintext: msg })
+  const decrypted = await bobGroup.processMessage({ message })
   if (decrypted == null) {
     throw new Error('expected an application message, got a handshake')
   }

@@ -75,7 +75,7 @@ describe('real MLS durable host save ordering', () => {
       pending,
     })
     const aad = utf8.encode('topic')
-    const sealed = await sender.wrap(utf8.encode('hello'), { aad })
+    const sealed = await sender.wrap({ bytes: utf8.encode('hello'), aad })
     const frame = {
       id: 'real-port-frame',
       topicID: 'topic',
@@ -86,7 +86,7 @@ describe('real MLS durable host save ordering', () => {
 
     const earlierSave = saveHandle(before, 1, gate.promise)
     await entered.promise
-    const opening = receiverPort.unwrap(sealed, { expectedAAD: aad, frame })
+    const opening = receiverPort.unwrap({ bytes: sealed, expectedAAD: aad, frame })
     await persistEntered.promise
     expect(records.size).toBe(0)
     gate.resolve()
@@ -108,7 +108,7 @@ describe('real MLS durable host save ordering', () => {
       state: restoredState,
       credential: receiver.handle.credential,
     })
-    await expect(restored.decrypt(sealed, { expectedAAD: aad })).rejects.toThrow()
+    await expect(restored.decrypt({ message: sealed, expectedAAD: aad })).rejects.toThrow()
     expect(await pending.list()).toHaveLength(1)
   })
 })

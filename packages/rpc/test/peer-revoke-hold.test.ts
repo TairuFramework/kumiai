@@ -28,18 +28,21 @@ test('hold starts while queued, covers build and resumes ordered log sends after
   const member = makeMLSPeer(hub, 'alice', secret)
   const pause = gate()
   let entered = false
-  const earlier = member.peer.commit(
-    buildLedgerCommit(member, ['earlier'], {
+  const earlier = member.peer.commit({
+    build: buildLedgerCommit(member, ['earlier'], {
       onBuild: async () => {
         entered = true
         await pause.promise
       },
     }),
-  )
+  })
   await vi.waitFor(() => expect(entered).toBe(true))
   const fetched = vi.spyOn(hub, 'fetchTopic')
   const seals = vi.spyOn(member.crypto, 'wrap')
-  const held = member.peer.commit(buildLedgerCommit(member, ['proof']), { holdLogSends: true })
+  const held = member.peer.commit({
+    build: buildLedgerCommit(member, ['proof']),
+    holdLogSends: true,
+  })
   try {
     await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'first' } })
     await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'second' } })
@@ -79,15 +82,15 @@ test('a prepared attempt whose durable write finishes during a hold is resealed 
   }
   await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'queued' } })
   await vi.waitFor(() => expect(putEntered).toBe(true))
-  const operation = member.peer.commit(
-    buildLedgerCommit(member, ['proof'], {
+  const operation = member.peer.commit({
+    build: buildLedgerCommit(member, ['proof'], {
       onBuild: async () => {
         buildEntered = true
         await buildPause.promise
       },
     }),
-    { holdLogSends: true },
-  )
+    holdLogSends: true,
+  })
   try {
     await vi.waitFor(() => expect(buildEntered).toBe(true))
     putPause.release()
@@ -126,14 +129,14 @@ test('a submitted log publish settles before a held commit is journalled', async
   await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'in flight' } })
   await vi.waitFor(() => expect(submitted).toBe(true))
   let built = false
-  const operation = member.peer.commit(
-    buildLedgerCommit(member, ['proof'], {
+  const operation = member.peer.commit({
+    build: buildLedgerCommit(member, ['proof'], {
       onBuild: () => {
         built = true
       },
     }),
-    { holdLogSends: true },
-  )
+    holdLogSends: true,
+  })
   try {
     await vi.waitFor(() => expect(built).toBe(true))
     expect(member.journal.puts()).toBe(0)
@@ -160,7 +163,7 @@ test('unknown publication keeps the journal hold across restart until replay ado
   }
   const member = makeMLSPeer(hub, 'alice', secret)
   await expect(
-    member.peer.commit(buildLedgerCommit(member, ['proof']), { holdLogSends: true }),
+    member.peer.commit({ build: buildLedgerCommit(member, ['proof']), holdLogSends: true }),
   ).rejects.toThrow('disconnected')
   expect(member.journal.slot()?.holdsLogSends).toBe(true)
   await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'restart' } })
@@ -184,12 +187,12 @@ test('a pre-journal build failure releases the hold', async () => {
   const member = makeMLSPeer(hub, 'alice', secret)
   try {
     await expect(
-      member.peer.commit(
-        async () => {
+      member.peer.commit({
+        build: async () => {
           throw new Error('cannot build')
         },
-        { holdLogSends: true },
-      ),
+        holdLogSends: true,
+      }),
     ).rejects.toThrow('cannot build')
     expect(member.journal.slot()).toBeNull()
     await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'released' } })

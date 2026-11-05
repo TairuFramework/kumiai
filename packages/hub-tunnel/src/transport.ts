@@ -105,6 +105,20 @@ export type HubFetchTopicResult = {
   gap: boolean
 }
 
+export type HubBaseSubscribeParams = {
+  subscriberDID: string
+  topicID: string
+} & HubSubscribeOptions
+
+export type HubBaseUnsubscribeParams = {
+  subscriberDID: string
+  topicID: string
+}
+
+export type HubBaseReceiveParams = {
+  subscriberDID: string
+} & HubReceiveOptions
+
 /**
  * The APIs both hub kinds share — everything except how you publish. `events` are
  * connection-lifecycle (reconnect/connect/disconnect), emitted by a mailbox and a log hub alike, so
@@ -112,13 +126,13 @@ export type HubFetchTopicResult = {
  * own `publish` on top; neither is derived from the other.
  */
 export type HubBase = {
-  subscribe: (
-    subscriberDID: string,
-    topicID: string,
-    options?: HubSubscribeOptions,
-  ) => Promise<void> | void
-  unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
-  receive: (subscriberDID: string, options?: HubReceiveOptions) => HubReceiveSubscription
+  subscribe: ({
+    subscriberDID,
+    topicID,
+    ...options
+  }: HubBaseSubscribeParams) => Promise<void> | void
+  unsubscribe?: ({ subscriberDID, topicID }: HubBaseUnsubscribeParams) => Promise<void> | void
+  receive: ({ subscriberDID, ...options }: HubBaseReceiveParams) => HubReceiveSubscription
   readonly events?: MailboxHubEvents
 }
 
@@ -223,12 +237,12 @@ export function createHubTunnelTransport<R, W>(
   // frames but still lets sends proceed.
   const subscribed = (async () => {
     try {
-      await hub.subscribe(localDID, receiveTopicID)
+      await hub.subscribe({ subscriberDID: localDID, topicID: receiveTopicID })
     } catch {
       // A failed subscribe yields no inbound frames; the send gate still proceeds.
     }
   })()
-  const subscription = hub.receive(localDID, { topicID: receiveTopicID })
+  const subscription = hub.receive({ subscriberDID: localDID, topicID: receiveTopicID })
   const iterator = subscription[Symbol.asyncIterator]()
 
   let abortHandler: (() => void) | undefined
@@ -296,7 +310,9 @@ export function createHubTunnelTransport<R, W>(
     // Ordered after `subscribed`: unsubscribing before an in-flight subscribe lands would have
     // the subscribe's later mutation resurrect a subscription this transport no longer wants.
     // `releaseResources` itself stays synchronous — only the unsubscribe is deferred.
-    void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
+    void subscribed
+      .then(() => hub.unsubscribe?.({ subscriberDID: localDID, topicID: receiveTopicID }))
+      .catch(() => {})
     try {
       // Fire-and-forget: awaiting `return()` deadlocks on the real wire hub, where it waits behind
       // the drain loop's in-flight `next()` that never settles during teardown. No-op catch keeps a

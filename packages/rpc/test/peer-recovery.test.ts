@@ -60,19 +60,19 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       })
       await vi.waitFor(() => expect(alice.mls.epoch()).toBe(3))
       const requestID = 'stranded-confirm'
-      const request = await bob.createRecoveryRequest(requestID)
+      const request = await bob.createRecoveryRequest({ requestID })
       await hub.publish({
         senderDID: 'bob',
         topicID: rendezvousTopic(secret),
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.recoveryConfirmRequest,
-          encodeRecoveryConfirmRequest({
+        payload: encodeHandshakeFrame({
+          kind: HANDSHAKE_KIND.recoveryConfirmRequest,
+          payload: encodeRecoveryConfirmRequest({
             requestID,
             request,
             position: external.sequenceID,
             commitDigest: publishedCommitDigest(hub, external.sequenceID),
           }),
-        ),
+        }),
       })
       await flush(100)
       expect(key).not.toHaveBeenCalled()
@@ -147,18 +147,21 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       await hub.publish({
         senderDID: 'observer',
         topicID: commitTopic(secret),
-        payload: encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, new Uint8Array([0])),
+        payload: encodeHandshakeFrame({
+          kind: HANDSHAKE_KIND.recoveryRequest,
+          payload: new Uint8Array([0]),
+        }),
       })
       await alice.peer.resync()
       const requestID = 'historical-retransmit'
-      const request = await bob.mls.createRecoveryRequest(requestID)
+      const request = await bob.mls.createRecoveryRequest({ requestID })
       await hub.publish({
         senderDID: 'bob',
         topicID: rendezvousTopic(secret),
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.recoveryConfirmRequest,
-          encodeRecoveryConfirmRequest({ ...original, requestID, request }),
-        ),
+        payload: encodeHandshakeFrame({
+          kind: HANDSHAKE_KIND.recoveryConfirmRequest,
+          payload: encodeRecoveryConfirmRequest({ ...original, requestID, request }),
+        }),
       })
       await drainUntil(
         () =>
@@ -180,7 +183,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       })
       if (response == null) throw new Error('No historical verdict')
       const { sealed } = decodeRecoveryVerdict(decodeHandshakeFrame(response.payload).payload)
-      expect(await bob.mls.openRecoveryVerdict(sealed, requestID)).toMatchObject({
+      expect(await bob.mls.openRecoveryVerdict({ sealed, requestID })).toMatchObject({
         verdict: { verdict: 'confirmed' },
       })
     } finally {
@@ -259,7 +262,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
     void recovery.catch(() => {})
     try {
       await drainUntil(() => sealing.mock.calls.length > 0, 'recovery seal call')
-      const committing = bob.peer.commit(build)
+      const committing = bob.peer.commit({ build })
       void committing.catch(() => {})
       await setImmediate()
       expect(build).not.toHaveBeenCalled()
@@ -298,7 +301,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
     expect(eve.mls.epoch()).toBe(4)
     expect(carol.mls.epoch()).toBe(4)
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
-    const { secret } = await eve.crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret } = await eve.crypto.exportSecret({ label: APP_TOPIC_LABEL })
     // Eve was stranded, never evicted, so the roster held her DID throughout: her rejoin REPLACES
     // her leaf and the DID set is identical before and after it. Nothing a roster diff reads moves
     // — so the rotation rides the commit's own external flag, and every member lands on the epoch
@@ -317,7 +320,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
     // names. (The topics they left keep their subscriptions — a rotation tears down the listeners
     // and never the subscription, or a peer would delete its own unread messages — so what is
     // decisive here is that the rejoin epoch's topic is the one they share.)
-    expect(hub.subscriberCount(protocolTopic(secret, 4, 'chat'))).toBe(3)
+    expect(hub.subscriberCount(protocolTopic({ secret, epoch: 4, protocol: 'chat' }))).toBe(3)
     // Carol (fast) replies; Dave (slow) observes that reply and suppresses his own.
     expect(recoveryReplyCount(hub, rs)).toBe(1)
     // The group's tree holds ONE leaf for the rejoined member, not two.

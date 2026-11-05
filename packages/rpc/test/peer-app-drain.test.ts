@@ -44,7 +44,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'before lunch' } })
     for (let i = 0; i < 10; i++) {
-      await alice.peer.commit(buildLedgerCommit(alice, []))
+      await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     }
     await flush()
     expect(alice.mls.epoch()).toBe(11)
@@ -85,14 +85,14 @@ describe('app frames outlive the commits that leave their epoch', () => {
 
     // Alice runs the group to epoch 3, posts there, and runs on to 6.
     for (let i = 0; i < 2; i++) {
-      await alice.peer.commit(buildLedgerCommit(alice, []))
+      await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     }
     expect(alice.mls.epoch()).toBe(3)
     await alice.peer
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'sent at epoch three' } })
     for (let i = 0; i < 3; i++) {
-      await alice.peer.commit(buildLedgerCommit(alice, []))
+      await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     }
     await flush()
     expect(alice.mls.epoch()).toBe(6)
@@ -139,7 +139,11 @@ describe('app frames outlive the commits that leave their epoch', () => {
     const landed = deferred<void>()
     const acknowledge = deferred<void>()
     const publish = hub.publish.bind(hub)
-    const appTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const appTopic = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
     vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
       if (params.senderDID !== 'alice' || params.topicID !== appTopic) return publish(params)
       submitted.resolve()
@@ -154,7 +158,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'raced the commit' } })
     await submitted.promise
-    await carol.peer.commit(buildLedgerCommit(carol, []))
+    await carol.peer.commit({ build: buildLedgerCommit(carol, []) })
     await flush()
     expect(carol.mls.epoch()).toBe(2)
     expect(alice.mls.epoch()).toBe(1)
@@ -164,7 +168,9 @@ describe('app frames outlive the commits that leave their epoch', () => {
 
     const commits = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
     const posted = hub.published.filter(
-      (m) => m.topicID === protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat'),
+      (m) =>
+        m.topicID ===
+        protocolTopic({ secret: fakeEpochSecret(1, APP_TOPIC_LABEL), epoch: 1, protocol: 'chat' }),
     )
     expect(commits).toHaveLength(1)
     expect(posted).toHaveLength(1)
@@ -225,7 +231,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     await alice.peer
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'alice said something' } })
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     expect(posted).toEqual([])
     expect(changed).toEqual([])

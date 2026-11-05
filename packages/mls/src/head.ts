@@ -20,6 +20,11 @@ const SHA256_LENGTH = 32
 /** The parsed ledger-head extension: a version and the running chain digest. */
 export type LedgerHead = { v: number; head: Uint8Array }
 
+export type LedgerIncompleteErrorParams = {
+  expected: Uint8Array
+  actual: Uint8Array
+}
+
 /**
  * Thrown when a recomputed head does not match the authenticated one — an inviter
  * omitted, reordered, or truncated a ledger entry. Carries both heads for logging.
@@ -29,7 +34,7 @@ export class LedgerIncompleteError extends Error {
   #expected: Uint8Array
   #actual: Uint8Array
 
-  constructor(expected: Uint8Array, actual: Uint8Array) {
+  constructor({ expected, actual }: LedgerIncompleteErrorParams) {
     super('recomputed ledger head does not match the authenticated head')
     this.name = 'LedgerIncompleteError'
     this.#expected = expected
@@ -70,18 +75,28 @@ export function genesisHead(groupID: string): Uint8Array {
   return sha256(concatBytes(DOMAIN, utf8.encode(groupID)))
 }
 
+export type ExtendHeadParams = {
+  head: Uint8Array
+  entryIDs: Array<string>
+}
+
 /**
  * Extend a head by a batch of entry ids, in envelope order: `head ← SHA256(head ‖
  * frame(id))`, folded left to right. Pure, order- and length-sensitive (see
  * {@link frameID}). An empty batch is a no-op — a commit with no entries does not
  * move the head.
  */
-export function extendHead(head: Uint8Array, entryIDs: Array<string>): Uint8Array {
+export function extendHead({ head, entryIDs }: ExtendHeadParams): Uint8Array {
   let acc = head
   for (const id of entryIDs) {
     acc = sha256(concatBytes(acc, frameID(id)))
   }
   return acc
+}
+
+export type ComputeHeadParams = {
+  groupID: string
+  entryIDs: Array<string>
 }
 
 /**
@@ -90,8 +105,8 @@ export function extendHead(head: Uint8Array, entryIDs: Array<string>): Uint8Arra
  * `extendHead(extendHead(genesisHead(g), a), b)`, so a member can verify a head
  * update by extending its own chain rather than refolding from genesis.
  */
-export function computeHead(groupID: string, entryIDs: Array<string>): Uint8Array {
-  return extendHead(genesisHead(groupID), entryIDs)
+export function computeHead({ groupID, entryIDs }: ComputeHeadParams): Uint8Array {
+  return extendHead({ head: genesisHead(groupID), entryIDs })
 }
 
 /**
@@ -171,21 +186,31 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true
 }
 
+export type HeadsMatchParams = {
+  expected: Uint8Array
+  actual: Uint8Array
+}
+
 /**
  * Whether a recomputed head equals the authenticated one — the predicate form of
  * {@link assertHeadMatches}. Two entry points on one comparison: a fail-closed gate
  * throws, a local invariant check reads the boolean.
  */
-export function headsMatch(expected: Uint8Array, actual: Uint8Array): boolean {
+export function headsMatch({ expected, actual }: HeadsMatchParams): boolean {
   return bytesEqual(expected, actual)
+}
+
+export type AssertHeadMatchesParams = {
+  expected: Uint8Array
+  actual: Uint8Array
 }
 
 /**
  * Assert a recomputed head matches the authenticated one, or throw
  * {@link LedgerIncompleteError} carrying both. Returns for equal heads.
  */
-export function assertHeadMatches(expected: Uint8Array, actual: Uint8Array): void {
-  if (!headsMatch(expected, actual)) {
-    throw new LedgerIncompleteError(expected, actual)
+export function assertHeadMatches({ expected, actual }: AssertHeadMatchesParams): void {
+  if (!headsMatch({ expected, actual })) {
+    throw new LedgerIncompleteError({ expected, actual })
   }
 }

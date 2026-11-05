@@ -34,6 +34,16 @@ export type LastResortRecord = {
   uploadedAt: number | null
 }
 
+export type LastResortStorePutParams = {
+  ownerDID: string
+  record: LastResortRecord
+}
+
+export type LastResortStoreDeleteParams = {
+  ownerDID: string
+  ref: string
+}
+
 /**
  * Durable storage for retained last-resort key packages, implemented by the host.
  *
@@ -55,8 +65,8 @@ export type LastResortRecord = {
  */
 export type LastResortStore = {
   list(ownerDID: string): Promise<Array<LastResortRecord>>
-  put(ownerDID: string, record: LastResortRecord): Promise<void>
-  delete(ownerDID: string, ref: string): Promise<void>
+  put({ ownerDID, record }: LastResortStorePutParams): Promise<void>
+  delete({ ownerDID, ref }: LastResortStoreDeleteParams): Promise<void>
 }
 
 /**

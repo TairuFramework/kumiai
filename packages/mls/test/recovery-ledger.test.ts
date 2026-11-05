@@ -63,10 +63,10 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle(invitee)
-  const commit = await commitInvite(admin, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: invitee })
+  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
   for (const other of others) {
-    await other.processMessage(commit.commitMessage)
+    await other.processMessage({ message: commit.commitMessage })
   }
   const { group } = await processWelcome({
     identity: invitee,
@@ -85,7 +85,9 @@ async function threeMemberGroup(groupID: string) {
   const bob = randomIdentity()
   const carol = randomIdentity()
 
-  const { group: created } = await createGroup(alice, groupID, {
+  const { group: created } = await createGroup({
+    identity: alice,
+    groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
   })
   const withBob = await inviteMember(fixture, created, alice, bob)
@@ -324,7 +326,10 @@ describe('sealed ledger gather', () => {
     // signature verifies; the tree is what refuses it. A seal WITHOUT this check would hand the
     // group's whole authority state to any stranger, encrypted neatly to the stranger's key.
     const outsider = randomIdentity()
-    const { group: outsiderGroup } = await createGroup(outsider, 'ledger-roster')
+    const { group: outsiderGroup } = await createGroup({
+      identity: outsider,
+      groupID: 'ledger-roster',
+    })
     const outsiderRequest = await createRecoveryRequest({
       group: outsiderGroup,
       identity: outsider,
@@ -341,7 +346,7 @@ describe('sealed ledger gather', () => {
     // leaf out of the tree, so there is no policy for a host to forget.
     const carolLeaf = aliceGroup.findMemberLeafIndex(carol.id)
     expect(carolLeaf).toBeDefined()
-    const removal = await removeMember(aliceGroup, carolLeaf as number)
+    const removal = await removeMember({ group: aliceGroup, leafIndex: carolLeaf as number })
     const carolRequest = await createRecoveryRequest({
       group: carolGroup,
       identity: carol,
@@ -357,7 +362,7 @@ describe('sealed ledger gather', () => {
     await expect(
       sealLedger({ group: bobGroup, request: carolRequest.request }),
     ).resolves.toBeInstanceOf(Uint8Array)
-    await bobGroup.processMessage(removal.commitMessage)
+    await bobGroup.processMessage({ message: removal.commitMessage })
     await expect(
       sealLedger({ group: bobGroup, request: carolRequest.request }),
     ).rejects.toMatchObject({ reason: 'not-a-member' })
@@ -367,7 +372,10 @@ describe('sealed ledger gather', () => {
     await expect(sealLedger({ group: aliceGroup, request: 'not-a-token' })).rejects.toMatchObject({
       reason: 'unverified',
     })
-    const { group: elsewhere } = await createGroup(outsider, 'ledger-roster-other')
+    const { group: elsewhere } = await createGroup({
+      identity: outsider,
+      groupID: 'ledger-roster-other',
+    })
     const elsewhereRequest = await createRecoveryRequest({
       group: elsewhere,
       identity: outsider,
@@ -420,7 +428,7 @@ describe('sealed ledger gather', () => {
     // A freshly created group holds no role entries — its ledger is empty — and its creator is
     // the member who both requests and answers here.
     const alice = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'ledger-empty')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'ledger-empty' })
     expect(await aliceGroup.getLedger()).toEqual([])
 
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({

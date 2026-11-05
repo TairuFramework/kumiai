@@ -37,7 +37,7 @@ test('horizon history and a 64 KiB consumer entry fit the real hub with the fina
   const topicID = commitTopic(new Uint8Array(32).fill(53))
   const seen: Array<number> = []
   try {
-    await connection.subscribe(identity.id, topicID, { retention: 3600 })
+    await connection.subscribe({ subscriberDID: identity.id, topicID, retention: 3600 })
     expect(
       await probe.frameMeasurements({
         onlyHorizon: true,
@@ -68,7 +68,7 @@ test('horizon history and a 64 KiB consumer entry fit the real hub with the fina
 test('a final frame one byte above the hub cap is rejected before journalling or publication', async () => {
   const hub = createWireHub()
   const identity = randomIdentity()
-  let group = (await createGroup(identity, 'frame-cap-side-effects')).group
+  let group = (await createGroup({ identity, groupID: 'frame-cap-side-effects' })).group
   const access = simpleHandleAccess({
     handle: () => group,
     adopt: (next) => {
@@ -99,26 +99,31 @@ test('a final frame one byte above the hub cap is rejected before journalling or
   })
   try {
     await peer.resync()
-    const token = await signLedgerEntry(identity, {
-      groupID: group.groupID,
-      type: 'note',
-      subject: identity.id,
-      value: 'cap',
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        groupID: group.groupID,
+        type: 'note',
+        subject: identity.id,
+        value: 'cap',
+      },
     })
-    const built = await commitLedgerEntries(group, [token])
+    const built = await commitLedgerEntries({ group, tokens: [token] })
     vi.spyOn(crypto, 'sealEntries').mockResolvedValue({
       sealed: new Uint8Array(786433 - built.commitMessage.length - 9),
       epoch: Number(group.epoch),
     })
     const before = publish.mock.calls.length
     await expect(
-      peer.commit(async () => ({
-        commit: built.commitMessage,
-        bodies: [token],
-        kind: 'ledger',
-        journal: encodeClientState(built.newGroup.state),
-        onAccepted: async () => guardedReplace(access, built.newGroup),
-      })),
+      peer.commit({
+        build: async () => ({
+          commit: built.commitMessage,
+          bodies: [token],
+          kind: 'ledger',
+          journal: encodeClientState(built.newGroup.state),
+          onAccepted: async () => guardedReplace({ access, next: built.newGroup }),
+        }),
+      }),
     ).rejects.toBeInstanceOf(FrameTooLargeError)
     expect(put).toHaveBeenCalledTimes(0)
     expect(journal.slot()).toBeNull()

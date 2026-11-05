@@ -66,7 +66,7 @@ test('the wrapped iterator never yields a message after return starts', async ()
     sendTopicID: 'topic:out',
     receiveTopicID: 'topic:in',
   })
-  const subscription = captured.hub?.receive('did:peer:local')
+  const subscription = captured.hub?.receive({ subscriberDID: 'did:peer:local' })
   if (subscription == null) throw new Error('wrapped subscription missing')
   const iterator = subscription[Symbol.asyncIterator]()
   const next = iterator.next()

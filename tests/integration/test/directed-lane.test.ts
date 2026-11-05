@@ -52,7 +52,11 @@ describe('directed RPC over real MLS, end to end', () => {
       invitee: bobID,
       bodies,
     })
-    const addBob = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const addBob = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = addBob.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,
@@ -116,7 +120,11 @@ describe('directed RPC over real MLS, end to end', () => {
       invitee: bobID,
       bodies,
     })
-    const addBob = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const addBob = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = addBob.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,
@@ -193,7 +201,11 @@ describe('a member that reconnects while its old connection is still up', () => 
       invitee: bobID,
       bodies,
     })
-    const addBob = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    const addBob = await commitInvite({
+      group: aliceHandle,
+      keyPackage: material.bundle.publicPackage,
+      invite: material.invite,
+    })
     aliceHandle = addBob.newGroup
     const bobHandle = await joinFromWelcome({
       identity: bobID,

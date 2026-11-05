@@ -1287,6 +1287,12 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
   })
 }
 
+export type {
+  ConformanceMailboxHubReceiveParams,
+  ConformanceMailboxHubSubscribeParams,
+  ConformanceMailboxHubUnsubscribeParams,
+  MailboxAckConformanceParamsRedeliverParams,
+} from './log-hub.js'
 export {
   type AckConformanceParams,
   type ConformanceLogHub,

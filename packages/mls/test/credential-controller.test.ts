@@ -82,11 +82,11 @@ test('bindingOfDID returns the membership form', async () => {
     keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(41) }],
     didMethod: 'key',
   })
-  const { group } = await createGroup(identity, 'membership-reader')
+  const { group } = await createGroup({ identity, groupID: 'membership-reader' })
   const controller = { ...membershipController, prefix: [] }
   const ratchetTree = group.state.ratchetTree.map((node) =>
     node?.nodeType === nodeTypes.leaf
-      ? { ...node, leaf: { ...node.leaf, credential: makeMLSCredential(identity, controller) } }
+      ? { ...node, leaf: { ...node.leaf, credential: makeMLSCredential({ identity, controller }) } }
       : node,
   )
   const bound = await deriveGroup(group, { ...group.state, ratchetTree })
@@ -156,7 +156,7 @@ test('bound constructors preserve the authenticated controller binding', async (
   })
   const controller = parseMLSCredentialIdentity(leaf.identity).controller
   if (controller == null) throw new Error('fixture has no controller binding')
-  const credential = makeMLSCredential(identity, controller)
+  const credential = makeMLSCredential({ identity, controller })
   expect(
     parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity).controller,
   ).toEqual(controller)
@@ -184,7 +184,7 @@ test('bound constructors refuse expired and future-issued capabilities', async (
     const leaf = await buildBoundLeaf({ capabilityOverrides })
     const controller = parseMLSCredentialIdentity(leaf.identity).controller
     if (controller == null) throw new Error('fixture has no controller binding')
-    await expect(createGroup(identity, 'bad-time', { controller })).rejects.toThrow()
+    await expect(createGroup({ identity, groupID: 'bad-time', controller })).rejects.toThrow()
     for (const construct of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
       await expect(construct(identity, { controller })).rejects.toThrow()
     }

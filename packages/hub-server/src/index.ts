@@ -21,7 +21,11 @@ export type { CreateHubParams, HubInstance, HubPurgeOptions, HubReplayOptions } 
 export { createHub, DEFAULT_HUB_ACCESS_RULES } from './hub.js'
 export { createMemoryStore, type MemoryStoreOptions } from './memoryStore.js'
 export { createRateLimiter, type RateLimitConfig, type RateLimiter } from './rateLimit.js'
-export type { ClientEntry } from './registry.js'
+export type {
+  ClientEntry,
+  HubClientRegistryBindReceiveWriterParams,
+  HubClientRegistryReleaseReceiveWriterParams,
+} from './registry.js'
 export { HubClientRegistry } from './registry.js'
 export {
   createWakeDispatcher,

@@ -23,7 +23,7 @@ function createAckingBus(): {
   const acked: Array<string> = []
   const bus: BroadcastBus = {
     publish: async () => {},
-    subscribe: (_topicID, onMessage) => {
+    subscribe: ({ topicID: _topicID, onMessage }) => {
       handler = onMessage
       return () => {
         handler = undefined

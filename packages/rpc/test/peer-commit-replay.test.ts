@@ -25,9 +25,10 @@ function faultyHub(hub: FakeHub, shouldFail: (params: HubPublishParams) => boole
       if (shouldFail(params)) throw new Error('the hub went away')
       return hub.publish(params)
     },
-    subscribe: (did, topicID, options) => hub.subscribe(did, topicID, options),
-    unsubscribe: (did, topicID) => hub.unsubscribe(did, topicID),
-    receive: (did) => hub.receive(did),
+    subscribe: ({ subscriberDID: did, topicID, ...options }) =>
+      hub.subscribe(did, topicID, options),
+    unsubscribe: ({ subscriberDID: did, topicID }) => hub.unsubscribe(did, topicID),
+    receive: ({ subscriberDID: did }) => hub.receive(did),
     fetchTopic: (params: HubFetchTopicParams) => hub.fetchTopic(params),
   }
 }
@@ -78,14 +79,16 @@ describe('restart replay closes the crash window', () => {
     // adopted, and before it could clear the slot.
     const build = buildLedgerCommit(alice, [token])
     await expect(
-      alice.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            throw new Error('the process died here')
-          },
-        }
+      alice.peer.commit({
+        build: async () => {
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              throw new Error('the process died here')
+            },
+          }
+        },
       }),
     ).rejects.toThrow('the process died here')
     await alice.peer.dispose()
@@ -138,7 +141,7 @@ describe('restart replay closes the crash window', () => {
     await flush()
 
     const token = 'signed-token: carol is an admin'
-    await expect(alice.peer.commit(buildLedgerCommit(alice, [token]))).rejects.toThrow(
+    await expect(alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })).rejects.toThrow(
       'the process died here',
     )
     await alice.peer.dispose()
@@ -174,12 +177,14 @@ describe('restart replay closes the crash window', () => {
     const token = 'signed-token: carol is an admin'
     const build = buildLedgerCommit(alice, [token])
     await expect(
-      alice.peer.commit(async () => ({
-        ...(await build()),
-        onAccepted: async () => {
-          throw new Error('the process died here')
-        },
-      })),
+      alice.peer.commit({
+        build: async () => ({
+          ...(await build()),
+          onAccepted: async () => {
+            throw new Error('the process died here')
+          },
+        }),
+      }),
     ).rejects.toThrow()
     await alice.peer.dispose()
 
@@ -315,7 +320,7 @@ describe('restart replay closes the crash window', () => {
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'mallory'] })
     await flush()
 
-    await alice.peer.commit(buildRemoveCommit(alice, 'mallory'))
+    await alice.peer.commit({ build: buildRemoveCommit(alice, 'mallory') })
 
     // The control the failed remove below is measured against: when the commit lands, the host
     // adopts in onAccepted and the leaf is gone. Eviction is that adoption and nothing else.
@@ -395,7 +400,7 @@ describe('restart replay closes the crash window', () => {
     const startup = async (): Promise<LostCommit | undefined> => {
       const { lost } = await alice.peer.replay()
       if (lost?.kind === 'ledger') {
-        await alice.peer.commit(buildLedgerCommit(alice, lost.tokens))
+        await alice.peer.commit({ build: buildLedgerCommit(alice, lost.tokens) })
       }
       return lost
     }
@@ -437,7 +442,7 @@ describe('restart replay closes the crash window', () => {
     )
     await flush()
 
-    await expect(alice.peer.commit(buildLedgerCommit(alice, [token]))).rejects.toThrow(
+    await expect(alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })).rejects.toThrow(
       'the hub went away',
     )
     expect(alice.journal.slot()).not.toBeNull() // kept, because the outcome is unknown
@@ -464,15 +469,17 @@ describe('restart replay closes the crash window', () => {
     // again. Both halves have to tolerate the repeat, and the host's do.
     const build = buildInviteCommit(alice, 'dave')
     await expect(
-      alice.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            await pending.onAccepted()
-            throw new Error('the process died after the Welcome went out')
-          },
-        }
+      alice.peer.commit({
+        build: async () => {
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              await pending.onAccepted()
+              throw new Error('the process died after the Welcome went out')
+            },
+          }
+        },
       }),
     ).rejects.toThrow()
     expect(alice.welcomes).toEqual(['dave'])
@@ -521,7 +528,7 @@ describe('restart replay closes the crash window', () => {
     await flush()
 
     const token = 'signed-token: carol is an admin'
-    await expect(alice.peer.commit(buildLedgerCommit(alice, [token]))).rejects.toThrow(
+    await expect(alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })).rejects.toThrow(
       'the process died here',
     )
     await alice.peer.dispose()
@@ -596,7 +603,7 @@ describe('restart replay closes the crash window', () => {
     // And the group is alive. Bob commits over a lane the poison would have wedged, and
     // Carol enacts it.
     const token = 'signed-token: dave is an admin'
-    await expect(bob.peer.commit(buildLedgerCommit(bob, [token]))).resolves.toEqual({})
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, [token]) })).resolves.toEqual({})
     await flush()
 
     expect(bob.mls.ledgerIDs()).toEqual([memoryEntryID(token)])

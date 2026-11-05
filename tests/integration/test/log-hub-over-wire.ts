@@ -138,12 +138,12 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
     })
 
     return {
-      subscribe: async (_subscriberDID, topicID, subscribeOptions) => {
+      subscribe: async ({ subscriberDID: _subscriberDID, topicID, ...subscribeOptions }) => {
         // The hub authenticates the subscriber from the connection, so the DID the caller
         // passes is not sent — it is already the connection's.
         await client.subscribe({ topicID, ...subscribeOptions })
       },
-      unsubscribe: async (_subscriberDID, topicID) => {
+      unsubscribe: async ({ subscriberDID: _subscriberDID, topicID }) => {
         await client.unsubscribe({ topicID })
       },
       publish: async (params) => {
@@ -157,7 +157,7 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
           })
         } catch (error) {
           if (error instanceof RequestError)
-            throw hubErrorFromCode(error.code, error.message) ?? error
+            throw hubErrorFromCode({ code: error.code, message: error.message }) ?? error
           throw error
         }
       },

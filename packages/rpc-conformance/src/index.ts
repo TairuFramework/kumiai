@@ -31,11 +31,18 @@ export {
   type ConformanceCommitCursor,
   testAppOutboxConformance,
 } from './app-outbox.js'
+export type { ConformanceCommitJournalMarkAcceptedParams } from './commit-journal.js'
 export {
   type ConformanceCommitJournal,
   type ConformanceJournalEntry,
   testCommitJournalConformance,
 } from './commit-journal.js'
+export type {
+  ConformanceGroupCryptoExportSecretParams,
+  ConformanceGroupCryptoUnwrapParams,
+  ConformanceGroupCryptoWrapParams,
+  GroupCryptoConformanceParamsCreateGroupParams,
+} from './group-crypto.js'
 export {
   type ConformanceCryptoGroup,
   type ConformanceCryptoMember,
@@ -44,6 +51,17 @@ export {
   type GroupCryptoConformanceParams,
   testGroupCryptoConformance,
 } from './group-crypto.js'
+export type {
+  ConformanceGroupMLSApplyRecoveryParams,
+  ConformanceGroupMLSConfirmationKeyParams,
+  ConformanceGroupMLSCreateRecoveryRequestParams,
+  ConformanceGroupMLSOpenRecoveryVerdictParams,
+  ConformanceGroupMLSOpenSealedLedgerParams,
+  ConformanceGroupMLSProcessCommitParams,
+  ConformanceGroupMLSSealRecoveryVerdictParams,
+  ConformanceMLSGroupSealVerdictPayloadParams,
+  GroupMLSConformanceParamsCreateGroupParams,
+} from './group-mls.js'
 export {
   type ConformanceCommit,
   type ConformanceCommitContext,
@@ -55,6 +73,7 @@ export {
   testGroupMLSConformance,
 } from './group-mls.js'
 export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
+export type { PendingCryptoUnwrapParams } from './pending-group-crypto.js'
 export {
   type ConformanceAppFrameRef,
   type ConformancePendingAppFrame,

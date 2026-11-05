@@ -119,6 +119,11 @@ export type JudgingContext = {
   mode: 'admit' | 'retain' | 'rejudge'
 }
 
+export type DIDAuthenticationDependenciesMayKeepDeniedIssuerParams = {
+  credential: Credential
+  signaturePublicKey: Uint8Array
+}
+
 export type DIDAuthenticationDependencies = CryptoOptions & {
   deviceDenySet?: () => ReadonlySet<string>
   judging?: () => JudgingContext
@@ -129,7 +134,10 @@ export type DIDAuthenticationDependencies = CryptoOptions & {
    * answers for the group (its anchor names a controller) and for the leaf (it is the credential
    * already in the tree at that index, or it arrives in a Welcome tree). Absent: never.
    */
-  mayKeepDeniedIssuer?: (credential: Credential, signaturePublicKey: Uint8Array) => boolean
+  mayKeepDeniedIssuer?: ({
+    credential,
+    signaturePublicKey,
+  }: DIDAuthenticationDependenciesMayKeepDeniedIssuerParams) => boolean
 }
 
 function isDenied(denied: ReadonlySet<string>, did: string): boolean {
@@ -380,12 +388,12 @@ export async function verifyLeafCredential(
       throw new LeafBindingError('generation-floor')
   }
   try {
-    const roots = memberRootsOf(binding, parsed.id)
+    const roots = memberRootsOf({ binding, leafDID: parsed.id })
     const primary = roots[0]
     const checkEpochCap = async () => {
       if (judging.mode !== 'admit' || primary?.root.kind !== 'member' || registry == null) return
-      const log = recordedLogOf(registry, binding.id)
-      if (log != null && (await epochEventCount(log, options)) > MAX_EPOCH_EVENTS_FOR_LEAVES)
+      const log = recordedLogOf({ registry, controller: binding.id })
+      if (log != null && (await epochEventCount({ log, ...options })) > MAX_EPOCH_EVENTS_FOR_LEAVES)
         throw new LeafBindingError('epoch-cap')
     }
     if (!structural && registry == null && roots.some(({ root }) => root.kind === 'member'))
@@ -406,15 +414,15 @@ export async function verifyLeafCredential(
       if (registry == null) throw new LeafBindingError('controller-mismatch')
       const root = primary?.root
       if (root == null) throw new LeafBindingError('member-unavailable')
-      const status = await memberRootStatus(registry, binding.id, root, options)
+      const status = await memberRootStatus({ registry, controller: binding.id, root, ...options })
       if (status.status === 'removed') {
         if (judging.mode === 'admit') throw new LeafBindingError('member-removed')
-        const authority = await effectiveAuthorityOf(
-          { did: parsed.id, binding, leafKey: signaturePublicKey },
+        const authority = await effectiveAuthorityOf({
+          leaf: { did: parsed.id, binding, leafKey: signaturePublicKey },
           registry,
-          binding.id,
-          options,
-        )
+          controller: binding.id,
+          ...options,
+        })
         if (!('root' in authority)) throw new LeafBindingError('member-removed')
         const substitute =
           authority.slot === 'holder'
@@ -445,7 +453,8 @@ export async function verifyLeafCredential(
       const projection = registry.controllers.get(normalizeDID(binding.id))
       if (
         status.status !== 'effective' ||
-        prefixRelation(projection?.recordedLog, binding.prefix) !== 'contained'
+        prefixRelation({ recorded: projection?.recordedLog, prefix: binding.prefix }) !==
+          'contained'
       ) {
         unavailable()
         return
@@ -509,7 +518,12 @@ export async function verifyLeafCredential(
       const status =
         registry == null
           ? { status: 'unavailable' as const }
-          : await memberRootStatus(registry, binding.id, primary.root, options)
+          : await memberRootStatus({
+              registry,
+              controller: binding.id,
+              root: primary.root,
+              ...options,
+            })
       if (judging.mode === 'admit') {
         if (status.status === 'removed') throw new LeafBindingError('member-removed')
         if (status.status === 'unavailable') throw new LeafBindingError('member-unavailable')
@@ -518,18 +532,19 @@ export async function verifyLeafCredential(
       const unavailable =
         status.status === 'unavailable' ||
         (status.status !== 'removed' &&
-          prefixRelation(projection?.recordedLog, binding.prefix) !== 'contained')
+          prefixRelation({ recorded: projection?.recordedLog, prefix: binding.prefix }) !==
+            'contained')
       if (unavailable) {
         if (judging.mode === 'retain') return
         throw new LeafBindingError('member-unavailable')
       }
       if (registry == null) throw new LeafBindingError('member-unavailable')
-      const authority = await effectiveAuthorityOf(
-        { did: parsed.id, binding, leafKey: signaturePublicKey },
+      const authority = await effectiveAuthorityOf({
+        leaf: { did: parsed.id, binding, leafKey: signaturePublicKey },
         registry,
-        binding.id,
-        options,
-      )
+        controller: binding.id,
+        ...options,
+      })
       if ('status' in authority) {
         if (authority.status === 'unavailable' && judging.mode === 'retain') return
         throw new LeafBindingError(
@@ -548,7 +563,7 @@ export async function verifyLeafCredential(
     }
     // The holder grant does not inherit the leaf capability's issuer exception.
     const leafDenySet =
-      deps.mayKeepDeniedIssuer?.(credential, signaturePublicKey) &&
+      deps.mayKeepDeniedIssuer?.({ credential, signaturePublicKey }) &&
       hasHolderEvidence(parsed, signaturePublicKey, denySet, common.trustedGrantLifetime)
         ? withoutIssuer(denySet, binding.capability)
         : denySet
@@ -560,14 +575,19 @@ export async function verifyLeafCredential(
     if (holderGrant != null) {
       const holder = roots.find(({ slot }) => slot === 'holder')
       if (holder?.root.kind === 'member' && registry != null) {
-        const status = await memberRootStatus(registry, binding.id, holder.root, options)
+        const status = await memberRootStatus({
+          registry,
+          controller: binding.id,
+          root: holder.root,
+          ...options,
+        })
         if (
           status.status === 'unavailable' ||
           (status.status !== 'removed' &&
-            prefixRelation(
-              registry.controllers.get(normalizeDID(binding.id))?.recordedLog,
-              binding.prefix,
-            ) !== 'contained')
+            prefixRelation({
+              recorded: registry.controllers.get(normalizeDID(binding.id))?.recordedLog,
+              prefix: binding.prefix,
+            }) !== 'contained')
         ) {
           if (judging.mode === 'retain') return
           throw new LeafBindingError('member-unavailable')

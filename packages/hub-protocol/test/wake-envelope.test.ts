@@ -64,8 +64,8 @@ describe('sealWakeHint', () => {
   test('round-trips a hint', () => {
     const recipient = createRecipient()
     const hint = { topicID: 'topic-a', sequenceID: '000000000042', count: 3 }
-    const body = sealWakeHint(hint, recipient)
-    expect(openWakeHint(body, recipient)).toEqual(hint)
+    const body = sealWakeHint({ hint, recipient })
+    expect(openWakeHint({ body, opener: recipient })).toEqual(hint)
   })
 
   // The body's LENGTH is the one thing padding cannot hide by accident. A provider that could see
@@ -74,11 +74,11 @@ describe('sealWakeHint', () => {
   // verifiable rather than merely self-consistent.
   test('body size does not vary with hint contents', () => {
     const recipient = createRecipient()
-    const short = sealWakeHint({ topicID: 'ab', sequenceID: '1', count: 1 }, recipient)
-    const long = sealWakeHint(
-      { topicID: 'x'.repeat(256), sequenceID: '0'.repeat(32), count: 9999 },
+    const short = sealWakeHint({ hint: { topicID: 'ab', sequenceID: '1', count: 1 }, recipient })
+    const long = sealWakeHint({
+      hint: { topicID: 'x'.repeat(256), sequenceID: '0'.repeat(32), count: 9999 },
       recipient,
-    )
+    })
     expect(short.length).toBe(597)
     expect(long.length).toBe(597)
   })
@@ -91,7 +91,10 @@ describe('sealWakeHint', () => {
   // on the web target, with nothing here to say why.
   test('the declared rs is STRICTLY greater than the ciphertext it describes (RFC 8291 section 4)', () => {
     const recipient = createRecipient()
-    const body = sealWakeHint({ topicID: 'topic-a', sequenceID: '1', count: 1 }, recipient)
+    const body = sealWakeHint({
+      hint: { topicID: 'topic-a', sequenceID: '1', count: 1 },
+      recipient,
+    })
 
     const rs = new DataView(body.buffer, body.byteOffset).getUint32(16)
     expect(rs).toBe(WAKE_RECORD_SIZE)
@@ -108,8 +111,8 @@ describe('sealWakeHint', () => {
   test('sealing the same hint for the same recipient twice produces different bytes', () => {
     const recipient = createRecipient()
     const hint = { topicID: 'topic-a', sequenceID: '001', count: 1 }
-    const first = sealWakeHint(hint, recipient)
-    const second = sealWakeHint(hint, recipient)
+    const first = sealWakeHint({ hint, recipient })
+    const second = sealWakeHint({ hint, recipient })
 
     expect(first.length).toBe(second.length)
     expect(Array.from(first)).not.toEqual(Array.from(second))
@@ -118,13 +121,13 @@ describe('sealWakeHint', () => {
     expect(Array.from(first.subarray(0, 16))).not.toEqual(Array.from(second.subarray(0, 16)))
     expect(Array.from(first.subarray(21, 86))).not.toEqual(Array.from(second.subarray(21, 86)))
     // Both still open: varying inputs must not have broken the derivation.
-    expect(openWakeHint(second, recipient)).toEqual(hint)
+    expect(openWakeHint({ body: second, opener: recipient })).toEqual(hint)
   })
 
   test('refuses a hint too large for the record', () => {
     const recipient = createRecipient()
     expect(() =>
-      sealWakeHint({ topicID: 'x'.repeat(600), sequenceID: '1', count: 1 }, recipient),
+      sealWakeHint({ hint: { topicID: 'x'.repeat(600), sequenceID: '1', count: 1 }, recipient }),
     ).toThrow(/too large/)
   })
 
@@ -135,8 +138,10 @@ describe('sealWakeHint', () => {
   test('seals a 256-ASCII-character topicID: raw record headroom above the 43-char schema cap', () => {
     const recipient = createRecipient()
     const hint = { topicID: 'x'.repeat(256), sequenceID: '000000000042', count: 9999 }
-    expect(() => sealWakeHint(hint, recipient)).not.toThrow()
-    expect(openWakeHint(sealWakeHint(hint, recipient), recipient)).toEqual(hint)
+    expect(() => sealWakeHint({ hint, recipient })).not.toThrow()
+    expect(openWakeHint({ body: sealWakeHint({ hint, recipient }), opener: recipient })).toEqual(
+      hint,
+    )
   })
 
   // The record's raw ASCII ceiling, pinned so it cannot drift silently. 433 is derived from this
@@ -151,8 +156,8 @@ describe('sealWakeHint', () => {
       sequenceID: '000000000042',
       count: 9999,
     })
-    expect(() => sealWakeHint(at(433), recipient)).not.toThrow()
-    expect(() => sealWakeHint(at(434), recipient)).toThrow(/too large/)
+    expect(() => sealWakeHint({ hint: at(433), recipient })).not.toThrow()
+    expect(() => sealWakeHint({ hint: at(434), recipient })).toThrow(/too large/)
   })
 
   // The record holds JSON bytes, and byte cost per character is what turns one into many. `"`, `\`
@@ -169,10 +174,12 @@ describe('sealWakeHint', () => {
   test('a 256-character topicID of JSON-escaping characters does NOT fit', () => {
     const recipient = createRecipient()
     const hint = { topicID: '"'.repeat(256), sequenceID: '000000000042', count: 9999 }
-    expect(() => sealWakeHint(hint, recipient)).toThrow(/too large/)
+    expect(() => sealWakeHint({ hint, recipient })).toThrow(/too large/)
     // …and where that ceiling actually sits for a 2-byte escape.
-    expect(() => sealWakeHint({ ...hint, topicID: '"'.repeat(216) }, recipient)).not.toThrow()
-    expect(() => sealWakeHint({ ...hint, topicID: '"'.repeat(217) }, recipient)).toThrow(
+    expect(() =>
+      sealWakeHint({ hint: { ...hint, topicID: '"'.repeat(216) }, recipient }),
+    ).not.toThrow()
+    expect(() => sealWakeHint({ hint: { ...hint, topicID: '"'.repeat(217) }, recipient })).toThrow(
       /too large/,
     )
   })
@@ -184,8 +191,8 @@ describe('sealWakeHint', () => {
       sequenceID: '000000000042',
       count: 9999,
     })
-    expect(() => sealWakeHint(at(144), recipient)).not.toThrow()
-    expect(() => sealWakeHint(at(145), recipient)).toThrow(/too large/)
+    expect(() => sealWakeHint({ hint: at(144), recipient })).not.toThrow()
+    expect(() => sealWakeHint({ hint: at(145), recipient })).toThrow(/too large/)
   })
 
   test('a control character with no short JSON escape (six-byte \\u) seals at 72 and refuses 73', () => {
@@ -195,8 +202,8 @@ describe('sealWakeHint', () => {
       sequenceID: '000000000042',
       count: 9999,
     })
-    expect(() => sealWakeHint(at(72), recipient)).not.toThrow()
-    expect(() => sealWakeHint(at(73), recipient)).toThrow(/too large/)
+    expect(() => sealWakeHint({ hint: at(72), recipient })).not.toThrow()
+    expect(() => sealWakeHint({ hint: at(73), recipient })).toThrow(/too large/)
   })
 
   // The character class whose byte cost diverges most sharply from its code-point count: a non-BMP
@@ -209,8 +216,8 @@ describe('sealWakeHint', () => {
       sequenceID: '000000000042',
       count: 9999,
     })
-    expect(() => sealWakeHint(at(108), recipient)).not.toThrow()
-    expect(() => sealWakeHint(at(109), recipient)).toThrow(/too large/)
+    expect(() => sealWakeHint({ hint: at(108), recipient })).not.toThrow()
+    expect(() => sealWakeHint({ hint: at(109), recipient })).toThrow(/too large/)
   })
 })
 
@@ -252,13 +259,13 @@ describe('wakeRecipientKeyProblem', () => {
     ).toMatch(/not a point/)
     // The premise: these bytes really do break the seal, so refusing them is refusing a failure.
     expect(() =>
-      sealWakeHint(
-        { topicID: 'a', sequenceID: '1', count: 1 },
-        {
+      sealWakeHint({
+        hint: { topicID: 'a', sequenceID: '1', count: 1 },
+        recipient: {
           publicKey: offCurve,
           authSecret: recipient.authSecret,
         },
-      ),
+      }),
     ).toThrow()
   })
 
@@ -285,8 +292,11 @@ describe('wakeRecipientKeyProblem', () => {
 
 describe('openWakeHint', () => {
   test('fails under the wrong key', () => {
-    const body = sealWakeHint({ topicID: 'a', sequenceID: '1', count: 1 }, createRecipient())
-    expect(() => openWakeHint(body, createRecipient())).toThrow()
+    const body = sealWakeHint({
+      hint: { topicID: 'a', sequenceID: '1', count: 1 },
+      recipient: createRecipient(),
+    })
+    expect(() => openWakeHint({ body, opener: createRecipient() })).toThrow()
   })
 
   test('rejects an unknown hint version', () => {
@@ -297,6 +307,6 @@ describe('openWakeHint', () => {
       ),
     )
     const body = sealRecord(record, WAKE_RECORD_SIZE, recipient)
-    expect(() => openWakeHint(body, recipient)).toThrow(/version/)
+    expect(() => openWakeHint({ body, opener: recipient })).toThrow(/version/)
   })
 })

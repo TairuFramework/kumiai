@@ -1,3 +1,16 @@
+export type GroupCryptoExportSecretParams = {
+  label: string
+  length?: number
+}
+
+export type GroupCryptoWrapParams = {
+  bytes: Uint8Array
+} & { aad?: Uint8Array }
+
+export type GroupCryptoUnwrapParams = {
+  bytes: Uint8Array
+} & { expectedAAD?: Uint8Array; frame?: AppFrameRef }
+
 /**
  * Consumer-supplied MLS crypto port: epoch number, epoch-bound domain-separated exported secrets
  * (`exportSecret`), byte-level encrypt/decrypt (`wrap`/`unwrap`), and the ledger-entry seal
@@ -59,8 +72,11 @@ export type GroupCrypto = {
    * the ledger-entry blobs of every commit enacted after its removal, with nothing throwing to
    * say so.
    */
-  exportSecret(label: string, length?: number): ExportSecretResult | Promise<ExportSecretResult>
-  wrap(bytes: Uint8Array, opts?: { aad?: Uint8Array }): Uint8Array | Promise<Uint8Array>
+  exportSecret({
+    label,
+    length,
+  }: GroupCryptoExportSecretParams): ExportSecretResult | Promise<ExportSecretResult>
+  wrap({ bytes, ...opts }: GroupCryptoWrapParams): Uint8Array | Promise<Uint8Array>
   /**
    * Open a sealed app frame and recover who sent it. Returns {@link GroupUnwrapResult}, whose
    * `senderDID` is REQUIRED: an implementation that cannot name the sender must throw, not return
@@ -70,10 +86,10 @@ export type GroupCrypto = {
    * frames that would otherwise burn a ratchet generation (DoS).
    * A readable frame at another epoch throws {@link FrameEpochError} before decrypting.
    */
-  unwrap(
-    bytes: Uint8Array,
-    opts?: { expectedAAD?: Uint8Array; frame?: AppFrameRef },
-  ): GroupUnwrapResult | Promise<GroupUnwrapResult>
+  unwrap({
+    bytes,
+    ...opts
+  }: GroupCryptoUnwrapParams): GroupUnwrapResult | Promise<GroupUnwrapResult>
   /** Cleartext app AAD for pre-open routing. Untrusted until unwrap authenticates it. Never throws. */
   frameAAD(bytes: Uint8Array): Uint8Array | null
   /** Present iff opened app frames and their consumed handle state are saved atomically. */
@@ -162,12 +178,17 @@ export type ProcessCommitResult = {
   refusal?: RecoveryRefusalReason
 }
 
+export type FrameEpochErrorParams = {
+  frameEpoch: number
+  handleEpoch: number
+}
+
 /** A frame refused against the locked handle epoch, before spending a decrypt key. */
 export class FrameEpochError extends Error {
   #frameEpoch: number
   #handleEpoch: number
 
-  constructor(frameEpoch: number, handleEpoch: number) {
+  constructor({ frameEpoch, handleEpoch }: FrameEpochErrorParams) {
     super(`frame epoch ${frameEpoch} differs from handle epoch ${handleEpoch}`)
     this.name = 'FrameEpochError'
     this.#frameEpoch = frameEpoch
@@ -196,9 +217,13 @@ export type PendingAppFrames = {
   complete(id: string): Promise<void>
 }
 
+export type AppFrameStorageErrorParams = {
+  message: string
+} & ErrorOptions
+
 /** A failed atomic handle-state and pending-record write; callers may retry the same frame. */
 export class AppFrameStorageError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  constructor({ message, ...options }: AppFrameStorageErrorParams) {
     super(message, options)
     this.name = 'AppFrameStorageError'
   }
@@ -363,6 +388,11 @@ export type CommitContext = {
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
 }
 
+export type PendingRecoveryConfirmationKeyParams = {
+  position: string
+  commitDigest: string
+}
+
 /**
  * A speculative external rejoin. Publication alone never authorises adoption.
  * The caller confirms the target epoch before accepting it.
@@ -372,7 +402,10 @@ export type PendingRecovery = {
   /** Mark an authoritative binding/lapse/floor refusal. Bounded memory survives ratchets, not restart. */
   markBindingUnusable(): void
   /** Bind judgement to the published tuple and derive from the speculative epoch. */
-  confirmationKey(position: string, commitDigest: string): Promise<Uint8Array>
+  confirmationKey({
+    position,
+    commitDigest,
+  }: PendingRecoveryConfirmationKeyParams): Promise<Uint8Array>
   /** Call after confirmationKey resolves. Failed bindings or signer gates are advisory. */
   judgeVerdict(opened: OpenedRecoveryVerdict): Promise<'authoritative' | 'advisory'>
   /** The external-commit bytes, framed at the epoch the sealed GroupInfo described. */
@@ -401,6 +434,41 @@ export type VerifiedRecoveryRequest = {
 /** Confirmation key for an applied external commit, and the epoch it was derived at. */
 export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
 
+export type GroupMLSConfirmationKeyParams = {
+  position: string
+  commitDigest: string
+}
+
+export type GroupMLSSealRecoveryVerdictParams = {
+  request: Uint8Array
+  verdict: RecoveryVerdict
+}
+
+export type GroupMLSOpenRecoveryVerdictParams = {
+  sealed: Uint8Array
+  requestID: string
+}
+
+export type GroupMLSProcessCommitParams = {
+  commit: Uint8Array
+  context: CommitContext
+}
+
+export type GroupMLSCreateRecoveryRequestParams = {
+  requestID: string
+  deadlineMs?: number
+}
+
+export type GroupMLSApplyRecoveryParams = {
+  sealed: Uint8Array
+  requestID: string
+}
+
+export type GroupMLSOpenSealedLedgerParams = {
+  sealed: Uint8Array
+  requestID: string
+}
+
 /**
  * Consumer-supplied MLS lifecycle port. Sibling to {@link GroupCrypto}: this drives the
  * handshake lane — applying Commits to advance the epoch, re-syncing a stranded peer. group-rpc
@@ -415,9 +483,15 @@ export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
 export type GroupMLS = {
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */
   verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>
-  confirmationKey(position: string, commitDigest: string): Promise<RecoveryConfirmationKey>
-  sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict): Promise<Uint8Array>
-  openRecoveryVerdict(sealed: Uint8Array, requestID: string): Promise<OpenedRecoveryVerdict | null>
+  confirmationKey({
+    position,
+    commitDigest,
+  }: GroupMLSConfirmationKeyParams): Promise<RecoveryConfirmationKey>
+  sealRecoveryVerdict({ request, verdict }: GroupMLSSealRecoveryVerdictParams): Promise<Uint8Array>
+  openRecoveryVerdict({
+    sealed,
+    requestID,
+  }: GroupMLSOpenRecoveryVerdictParams): Promise<OpenedRecoveryVerdict | null>
   /** Published with the epoch, without taking the handle lock. */
   sendAdmission(): SendAdmission
   /** Read the current handle epoch under the host's handle lock. */
@@ -495,7 +569,7 @@ export type GroupMLS = {
    * contract on a frame it should have applied, which the lane DOES re-read. See
    * {@link isMissingLedgerEntries}.
    */
-  processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult>
+  processCommit({ commit, context }: GroupMLSProcessCommitParams): Promise<ProcessCommitResult>
   /** Check lifecycle binding availability once before a recovery attempt requests GroupInfo. */
   prepareRecovery(): Promise<'ready' | 'renewal-required'>
   /**
@@ -512,7 +586,10 @@ export type GroupMLS = {
    * off the mint time is the natural bound; it lives here rather than as a new lane release
    * method that would obligate every {@link GroupMLS}.
    */
-  createRecoveryRequest(requestID: string, deadlineMs?: number): Promise<Uint8Array>
+  createRecoveryRequest({
+    requestID,
+    deadlineMs,
+  }: GroupMLSCreateRecoveryRequestParams): Promise<Uint8Array>
   /**
    * Answer another member's request: verify the token, check the requester still holds a leaf in
    * THIS member's current ratchet tree, seal current GroupInfo to the ephemeral key inside the
@@ -539,7 +616,7 @@ export type GroupMLS = {
    * reply the AEAD refuses, or one that fails either check, is `null`; a throw is tolerated and
    * read the same way.
    */
-  applyRecovery(sealed: Uint8Array, requestID: string): Promise<AppliedRecovery>
+  applyRecovery({ sealed, requestID }: GroupMLSApplyRecoveryParams): Promise<AppliedRecovery>
   /**
    * Whether the ledger this handle holds is the whole ledger its OWN GroupContext attests to: the
    * head folded from the entries it holds, against the authenticated head it carries. Purely
@@ -586,7 +663,10 @@ export type GroupMLS = {
    * a forged, lying, reordered or truncated one fails and is dropped — withhold, never rewrite. A
    * forged reply that merely decrypts costs one gather attempt: denial of service, not compromise.
    */
-  openSealedLedger(sealed: Uint8Array, requestID: string): Promise<Array<string> | null>
+  openSealedLedger({
+    sealed,
+    requestID,
+  }: GroupMLSOpenSealedLedgerParams): Promise<Array<string> | null>
   /**
    * Install a gathered ledger, verified against the authenticated head BEFORE a single entry is
    * folded. REPLACES the ledger this handle holds — sound because a list reproducing the head

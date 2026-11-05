@@ -8,7 +8,7 @@ describe('ordinary key package lifetime', () => {
   })
 
   test('createKeyPackageBundle stamps the pinned lifetime, in SECONDS', async () => {
-    const bundle = await createKeyPackageBundle(randomIdentity())
+    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
     const lifetime = bundle.publicPackage.leafNode.lifetime
 
     // Pinned in seconds and at the real magnitude. A milliseconds regression here would make every

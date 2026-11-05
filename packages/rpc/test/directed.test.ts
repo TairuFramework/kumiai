@@ -62,19 +62,20 @@ function member(
 ) {
   const crypto = createFakeCrypto({ localDID })
   const mux = createHubMux({ hub, localDID })
-  const topicID = inboxTopic(SECRET, EPOCH, localDID)
+  const topicID = inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: localDID })
   const acceptor = createInboxAcceptor({
     mux,
     localDID,
     selfInboxTopic: topicID,
     inbound: createInboxPath({ mux, topicID, unwrap: unwrap ?? crypto.unwrap }),
-    resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
+    resolveSendTopic: (senderDID) =>
+      inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: senderDID }),
     protocol,
     protocolName: 'rpc',
     handlers: handlers as Handlers,
     wrap: (bytes, opts) => {
       onWrapAAD?.(opts?.aad)
-      return crypto.wrap(bytes, opts)
+      return crypto.wrap({ bytes, ...opts })
     },
   })
   return { mux, acceptor }
@@ -94,19 +95,19 @@ function caller(
 ) {
   const crypto = createFakeCrypto({ localDID })
   const mux = createHubMux({ hub, localDID })
-  const receiveTopicID = inboxTopic(SECRET, EPOCH, localDID)
+  const receiveTopicID = inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: localDID })
   const created = createDirectedClient<Protocol>({
     mux,
     localDID,
     memberDID,
-    sendTopicID: inboxTopic(SECRET, EPOCH, memberDID),
+    sendTopicID: inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID }),
     receiveTopicID,
     inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
     runtime: createRuntime({ getRandomID: () => sessionID }),
     protocol: 'rpc',
     wrap: (bytes, opts) => {
       onWrapAAD?.(opts?.aad)
-      return crypto.wrap(bytes, opts)
+      return crypto.wrap({ bytes, ...opts })
     },
   })
   return { ...created, mux, crypto }
@@ -152,7 +153,7 @@ describe('directed RPC', () => {
     expect(result).toEqual({ n: 42 })
 
     // Alice's request publish bound the AAD to bob's inbox topic — where it was sent.
-    const bobTopicID = inboxTopic(SECRET, EPOCH, 'bob')
+    const bobTopicID = inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: 'bob' })
     expect(aliceAAD.length).toBeGreaterThan(0)
     for (const aad of aliceAAD) {
       expect(aad).toBeInstanceOf(Uint8Array)
@@ -163,7 +164,7 @@ describe('directed RPC', () => {
     }
 
     // Bob's reply publish bound the AAD to alice's inbox topic — where the reply was sent.
-    const aliceTopicID = inboxTopic(SECRET, EPOCH, 'alice')
+    const aliceTopicID = inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: 'alice' })
     expect(bobAAD.length).toBeGreaterThan(0)
     for (const aad of bobAAD) {
       expect(aad).toBeInstanceOf(Uint8Array)
@@ -222,7 +223,7 @@ describe('directed RPC security', () => {
     const bobCrypto = createFakeCrypto({ localDID: 'bob' })
     // Fault injection deliberately violates the now-narrowed GroupUnwrapResult contract.
     const senderless: GroupUnwrap = async (bytes) => {
-      const result = await bobCrypto.unwrap(bytes)
+      const result = await bobCrypto.unwrap({ bytes })
       return result.payload as unknown as GroupUnwrapResult
     }
     const bob = member(
@@ -316,8 +317,8 @@ describe('directed RPC security', () => {
       // so a self-published frame never reaches bob's drain. Model the hub
       // injecting the frame.
       senderDID: 'hub',
-      topicID: inboxTopic(SECRET, EPOCH, 'bob'),
-      payload: await mallory.wrap(new TextEncoder().encode(forgedFrame)),
+      topicID: inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: 'bob' }),
+      payload: await mallory.wrap({ bytes: new TextEncoder().encode(forgedFrame) }),
     })
     await flush()
     expect(calls).toEqual([1]) // handler NOT invoked with n:7
@@ -420,8 +421,8 @@ describe('directed RPC security', () => {
     })
     await hub.publish({
       senderDID: 'hub',
-      topicID: inboxTopic(SECRET, EPOCH, 'bob'),
-      payload: await aliceCrypto.wrap(encodeDirectedPayload('rpc', frame)),
+      topicID: inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: 'bob' }),
+      payload: await aliceCrypto.wrap({ bytes: encodeDirectedPayload('rpc', frame) }),
     })
     await flush(60)
     expect(seenIss).toBe('alice')
@@ -503,16 +504,17 @@ describe('directed RPC security', () => {
       const index = seen++
       const delayMs = index === 0 ? 20 : 2
       await new Promise((resolve) => setTimeout(resolve, delayMs))
-      return bobCrypto.unwrap(bytes)
+      return bobCrypto.unwrap({ bytes })
     }
 
-    const bobTopic = inboxTopic(SECRET, EPOCH, 'bob')
+    const bobTopic = inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: 'bob' })
     const bobAcceptor = createInboxAcceptor({
       mux: bobMux,
       localDID: 'bob',
       selfInboxTopic: bobTopic,
       inbound: createInboxPath({ mux: bobMux, topicID: bobTopic, unwrap: delayedUnwrap }),
-      resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
+      resolveSendTopic: (senderDID) =>
+        inboxTopic({ secret: SECRET, epoch: EPOCH, memberDID: senderDID }),
       protocol,
       protocolName: 'rpc',
       handlers: {

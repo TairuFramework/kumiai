@@ -18,7 +18,7 @@ import type { Invite } from '../src/types.js'
 describe('createLastResortKeyPackageBundle', () => {
   test('stamps the last_resort extension, carrying no data', async () => {
     const identity = randomIdentity()
-    const bundle = await createLastResortKeyPackageBundle(identity)
+    const bundle = await createLastResortKeyPackageBundle({ identity })
 
     const extension = bundle.publicPackage.extensions.find(
       (ext) => ext.extensionType === LAST_RESORT_EXTENSION_TYPE,
@@ -29,7 +29,7 @@ describe('createLastResortKeyPackageBundle', () => {
   })
 
   test('an ordinary bundle carries no last_resort extension', async () => {
-    const bundle = await createKeyPackageBundle(randomIdentity())
+    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
     expect(
       bundle.publicPackage.extensions.some(
         (ext) => ext.extensionType === LAST_RESORT_EXTENSION_TYPE,
@@ -47,7 +47,7 @@ describe('createLastResortKeyPackageBundle', () => {
     const identity = randomIdentity()
     const seen = new Set<number>()
     for (let i = 0; i < 30; i++) {
-      const bundle = await createLastResortKeyPackageBundle(identity)
+      const bundle = await createLastResortKeyPackageBundle({ identity })
       for (const ext of bundle.publicPackage.extensions) {
         if (ext.extensionType !== LAST_RESORT_EXTENSION_TYPE) seen.add(ext.extensionType)
       }
@@ -76,7 +76,11 @@ describe('createLastResortKeyPackageBundle', () => {
         return token
       })
 
-    const { group } = await createGroup(alice, 'group:last-resort', { resolveLedgerEntries })
+    const { group } = await createGroup({
+      identity: alice,
+      groupID: 'group:last-resort',
+      resolveLedgerEntries,
+    })
     const { invite } = await createInvite({
       group,
       identity: alice,
@@ -85,8 +89,8 @@ describe('createLastResortKeyPackageBundle', () => {
     })
     publish(invite)
 
-    const bundle = await createLastResortKeyPackageBundle(bob)
-    const added = await commitInvite(group, bundle.publicPackage, invite)
+    const bundle = await createLastResortKeyPackageBundle({ identity: bob })
+    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
     const { group: joined } = await processWelcome({
       identity: bob,
       invite,
@@ -121,9 +125,11 @@ describe('createLastResortKeyPackageBundle', () => {
         return token
       })
 
-    const bundle = await createLastResortKeyPackageBundle(bob)
+    const bundle = await createLastResortKeyPackageBundle({ identity: bob })
 
-    const { group: groupA } = await createGroup(alice, 'group:last-resort-a', {
+    const { group: groupA } = await createGroup({
+      identity: alice,
+      groupID: 'group:last-resort-a',
       resolveLedgerEntries,
     })
     const { invite: inviteA } = await createInvite({
@@ -133,7 +139,11 @@ describe('createLastResortKeyPackageBundle', () => {
       permission: 'member',
     })
     publish(inviteA)
-    const addedA = await commitInvite(groupA, bundle.publicPackage, inviteA)
+    const addedA = await commitInvite({
+      group: groupA,
+      keyPackage: bundle.publicPackage,
+      invite: inviteA,
+    })
     const { group: joinedA } = await processWelcome({
       identity: bob,
       invite: inviteA,
@@ -143,7 +153,9 @@ describe('createLastResortKeyPackageBundle', () => {
       options: { resolveLedgerEntries },
     })
 
-    const { group: groupB } = await createGroup(carol, 'group:last-resort-b', {
+    const { group: groupB } = await createGroup({
+      identity: carol,
+      groupID: 'group:last-resort-b',
       resolveLedgerEntries,
     })
     const { invite: inviteB } = await createInvite({
@@ -153,7 +165,11 @@ describe('createLastResortKeyPackageBundle', () => {
       permission: 'member',
     })
     publish(inviteB)
-    const addedB = await commitInvite(groupB, bundle.publicPackage, inviteB)
+    const addedB = await commitInvite({
+      group: groupB,
+      keyPackage: bundle.publicPackage,
+      invite: inviteB,
+    })
     const { group: joinedB } = await processWelcome({
       identity: bob,
       invite: inviteB,
@@ -178,7 +194,7 @@ describe('last-resort key package lifetime', () => {
    * keeps serving it and every Add fails at the inviter.
    */
   test('carries an explicit ~90-day lifetime, not ts-mls default ~15-day one', async () => {
-    const bundle = await createLastResortKeyPackageBundle(randomIdentity())
+    const bundle = await createLastResortKeyPackageBundle({ identity: randomIdentity() })
     const { notBefore, notAfter } = bundle.publicPackage.leafNode.lifetime
     const days = Number(notAfter - notBefore) / 86400
     // 90 days forward, plus the one day of back-dating that absorbs clock skew between peers.
@@ -186,7 +202,7 @@ describe('last-resort key package lifetime', () => {
   })
 
   test('an ordinary bundle carries the pinned ordinary lifetime', async () => {
-    const bundle = await createKeyPackageBundle(randomIdentity())
+    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
     const { notBefore, notAfter } = bundle.publicPackage.leafNode.lifetime
     const days = Number(notAfter - notBefore) / 86400
     // ORDINARY_KEY_PACKAGE_LIFETIME_DAYS forward, plus the one day of back-dating for clock skew.
@@ -209,8 +225,12 @@ describe('last-resort key package lifetime', () => {
         return token
       })
 
-    const bundle = await createLastResortKeyPackageBundle(bob)
-    const { group } = await createGroup(alice, 'group:lifetime', { resolveLedgerEntries })
+    const bundle = await createLastResortKeyPackageBundle({ identity: bob })
+    const { group } = await createGroup({
+      identity: alice,
+      groupID: 'group:lifetime',
+      resolveLedgerEntries,
+    })
     const { invite } = await createInvite({
       group,
       identity: alice,
@@ -222,7 +242,7 @@ describe('last-resort key package lifetime', () => {
     vi.useFakeTimers()
     vi.setSystemTime(Date.now() + 60 * 86400 * 1000)
 
-    const added = await commitInvite(group, bundle.publicPackage, invite)
+    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
     expect(added.welcomeMessage).toBeDefined()
   })
 })

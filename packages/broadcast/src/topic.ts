@@ -31,6 +31,13 @@ function assertEpoch(epoch: number): void {
   }
 }
 
+export type DeriveTopicIDParams = {
+  secret: Uint8Array
+  epoch: number
+  label: string
+  scope?: string
+}
+
 /**
  * Derive an opaque, secret-gated, epoch-rotating topic ID.
  *
@@ -38,12 +45,7 @@ function assertEpoch(epoch: number): void {
  * channel name, `scope` an optional subgroup/target discriminator. NUL
  * separators make the `label`/`scope` boundary unambiguous.
  */
-export function deriveTopicID(
-  secret: Uint8Array,
-  epoch: number,
-  label: string,
-  scope = '',
-): string {
+export function deriveTopicID({ secret, epoch, label, scope = '' }: DeriveTopicIDParams): string {
   assertEpoch(epoch)
   assertComponent(label, 'label')
   assertComponent(scope, 'scope')

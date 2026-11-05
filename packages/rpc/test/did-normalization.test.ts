@@ -62,24 +62,25 @@ describe('DID normalization at rpc ingress', () => {
     // inside `detectRosterChange` itself (which stays a pure set-equality check).
     const before = [SHORT_B, 'carol'].map(normalizeDID)
     const after = [LONG_B, 'carol'].map(normalizeDID)
-    expect(detectRosterChange(before, after)).toBe(false)
+    expect(detectRosterChange({ before, after })).toBe(false)
 
     // Unnormalized, the same pair of reads looks like a roster change — proving the ingress
     // normalization is load-bearing and not a no-op on these inputs.
-    expect(detectRosterChange([SHORT_B, 'carol'], [LONG_B, 'carol'])).toBe(true)
+    expect(detectRosterChange({ before: [SHORT_B, 'carol'], after: [LONG_B, 'carol'] })).toBe(true)
   })
 
   test('self-echo suppression holds across DID forms in the app-lane drain', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x77)
     const anchorSecret = fakeEpochSecret(1, APP_TOPIC_LABEL)
-    const chatTopicID = protocolTopic(anchorSecret, 1, 'chat')
+    const chatTopicID = protocolTopic({ secret: anchorSecret, epoch: 1, protocol: 'chat' })
 
     // Published BEFORE bob's peer exists, so both frames are read back on his first history
     // pull (app-lane.ts's `drain`), never through the live push — isolating the drain's own
     // `opened.senderDID === localDID` check from any live-path filtering.
     const echoCrypto = createFakeCrypto({ epoch: 1, localDID: LONG_B })
-    const echoSealed = await echoCrypto.wrap(encodeEventFrame('chat/posted', { text: 'echo' }), {
+    const echoSealed = await echoCrypto.wrap({
+      bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'echo' } }),
       aad: encodeAppAAD({ topicID: chatTopicID, intent: 'log' }),
     })
     await hub.publish({
@@ -90,12 +91,11 @@ describe('DID normalization at rpc ingress', () => {
     })
 
     const carolCrypto = createFakeCrypto({ epoch: 1, localDID: 'carol' })
-    const carolSealed = await carolCrypto.wrap(
-      encodeEventFrame('chat/posted', { text: 'from carol' }),
-      {
-        aad: encodeAppAAD({ topicID: chatTopicID, intent: 'log' }),
-      },
-    )
+    const carolSealed = await carolCrypto.wrap({
+      bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'from carol' } }),
+
+      aad: encodeAppAAD({ topicID: chatTopicID, intent: 'log' }),
+    })
     await hub.publish({
       senderDID: 'carol',
       topicID: chatTopicID,
@@ -122,7 +122,7 @@ describe('DID normalization at rpc ingress', () => {
     // for how). A short-form DID is already canonical, so normalizing it at ingress must move
     // nothing — this pins that no rotation occurred.
     const secret = new Uint8Array(32).fill(7)
-    expect(inboxTopic(secret, 1, 'did:peer:4zQmShort')).toBe(
+    expect(inboxTopic({ secret, epoch: 1, memberDID: 'did:peer:4zQmShort' })).toBe(
       'p1PLMa1iPmh-AkN44pvTl7gdIoidbm7MyxrUtM-QiDQ',
     )
   })

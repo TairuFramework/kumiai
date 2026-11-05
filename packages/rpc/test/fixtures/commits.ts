@@ -83,7 +83,10 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
   return hub.publish({
     senderDID,
     topicID: commitTopic(recoverySecret),
-    payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealed)),
+    payload: encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.commit,
+      payload: encodeCommitFrame({ commit, sealedEntries: sealed }),
+    }),
     retain: 'log',
     ...(params.expectedHead !== undefined ? { expectedHead: params.expectedHead } : {}),
   })

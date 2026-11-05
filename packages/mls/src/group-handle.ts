@@ -146,7 +146,12 @@ async function computeAdmission(
 
 const HISTORICAL_REGISTRIES = new WeakMap<GroupHandle, Map<string, DeviceRegistry>>()
 
-export async function registryAt(group: GroupHandle, head: Uint8Array): Promise<DeviceRegistry> {
+export type RegistryAtParams = {
+  group: GroupHandle
+  head: Uint8Array
+}
+
+export async function registryAt({ group, head }: RegistryAtParams): Promise<DeviceRegistry> {
   let cache = HISTORICAL_REGISTRIES.get(group)
   if (cache == null) {
     cache = new Map()
@@ -158,11 +163,11 @@ export async function registryAt(group: GroupHandle, head: Uint8Array): Promise<
   let held = genesisHead(group.groupID)
   let length = 0
   for (const entry of group.ledger) {
-    if (headsMatch(held, head)) break
-    held = extendHead(held, [entry.entryID])
+    if (headsMatch({ expected: held, actual: head })) break
+    held = extendHead({ head: held, entryIDs: [entry.entryID] })
     length++
   }
-  if (!headsMatch(held, head)) throw new Error('Unknown epoch ledger head')
+  if (!headsMatch({ expected: held, actual: head })) throw new Error('Unknown epoch ledger head')
   const registry = (
     await foldLedgerControl(group.ledger.slice(0, length), group.anchor, group.groupID, {
       crypto: group.crypto,
@@ -271,6 +276,12 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true
 }
 
+export type CommitRejectedErrorParams = {
+  proposals: Array<ProposalWithSender>
+  senderLeafIndex?: number
+  reason?: CommitRejectionReason
+}
+
 /** Thrown by GroupHandle.processMessage when the commit policy rejects an incoming
  *  commit. The handle is left at its pre-commit epoch. */
 export class CommitRejectedError extends Error {
@@ -278,11 +289,7 @@ export class CommitRejectedError extends Error {
   #senderLeafIndex?: number
   #reason: CommitRejectionReason
 
-  constructor(
-    proposals: Array<ProposalWithSender>,
-    senderLeafIndex?: number,
-    reason: CommitRejectionReason = 'policy',
-  ) {
+  constructor({ proposals, senderLeafIndex, reason = 'policy' }: CommitRejectedErrorParams) {
     super('Commit rejected by group commit policy')
     this.name = 'CommitRejectedError'
     this.#reason = reason
@@ -516,7 +523,7 @@ async function verifyCachedLedgerEntry(
 ): Promise<VerifiedLedgerEntry | null> {
   const cached = cachedLedgerEntry(token, options)
   if (cached !== undefined) return cached
-  const verified = await verifyLedgerEntry(token, options)
+  const verified = await verifyLedgerEntry({ token, ...options })
   if (verified != null) cacheLedgerEntry(token, verified, options)
   return verified
 }
@@ -585,7 +592,7 @@ async function foldLedgerControl(
   options?: CryptoOptions,
 ): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
   const entries = ledger.map(({ verified, entryID }) => ({ verified, entryID }) as FoldInput)
-  return await foldControl(entries, anchor, groupID, undefined, options)
+  return await foldControl({ entries, anchor, groupID, ...options })
 }
 
 export type GroupHandleParams = CryptoOptions & {
@@ -606,6 +613,44 @@ export type GroupHandleParams = CryptoOptions & {
   events?: EventEmitter<GroupHandleEvents>
   /** Defer authored control notifications until adoption. */
   speculative?: boolean
+}
+
+export type GroupHandleBootstrapLedgerParams = {
+  tokens: Array<string>
+} & { persist?: (handle: GroupHandle) => Promise<void> | void }
+
+export type GroupHandleExportSecretParams = {
+  label: string
+  context: Uint8Array
+  length?: number
+}
+
+export type GroupHandleEncryptParams = {
+  plaintext: Uint8Array
+} & { aad?: Uint8Array }
+
+export type GroupHandleAdvanceSenderGenerationParams = {
+  target: number
+} & { maxSteps?: number }
+
+export type GroupHandleDecryptParams = {
+  message: Uint8Array
+} & { expectedAAD?: Uint8Array }
+
+export type GroupHandleDecryptStagedParams = {
+  message: Uint8Array
+  opts: { expectedAAD?: Uint8Array }
+  persist: (
+    stagedState: Uint8Array,
+    opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
+  ) => Promise<void>
+}
+
+export type GroupHandleProcessMessageParams = {
+  message: Uint8Array | MlsFramedMessage
+} & {
+  commitPolicy?: IncomingMessageCallback
+  persist?: (handle: GroupHandle) => Promise<void> | void
 }
 
 /** Mutable wrapper around MLS group state + Enkaku credential. */
@@ -855,8 +900,9 @@ export class GroupHandle {
 
   async settleAdvisory(): Promise<'ok' | 'prompt' | 'blocked'> {
     const controller = this.#anchor.controller
-    const log = controller == null ? undefined : recordedLogOf(this.#registry, controller)
-    return log == null ? 'ok' : await settleAdvisory(log, { crypto: this.#crypto })
+    const log =
+      controller == null ? undefined : recordedLogOf({ registry: this.#registry, controller })
+    return log == null ? 'ok' : await settleAdvisory({ log, crypto: this.#crypto })
   }
 
   /**
@@ -934,11 +980,11 @@ export class GroupHandle {
           ),
         ]) {
           const device = normalizeDID(effect.did)
-          const record = revocationOf(this, device)
+          const record = revocationOf({ group: this, did: device })
           if (record != null) revoked.push({ device, ...record })
         }
       } else if (value.op === 'revoke') {
-        const controller = controllerOf(this.#registry, subject)
+        const controller = controllerOf({ registry: this.#registry, deviceDID: subject })
         if (controller != null) revoked.push({ device: subject, controller })
       } else if (value.op === 'beacon' && value.logLength != null && value.headDigest != null) {
         emitter.fire('controllerBeaconChanged', {
@@ -1067,13 +1113,13 @@ export class GroupHandle {
         // Report incomplete and let bootstrap fail loudly.
         return false
       }
-      return headsMatch(
-        authenticated.head,
-        computeHead(
-          this.groupID,
-          this.#ledger.map(({ entryID }) => entryID),
-        ),
-      )
+      return headsMatch({
+        expected: authenticated.head,
+        actual: computeHead({
+          groupID: this.groupID,
+          entryIDs: this.#ledger.map(({ entryID }) => entryID),
+        }),
+      })
     })
   }
 
@@ -1110,10 +1156,7 @@ export class GroupHandle {
    * call back into it. It must write atomically: rejection means nothing was stored.
    * Host callbacks run after successful persist; a callback throw does not undo bootstrap.
    */
-  async bootstrapLedger(
-    tokens: Array<string>,
-    opts?: { persist?: (handle: GroupHandle) => Promise<void> | void },
-  ): Promise<void> {
+  async bootstrapLedger({ tokens, ...opts }: GroupHandleBootstrapLedgerParams): Promise<void> {
     return mutexFor(this).run(async () => {
       const authenticated = readLedgerHead(this)
       if (authenticated == null) {
@@ -1123,7 +1166,10 @@ export class GroupHandle {
       // The gate. Nothing below touches the handle until the last three statements,
       // and nothing above reads the tokens except for their content ids.
       const entryIDs = tokens.map(ledgerEntryDigest)
-      assertHeadMatches(authenticated.head, computeHead(this.groupID, entryIDs))
+      assertHeadMatches({
+        expected: authenticated.head,
+        actual: computeHead({ groupID: this.groupID, entryIDs }),
+      })
 
       const log: Array<LedgerLogEntry> = []
       for (let index = 0; index < tokens.length; index++) {
@@ -1238,7 +1284,10 @@ export class GroupHandle {
           // rejects any peer:4 leaf lacking one before it can enter a ratchet tree. restore
           // trusts the host's own persisted state, so neither gate runs on that path.
           const controller = parsed.controller ? parsed.controller.id : undefined
-          const beacon = controller != null ? beaconOf(this.#registry, controller) : undefined
+          const beacon =
+            controller != null
+              ? beaconOf({ registry: this.#registry, controllerDID: controller })
+              : undefined
           // A KeyPackage leaf node is unique to its KeyPackage by its fresh HPKE key, and stays
           // in the tree only until the member's own path or Update replaces it.
           const admission =
@@ -1329,7 +1378,11 @@ export class GroupHandle {
    * exporter secret, which is the epoch the blob being opened was sealed under. Both are silent
    * consequences of this method's plainness; wrapping it "for consistency" breaks both.
    */
-  async exportSecret(label: string, context: Uint8Array, length = 32): Promise<Uint8Array> {
+  async exportSecret({
+    label,
+    context,
+    length = 32,
+  }: GroupHandleExportSecretParams): Promise<Uint8Array> {
     return await mlsExporter(
       this.#state.keySchedule.exporterSecret,
       label,
@@ -1381,7 +1434,7 @@ export class GroupHandle {
    * carried in the clear, so a caller reading it back (or comparing via `decrypt`'s
    * `expectedAAD`) needs no key. Defaults to empty.
    */
-  async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
+  async encrypt({ plaintext, ...opts }: GroupHandleEncryptParams): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
       const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
       if (own != null && (await isLapsed(this, own))) throw new LeafLapsedError('lapsed')
@@ -1422,7 +1475,10 @@ export class GroupHandle {
    * removed or suspended member. `target` must be below 0xffffffff, the last generation.
    * On any throw the handle state is unchanged and the secrets derived so far are zeroed.
    */
-  async advanceSenderGeneration(target: number, opts?: { maxSteps?: number }): Promise<void> {
+  async advanceSenderGeneration({
+    target,
+    ...opts
+  }: GroupHandleAdvanceSenderGenerationParams): Promise<void> {
     // 0xffffffff is the last uint32 generation: no frame could follow it.
     if (!Number.isInteger(target) || target < 0 || target >= 0xffffffff) {
       throw new RangeError(`advanceSenderGeneration: ${target} is not a sendable uint32 generation`)
@@ -1622,10 +1678,14 @@ export class GroupHandle {
    * no ratchet generation, so a wrong-topic frame costs nothing to reject. The frame's AAD
    * is always returned, whether or not `expectedAAD` was given.
    */
-  async decrypt(
-    message: Uint8Array,
-    opts?: { expectedAAD?: Uint8Array },
-  ): Promise<{ payload: Uint8Array; senderDID?: string; aad: Uint8Array }> {
+  async decrypt({
+    message,
+    ...opts
+  }: GroupHandleDecryptParams): Promise<{
+    payload: Uint8Array
+    senderDID?: string
+    aad: Uint8Array
+  }> {
     const decoded = decode(mlsMessageDecoder, message)
     if (decoded == null) throw new Error('decrypt: failed to decode MLSMessage')
     return mutexFor(this).run(async () => {
@@ -1673,14 +1733,15 @@ export class GroupHandle {
    * group's handle state. It must not call this handle or the peer. If opening or
    * persistence fails, the live state and its ratchet secrets remain untouched.
    */
-  async decryptStaged(
-    message: Uint8Array,
-    opts: { expectedAAD?: Uint8Array },
-    persist: (
-      stagedState: Uint8Array,
-      opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
-    ) => Promise<void>,
-  ): Promise<{ payload: Uint8Array; senderDID: string; aad: Uint8Array }> {
+  async decryptStaged({
+    message,
+    opts,
+    persist,
+  }: GroupHandleDecryptStagedParams): Promise<{
+    payload: Uint8Array
+    senderDID: string
+    aad: Uint8Array
+  }> {
     const decoded = decode(mlsMessageDecoder, message)
     if (decoded == null) throw new Error('decryptStaged: failed to decode MLSMessage')
     return mutexFor(this).run(async () => {
@@ -1827,7 +1888,7 @@ export class GroupHandle {
 
             const proofCtx = {
               bindingOfDID: (d: string) => this.bindingOfDID(d),
-              controllerOf: (d: string) => controllerOf(this.#registry, d),
+              controllerOf: (d: string) => controllerOf({ registry: this.#registry, deviceDID: d }),
             }
             for (const { verified } of acceptedEntries) {
               if (verified.entry.type !== DEVICE_ENTRY_TYPE) continue
@@ -1921,7 +1982,7 @@ export class GroupHandle {
         return 'reject'
       }
       if (callerPolicy != null) return callerPolicy(incoming)
-      return this.#anchor.controller == null ? defaultCommitPolicy(incoming, context) : 'accept'
+      return this.#anchor.controller == null ? defaultCommitPolicy({ incoming, context }) : 'accept'
     }
 
     const applyOnAccept = async (notify = true): Promise<() => void> => {
@@ -2181,13 +2242,10 @@ export class GroupHandle {
    * It must write atomically: rejection means nothing was stored. Host callbacks run
    * after successful persist; a callback throw does not undo an advance.
    */
-  async processMessage(
-    message: Uint8Array | MlsFramedMessage,
-    opts?: {
-      commitPolicy?: IncomingMessageCallback
-      persist?: (handle: GroupHandle) => Promise<void> | void
-    },
-  ): Promise<Uint8Array | null> {
+  async processMessage({
+    message,
+    ...opts
+  }: GroupHandleProcessMessageParams): Promise<Uint8Array | null> {
     let decoded: unknown = message
     if (message instanceof Uint8Array) {
       const parsed = decode(mlsMessageDecoder, message)
@@ -2310,21 +2368,21 @@ export class GroupHandle {
         result = await run(callback)
       } catch (error) {
         if (application != null) throw error
-        const rejection = new CommitRejectedError(
-          capture.rejected?.proposals ?? [],
-          capture.rejected?.senderLeafIndex,
-          capture.reason ?? 'invalid',
-        )
+        const rejection = new CommitRejectedError({
+          proposals: capture.rejected?.proposals ?? [],
+          senderLeafIndex: capture.rejected?.senderLeafIndex,
+          reason: capture.reason ?? 'invalid',
+        })
         rejection.cause = capture.bindingError ?? error
         if (error instanceof Error) rejection.message += `: ${error.message}`
         throw rejection
       }
       if (result.kind === 'newState' && result.actionTaken === 'reject') {
-        const rejection = new CommitRejectedError(
-          capture.rejected?.proposals ?? [],
-          capture.rejected?.senderLeafIndex,
-          capture.reason ?? 'policy',
-        )
+        const rejection = new CommitRejectedError({
+          proposals: capture.rejected?.proposals ?? [],
+          senderLeafIndex: capture.rejected?.senderLeafIndex,
+          reason: capture.reason ?? 'policy',
+        })
         const cause = capture.proofError ?? capture.bindingError
         if (cause != null) rejection.cause = cause
         throw rejection
@@ -2333,11 +2391,11 @@ export class GroupHandle {
         try {
           await postApply(result.newState)
         } catch (error) {
-          const rejection = new CommitRejectedError(
-            capture.rejected?.proposals ?? [],
-            capture.rejected?.senderLeafIndex,
-            rejectionReason(error),
-          )
+          const rejection = new CommitRejectedError({
+            proposals: capture.rejected?.proposals ?? [],
+            senderLeafIndex: capture.rejected?.senderLeafIndex,
+            reason: rejectionReason(error),
+          })
           rejection.cause = error
           throw rejection
         }
@@ -2400,7 +2458,7 @@ export function buildCommitPolicyContext(
   const expectedHeadExtensionData =
     currentHead == null
       ? new Uint8Array()
-      : encodeLedgerHead(extendHead(currentHead.head, args.entryIDs))
+      : encodeLedgerHead(extendHead({ head: currentHead.head, entryIDs: args.entryIDs }))
   return {
     baseRoster: args.baseRoster,
     candidateRoster: args.candidateRoster,

@@ -72,7 +72,7 @@ describe('the open-once path acks what it opens', () => {
       mux,
       topicID: 'topic:app',
       unwrap: async () => {
-        throw new FrameEpochError(1, 2)
+        throw new FrameEpochError({ frameEpoch: 1, handleEpoch: 2 })
       },
       retainOnFailure: (_message, error) => isFrameAhead(error),
       project: (_message, result) => result.payload,
@@ -96,7 +96,7 @@ describe('the open-once path acks what it opens', () => {
       mux,
       topicID: 'topic:app',
       unwrap: async () => {
-        throw new FrameEpochError(2, 1)
+        throw new FrameEpochError({ frameEpoch: 2, handleEpoch: 1 })
       },
       retainOnFailure: (_message, error) => isFrameAhead(error),
       project: (_message, result) => result.payload,

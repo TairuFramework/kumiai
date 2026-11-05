@@ -46,7 +46,10 @@ describe('a Welcome delivered a second time', () => {
     const carol = randomIdentity()
     const tokens = new Map<string, string>()
 
-    const { group: aliceGroup } = await createGroup(alice, 'welcome-redelivery')
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'welcome-redelivery',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -54,12 +57,12 @@ describe('a Welcome delivered a second time', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKeyBundle.publicPackage,
+    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKeyBundle.publicPackage,
       invite,
-    )
+    })
 
     const { group: bobGroup } = await processWelcome({
       identity: bob,
@@ -80,13 +83,13 @@ describe('a Welcome delivered a second time', () => {
       permission: 'member',
     })
     publishInvite(tokens, carolInvite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const { commitMessage: addCarol, newGroup: groupWithCarol } = await commitInvite(
-      groupWithBob,
-      carolKP.publicPackage,
-      carolInvite,
-    )
-    await bobGroup.processMessage(addCarol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const { commitMessage: addCarol, newGroup: groupWithCarol } = await commitInvite({
+      group: groupWithBob,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
+    await bobGroup.processMessage({ message: addCarol })
     expect(bobGroup.epoch).toBe(2n)
     expect(bobGroup.memberCount).toBe(3)
 
@@ -121,13 +124,17 @@ describe('a Welcome delivered a second time', () => {
     expect(rejoined.groupID).toBe(bobGroup.groupID)
 
     // And the rollback is not cosmetic: the stale handle cannot read the group's traffic.
-    const message = await groupWithCarol.encrypt(new TextEncoder().encode('after the join'))
-    await expect(rejoined.processMessage(message)).rejects.toThrow()
+    const message = await groupWithCarol.encrypt({
+      plaintext: new TextEncoder().encode('after the join'),
+    })
+    await expect(rejoined.processMessage({ message })).rejects.toThrow()
     // The live handle, untouched by the re-delivery, still can.
-    const same = await groupWithCarol.encrypt(new TextEncoder().encode('after the join'))
-    expect(new TextDecoder().decode((await bobGroup.processMessage(same)) as Uint8Array)).toBe(
-      'after the join',
-    )
+    const same = await groupWithCarol.encrypt({
+      plaintext: new TextEncoder().encode('after the join'),
+    })
+    expect(
+      new TextDecoder().decode((await bobGroup.processMessage({ message: same })) as Uint8Array),
+    ).toBe('after the join')
   })
 
   test('the repeat is accepted even when the invitee is still at the joining epoch', async () => {
@@ -135,7 +142,10 @@ describe('a Welcome delivered a second time', () => {
     const bob = randomIdentity()
     const tokens = new Map<string, string>()
 
-    const { group: aliceGroup } = await createGroup(alice, 'welcome-redelivery-same-epoch')
+    const { group: aliceGroup } = await createGroup({
+      identity: alice,
+      groupID: 'welcome-redelivery-same-epoch',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -143,12 +153,12 @@ describe('a Welcome delivered a second time', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKeyBundle.publicPackage,
+    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKeyBundle.publicPackage,
       invite,
-    )
+    })
 
     const join = {
       identity: bob,
@@ -178,7 +188,7 @@ describe('the safe join path', () => {
     const carol = randomIdentity()
     const tokens = new Map<string, string>()
 
-    const { group: aliceGroup } = await createGroup(alice, 'join-once')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'join-once' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -186,12 +196,12 @@ describe('the safe join path', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKeyBundle.publicPackage,
+    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKeyBundle.publicPackage,
       invite,
-    )
+    })
 
     const join = {
       identity: bob,
@@ -218,13 +228,13 @@ describe('the safe join path', () => {
       permission: 'member',
     })
     publishInvite(tokens, carolInvite)
-    const carolKP = await createKeyPackageBundle(carol)
-    const { commitMessage: addCarol, newGroup: groupWithCarol } = await commitInvite(
-      groupWithBob,
-      carolKP.publicPackage,
-      carolInvite,
-    )
-    await bobGroup.processMessage(addCarol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const { commitMessage: addCarol, newGroup: groupWithCarol } = await commitInvite({
+      group: groupWithBob,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
+    await bobGroup.processMessage({ message: addCarol })
     expect(bobGroup.epoch).toBe(2n)
 
     // The Welcome is re-delivered. Bob holds this group, so nothing comes back — and no stale
@@ -236,10 +246,12 @@ describe('the safe join path', () => {
     expect(bobGroup.epoch).toBe(2n)
     expect(bobGroup.memberCount).toBe(3)
     expect(bobGroup.roster.roles.has(normalizeDID(carol.id))).toBe(true)
-    const message = await groupWithCarol.encrypt(new TextEncoder().encode('still here'))
-    expect(new TextDecoder().decode((await bobGroup.processMessage(message)) as Uint8Array)).toBe(
-      'still here',
-    )
+    const message = await groupWithCarol.encrypt({
+      plaintext: new TextEncoder().encode('still here'),
+    })
+    expect(
+      new TextDecoder().decode((await bobGroup.processMessage({ message })) as Uint8Array),
+    ).toBe('still here')
   })
 
   test('a Welcome for a group the member does not hold still joins', async () => {
@@ -247,7 +259,7 @@ describe('the safe join path', () => {
     const bob = randomIdentity()
     const tokens = new Map<string, string>()
 
-    const { group: aliceGroup } = await createGroup(alice, 'second-group')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'second-group' })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -255,12 +267,12 @@ describe('the safe join path', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite(
-      aliceGroup,
-      bobKeyBundle.publicPackage,
+    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKeyBundle.publicPackage,
       invite,
-    )
+    })
 
     // Bob is already in other groups. The guard is per group id, not per member: an invite to
     // a group he does not hold is a first join however many others he is in.

@@ -68,10 +68,13 @@ describe('capability issuing', () => {
     expect(payloadOf(token).cap).toBeUndefined()
     await expect(
       verifyLeafCredential(
-        makeMLSCredential(agent(41), {
-          id: f.controller.id,
-          prefix: [f.inception],
-          capability: token,
+        makeMLSCredential({
+          identity: agent(41),
+          controller: {
+            id: f.controller.id,
+            prefix: [f.inception],
+            capability: token,
+          },
         }),
         f.device.publicKey,
       ),

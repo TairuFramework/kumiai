@@ -87,7 +87,7 @@ describe('broadcast reply identity', () => {
     })
     const client = new BroadcastClient({ transport: memberTransport(bus, 'did:key:alice') })
 
-    const replies = await client.gather('census', {}, { timeoutMs: 300 })
+    const replies = await client.gather({ prc: 'census', prm: {}, timeoutMs: 300 })
     expect(replies).toEqual([{ senderDID: 'did:key:bob', value: 'bob-answer' }])
 
     await client.dispose()
@@ -115,7 +115,7 @@ describe('broadcast reply identity', () => {
     })
     const client = new BroadcastClient({ transport: memberTransport(bus, 'did:key:alice') })
 
-    const replies = await client.gather('census', {}, { timeoutMs: 300 })
+    const replies = await client.gather({ prc: 'census', prm: {}, timeoutMs: 300 })
     const byDID = new Map(replies.map((reply) => [reply.senderDID, reply.value]))
 
     // Bob's real reply survived the forgery that arrived under his name...
@@ -154,7 +154,7 @@ describe('broadcast reply identity', () => {
     })().catch(() => {})
 
     // Three replies on the wire, one sender behind them: a quorum of three must NOT be reached.
-    const replies = await client.gather('census', {}, { quorum: 3, timeoutMs: 300 })
+    const replies = await client.gather({ prc: 'census', prm: {}, quorum: 3, timeoutMs: 300 })
     expect(replies).toEqual([{ senderDID: 'did:key:mallory', value: 'did:key:bob' }])
 
     running = false
@@ -227,7 +227,7 @@ describe('broadcast reply identity', () => {
       requestHandlers: { census: () => 'answer' },
     })
 
-    const replies = await client.gather('census', {}, { timeoutMs: 150 })
+    const replies = await client.gather({ prc: 'census', prm: {}, timeoutMs: 150 })
     expect(replies).toEqual([])
 
     await client.dispose()
@@ -260,10 +260,12 @@ describe('broadcast wire version', () => {
     })
     const reader = rx[Symbol.asyncIterator]()
 
-    await bus.publish(
-      TOPIC,
-      fromUTF(JSON.stringify({ v: 99, payload: { typ: 'event', prc: 'future', data: {} } })),
-    )
+    await bus.publish({
+      topicID: TOPIC,
+      payload: fromUTF(
+        JSON.stringify({ v: 99, payload: { typ: 'event', prc: 'future', data: {} } }),
+      ),
+    })
     await sleep(0)
 
     const tx = createBroadcastTransport<BroadcastMessage, BroadcastMessage>({

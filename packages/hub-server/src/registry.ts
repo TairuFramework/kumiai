@@ -9,6 +9,17 @@ export type ClientEntry = {
   token: symbol | null
 }
 
+export type HubClientRegistryBindReceiveWriterParams = {
+  did: string
+  writer: (message: StoredMessage) => void
+  endReceive: () => void
+}
+
+export type HubClientRegistryReleaseReceiveWriterParams = {
+  did: string
+  token: symbol
+}
+
 /**
  * Tracks online clients and their live receive-channel writers. Subscription
  * state is durable in the store, not here — the registry only routes live
@@ -60,11 +71,10 @@ export class HubClientRegistry {
    * it. So a release names the binding it is releasing, and one that is no longer current is a
    * no-op.
    */
-  bindReceiveWriter(
-    did: string,
-    writer: (message: StoredMessage) => void,
-    endReceive: () => void,
-  ): { token: symbol; evicted: (() => void) | null } {
+  bindReceiveWriter({ did, writer, endReceive }: HubClientRegistryBindReceiveWriterParams): {
+    token: symbol
+    evicted: (() => void) | null
+  } {
     const entry = this.#clients.get(did)
     if (entry == null) return { token: Symbol('unbound'), evicted: null }
     const evicted = entry.endReceive
@@ -76,7 +86,7 @@ export class HubClientRegistry {
   }
 
   /** Clear the binding this token names. A token that is no longer current is a no-op. */
-  releaseReceiveWriter(did: string, token: symbol): void {
+  releaseReceiveWriter({ did, token }: HubClientRegistryReleaseReceiveWriterParams): void {
     const entry = this.#clients.get(did)
     if (entry == null || entry.token !== token) return
     entry.sendMessage = null

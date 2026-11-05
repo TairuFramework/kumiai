@@ -11,10 +11,15 @@ export type ConformanceJournalEntry = {
   kind: 'ledger' | 'invite' | 'remove'
   journal: Uint8Array
 }
+export type ConformanceCommitJournalMarkAcceptedParams = {
+  publishID: string
+  sequenceID: string
+}
+
 export type ConformanceCommitJournal = {
   put(entry: ConformanceJournalEntry): Promise<void>
   get(): Promise<ConformanceJournalEntry | null>
-  markAccepted(publishID: string, sequenceID: string): Promise<void>
+  markAccepted({ publishID, sequenceID }: ConformanceCommitJournalMarkAcceptedParams): Promise<void>
   clear(publishID: string): Promise<void>
 }
 
@@ -39,10 +44,10 @@ export function testCommitJournalConformance(params: CommitJournalConformancePar
       }
       await journal.put(entry)
       expect(await journal.get()).toEqual(entry)
-      await journal.markAccepted('other', 'wrong')
+      await journal.markAccepted({ publishID: 'other', sequenceID: 'wrong' })
       await journal.clear('other')
       expect(await journal.get()).toEqual(entry)
-      await journal.markAccepted(entry.publishID, 'accepted')
+      await journal.markAccepted({ publishID: entry.publishID, sequenceID: 'accepted' })
       expect(await journal.get()).toEqual({ ...entry, acceptedAs: 'accepted' })
       await journal.clear('other')
       expect((await journal.get())?.holdsLogSends).toBe(true)

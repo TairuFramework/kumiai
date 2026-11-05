@@ -126,10 +126,12 @@ describe('work resumed after disposal', () => {
     let building = false
     try {
       const build = buildLedgerCommit(alice, ['late=commit'])
-      const committing = alice.peer.commit(async () => {
-        building = true
-        await buildGate
-        return build()
+      const committing = alice.peer.commit({
+        build: async () => {
+          building = true
+          await buildGate
+          return build()
+        },
       })
       await vi.waitFor(() => expect(building).toBe(true))
       await alice.peer.dispose()
@@ -162,7 +164,7 @@ describe('work resumed after disposal', () => {
       return isLedgerComplete()
     })
     try {
-      const committing = alice.peer.commit(buildLedgerCommit(alice, ['late=ledger']))
+      const committing = alice.peer.commit({ build: buildLedgerCommit(alice, ['late=ledger']) })
       await vi.waitFor(() => expect(checking).toBe(true))
       await alice.peer.dispose()
       releaseCheck()
@@ -191,7 +193,7 @@ describe('work resumed after disposal', () => {
       return publish(params)
     })
     try {
-      const committing = alice.peer.commit(buildLedgerCommit(alice, ['late=acceptance']))
+      const committing = alice.peer.commit({ build: buildLedgerCommit(alice, ['late=acceptance']) })
       await vi.waitFor(() => expect(publishing).toBe(true))
       await alice.peer.dispose()
       releasePublish()
@@ -222,7 +224,7 @@ describe('work resumed after disposal', () => {
       return rosterEntries()
     })
     try {
-      const committing = alice.peer.commit(buildLedgerCommit(alice, ['late=adoption']))
+      const committing = alice.peer.commit({ build: buildLedgerCommit(alice, ['late=adoption']) })
       await vi.waitFor(() => expect(readStarted).toBe(true))
       await alice.peer.dispose()
       releaseRead()
@@ -247,13 +249,18 @@ describe('work resumed after disposal', () => {
     let building = false
     try {
       const build = buildLedgerCommit(alice, [])
-      const committing = alice.peer.commit(async () => {
-        building = true
-        await buildGate
-        return build()
+      const committing = alice.peer.commit({
+        build: async () => {
+          building = true
+          await buildGate
+          return build()
+        },
       })
       await vi.waitFor(() => expect(building).toBe(true))
-      const dropping = alice.peer.dropAppFrame('unknown-topic', '000000000001')
+      const dropping = alice.peer.dropAppFrame({
+        topicID: 'unknown-topic',
+        position: '000000000001',
+      })
       await new Promise((resolve) => setTimeout(resolve, 0))
       await alice.peer.dispose()
       releaseBuild()
@@ -268,7 +275,11 @@ describe('work resumed after disposal', () => {
   test('a drop waiting for ledger completeness reports disposal', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xb8)
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
     const rows = new Map<string, PendingAppFrame>()
     const crypto = createFakeCrypto({
       epoch: 1,
@@ -294,7 +305,8 @@ describe('work resumed after disposal', () => {
       senderDID: 'mallory',
       topicID,
       retain: 'log',
-      payload: await forged.wrap(encodeEventFrame('chat/posted', { text: 'forged' }), {
+      payload: await forged.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'forged' } }),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
     })
@@ -320,7 +332,7 @@ describe('work resumed after disposal', () => {
       return isLedgerComplete()
     })
     try {
-      const dropping = restarted.peer.dropAppFrame(topicID, blocked.sequenceID)
+      const dropping = restarted.peer.dropAppFrame({ topicID, position: blocked.sequenceID })
       const rejection = expect(dropping).rejects.toBeInstanceOf(PeerDisposedError)
       await vi.waitFor(() => expect(checking).toBe(true))
       await restarted.peer.dispose()

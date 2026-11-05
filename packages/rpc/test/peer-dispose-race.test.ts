@@ -97,7 +97,7 @@ describe('dispose against an in-flight subscribe', { concurrent: false }, () => 
 
     const hub: LogHub = {
       publish: (params) => fake.publish(params),
-      subscribe: (subscriberDID, topicID, options) => {
+      subscribe: ({ subscriberDID, topicID, ...options }) => {
         if (capturingInitial) {
           initialTopics.add(topicID)
           return fake.subscribe(subscriberDID, topicID, options)
@@ -111,8 +111,8 @@ describe('dispose against an in-flight subscribe', { concurrent: false }, () => 
         }
         return fake.subscribe(subscriberDID, topicID, options)
       },
-      unsubscribe: (subscriberDID, topicID) => fake.unsubscribe(subscriberDID, topicID),
-      receive: (subscriberDID) => fake.receive(subscriberDID),
+      unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe(subscriberDID, topicID),
+      receive: ({ subscriberDID }) => fake.receive(subscriberDID),
       fetchTopic: (params) => fake.fetchTopic(params),
     }
 
@@ -137,7 +137,9 @@ describe('dispose against an in-flight subscribe', { concurrent: false }, () => 
     // Owned, not floated: alice's commit is still in flight while both peers are disposed below,
     // and an unowned rejection surfaces as a cross-file unhandled rejection rather than a failure
     // here. Awaited at the end so a timing change fails loudly instead of escaping the test.
-    const aliceCommit = alice.peer.commit(buildRemoveCommit(alice, 'carol')).catch(() => {})
+    const aliceCommit = alice.peer
+      .commit({ build: buildRemoveCommit(alice, 'carol') })
+      .catch(() => {})
     await flush()
 
     // Bob's rebuild has, by now, asked the hub for his new chat and self-inbox topics — both
@@ -177,15 +179,15 @@ describe('dispose against a commit made afterwards', { concurrent: false }, () =
         record(`publish:${params.topicID}`)
         return fake.publish(params)
       },
-      subscribe: (subscriberDID, topicID, options) => {
+      subscribe: ({ subscriberDID, topicID, ...options }) => {
         record(`subscribe:${topicID}`)
         return fake.subscribe(subscriberDID, topicID, options)
       },
-      unsubscribe: (subscriberDID, topicID) => {
+      unsubscribe: ({ subscriberDID, topicID }) => {
         record(`unsubscribe:${topicID}`)
         return fake.unsubscribe(subscriberDID, topicID)
       },
-      receive: (subscriberDID) => {
+      receive: ({ subscriberDID }) => {
         record('receive')
         return fake.receive(subscriberDID)
       },
@@ -205,7 +207,7 @@ describe('dispose against a commit made afterwards', { concurrent: false }, () =
     // pulls the commit log and the rendezvous topic, then `mux.publish` (which carries NO disposed
     // check of its own, `hub-mux.ts:665`) writes the commit to the hub. A disposed peer publishing
     // a commit is a live group moved by a device its host has already torn down.
-    const op = alice.peer.commit(buildLedgerCommit(alice, ['post-dispose']))
+    const op = alice.peer.commit({ build: buildLedgerCommit(alice, ['post-dispose']) })
     // Owned immediately: the hub-traffic assertion runs BEFORE the rejection is awaited, because
     // an unguarded `commit()` does not reject promptly — it settles on the commit deadline, long
     // after the publish has landed. Asserting the rejection first would turn "it published" into a
@@ -250,7 +252,9 @@ describe('dispose against a replay made afterwards', { concurrent: false }, () =
       recovery: { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 400 },
     })
     await bob.peer.resync()
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
+    await bob.peer.commit({
+      build: buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']),
+    })
     await bob.peer.resync()
 
     const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
@@ -362,7 +366,7 @@ describe('dispose against a commit delivery queued behind a lane operation', {
 
     // Alice's commit reaches bob's commit listener, which acks and hands its lane operation to
     // `runSerial` — where it queues, because `replay()` still holds the mutex inside the gate.
-    await alice.peer.commit(buildLedgerCommit(alice, ['queued-behind-the-lane']))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, ['queued-behind-the-lane']) })
     await flush()
 
     // Returns without waiting on the mutex: dispose awaits `settled`, and the queued delivery is
@@ -431,7 +435,7 @@ describe('dispose against a ledger reply whose timer already fired', { concurren
     await bob.peer.resync()
     // `handleLedgerRequest` checks `isLedgerComplete()` BEFORE sealing, so without an entry bob
     // returns early and never reaches the gate.
-    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['circle:x=Bob']) })
     await bob.peer.resync()
 
     // Alice takes the bare hub: only the peer under test is recorded. Built plainly, exactly as
@@ -583,11 +587,11 @@ describe('dispose against a requester ledger reply already in its IIFE', {
     })
     const aliceMLS: MemoryGroupMLS = {
       ...aliceInner,
-      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+      async openSealedLedger({ sealed, requestID }) {
         openEntered = true
         await gate
         openResumed = true
-        return await aliceInner.openSealedLedger(sealed, requestID)
+        return await aliceInner.openSealedLedger({ sealed, requestID })
       },
       async bootstrapLedger(tokens: Array<string>) {
         bootstrapCalls++
@@ -602,7 +606,7 @@ describe('dispose against a requester ledger reply already in its IIFE', {
       recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
     })
     await bob.peer.resync()
-    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['circle:x=Bob']) })
     await bob.peer.resync()
 
     const alice = makeMLSPeer(fake, 'alice', rs, {
@@ -753,9 +757,10 @@ const hubHoldingLedgerReply = (fake: FakeHub, holderDID: string): HeldReceive =>
 
   const hub: LogHub = {
     publish: (params) => fake.publish(params),
-    subscribe: (subscriberDID, topicID, options) => fake.subscribe(subscriberDID, topicID, options),
-    unsubscribe: (subscriberDID, topicID) => fake.unsubscribe(subscriberDID, topicID),
-    receive: (subscriberDID) => {
+    subscribe: ({ subscriberDID, topicID, ...options }) =>
+      fake.subscribe(subscriberDID, topicID, options),
+    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe(subscriberDID, topicID),
+    receive: ({ subscriberDID }) => {
       const inner = fake.receive(subscriberDID)
       return subscriberDID === holderDID ? wrap(inner) : inner
     },
@@ -795,11 +800,11 @@ describe('dispose against a ledger reply delivered inside the dispose window', {
     })
     const aliceMLS: MemoryGroupMLS = {
       ...aliceInner,
-      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+      async openSealedLedger({ sealed, requestID }) {
         // Flipped BEFORE the first await: if the early guard returns, this is never reached and the
         // flag stays false. Removing the early `disposed` term flips it true — the mutation bite.
         openEntered = true
-        return await aliceInner.openSealedLedger(sealed, requestID)
+        return await aliceInner.openSealedLedger({ sealed, requestID })
       },
     }
 
@@ -810,7 +815,7 @@ describe('dispose against a ledger reply delivered inside the dispose window', {
       recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
     })
     await flush()
-    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['circle:x=Bob']) })
     await flush()
 
     const alice = makeMLSPeer(held.hub, 'alice', rs, {
@@ -876,14 +881,14 @@ describe('dispose against a lane op already inside the commit mutex', { concurre
     const alice = makeMLSPeer(recorder.hub, 'alice', rs, { epoch: 1, members })
     await flush()
 
-    const op = alice.peer.commit(
-      buildLedgerCommit(alice, ['post-dispose'], {
+    const op = alice.peer.commit({
+      build: buildLedgerCommit(alice, ['post-dispose'], {
         onBuild: async () => {
           buildEntered = true
           await buildGate // park the op AFTER assertLive, BEFORE mux.publish
         },
       }),
-    )
+    })
     const owned = op.catch(() => {})
     await flush()
     expect(buildEntered).toBe(true)
@@ -920,13 +925,13 @@ describe('dispose against a lane op parked before the mux bus-publish route', {
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const gatedCrypto: FakeCrypto = {
       ...aliceCrypto,
-      wrap: async (bytes) => {
+      wrap: async ({ bytes }) => {
         if (gateArmed) {
           gateArmed = false
           wrapEntered = true
           await wrapGate // park the op AFTER the seal starts, BEFORE bus.publish
         }
-        return aliceCrypto.wrap(bytes)
+        return aliceCrypto.wrap({ bytes })
       },
     }
 
@@ -979,13 +984,13 @@ describe('dispose against a lane op parked before the mux mailbox-publish route'
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const gatedCrypto: FakeCrypto = {
       ...aliceCrypto,
-      wrap: async (bytes) => {
+      wrap: async ({ bytes }) => {
         if (gateArmed) {
           gateArmed = false
           wrapEntered = true
           await wrapGate // park the op AFTER the seal starts, BEFORE mailbox.publish
         }
-        return aliceCrypto.wrap(bytes)
+        return aliceCrypto.wrap({ bytes })
       },
     }
 
@@ -1031,11 +1036,12 @@ function controllableReceiveHub(
   const fake = new FakeHub()
   let returnCalls = 0
   const hub: LogHub = {
-    subscribe: (subscriberDID, topicID, options) => fake.subscribe(subscriberDID, topicID, options),
-    unsubscribe: (subscriberDID, topicID) => fake.unsubscribe(subscriberDID, topicID),
+    subscribe: ({ subscriberDID, topicID, ...options }) =>
+      fake.subscribe(subscriberDID, topicID, options),
+    unsubscribe: ({ subscriberDID, topicID }) => fake.unsubscribe(subscriberDID, topicID),
     publish: (params) => fake.publish(params),
     fetchTopic: (params) => fake.fetchTopic(params),
-    receive: (subscriberDID) => {
+    receive: ({ subscriberDID }) => {
       const inner = fake.receive(subscriberDID)
       const iterator = inner[Symbol.asyncIterator]()
       return {

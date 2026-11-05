@@ -12,7 +12,10 @@ describe('createHubMux', () => {
     const hub = new FakeHub()
     const mux = createHubMux({ hub, localDID: 'bob' })
     const got: Array<string> = []
-    const unsub = mux.bus.subscribe('topic:x', (bytes) => got.push(toUTF(bytes)))
+    const unsub = mux.bus.subscribe({
+      topicID: 'topic:x',
+      onMessage: (bytes) => got.push(toUTF(bytes)),
+    })
     expect(hub.subscriberCount('topic:x')).toBe(1)
 
     await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: fromUTF('m1') })
@@ -31,7 +34,7 @@ describe('createHubMux', () => {
   test('the last listener leaving does not unsubscribe', async () => {
     const hub = new FakeHub()
     const mux = createHubMux({ hub, localDID: 'bob' })
-    const a = mux.bus.subscribe('topic:y', () => {})
+    const a = mux.bus.subscribe({ topicID: 'topic:y', onMessage: () => {} })
     const b = mux.onInbound('topic:y', () => {})
     // One real subscribe across both registrations: the refcount is about local listeners.
     expect(hub.subscriberCount('topic:y')).toBe(1)
@@ -61,7 +64,7 @@ describe('createHubMux', () => {
       order.push('onInbound')
       senders.push(msg.senderDID)
     })
-    const sub = mux.mailbox.receive('bob')
+    const sub = mux.mailbox.receive({ subscriberDID: 'bob' })
     void (async () => {
       for await (const _msg of sub) order.push('sink')
     })()
@@ -95,7 +98,7 @@ describe('createHubMux', () => {
     const hub = new FakeHub()
     const mux = createHubMux({ hub, localDID: 'bob' })
     const got: Array<string> = []
-    mux.bus.subscribe('topic:q', (bytes) => got.push(toUTF(bytes)))
+    mux.bus.subscribe({ topicID: 'topic:q', onMessage: (bytes) => got.push(toUTF(bytes)) })
     expect(hub.subscriberCount('topic:q')).toBe(1)
 
     await mux.dispose()
@@ -122,7 +125,7 @@ describe('createHubMux', () => {
     mux.onInbound('topic:lazy', () => {
       if (started) return
       started = true
-      const sub = mux.mailbox.receive('bob')
+      const sub = mux.mailbox.receive({ subscriberDID: 'bob' })
       void (async () => {
         for await (const msg of sub) got.push(toUTF(msg.payload))
       })()

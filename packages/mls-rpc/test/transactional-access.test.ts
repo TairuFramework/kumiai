@@ -46,7 +46,7 @@ async function setup(name: string) {
   const sender = createGroupCrypto({
     access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
   })
-  const seal = async (text: string) => await sender.wrap(utf8.encode(text), { aad })
+  const seal = async (text: string) => await sender.wrap({ bytes: utf8.encode(text), aad })
   return { group, store, host, crypto, seal }
 }
 
@@ -62,7 +62,7 @@ describe('transactional access: atomic durable open', () => {
       await release.promise
     }
 
-    const opening = crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') })
+    const opening = crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') })
     await entered.promise
     // The write is pending: a read takes the lock and sees the handle from before the open.
     expect(await host.access.read((handle) => handle)).toBe(before)
@@ -86,13 +86,13 @@ describe('transactional access: atomic durable open', () => {
     }
 
     await expect(
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     ).resolves.toMatchObject({ senderDID: expect.any(String) })
     expect(writes).toBe(2)
     expect([...store.records.keys()]).toEqual(['f1'])
     expect(store.snapshot().revision).toBe(2)
     await expect(
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     ).rejects.not.toBeInstanceOf(AppFrameStorageError)
     expect(store.records.size).toBe(1)
   })
@@ -106,7 +106,7 @@ describe('transactional access: atomic durable open', () => {
     }
 
     const failure = await failureOf(() =>
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     )
     expect(failure).toBeInstanceOf(AppFrameStorageError)
     expect((failure as Error).cause).toMatchObject({ message: 'disk failed' })
@@ -116,7 +116,7 @@ describe('transactional access: atomic durable open', () => {
 
     store.beforeWrite = undefined
     await expect(
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     ).resolves.toMatchObject({ payload: utf8.encode('hello') })
     expect(store.records.size).toBe(1)
   })
@@ -124,7 +124,7 @@ describe('transactional access: atomic durable open', () => {
   test('a stale same-epoch save after an open is rejected', async () => {
     const { store, host, crypto, seal } = await setup('tx-stale-save')
     const stale = store.snapshot()
-    await crypto.unwrap(await seal('hello'), { expectedAAD: aad, frame: frameRef('f1') })
+    await crypto.unwrap({ bytes: await seal('hello'), expectedAAD: aad, frame: frameRef('f1') })
     const opened = store.snapshot()
     expect(Number(host.live().epoch)).toBe(host.access.epoch())
 
@@ -147,7 +147,7 @@ describe('transactional access: atomic durable open', () => {
     }
     // Issued first and delayed: the open's write queues behind it and must retry past it.
     const earlier = store.save(row.revision, row.state, row.ledger)
-    const opening = crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') })
+    const opening = crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') })
     hold.resolve()
     await earlier
     await opening
@@ -160,7 +160,7 @@ describe('transactional access: atomic durable open', () => {
     const before = { live: host.live(), row: store.snapshot() }
     await expect(
       host.access.mutate(async (handle) => {
-        await handle.encrypt(utf8.encode('spent'))
+        await handle.encrypt({ plaintext: utf8.encode('spent') })
         throw new Error('transaction rolled back')
       }),
     ).rejects.toThrow('transaction rolled back')
@@ -178,11 +178,11 @@ describe('transactional access: atomic durable open', () => {
     store.records.set('f1', earlier)
     const sealed = await seal('hello')
 
-    await crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') })
+    await crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') })
     expect(store.records.get('f1')).toBe(earlier)
     const revision = store.snapshot().revision
     await expect(
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     ).rejects.not.toBeInstanceOf(AppFrameStorageError)
     expect(store.snapshot().revision).toBe(revision)
   })
@@ -195,7 +195,7 @@ describe('transactional access: atomic durable open', () => {
       [new Uint8Array([0, 1, 2]), aad],
     ] as const) {
       const failure = await failureOf(() =>
-        crypto.unwrap(bytes, { expectedAAD, frame: frameRef('f1') }),
+        crypto.unwrap({ bytes, expectedAAD, frame: frameRef('f1') }),
       )
       expect(failure).toBeInstanceOf(Error)
       expect(failure).not.toBeInstanceOf(AppFrameStorageError)
@@ -221,7 +221,7 @@ describe('transactional access: atomic durable open', () => {
 
   test('the stored state is the state the live handle publishes', async () => {
     const { store, host, crypto, seal } = await setup('tx-stored-state')
-    await crypto.unwrap(await seal('hello'), { expectedAAD: aad, frame: frameRef('f1') })
+    await crypto.unwrap({ bytes: await seal('hello'), expectedAAD: aad, frame: frameRef('f1') })
     expect(store.snapshot().state).toEqual(encodeClientState(host.live().state))
   })
 })
@@ -238,7 +238,7 @@ describe('adapter faults around a durable open', () => {
     }
     const crypto = createGroupCrypto({ access: failing, pending: host.pending })
     const failure = await failureOf(() =>
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     )
     expect(failure).toBeInstanceOf(AppFrameStorageError)
     expect((failure as Error).cause).toMatchObject({ message: 'restore failed' })
@@ -250,26 +250,26 @@ describe('adapter faults around a durable open', () => {
     let busy = true
     const staging: HandleAccess = {
       ...host.access,
-      open: (fn, persistOpened) =>
-        host.access.open(
-          (handle, stage) =>
+      open: ({ fn, persistOpened }) =>
+        host.access.open({
+          fn: (handle, stage) =>
             fn(handle, async (state, record) => {
               if (busy) throw new Error('SQLITE_BUSY')
               await stage(state, record)
             }),
           persistOpened,
-        ),
+        }),
     }
     const crypto = createGroupCrypto({ access: staging, pending: host.pending })
     const failure = await failureOf(() =>
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     )
     expect(failure).toBeInstanceOf(AppFrameStorageError)
     expect((failure as Error).cause).toMatchObject({ message: 'SQLITE_BUSY' })
 
     busy = false
     await expect(
-      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+      crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') }),
     ).resolves.toMatchObject({ payload: utf8.encode('hello') })
   })
 })
@@ -286,7 +286,7 @@ test('an open cannot publish over a newer mutation that committed after its writ
     writing.resolve()
     await release.promise
   }
-  const opening = crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') })
+  const opening = crypto.unwrap({ bytes: sealed, expectedAAD: aad, frame: frameRef('f1') })
   await writing.promise
   // Hold the lock so the mutation queues ahead of the open's publish.
   const hold = deferred()
@@ -294,7 +294,7 @@ test('an open cannot publish over a newer mutation that committed after its writ
     await hold.promise
   })
   const mutating = host.access.mutate(async (handle) => {
-    await handle.encrypt(utf8.encode('later'))
+    await handle.encrypt({ plaintext: utf8.encode('later') })
   })
   release.resolve()
   await new Promise((resolve) => setTimeout(resolve, 20))
@@ -309,13 +309,18 @@ test('a bootstrap whose host callback throws after the write still publishes the
   const group = await createRealGroup(1, 'tx-bootstrap-callback')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
-  const note = await signLedgerEntry(group.committer.identity, {
-    type: 'app.note',
-    groupID: group.committer.handle.groupID,
-    subject: group.committer.identity.id,
-    value: 'missed',
+  const note = await signLedgerEntry({
+    identity: group.committer.identity,
+    entry: {
+      type: 'app.note',
+      groupID: group.committer.handle.groupID,
+      subject: group.committer.identity.id,
+      value: 'missed',
+    },
   })
-  group.committer.handle = (await commitLedgerEntries(group.committer.handle, [note])).newGroup
+  group.committer.handle = (
+    await commitLedgerEntries({ group: group.committer.handle, tokens: [note] })
+  ).newGroup
   // Rejoin through recovery, which leaves the ledger incomplete until a bootstrap.
   const requester = createGroupMLS({
     access: simpleHandleAccess({
@@ -332,11 +337,11 @@ test('a bootstrap whose host callback throws after the write still publishes the
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
-  const request = await requester.createRecoveryRequest('tx-bootstrap')
-  const recovered = await requester.applyRecovery(
-    await responder.sealGroupInfo(request),
-    'tx-bootstrap',
-  )
+  const request = await requester.createRecoveryRequest({ requestID: 'tx-bootstrap' })
+  const recovered = await requester.applyRecovery({
+    sealed: await responder.sealGroupInfo(request),
+    requestID: 'tx-bootstrap',
+  })
   if (recovered == null || 'renewalRequired' in recovered) throw new Error('expected recovery')
   await recovered.onAccepted()
 

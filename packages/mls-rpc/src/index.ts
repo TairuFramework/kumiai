@@ -19,6 +19,11 @@
  * @module mls-rpc
  */
 
+export type {
+  GuardedReplaceParams,
+  HandleAccessOpenParams,
+  HandleAccessReplaceParams,
+} from './access.js'
 export {
   guardedReplace,
   type HandleAccess,
@@ -27,6 +32,7 @@ export {
   simpleHandleAccess,
 } from './access.js'
 export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
+export type { DeriveEntryKeyParams, OpenEntriesParams, SealEntriesParams } from './crypto.js'
 export {
   createGroupCrypto,
   deriveEntryKey,
@@ -35,6 +41,7 @@ export {
   openEntries,
   sealEntries,
 } from './crypto.js'
+export type { RecoveryPendingPutParams } from './mls.js'
 export {
   createGroupMLS,
   createLedgerEntrySlot,

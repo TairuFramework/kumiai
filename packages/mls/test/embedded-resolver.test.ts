@@ -54,41 +54,46 @@ function withDenied(registry: DeviceRegistry, denied: string): DeviceRegistry {
 
 describe('prefixRelation', () => {
   test('recognises equal and earlier chain heads as contained', () => {
-    expect(prefixRelation(rotated, [inception])).toBe('contained')
-    expect(prefixRelation(rotated, rotated.chain)).toBe('contained')
+    expect(prefixRelation({ recorded: rotated, prefix: [inception] })).toBe('contained')
+    expect(prefixRelation({ recorded: rotated, prefix: rotated.chain })).toBe('contained')
   })
 
   test('recognises an extending prefix as ahead', () => {
-    expect(prefixRelation({ chain: [inception], events: [] }, rotated.chain)).toBe('ahead')
+    expect(
+      prefixRelation({ recorded: { chain: [inception], events: [] }, prefix: rotated.chain }),
+    ).toBe('ahead')
   })
 
   test('contains a shared head after earlier generations have been pruned', async () => {
     const reset = await createReset({ seed: seed, profile: 0, gen: 1 })
     const recorded = { chain: [inception, reset], events: [] }
-    expect(prefixRelation(recorded, [inception, rotation, reset])).toBe('contained')
+    expect(prefixRelation({ recorded, prefix: [inception, rotation, reset] })).toBe('contained')
   })
 
   test('recognises an ahead head across pruned reset history', async () => {
     const reset = await createReset({ seed: seed, profile: 0, gen: 1 })
     const next = await rotateChain({ ...params, chain: [inception, reset] })
     const recorded = { chain: [inception, rotation, reset], events: [] }
-    expect(prefixRelation(recorded, [inception, reset, next])).toBe('ahead')
+    expect(prefixRelation({ recorded, prefix: [inception, reset, next] })).toBe('ahead')
   })
 
   test('recognises a divergent chain as forked', async () => {
     const fork = await rotateChain({ ...params, deny: ['did:key:fork'] })
-    expect(prefixRelation(rotated, [inception, fork])).toBe('forked')
+    expect(prefixRelation({ recorded: rotated, prefix: [inception, fork] })).toBe('forked')
     expect(
-      prefixRelation(rotated, [
-        await createInception({ seed: new Uint8Array(32).fill(8), profile: 0 }),
-      ]),
+      prefixRelation({
+        recorded: rotated,
+        prefix: [await createInception({ seed: new Uint8Array(32).fill(8), profile: 0 })],
+      }),
     ).toBe('forked')
   })
 
   test('answers none without a recorded chain or prefix head', () => {
-    expect(prefixRelation(undefined, [inception])).toBe('none')
-    expect(prefixRelation({ chain: [], events: [] }, [inception])).toBe('none')
-    expect(prefixRelation(rotated, [])).toBe('none')
+    expect(prefixRelation({ recorded: undefined, prefix: [inception] })).toBe('none')
+    expect(prefixRelation({ recorded: { chain: [], events: [] }, prefix: [inception] })).toBe(
+      'none',
+    )
+    expect(prefixRelation({ recorded: rotated, prefix: [] })).toBe('none')
   })
 })
 
@@ -155,7 +160,7 @@ describe('createRegistryControllerResolver', () => {
     const resolver = createRegistryControllerResolver({
       controllerID: fixture.did,
       prefix: [fixture.inception],
-      registry: await registryForLog(fixture.did, fixture.log),
+      registry: await registryForLog({ controller: fixture.did, log: fixture.log }),
     })
     for (const view of [resolver, resolver.frozen()]) {
       for (const did of [member.did, normalizeDID(member.did)]) {
@@ -185,7 +190,7 @@ describe('createRegistryControllerResolver', () => {
     const resolver = createRegistryControllerResolver({
       controllerID: fixture.did,
       prefix: [fixture.inception],
-      registry: await registryForLog(fixture.did, fixture.log),
+      registry: await registryForLog({ controller: fixture.did, log: fixture.log }),
     })
     for (const view of [resolver, resolver.frozen()]) {
       await expect(
@@ -221,7 +226,7 @@ describe('createRegistryControllerResolver', () => {
       const resolver = createRegistryControllerResolver({
         controllerID: fixture.did,
         prefix,
-        registry: await registryForLog(fixture.did, log),
+        registry: await registryForLog({ controller: fixture.did, log }),
       })
       for (const view of [resolver, resolver.frozen()]) {
         await expect(
@@ -243,7 +248,10 @@ describe('createRegistryControllerResolver', () => {
     const fixture = await buildEpoch({ members: 1 })
     const member = fixture.members[0]
     if (member == null) throw new Error('Missing member')
-    for (const registry of [registrySeed(), await registryForLog(fixture.did, fixture.log)]) {
+    for (const registry of [
+      registrySeed(),
+      await registryForLog({ controller: fixture.did, log: fixture.log }),
+    ]) {
       const resolver = createRegistryControllerResolver({
         controllerID: fixture.did,
         prefix: fixture.log.chain,
@@ -270,7 +278,7 @@ describe('createRegistryControllerResolver', () => {
 
   test('frozen view keeps the registry deny set', async () => {
     const registry = withDenied(
-      await registryForLog(did, { chain: [inception], events: [] }),
+      await registryForLog({ controller: did, log: { chain: [inception], events: [] } }),
       'did:key:zDenied',
     )
     const resolver = createRegistryControllerResolver({
@@ -290,7 +298,7 @@ describe('createRegistryControllerResolver', () => {
     const view = createRegistryControllerResolver({
       controllerID: fixture.did,
       prefix: fixture.log.chain,
-      registry: await registryForLog(fixture.did, fixture.log),
+      registry: await registryForLog({ controller: fixture.did, log: fixture.log }),
     }).frozen()
     loads.recorded = 0
     await view.resolve({ did: fixture.did, header: {} })
@@ -311,7 +319,7 @@ describe('createRegistryControllerResolver', () => {
     const resolver = createRegistryControllerResolver({
       controllerID: fixture.did,
       prefix: fixture.log.chain,
-      registry: await registryForLog(fixture.did, fixture.log),
+      registry: await registryForLog({ controller: fixture.did, log: fixture.log }),
     })
     loads.dids.length = 0
     const view = resolver.frozen()
@@ -339,7 +347,7 @@ describe('createRegistryControllerResolver', () => {
   })
 
   test('key resolution uses the prefix even when the registry has a later rotation', async () => {
-    const registry = await registryForLog(did, rotated)
+    const registry = await registryForLog({ controller: did, log: rotated })
     const resolver = createRegistryControllerResolver({
       controllerID: did,
       prefix: [inception],

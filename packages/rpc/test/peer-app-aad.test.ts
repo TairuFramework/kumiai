@@ -23,11 +23,11 @@ function peer(hub: FakeHub, localDID: string, handlers: Record<string, unknown>)
     ...base,
     wrap: (bytes: Uint8Array, opts?: { aad?: Uint8Array }) => {
       sealed.push(decodeAppAAD(opts?.aad ?? new Uint8Array()))
-      return base.wrap(bytes, opts)
+      return base.wrap({ bytes, ...opts })
     },
     unwrap: (bytes: Uint8Array, opts?: { expectedAAD?: Uint8Array }) => {
       opened.push(decodeAppAAD(opts?.expectedAAD ?? new Uint8Array()))
-      return base.unwrap(bytes, opts)
+      return base.unwrap({ bytes, ...opts })
     },
   }
   return {

@@ -12,7 +12,7 @@ testAppOutboxConformance({ label: 'integration host outbox', createOutbox: creat
 test('real MLS accepts pre-init dispatches in order and retains them across peer restart', async () => {
   const hub = createWireHub()
   const identity = randomIdentity()
-  const group = (await createGroup(identity, 'outbox-restart')).group
+  const group = (await createGroup({ identity, groupID: 'outbox-restart' })).group
   const entrySlot = createLedgerEntrySlot()
   const member = makeMember({ hub, identity, group, entrySlot })
   try {

@@ -28,9 +28,12 @@ test('a commit resolves entries through access.read without re-entering mutate',
     return await group.resolveLedgerEntries(ids)
   })
   await expect(
-    mls.processCommit(commit, {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: resolver,
+    mls.processCommit({
+      commit,
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: resolver,
+      },
     }),
   ).resolves.toMatchObject({ advanced: true })
   expect(resolver).toHaveBeenCalledOnce()
@@ -45,9 +48,12 @@ test('an empty entry list skips the resolver', async () => {
   const commit = await buildRealCommit(group, { removes: 1 })
   expect(readCommitEntryIDs(commit)).toEqual([])
   const resolver = vi.fn(group.resolveLedgerEntries)
-  await mls.processCommit(commit, {
-    senderDID: group.committer.identity.id,
-    resolveLedgerEntries: resolver,
+  await mls.processCommit({
+    commit,
+    context: {
+      senderDID: group.committer.identity.id,
+      resolveLedgerEntries: resolver,
+    },
   })
   expect(resolver).not.toHaveBeenCalled()
 })
@@ -65,14 +71,17 @@ test('an epoch move during pre-resolution reports the new epoch without applying
   const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
   const commit = await buildRealCommit(group)
   const resolver = async (ids: Array<string>) => {
-    await guardedReplace(access, group.committer.handle)
+    await guardedReplace({ access, next: group.committer.handle })
     return await group.resolveLedgerEntries(ids)
   }
   const moved = Number(group.committer.handle.epoch)
   await expect(
-    mls.processCommit(commit, {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: resolver,
+    mls.processCommit({
+      commit,
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: resolver,
+      },
     }),
   ).resolves.toEqual({ advanced: false, epochBefore: moved, epochAfter: moved })
   expect(member.handle).toBe(group.committer.handle)
@@ -91,17 +100,23 @@ test('wrong-epoch and non-Commit frames never open entry bodies', async () => {
   const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
   const commit = await buildRealCommit(group)
   const opened = vi.fn(group.resolveLedgerEntries)
-  await guardedReplace(access, group.committer.handle)
+  await guardedReplace({ access, next: group.committer.handle })
   await expect(
-    mls.processCommit(commit, {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: opened,
+    mls.processCommit({
+      commit,
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: opened,
+      },
     }),
   ).resolves.toMatchObject({ advanced: false })
   await expect(
-    mls.processCommit(new Uint8Array([0]), {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: opened,
+    mls.processCommit({
+      commit: new Uint8Array([0]),
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: opened,
+      },
     }),
   ).resolves.toMatchObject({ advanced: false })
   expect(readCommitEntryIDs(new Uint8Array([0]))).toEqual([])
@@ -117,24 +132,33 @@ test('resolver faults and missing bodies retain their error boundary', async () 
   const commit = await buildRealCommit(group)
   const fault = new Error('blob open failed')
   await expect(
-    mls.processCommit(commit, {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: async () => {
-        throw fault
+    mls.processCommit({
+      commit,
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: async () => {
+          throw fault
+        },
       },
     }),
   ).rejects.toBe(fault)
   await expect(
-    mls.processCommit(commit, {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: async () => [],
+    mls.processCommit({
+      commit,
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: async () => [],
+      },
     }),
   ).rejects.toBeInstanceOf(MissingLedgerEntriesError)
   // A body whose digest matches no requested ID is absent, not trusted.
   await expect(
-    mls.processCommit(commit, {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: async () => ['not-a-token'],
+    mls.processCommit({
+      commit,
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: async () => ['not-a-token'],
+      },
     }),
   ).rejects.toBeInstanceOf(MissingLedgerEntriesError)
   expect(member.handle.epoch).toBe(group.committer.handle.epoch - 1n)

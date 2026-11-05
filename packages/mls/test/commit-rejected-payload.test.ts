@@ -46,7 +46,7 @@ async function twoMemberGroup(
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
 
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -54,8 +54,8 @@ async function twoMemberGroup(
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle(bob)
-  const added = await commitInvite(created, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: bob })
+  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -97,13 +97,13 @@ describe('CommitRejectedError carries the rejected commit', () => {
   test('the default policy path captures proposals and the sender leaf index', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('rejected-payload-default')
     const carol = randomIdentity()
-    const carolKP = await createKeyPackageBundle(carol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
     const bobCommit = await addCommitBytes(bobGroup, carolKP.publicPackage)
 
     // `rejects.toThrow` cannot reach the fields — the whole point here is the caught object.
     expect.assertions(4)
     try {
-      await aliceGroup.processMessage(bobCommit)
+      await aliceGroup.processMessage({ message: bobCommit })
     } catch (error) {
       expect(error).toBeInstanceOf(CommitRejectedError)
       const rejected = error as CommitRejectedError
@@ -129,7 +129,7 @@ describe('CommitRejectedError carries the rejected commit', () => {
     )
 
     const carol = randomIdentity()
-    const carolKP = await createKeyPackageBundle(carol)
+    const carolKP = await createKeyPackageBundle({ identity: carol })
     // A REAL invite, not `addCommitBytes`'s bare raw commit (that's Task 1's shape, for a
     // commit `defaultCommitPolicy` also rejects — admin-valid but unrostered). Carol's role
     // grant rides this commit and folds into `candidateRoster`, so `defaultCommitPolicy`
@@ -143,11 +143,15 @@ describe('CommitRejectedError carries the rejected commit', () => {
       permission: 'member',
     })
     publish(carolInvite)
-    const addedCarol = await commitInvite(aliceGroup, carolKP.publicPackage, carolInvite)
+    const addedCarol = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolKP.publicPackage,
+      invite: carolInvite,
+    })
 
     expect.assertions(4)
     try {
-      await bobGroup.processMessage(addedCarol.commitMessage)
+      await bobGroup.processMessage({ message: addedCarol.commitMessage })
     } catch (error) {
       expect(error).toBeInstanceOf(CommitRejectedError)
       const rejected = error as CommitRejectedError
