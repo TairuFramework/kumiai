@@ -36,7 +36,7 @@ export async function createCheckpointSplitView() {
         ledgerEntries: member.handle.ledgerTokens,
         options: fixture.environment.options,
       }),
-      { packageUse: { sourceID: 'split-member', ref: `split-${index}`, kind: 'ordinary' } },
+      { packageUse: await fixture.packageUse() },
     )
     const access = await fixture.registry.access(key.groupID)
     await access.mutate(async (handle, persist) => {

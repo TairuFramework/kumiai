@@ -10,6 +10,7 @@ import type { GroupKey, GroupStateRecord } from '../src/persistence-types.js'
 import { recoveryTrustFor } from '../src/registry/trust.js'
 import { createMemoryTransaction, gateRegistryMaintenance } from '../src/testing.js'
 import { createDeterministicAtRestCodec } from './fixtures/at-rest.js'
+import { createDevicePackages } from './fixtures/device-packages.js'
 import {
   createGatedRegistryFixture as createRegistryFixture,
   type RegistryFixtureBase,
@@ -23,6 +24,7 @@ function registry(fixture: RegistryFixtureBase) {
   const owner = createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
+    packages: fixture.packages,
     recovery: fixture.environment,
     restore: registryFixtureRestore(fixture),
     restoreCandidate: async () => {
@@ -863,6 +865,7 @@ test('two device factories on one database reject the second registry before rea
     createGroupHandleRegistry({
       persistence,
       providerID: params.providerID,
+      packages: createDevicePackages(persistence),
       recovery: { identity, options: {} },
       restore,
       restoreCandidate: async () => {
@@ -886,6 +889,7 @@ test('copied unregistered wrapper and foreign provider refuse synchronously', as
     const params = {
       persistence: fixture.device,
       providerID: fixture.device.providerID,
+      packages: fixture.packages,
       recovery: fixture.environment,
       restore: registryFixtureRestore(fixture),
       restoreCandidate: async () => {

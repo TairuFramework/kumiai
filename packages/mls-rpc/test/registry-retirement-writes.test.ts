@@ -347,6 +347,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         const registry = createGroupHandleRegistry({
           persistence: fixture.device,
           providerID: fixture.device.providerID,
+          packages: fixture.packages,
           recovery: fixture.environment,
           restore: registryFixtureRestore(fixture),
           restoreCandidate: async () => {

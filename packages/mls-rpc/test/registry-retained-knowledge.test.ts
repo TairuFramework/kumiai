@@ -136,7 +136,7 @@ test.each(['seed', 'readmission'] as const)(
   async (path) => {
     const s = await leaseSettlement()
     try {
-      const packageUse = { sourceID: 'settlement', ref: 'package', kind: 'ordinary' as const }
+      const packageUse = await s.fixture.packageUse()
       await s.fixture.registry.seed(s.current, { packageUse })
       if (path === 'seed') await s.fixture.registry.delete(s.key)
       const before = await s.fixture.inspectRows()
@@ -158,7 +158,7 @@ test('batching preserves controller knowledge and control progress', async () =>
   try {
     const sender = await bareTestHandle(s.current)
     await s.fixture.registry.seed(s.current, {
-      packageUse: { sourceID: 'batch-knowledge', ref: 'package', kind: 'ordinary' },
+      packageUse: await s.fixture.packageUse(),
     })
     const access = await s.fixture.registry.access(s.key.groupID)
     const binding = registryStreamingOpen(access)

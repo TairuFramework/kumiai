@@ -191,7 +191,7 @@ export async function authenticatedCompletionFixture(
   const sender = await registryHandle({ mode, handle: joined, options })
   const key = await fixture.registry.seed(
     await registryHandle({ mode, handle: added.newGroup, options }),
-    { packageUse: { sourceID: 'completion-authentication', ref: 'joined', kind: 'ordinary' } },
+    { packageUse: await fixture.packageUse() },
   )
   const access = await fixture.registry.access(groupID)
   const completion = createHandlerCompletion({ persistence: fixture.device.groups, key })

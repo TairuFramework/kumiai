@@ -178,6 +178,7 @@ export async function createRegistryWelcomeHistory(params: {
   })
   const newer = await at(2)
   return {
+    bundle,
     history: {
       exact,
       alternate,
@@ -185,7 +186,7 @@ export async function createRegistryWelcomeHistory(params: {
       newer,
       unusedOlder,
       packageUse: {
-        sourceID: 'registry-welcome',
+        sourceID: params.kind === 'ordinary' ? 'registry-welcome' : 'registry-welcome-last-resort',
         ref: await keyPackageRef(bundle.publicPackage),
         kind: params.kind,
       },

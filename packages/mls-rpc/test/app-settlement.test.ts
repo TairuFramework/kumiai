@@ -973,6 +973,7 @@ for (const afterAwait of [false, true]) {
             return createGroupHandleRegistry({
               persistence: fixture.device,
               providerID: fixture.device.providerID,
+              packages: fixture.packages,
               recovery: fixture.environment,
               restore: async () => fixture.makeHandle(0),
               restoreCandidate: async () => fixture.makeHandle(0),

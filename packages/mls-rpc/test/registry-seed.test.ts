@@ -25,6 +25,7 @@ function registry(fixture: RegistryFixtureBase) {
   return createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
+    packages: fixture.packages,
     recovery: fixture.environment,
     restore: registryFixtureRestore(fixture),
     restoreCandidate: async () => {
@@ -40,7 +41,7 @@ function entry(fixture: RegistryFixtureBase) {
 function refused(reason: SeedAdmissionRefusedError['reason']) {
   return { name: 'SeedAdmissionRefusedError', reason }
 }
-const packageUse: PackageUse = { sourceID: 'seed-source', ref: 'seed-ref', kind: 'ordinary' }
+const packageUse: PackageUse = { sourceID: 'source', ref: 'seed-ref', kind: 'ordinary' }
 
 for (const mode of ['real-mls', 'double'] as const) {
   describe(`seed (${mode})`, () => {

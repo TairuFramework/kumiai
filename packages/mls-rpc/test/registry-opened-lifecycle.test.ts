@@ -206,10 +206,10 @@ for (const mode of ['real-mls', 'double'] as const) {
         if (kind === 'delete') begin = () => env.fixture.registry.delete(env.key)
         else if (kind === 'Welcome-readmission') {
           const candidate = await env.fixture.makeHandle(2)
-          begin = () =>
+          begin = async () =>
             env.fixture.registry.seed(candidate, {
               replace: true,
-              packageUse: { kind: 'ordinary', sourceID: 'hub', ref: 'fresh' },
+              packageUse: await env.fixture.packageUse(),
             })
         } else if (kind === 'resync') {
           const recovery = await env.fixture.confirmedRecovery(env.key, {
@@ -675,7 +675,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             await fixture.registry.seed(
               await registryHandle({ mode, handle: local.handle, options }),
               {
-                packageUse: { kind: 'ordinary', sourceID: 'terminal-drain', ref: 'joined' },
+                packageUse: await fixture.packageUse(),
               },
             )
             const sender = await registryHandle({

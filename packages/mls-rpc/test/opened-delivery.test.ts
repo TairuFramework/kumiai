@@ -110,6 +110,7 @@ test.each(['real-mls', 'double'] as const)(
     const params = {
       persistence: fixture.device,
       providerID: fixture.device.providerID,
+      packages: fixture.packages,
       recovery: fixture.environment,
       restore: async () => {
         throw new Error('Unexpected restore')
@@ -1142,10 +1143,10 @@ describe.each(['real-mls', 'double'] as const)('stored opened delivery (%s)', (m
         let lifecycle: () => Promise<unknown> = () => env.fixture.registry.delete(env.key)
         if (entry === 'readmit') {
           const candidate = await env.fixture.makeHandle(2)
-          lifecycle = () =>
+          lifecycle = async () =>
             env.fixture.registry.seed(candidate, {
               replace: true,
-              packageUse: { kind: 'ordinary', ref: 'cursor-readmit', sourceID: 'hub' },
+              packageUse: await env.fixture.packageUse(),
             })
         } else if (entry === 'switch') {
           const recovery = await env.fixture.confirmedRecovery(env.key, {

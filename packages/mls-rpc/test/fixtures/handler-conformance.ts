@@ -24,6 +24,7 @@ export async function createHandlerConformanceFixture(
     registry = createGroupHandleRegistry({
       persistence: ports.device,
       providerID: ports.device.providerID,
+      packages: ports.packages,
       openedDeliveryContext,
       recovery: { identity, options },
       async restoreCandidate() {

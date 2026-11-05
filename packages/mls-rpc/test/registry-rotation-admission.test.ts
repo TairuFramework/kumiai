@@ -1280,7 +1280,7 @@ test.each(['real-mls', 'double'] as const)(
       const key = await base.registry.seed(
         await registryHandle({ mode, handle, options: base.environment.options }),
         {
-          packageUse: { sourceID: 'lease-lapse', ref: 'joined', kind: 'ordinary' },
+          packageUse: await base.packageUse(),
         },
       )
       const saved = await base.device.groups.loadState(key)

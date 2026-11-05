@@ -156,7 +156,7 @@ export async function createRegistryLeaseFixture(
         options: peerFixture.environment.options,
       })
       await peerFixture.registry.seed(handle, {
-        packageUse: { sourceID: 'lease-peer', ref: 'joined', kind: 'ordinary' },
+        packageUse: await peerFixture.packageUse(),
       })
       peer = await peerFixture.registry.access(key.groupID)
       return peer
@@ -584,7 +584,7 @@ export async function createRegistryLeaseFixture(
             aad: result.aad('ephemeral'),
           })
           const localKey = await local.registry.seed(author, {
-            packageUse: { sourceID: 'lease-lapsed', ref: 'restored', kind: 'ordinary' },
+            packageUse: await local.packageUse(),
           })
           for (const restart of [false, true]) {
             if (restart) local = await local.reopen()

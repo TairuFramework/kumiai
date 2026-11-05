@@ -61,6 +61,7 @@ import {
   recordAAD,
 } from '../../src/persistence-codec.js'
 import type {
+  DevicePackageAdapters,
   DevicePersistence,
   DeviceStores,
   GroupPersistence,
@@ -86,6 +87,7 @@ import {
   memoryFaults,
 } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
+import { createDevicePackages } from './device-packages.js'
 import { openedDeliveryContext } from './ownership-context.js'
 import { createTestCompletion, testGroupMLSDependencies } from './real-group.js'
 import { requireValue } from './require-value.js'
@@ -164,6 +166,7 @@ type RegistryStoragePorts = {
   prepareInstallationCheckpoint: typeof prepareCheckpointInstallationFromTrust
   readConfirmedTranscriptHash(state: Uint8Array | null): Promise<Uint8Array>
   device: DevicePersistence<MemoryTransaction>
+  packages: DevicePackageAdapters
   completion(key: {
     groupID: string
     incarnation: number
@@ -501,6 +504,10 @@ export async function createStorageFixture(params: {
       device,
       completion: (key: { groupID: string; incarnation: number }) =>
         createHandlerCompletion({ persistence: device.groups, key }),
+      packages: createDevicePackages(device, [
+        { sourceID: 'source-1', kind: 'ordinary' },
+        { sourceID: 'source-1-last-resort', kind: 'last-resort' },
+      ]),
       packageStores: (sourceID: string) => createMemoryPackageStores({ device, sourceID }),
     }
   }
@@ -1112,6 +1119,7 @@ export async function createControlCrashHarness(
       ? createGroupHandleRegistry({
           persistence: fixture.ports.device,
           providerID: fixture.ports.device.providerID,
+          packages: fixture.ports.packages,
           openedDeliveryContext,
           recovery: { identity, options },
           restore: async (record) => {

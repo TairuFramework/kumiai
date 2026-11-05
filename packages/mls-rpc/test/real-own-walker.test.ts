@@ -68,7 +68,7 @@ async function fixture() {
     options: f.environment.options,
   })
   const key = await f.registry.seed(local.handle, {
-    packageUse: { sourceID: 'own-walker', ref: 'joined', kind: 'ordinary' },
+    packageUse: await f.packageUse(),
   })
   const ports = f.device.groups.ports(key)
   const access = createRegistryHandleAccess({ access: await f.registry.access(key.groupID) })

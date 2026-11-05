@@ -522,7 +522,7 @@ test.each(['receive', 'remove'] as const)(
           ledgerEntries: member.handle.ledgerTokens,
           options: fixture.environment.options,
         }),
-        { packageUse: { sourceID: 'receiver', ref: 'receiver-package', kind: 'ordinary' } },
+        { packageUse: await fixture.packageUse() },
       )
       const access = await fixture.registry.access(groupID)
       const capability = entryCapability(fixture.device.groups)

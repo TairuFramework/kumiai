@@ -29,6 +29,7 @@ function registry(fixture: RegistryFixtureBase) {
   return createGroupHandleRegistry({
     persistence: fixture.device,
     providerID: fixture.device.providerID,
+    packages: fixture.packages,
     recovery: fixture.environment,
     restore: registryFixtureRestore(fixture),
     restoreCandidate: async () => {

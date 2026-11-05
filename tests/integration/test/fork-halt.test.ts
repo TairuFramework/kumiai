@@ -197,7 +197,7 @@ test('ack retains immutable evidence and event identity after reopen', async () 
   await expect(
     f.registry.registry.seed(fresh, {
       replace: true,
-      packageUse: { sourceID: 'fork-readmission', ref: crypto.randomUUID(), kind: 'ordinary' },
+      packageUse: await f.registry.packageUse(),
     }),
   ).rejects.toMatchObject({ reason: 'fork-halted' })
   expect((await f.member.control.load()).forkHalt).toEqual(event.halt)

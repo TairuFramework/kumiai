@@ -452,7 +452,7 @@ test('total key and database loss permits fresh same group invite', async () => 
   })
   try {
     await previous.registry.seed(joined, {
-      packageUse: { sourceID: 'old', ref: 'old-package', kind: 'ordinary' },
+      packageUse: await previous.packageUse(),
     })
   } finally {
     await previous.close()
@@ -490,7 +490,7 @@ test('total key and database loss permits fresh same group invite', async () => 
   try {
     expect(
       await next.registry.seed(rejoined, {
-        packageUse: { sourceID: 'fresh', ref: 'fresh-package', kind: 'ordinary' },
+        packageUse: await next.packageUse(),
       }),
     ).toEqual({ groupID, incarnation: 1 })
     expect((await next.registry.access(groupID)).admission().admissible).toBe(true)

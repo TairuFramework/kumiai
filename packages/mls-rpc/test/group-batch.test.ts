@@ -9,6 +9,7 @@ import { createMemoryDevicePersistence } from '../src/memory-device-persistence.
 import { createMemoryTransaction } from '../src/memory-transaction.js'
 import { createGroupHandleRegistry } from '../src/registry/registry.js'
 import { deferred } from '../src/runtime.js'
+import { createDevicePackages } from './fixtures/device-packages.js'
 
 const idle = async () => {
   for (let turn = 0; turn < 12; turn++) await Promise.resolve()
@@ -638,6 +639,7 @@ describe('group batch arbitration', () => {
     const params = {
       persistence,
       providerID: persistence.providerID,
+      packages: createDevicePackages(persistence),
       recovery: { identity, options: {} },
       restore: unexpected,
       restoreCandidate: unexpected,

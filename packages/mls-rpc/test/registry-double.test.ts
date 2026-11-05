@@ -1506,7 +1506,7 @@ describe('double application frames', () => {
             let own: Uint8Array
             if (path === 'registry adoption') {
               await fixture.registry.seed(f.local, {
-                packageUse: { sourceID: 'retained', ref: 'member', kind: 'ordinary' },
+                packageUse: await fixture.packageUse(),
               })
               const access = await fixture.registry.access(f.local.groupID)
               // Build first so adoption must carry progress committed afterwards.

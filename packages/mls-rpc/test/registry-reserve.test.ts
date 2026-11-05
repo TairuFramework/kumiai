@@ -324,7 +324,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       expect(input.ownLeafLapsed()).toBe(true)
       const reserve = vi.spyOn(reservations, 'reserveFromBytes')
       await fixture.registry.seed(input, {
-        packageUse: { sourceID: 'floor', ref: 'lapsed', kind: 'ordinary' },
+        packageUse: await fixture.packageUse(),
       })
       const result = await reserve.mock.results[0]?.value
       expect(result.reservation).toBeNull()
@@ -1116,7 +1116,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       fixtures.push(fixture)
       const restore = fixture.holdRestore(group.key.groupID)
       const installing = fixture.registry.seed(input, {
-        packageUse: { sourceID: 'capture', ref: 'race', kind: 'ordinary' },
+        packageUse: await fixture.packageUse(),
       })
       await restore.started
       const { commitKeyRotation } = await import('@kumiai/mls')
@@ -1224,7 +1224,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       let settled = false
       const reserve = vi.spyOn(reservations, 'reserveFromBytes')
       const installing = fixture.registry
-        .seed(input, { packageUse: { sourceID: 'decrypt', ref: 'capture', kind: 'ordinary' } })
+        .seed(input, { packageUse: await fixture.packageUse() })
         .finally(() => {
           settled = true
         })

@@ -418,7 +418,7 @@ one. The ones a host is most likely to trip on:
 
 ## Validated registry cold access
 
-`createGroupHandleRegistry({ persistence, providerID, recovery, restore, restoreCandidate })`
+`createGroupHandleRegistry({ persistence, providerID, packages, recovery, restore, restoreCandidate })`
 provides `start()` and `access(groupID)` over device persistence. The provider ID must match
 `persistence.providerID`, and the recovery identity must own the device. `start()` checks device
 restore work and lifetime restore flags; this core refuses pending restore work. Access restores
@@ -430,6 +430,11 @@ Restore adapters throw `InvalidCandidateError` for undecodable or invalid candid
 operational failures. This export reuses MLS's `GroupRestoreError`, so `restoreGroup` validation
 failures already have the correct type. Control-build rejects that error and unsupported
 client-state versions before framing or persistence. Other restoration errors propagate.
+
+`packages` must describe the same provider and owner as `persistence`. Each non-empty source ID names one source/store pair with matching kind.
+The factory validates identities, unique IDs and callable operations before registration. It copies descriptors while preserving callback and store identities.
+Descriptors must truthfully identify one provider/loss boundary. Validation cannot inspect arbitrary host callback implementations.
+Empty source/store arrays support genesis-only use. Welcome seeds require their package source and kind to be registered before private restoration.
 
 `createRegistryPeer` supplies a private, non-revoking automatic rotation at the application generation ceiling.
 The default `buildKeyRotation` serialises its candidate as a library envelope containing
@@ -922,6 +927,7 @@ Prefer a key-neutral registry resolver for cold and retired delivery:
 ```ts
 const registry = createGroupHandleRegistry({
   ...registryParams,
+  packages,
   openedDeliveryContext,
   openedHandler: ({ key, completion, openedDeliveryContext }) =>
     createOpenedAppHandler({

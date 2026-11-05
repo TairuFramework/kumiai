@@ -59,6 +59,7 @@ import {
 import type {
   AppOutboxEntry,
   AppSettlementObligation,
+  DevicePackageAdapters,
   DevicePersistence,
   GroupBatchOptions,
   GroupKey,
@@ -88,6 +89,7 @@ import { deferred } from '../../src/runtime.js'
 import { createGroupSafety, type GroupSafety } from '../../src/safety.js'
 import { gateRegistryMaintenance, restoreCommittedSender } from '../../src/testing.js'
 import { createDeterministicAtRestCodec } from './at-rest.js'
+import { createDevicePackages, provisionDevicePackage } from './device-packages.js'
 import { openedDeliveryContext } from './ownership-context.js'
 import { createRealGroup, testGroupMLSDependencies, testHandleAccess } from './real-group.js'
 import {
@@ -119,6 +121,8 @@ export type RegistryFixture = Omit<RegistryFixtureBase, 'reopen'> & {
 }
 export type RegistryFixtureBase = {
   device: DevicePersistence<MemoryTransaction>
+  packages: DevicePackageAdapters
+  packageUse(): Promise<PackageUse>
   identity: OwnIdentity
   environment: RecoveryEnvironment
   makeHandle(epoch: number, groupID?: string): Promise<GroupHandle>
@@ -491,6 +495,17 @@ async function assemble(
     effects: params.effects,
     ownershipContext: params.ownershipContext,
   })
+  const packageStore = storage.ports.packageStores('source').ordinary
+  const retainedPackage = (await packageStore.list(identity.id))[0]
+  const packageUse: PackageUse =
+    retainedPackage === undefined
+      ? await provisionDevicePackage({
+          device: storage.ports.device,
+          identity,
+          sourceID: 'source',
+          kind: 'ordinary',
+        })
+      : { sourceID: 'source', ref: retainedPackage.ref, kind: 'ordinary' }
   let beforeWork: (() => void | Promise<void>) | undefined
   const key = { groupID: params.groupID, incarnation: 1 }
   const restoreHolds = new Map<string, Hold>()
@@ -563,6 +578,7 @@ async function assemble(
         persistence: fixture.device,
         batch: params.batch,
         providerID: fixture.device.providerID,
+        packages: fixture.packages,
         openedDeliveryContext:
           params.openedDeliveryContext === null
             ? undefined
@@ -581,6 +597,12 @@ async function assemble(
       return owner
     },
     device: storage.ports.device,
+    packages: createDevicePackages(storage.ports.device, [
+      { sourceID: 'source', kind: 'ordinary' },
+      { sourceID: 'registry-welcome', kind: 'ordinary' },
+      { sourceID: 'registry-welcome-last-resort', kind: 'last-resort' },
+    ]),
+    packageUse: async () => ({ ...packageUse }),
     manualRecovery: () =>
       createManualRecoveryStore({
         registry: fixture.registry,
@@ -639,14 +661,20 @@ async function assemble(
       return candidate
     },
     async welcomeHistory(kind) {
-      return (
-        await createRegistryWelcomeHistory({
-          ...params,
-          identity,
-          options: environment.options,
-          kind,
-        })
-      ).history
+      const { history, bundle } = await createRegistryWelcomeHistory({
+        ...params,
+        identity,
+        options: environment.options,
+        kind,
+      })
+      await provisionDevicePackage({
+        device: fixture.device,
+        identity,
+        sourceID: history.packageUse.sourceID,
+        kind,
+        bundle,
+      })
+      return history
     },
     async confirmedRecovery(sourceKey, options) {
       const record = await fixture.device.groups.loadState(sourceKey)
@@ -1176,7 +1204,7 @@ export async function createForkNoticeFixture(params: {
       options: fixture.environment.options,
     })
   const key = await fixture.registry.seed(await wrap(real.committer.handle), {
-    packageUse: { sourceID: 'fork-notice', ref: 'member-package', kind: 'ordinary' },
+    packageUse: await fixture.packageUse(),
   })
   let local = (await commitKeyRotation(real.committer.handle)).newGroup
   const remote = (await commitKeyRotation(member.handle)).newGroup
@@ -1533,10 +1561,10 @@ export async function createNotMemberFixture(
       handle: await clone(own),
       options: local.environment.options,
     }),
-    { packageUse: { sourceID: 'diagnostic', ref: 'requester-package', kind: 'ordinary' } },
+    { packageUse: await local.packageUse() },
   )
   const remoteKey = await remote.registry.seed(await clone(common), {
-    packageUse: { sourceID: 'diagnostic', ref: 'responder-package', kind: 'ordinary' },
+    packageUse: await remote.packageUse(),
   })
   async function install(fixture: RegistryFixture, key: GroupKey, proposed: GroupHandle) {
     const handle =
@@ -1573,7 +1601,7 @@ export async function createNotMemberFixture(
       identity: additional.identity,
     })
     await additional.fixture.registry.seed(await clone(additional.handle), {
-      packageUse: { sourceID: 'diagnostic', ref: 'second-responder', kind: 'ordinary' },
+      packageUse: await additional.fixture.packageUse(),
     })
   }
   const continuing = await clone(common)
@@ -1652,7 +1680,7 @@ export async function createNotMemberFixture(
       identity: alternate,
     })
     const key = await fixture.registry.seed(await clone(handle), {
-      packageUse: { sourceID: 'diagnostic', ref: 'alternate-key-responder', kind: 'ordinary' },
+      packageUse: await fixture.packageUse(),
     })
     const additional = { identity: alternate, handle, fixture }
     additionals.unshift(additional)
@@ -1798,7 +1826,7 @@ export async function createNotMemberFixture(
       })
       continuers.push(survivor)
       await survivor.registry.seed(offered, {
-        packageUse: { sourceID: 'diagnostic', ref: 'continuing-responder', kind: 'ordinary' },
+        packageUse: await survivor.packageUse(),
       })
       return survivor
     },

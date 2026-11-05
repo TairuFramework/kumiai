@@ -1455,6 +1455,7 @@ test.each(['empty', 'complete', 'partial', 'stale', 'missing head'] as const)(
     const owner = createGroupHandleRegistry({
       persistence: fixture.device,
       providerID: fixture.device.providerID,
+      packages: fixture.packages,
       recovery: fixture.environment,
       restore: registryFixtureRestore(fixture),
       restoreCandidate: async () => {

@@ -104,7 +104,7 @@ async function setup(
       options: { ...fixture.environment.options, resolveLedgerEntries: member.slot.resolve },
     })
   const key = await fixture.registry.seed(local.handle, {
-    packageUse: { sourceID: 'competing-test', ref: 'joined', kind: 'ordinary' },
+    packageUse: await fixture.packageUse(),
   })
   const sourceEpoch = Number(local.handle.epoch)
   const hub = new FakeHub()

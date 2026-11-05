@@ -618,13 +618,13 @@ export async function createForkRecoveryRealFixture(
   const remote = await makeRegistry(peer.identity)
   const original = await makeRegistry(peer.identity)
   let key = await local.registry.seed(await clone(own.handle), {
-    packageUse: { sourceID: 'fork', ref: 'local', kind: 'ordinary' },
+    packageUse: await local.packageUse(),
   })
   const remoteKey = await remote.registry.seed(await clone(peer.handle), {
-    packageUse: { sourceID: 'fork', ref: 'remote', kind: 'ordinary' },
+    packageUse: await remote.packageUse(),
   })
   const originalKey = await original.registry.seed(await clone(peer.handle), {
-    packageUse: { sourceID: 'fork', ref: 'original', kind: 'ordinary' },
+    packageUse: await original.packageUse(),
   })
   async function install(fixture: typeof local, key: typeof remoteKey, handle: GroupHandle) {
     const previous = await fixture.device.groups.loadState(key)

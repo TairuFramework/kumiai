@@ -344,10 +344,10 @@ test('stale responder below requester join epoch cannot prove absence with a val
       await own.processMessage(rotation.commitMessage)
     }
     const sourceKey = await local.registry.seed(own, {
-      packageUse: { sourceID: 'stale', ref: 'first-join', kind: 'ordinary' },
+      packageUse: await local.packageUse(),
     })
     const remoteKey = await remote.registry.seed(await clone(continuing, remote), {
-      packageUse: { sourceID: 'stale', ref: 'responder', kind: 'ordinary' },
+      packageUse: await remote.packageUse(),
     })
     async function install(fixture: typeof local, key: typeof sourceKey, handle: typeof own) {
       const previous = await fixture.device.groups.loadState(key)
@@ -401,7 +401,7 @@ test('stale responder below requester join epoch cannot prove absence with a val
     expect(Number(own.epoch)).toBe(8)
     const key = await local.registry.seed(own, {
       replace: true,
-      packageUse: { sourceID: 'stale', ref: 'reinvite-at-eight', kind: 'ordinary' },
+      packageUse: await local.packageUse(),
     })
     while (Number(own.epoch) < 12) {
       own = (await commitKeyRotation(own)).newGroup
@@ -672,11 +672,7 @@ test.each(['seed', 'own-commit', 'confirmed-recovery'] as const)(
           const next = await access.read((handle) => f.local().advance(handle))
           destination = await f.local().registry.seed(next, {
             replace: true,
-            packageUse: {
-              sourceID: 'successful-installation',
-              ref: 'fresh-welcome',
-              kind: 'ordinary',
-            },
+            packageUse: await f.local().packageUse(),
           })
         }
       }

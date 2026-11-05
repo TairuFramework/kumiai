@@ -18,6 +18,7 @@ import type {
 } from './manual-recovery.js'
 import type {
   ConformanceAppSettlementObligation,
+  ConformanceDevicePackageAdapters,
   ConformanceDevicePersistence,
   ConformanceEpochIdentity,
   ConformanceGroupKey,
@@ -195,6 +196,8 @@ export type ConformanceRegistryFixtureBase<
   TTx extends ConformanceGroupTransaction = ConformanceGroupTransaction,
 > = {
   device: ConformanceDevicePersistence<TTx>
+  packages: ConformanceDevicePackageAdapters
+  packageUse(): Promise<ConformancePackageUse>
   identity: { id: string; privateKey: Uint8Array; publicKey: Uint8Array }
   environment: {
     identity: { id: string; privateKey: Uint8Array; publicKey: Uint8Array }

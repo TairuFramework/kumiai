@@ -99,7 +99,7 @@ test('senderHWM reads the own node index', async () => {
       options: fixture.environment.options,
     })
     const key = await fixture.registry.seed(handle, {
-      packageUse: { sourceID: 'own-sender', ref: 'member-package', kind: 'ordinary' },
+      packageUse: await fixture.packageUse(),
     })
     const access = await fixture.registry.access(key.groupID)
     const sender = await fixture.restoreCommittedSender(key.groupID)

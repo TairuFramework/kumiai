@@ -74,7 +74,7 @@ async function setup(mode: 'real-mls' | 'double') {
   const sender = await registryHandle({ mode, handle: joined, options })
   const key = await f.registry.seed(
     await registryHandle({ mode, handle: added.newGroup, options }),
-    { packageUse: { sourceID: 'registry-crypto', ref: 'joined', kind: 'ordinary' } },
+    { packageUse: await f.packageUse() },
   )
   const access = await f.registry.access(key.groupID)
   const crypto = createGroupCrypto({ access })

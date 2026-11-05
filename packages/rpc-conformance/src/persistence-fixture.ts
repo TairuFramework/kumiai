@@ -140,6 +140,29 @@ export type ConformanceKeyPackagePoolStore = {
   consume(ref: string, groupID: string): Promise<void>
   receipt(ref: string): Promise<{ groupID: string } | null>
 }
+export type ConformanceBundleSource<TBundle = unknown> = {
+  sourceID: string
+  kind: ConformancePackageUse['kind']
+  bundles(): Promise<Array<TBundle>>
+  consume(ref: string, groupID: string): Promise<void>
+  receipt(ref: string): Promise<{ groupID: string } | null>
+}
+
+export type ConformanceDevicePackageAdapters<TBundle = unknown> = {
+  providerID: string
+  ownerDID: string
+  sources: Array<ConformanceBundleSource<TBundle> & { providerID: string; ownerDID: string }>
+  stores: Array<{
+    sourceID: string
+    kind: ConformancePackageUse['kind']
+    providerID: string
+    ownerDID: string
+    store: ConformanceKeyPackagePoolStore | ConformanceLastResortStore
+  }>
+  rotateAvailability(): Promise<void>
+  cleanup(row: ConformanceHubCleanupRow): Promise<'removed' | 'expired' | 'retry' | 'unsupported'>
+}
+
 export type ConformanceLastResortStore = Omit<ConformanceKeyPackagePoolStore, 'list' | 'put'> & {
   list(ownerDID: string): Promise<Array<ConformanceLastResortRecord>>
   put(ownerDID: string, record: ConformanceLastResortRecord): Promise<void>
@@ -905,6 +928,7 @@ export type ConformancePersistenceEvent =
 export type StorageTestPorts<TTx extends ConformanceGroupTransaction> =
   ConformanceCheckpointPreparation & {
     device: ConformanceDevicePersistence<TTx>
+    packages: ConformanceDevicePackageAdapters
     packageStores(sourceID: string): {
       ordinary: ConformanceKeyPackagePoolStore
       lastResort: ConformanceLastResortStore

@@ -10,6 +10,7 @@ import {
 
 import { finaliseAppSettlements } from '../app-settlement.js'
 import { bindRegistryCheckpoint } from '../checkpoint.js'
+import { validateDevicePackages } from '../device-packages.js'
 import {
   type AccountedGroupObservation,
   coordinatorBinding,
@@ -31,6 +32,7 @@ import {
   GroupStateConflictError,
   GroupUnavailableError,
   RegistryRetiringError,
+  SeedAdmissionRefusedError,
   SpentSetCorruptError,
   StorageOutcomeUnknownError,
 } from '../persistence-errors.js'
@@ -115,6 +117,7 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
   params: GroupHandleRegistryParams<TTx>,
 ): GroupHandleRegistry {
   const { persistence } = params
+  const packages = validateDevicePackages(persistence, params.packages)
   if (params.openedHandler !== undefined && params.deliverOpened !== undefined)
     throw new TypeError('Opened handler and raw callback are mutually exclusive')
   if (params.openedHandler !== undefined || params.deliverOpened !== undefined)
@@ -1044,8 +1047,17 @@ export function createGroupHandleRegistry<TTx extends GroupTransaction>(
     },
     async seed(group, options) {
       assertOpen()
+      assertLifecycleEntry(() => ({ groupID: group.groupID, incarnation: 1 }))
+      const packageUse = options.packageUse === null ? null : { ...options.packageUse }
+      if (
+        packageUse !== null &&
+        !packages.sources.some(
+          (source) => source.sourceID === packageUse.sourceID && source.kind === packageUse.kind,
+        )
+      )
+        throw new SeedAdmissionRefusedError({ reason: 'invalid-package-use' })
       try {
-        const result = await track(seed(group, options))
+        const result = await track(seed(group, { ...options, packageUse }))
         groupSlot(result.key.groupID).pendingHandoff = closing ? null : result.reservation
         return result.key
       } catch (error) {

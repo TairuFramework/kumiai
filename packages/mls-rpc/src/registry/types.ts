@@ -17,6 +17,7 @@ import type {
 
 import type { ControlReadScope, HandleAccess } from '../access.js'
 import type {
+  DevicePackageAdapters,
   DevicePersistence,
   EpochIdentity,
   GroupBatchOptions,
@@ -162,6 +163,7 @@ export type RegistryOpenedHandlerOptions<TTx extends GroupTransaction> =
 export type GroupHandleRegistryParams<TTx extends GroupTransaction> = {
   persistence: DevicePersistence<TTx>
   providerID: string
+  packages: DevicePackageAdapters
   batch?: GroupBatchOptions
   /** Required when either dispatcher is configured; shared by every peer and drain. */
   openedDeliveryContext?: OpenedDeliveryContext

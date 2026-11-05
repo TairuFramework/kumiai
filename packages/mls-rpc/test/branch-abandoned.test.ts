@@ -527,7 +527,7 @@ test.each([false, true])(
           ledgerEntries: member.handle.ledgerTokens,
           options: fixture.environment.options,
         }),
-        { packageUse: { sourceID: 'descendant', ref: 'member', kind: 'ordinary' } },
+        { packageUse: await fixture.packageUse() },
       )
       let responder = await restoreGroup({
         state: structuredClone(real.committer.handle.state),
@@ -536,7 +536,7 @@ test.each([false, true])(
         options: remote.environment.options,
       })
       const remoteKey = await remote.registry.seed(responder, {
-        packageUse: { sourceID: 'descendant', ref: 'responder', kind: 'ordinary' },
+        packageUse: await remote.packageUse(),
       })
       if (ahead) {
         responder = (await commitKeyRotation(responder)).newGroup
@@ -703,10 +703,10 @@ test.each(['valid', 'invalid-signature', 'shared-addition', 'remote-removal'] as
       let continuing = await clone(real.committer.handle)
       const current = await clone(requester.handle)
       const key = await local.registry.seed(current, {
-        packageUse: { sourceID: 'branch', ref: 'source', kind: 'ordinary' },
+        packageUse: await local.packageUse(),
       })
       const remoteKey = await remote.registry.seed(continuing, {
-        packageUse: { sourceID: 'branch', ref: 'remote', kind: 'ordinary' },
+        packageUse: await remote.packageUse(),
       })
       async function install(fixture: typeof local, handle: GroupHandle) {
         const state = await fixture.device.groups.loadState(key)

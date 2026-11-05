@@ -533,7 +533,7 @@ test('authenticated MLS replay after rollback completion and restart never recou
         ledgerEntries: receiver.handle.ledgerTokens,
         options: fixture.environment.options,
       }),
-      { packageUse: { sourceID: 'branch-replay', ref: 'joined-member', kind: 'ordinary' } },
+      { packageUse: await fixture.packageUse() },
     )
     const payload = await real.committer.handle.encrypt(new Uint8Array([42]))
     const receive = async (frameID: string, rollback = false) => {

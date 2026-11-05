@@ -1366,7 +1366,7 @@ for (const mode of ['real-mls', 'double'] as const) {
         options: base.environment.options,
       })
       const key = await base.registry.seed(input, {
-        packageUse: { sourceID: 'floor', ref: 'lapsed', kind: 'ordinary' },
+        packageUse: await base.packageUse(),
       })
       const access = await base.registry.access(id)
       await expect(

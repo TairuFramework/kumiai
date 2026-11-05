@@ -66,7 +66,7 @@ export async function createRegistryCryptoGroup(
           })
   }
   const key = await fixture.registry.seed(local.handle, {
-    packageUse: { sourceID: 'registry-crypto-conformance', ref: 'joined', kind: 'ordinary' },
+    packageUse: await fixture.packageUse(),
   })
   let access = await fixture.registry.access(key.groupID)
   let outstanding: Uint8Array | undefined
@@ -261,6 +261,7 @@ export async function createRegistryPendingCryptoFixture(
       const registry = createGroupHandleRegistry({
         persistence: storage.ports.device,
         providerID: storage.ports.device.providerID,
+        packages: storage.ports.packages,
         recovery: fixture.environment,
         restoreCandidate: async () => {
           throw new Error('Unexpected recovery candidate')

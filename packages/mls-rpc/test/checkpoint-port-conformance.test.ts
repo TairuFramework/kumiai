@@ -331,7 +331,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           }),
         })
         const key = await fixture.registry.seed(handle, {
-          packageUse: { sourceID: 'cached-signers', ref: 'local-package', kind: 'ordinary' },
+          packageUse: await fixture.packageUse(),
         })
         const port = createCheckpointPort({
           registry: fixture.registry,
@@ -403,6 +403,7 @@ for (const mode of ['real-mls', 'double'] as const) {
           return createGroupHandleRegistry({
             persistence: fixture.ports.device,
             providerID: fixture.ports.device.providerID,
+            packages: fixture.ports.packages,
             recovery: { identity, options: {} },
             restore: async () => {
               throw new Error('Coverage must not restore private state')
@@ -483,7 +484,7 @@ for (const mode of ['real-mls', 'double'] as const) {
             }),
             options: fixture.environment.options,
           }),
-          { packageUse: { sourceID: 'comparison', ref: 'local-package', kind: 'ordinary' } },
+          { packageUse: await fixture.packageUse() },
         )
         const port = createCheckpointPort({
           registry: fixture.registry,
