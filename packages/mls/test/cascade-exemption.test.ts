@@ -162,7 +162,7 @@ async function afterIssuerProof(options: SetupOptions = {}) {
   await publishLedger(setup.tokens, built.result.newGroup)
   const child = setup.childHandle
   if (child == null) throw new Error('Missing child handle')
-  await child.processMessage(built.result.commitMessage)
+  await child.processMessage({ message: built.result.commitMessage })
   return { ...setup, built, publisher: built.result.newGroup, childHandle: child }
 }
 
@@ -241,7 +241,7 @@ describe('revocation cascade', () => {
     await publishLedger(setup.tokens, built.result.newGroup)
     const child = setup.childHandle
     if (child == null) throw new Error('Missing child handle')
-    await child.processMessage(built.result.commitMessage)
+    await child.processMessage({ message: built.result.commitMessage })
     expect(child.state.groupActiveState.kind).toBe('active')
     expect(child.epoch).toBe(built.result.newGroup.epoch)
     expect(child.registry.devices.get(setup.issuer.id)?.status).toBe('revoked')
@@ -272,16 +272,19 @@ describe('revocation cascade', () => {
     const issuerIndex = setup.publisher.findMemberLeafIndex(setup.issuer.id)
     if (issuerIndex == null) throw new Error('Missing issuer')
     // A proof that leaves the unevidenced child behind, built below the acceptance gate.
-    const token = await signLedgerEntry(setup.identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: setup.publisher.groupID,
-      subject: controllerID,
-      value: {
-        effects: denyEffects(setup.log.slice(1), setup.issuer.id),
-        removed: [],
-        op: 'revoke',
-        proof: asControllerLog(setup.log.slice(1)),
-        revoked: [{ did: setup.issuer.id }],
+    const token = await signLedgerEntry({
+      identity: setup.identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: setup.publisher.groupID,
+        subject: controllerID,
+        value: {
+          effects: denyEffects(setup.log.slice(1), setup.issuer.id),
+          removed: [],
+          op: 'revoke',
+          proof: asControllerLog(setup.log.slice(1)),
+          revoked: [{ did: setup.issuer.id }],
+        },
       },
     })
     const forged = await rawCommit({
@@ -328,15 +331,18 @@ describe('revocation cascade', () => {
 describe('commit authentication of evidenced children', () => {
   test('survivorControlCommitAfterIssuerProofAccepted', async () => {
     const { publisher, childHandle, child, tokens } = await afterIssuerProof()
-    const note = await signLedgerEntry(child, {
-      type: 'test.note',
-      groupID: childHandle.groupID,
-      subject: child.id,
-      value: 'after the proof',
+    const note = await signLedgerEntry({
+      identity: child,
+      entry: {
+        type: 'test.note',
+        groupID: childHandle.groupID,
+        subject: child.id,
+        value: 'after the proof',
+      },
     })
-    const committed = await commitLedgerEntries(childHandle, [note])
+    const committed = await commitLedgerEntries({ group: childHandle, tokens: [note] })
     await publishLedger(tokens, committed.newGroup)
-    await publisher.processMessage(committed.commitMessage)
+    await publisher.processMessage({ message: committed.commitMessage })
     expect(publisher.epoch).toBe(committed.epoch)
     expect(publisher.ledger.at(-1)?.verified.entry.type).toBe('test.note')
     expect(publisher.findMemberLeafIndex(child.id)).toBeDefined()
@@ -354,7 +360,7 @@ describe('commit authentication of evidenced children', () => {
     if (entry == null) throw new Error('Missing second proof entry')
     expect(proofValue(entry).revoked).toEqual([{ did: bystander.id }])
     await publishLedger(tokens, second.result.newGroup)
-    await publisher.processMessage(second.result.commitMessage)
+    await publisher.processMessage({ message: second.result.commitMessage })
     expect(publisher.epoch).toBe(second.result.epoch)
     expect(publisher.findMemberLeafIndex(bystander.id)).toBeUndefined()
     expect(publisher.registry.devices.get(bystander.id)?.status).toBe('revoked')
@@ -368,7 +374,7 @@ describe('commit authentication of evidenced children', () => {
     expect(fresh.holderGrant).toBeDefined()
     const commit = await rawCommit({ group: childHandle, binding: fresh })
     await expectRejected(
-      publisher.processMessage(encode(mlsMessageEncoder, commit.commit)),
+      publisher.processMessage({ message: encode(mlsMessageEncoder, commit.commit) }),
       'binding',
       'denied-issuer',
     )
@@ -393,7 +399,7 @@ describe('commit authentication of evidenced children', () => {
       tokens: proof.result.newGroup.ledgerTokens.slice(childHandle.ledgerTokens.length),
     })
     await expectRejected(
-      publisher.processMessage(encode(mlsMessageEncoder, proofWithFreshLeaf.commit)),
+      publisher.processMessage({ message: encode(mlsMessageEncoder, proofWithFreshLeaf.commit) }),
       'binding',
       'denied-issuer',
     )
@@ -403,9 +409,11 @@ describe('commit authentication of evidenced children', () => {
   test('deniedIssuerCannotRenewAfterProof', async () => {
     const { publisher, childHandle, child, issuer, parent } = await afterIssuerProof()
     const fresh = await timedBinding({ identity: child, iat: 120, exp: 200, issuer, parent })
-    await expect(renewLeaf(childHandle, fresh)).rejects.toMatchObject({ reason: 'denied-issuer' })
+    await expect(renewLeaf({ group: childHandle, binding: fresh })).rejects.toMatchObject({
+      reason: 'denied-issuer',
+    })
     await expectRejected(
-      publisher.processMessage(await rawUpdate(childHandle, child, fresh)),
+      publisher.processMessage({ message: await rawUpdate(childHandle, child, fresh) }),
       'binding',
       'denied-issuer',
     )
@@ -423,14 +431,14 @@ describe('commit authentication of evidenced children', () => {
       ],
     })
     await expectRejected(
-      publisher.processMessage(encode(mlsMessageEncoder, add.commit)),
+      publisher.processMessage({ message: encode(mlsMessageEncoder, add.commit) }),
       'binding',
       'denied-issuer',
     )
     await expectRejected(
-      publisher.processMessage(
-        await lowLevelExternal({ group: publisher, identity: child, binding: fresh }),
-      ),
+      publisher.processMessage({
+        message: await lowLevelExternal({ group: publisher, identity: child, binding: fresh }),
+      }),
       'binding',
       'denied-issuer',
     )
@@ -465,11 +473,14 @@ describe('groups whose anchor names no controller', () => {
       managerDID: manager.id,
       managerKey: manager.publicKey,
     })
-    const register = await signLedgerEntry(manager, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: issuer.id,
-      value: { op: 'register', controller: controllerID, capability },
+    const register = await signLedgerEntry({
+      identity: manager,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: issuer.id,
+        value: { op: 'register', controller: controllerID, capability },
+      },
     })
     const registered = await commitWithEntries({
       group: withChild.author,
@@ -480,22 +491,28 @@ describe('groups whose anchor names no controller', () => {
     const publisher = await deriveGroup(withChild.author, registered.newState)
     await publisher.applyLedgerEntries([register])
     await publishLedger(tokens, publisher)
-    await withChild.joined.processMessage(encode(mlsMessageEncoder, registered.commit))
+    await withChild.joined.processMessage({ message: encode(mlsMessageEncoder, registered.commit) })
 
     // The device revocation, applied below the gate: an honest member refuses to keep the child.
     const joiner = agent(81)
     const entries = [
-      await signLedgerEntry(manager, {
-        type: DEVICE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: issuer.id,
-        value: { op: 'revoke', capability },
+      await signLedgerEntry({
+        identity: manager,
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: issuer.id,
+          value: { op: 'revoke', capability },
+        },
       }),
-      await signLedgerEntry(identity, {
-        type: ROLE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: joiner.id,
-        value: 'member',
+      await signLedgerEntry({
+        identity,
+        entry: {
+          type: ROLE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: joiner.id,
+          value: 'member',
+        },
       }),
     ]
     const issuerIndex = publisher.findMemberLeafIndex(issuer.id)
@@ -520,7 +537,7 @@ describe('groups whose anchor names no controller', () => {
     // The child's unchanged commit is refused.
     const unchanged = await rawCommit({ group: childAfter })
     await expectRejected(
-      after.processMessage(encode(mlsMessageEncoder, unchanged.commit)),
+      after.processMessage({ message: encode(mlsMessageEncoder, unchanged.commit) }),
       'binding',
       'denied-issuer',
     )
@@ -547,9 +564,9 @@ describe('renewal order', () => {
     expect(readCapability(current).payload.iat).toBe(110)
     const direct = await timedBinding({ identity: child, iat: 105, exp: 200 })
     expect(childHandle.registry.devices.get(issuer.id)?.status).toBe('revoked')
-    const renewal = await renewLeaf(childHandle, direct)
+    const renewal = await renewLeaf({ group: childHandle, binding: direct })
     await publishLedger(tokens, renewal.newGroup)
-    await publisher.processMessage(renewal.commitMessage)
+    await publisher.processMessage({ message: renewal.commitMessage })
     expect(publisher.epoch).toBe(renewal.epoch)
     const installed = publisher.bindingOfDID(child.id)?.capability
     if (installed == null) throw new Error('Missing installed capability')
@@ -563,14 +580,16 @@ describe('renewal order', () => {
     if (childHandle == null) throw new Error('Missing child handle')
     expect(childHandle.registry.devices.get(setup.issuer.id)?.status).not.toBe('revoked')
     const direct = await timedBinding({ identity: setup.child, iat: 105, exp: 200 })
-    await expect(renewLeaf(childHandle, direct)).rejects.toMatchObject({ reason: 'renewal-order' })
+    await expect(renewLeaf({ group: childHandle, binding: direct })).rejects.toMatchObject({
+      reason: 'renewal-order',
+    })
     await expectRejected(
-      setup.publisher.processMessage(
-        encode(
+      setup.publisher.processMessage({
+        message: encode(
           mlsMessageEncoder,
           (await rawCommit({ group: childHandle, binding: direct })).commit,
         ),
-      ),
+      }),
       'binding',
       'renewal-order',
     )
@@ -581,16 +600,16 @@ describe('renewal order', () => {
       exp: 200,
       prefix: setup.log,
     })
-    await expect(renewLeaf(childHandle, afterRev)).rejects.toMatchObject({
+    await expect(renewLeaf({ group: childHandle, binding: afterRev })).rejects.toMatchObject({
       reason: 'renewal-order',
     })
     await expectRejected(
-      setup.publisher.processMessage(
-        encode(
+      setup.publisher.processMessage({
+        message: encode(
           mlsMessageEncoder,
           (await rawCommit({ group: childHandle, binding: afterRev })).commit,
         ),
-      ),
+      }),
       'binding',
       'renewal-order',
     )
@@ -620,7 +639,7 @@ describe('renewal order', () => {
         }),
       ),
     }
-    await expect(renewLeaf(childHandle, wrongKey)).rejects.toMatchObject({
+    await expect(renewLeaf({ group: childHandle, binding: wrongKey })).rejects.toMatchObject({
       reason: 'confirmation-invalid',
     })
 
@@ -649,19 +668,23 @@ describe('renewal order', () => {
         }),
       ),
     }
-    await expect(renewLeaf(childHandle, otherController)).rejects.toMatchObject({
-      reason: 'controller-mismatch',
-    })
+    await expect(renewLeaf({ group: childHandle, binding: otherController })).rejects.toMatchObject(
+      {
+        reason: 'controller-mismatch',
+      },
+    )
 
     const overlong = await timedBinding({ identity: child, iat: 105, exp: 105 + 86_401 })
-    await expect(renewLeaf(childHandle, overlong)).rejects.toMatchObject({ reason: 'lifetime-cap' })
+    await expect(renewLeaf({ group: childHandle, binding: overlong })).rejects.toMatchObject({
+      reason: 'lifetime-cap',
+    })
 
     // The child's leaf attests its parent grant's issuance (108), the newest in the tree.
     const late = await afterIssuerProof({ parentIat: 108 })
     const regressing = await timedBinding({ identity: late.child, iat: 102, exp: 200 })
     const commit = await rawCommit({ group: late.childHandle, binding: regressing })
     const error = await late.publisher
-      .processMessage(encode(mlsMessageEncoder, commit.commit))
+      .processMessage({ message: encode(mlsMessageEncoder, commit.commit) })
       .then(
         () => undefined,
         (thrown: unknown) => thrown,

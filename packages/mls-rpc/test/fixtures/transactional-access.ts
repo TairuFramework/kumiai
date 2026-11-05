@@ -166,7 +166,7 @@ export async function createTransactionalAccess(
         publish(working, row.revision + 1)
         return result
       }),
-    replace: (next, guard) =>
+    replace: ({ next, guard }) =>
       locked(async () => {
         await store.settled()
         const row = store.snapshot()
@@ -175,7 +175,7 @@ export async function createTransactionalAccess(
         publish(next, row.revision + 1)
         next.confirmAdopted()
       }),
-    open: (fn, persistOpened) => {
+    open: ({ fn, persistOpened }) => {
       const run = openTail.then(async () => {
         while (true) {
           const row = await locked(async () => {

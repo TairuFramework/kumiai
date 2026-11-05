@@ -55,7 +55,7 @@ async function wakeLane(hub: FakeHub, rs: Uint8Array): Promise<void> {
 
 /** The host's answer to a heal: re-enact whatever came back, with an ordinary commit. */
 async function reenactFrom(member: TestPeer, reenact: Array<string>): Promise<void> {
-  if (reenact.length > 0) await member.peer.commit(buildLedgerCommit(member, reenact))
+  if (reenact.length > 0) await member.peer.commit({ build: buildLedgerCommit(member, reenact) })
 }
 
 type Armed = { bob: TestPeer; responder?: TestPeer; staleEpoch: number }
@@ -215,9 +215,9 @@ describe('heal strand', { concurrent: false }, () => {
         const headBefore = hub.head(commitTopic(rs))
         const framesBefore = commitFrames(hub, rs)
 
-        await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-          RecoveryRequiredError,
-        )
+        await expect(
+          bob.peer.commit({ build: buildLedgerCommit(bob, ['role:zoe=admin']) }),
+        ).rejects.toThrow(RecoveryRequiredError)
 
         // Belief, not the absence of an error: nothing was published to the log, the head did not
         // move, the peer did not advance onto its own branch, and nothing was journalled.
@@ -244,7 +244,7 @@ describe('heal strand', { concurrent: false }, () => {
         const { reenact = [] } = await bob.peer.replay()
         await reenactFrom(bob, reenact)
         await carol.peer.resync()
-        await bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))
+        await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:zoe=admin']) })
         await carol.peer.resync()
         expect(bob.mls.fold().get('role:zoe')).toBe('admin')
 
@@ -281,7 +281,7 @@ describe('heal strand', { concurrent: false }, () => {
       // Gating him here — refusing on poison rather than on positive `ahead` evidence — would be
       // the group-death hazard rebuilt: every honest member would refuse, and no one could publish
       // the commit that unsticks the group.
-      await bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))
+      await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:zoe=admin']) })
       await bob.peer.resync()
       expect(bob.mls.epoch()).toBe(2)
       expect(bob.mls.fold().get('role:zoe')).toBe('admin')

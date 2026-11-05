@@ -16,18 +16,21 @@ import * as ledger from '../src/ledger.js'
 
 async function fixture(groupID = 'ledger-memo') {
   const identity = randomIdentity()
-  const { group } = await createGroup(identity, groupID)
+  const { group } = await createGroup({ identity, groupID })
   const restore = (tokens: Array<string>) => {
     const state = decodeClientState(encodeClientState(group.state))
     if (state == null) throw new Error('invalid stored state')
     return restoreGroup({ state, credential: group.credential, ledgerEntries: tokens })
   }
   const sign = (value: string) =>
-    ledger.signLedgerEntry(identity, {
-      type: 'app.value',
-      groupID: group.groupID,
-      subject: identity.id,
-      value,
+    ledger.signLedgerEntry({
+      identity,
+      entry: {
+        type: 'app.value',
+        groupID: group.groupID,
+        subject: identity.id,
+        value,
+      },
     })
   return { identity, group, restore, sign }
 }
@@ -119,11 +122,14 @@ describe('verified ledger replay', () => {
     const tokens = [original]
     await restore(tokens)
     const other = randomIdentity()
-    const replacement = await ledger.signLedgerEntry(other, {
-      type: 'app.value',
-      groupID: group.groupID,
-      subject: other.id,
-      value: 'two',
+    const replacement = await ledger.signLedgerEntry({
+      identity: other,
+      entry: {
+        type: 'app.value',
+        groupID: group.groupID,
+        subject: other.id,
+        value: 'two',
+      },
     })
     tokens[0] = replacement
     const restored = await restore(tokens)
@@ -186,8 +192,8 @@ describe('verified ledger replay', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bundle = await createKeyPackageBundle(bob)
-    const added = await commitInvite(group, bundle.publicPackage, invite)
+    const bundle = await createKeyPackageBundle({ identity: bob })
+    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
     const bodies = new Map<string, string>()
     const { group: receiver } = await processWelcome({
       identity: bob,
@@ -206,14 +212,14 @@ describe('verified ledger replay', () => {
     })
     const token = await sign('signed-value')
     bodies.set(ledger.ledgerEntryDigest(token), token)
-    const first = await commitLedgerEntries(added.newGroup, [token])
-    await receiver.processMessage(first.commitMessage)
+    const first = await commitLedgerEntries({ group: added.newGroup, tokens: [token] })
+    await receiver.processMessage({ message: first.commitMessage })
     const held = receiver.ledger.find((entry) => entry.token === token)
     if (held == null) throw new Error('missing entry')
     held.verified.entry.value = 'forged-value'
 
-    const second = await commitLedgerEntries(first.newGroup, [token])
-    await receiver.processMessage(second.commitMessage)
+    const second = await commitLedgerEntries({ group: first.newGroup, tokens: [token] })
+    await receiver.processMessage({ message: second.commitMessage })
     const state = decodeClientState(encodeClientState(receiver.state))
     if (state == null) throw new Error('invalid stored state')
     const restored = await restoreGroup({

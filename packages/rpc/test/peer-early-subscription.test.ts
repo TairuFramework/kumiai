@@ -15,24 +15,24 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
     const fake = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xb8)
     const secret = fakeEpochSecret(2, APP_TOPIC_LABEL)
-    const topicID = protocolTopic(secret, 2, 'chat')
-    const selfInbox = inboxTopic(secret, 2, 'bob')
+    const topicID = protocolTopic({ secret, epoch: 2, protocol: 'chat' })
+    const selfInbox = inboxTopic({ secret, epoch: 2, memberDID: 'bob' })
     let acknowledge = (): void => {}
     const subscriptionGate = new Promise<void>((resolve) => {
       acknowledge = resolve
     })
     const retains: Array<{ topicID: string; retention: number | undefined }> = []
     const hub: LogHub = {
-      subscribe: async (did, topic, options) => {
+      subscribe: async ({ subscriberDID: did, topicID: topic, ...options }) => {
         if (did === 'bob' && (topic === topicID || topic === selfInbox)) {
           retains.push({ topicID: topic, retention: options?.retention })
           if (scenario === 'delayed') await subscriptionGate
         }
         fake.subscribe(did, topic, options)
       },
-      unsubscribe: (did, topic) => fake.unsubscribe(did, topic),
+      unsubscribe: ({ subscriberDID: did, topicID: topic }) => fake.unsubscribe(did, topic),
       publish: (params) => fake.publish(params),
-      receive: (did) => fake.receive(did),
+      receive: ({ subscriberDID: did }) => fake.receive(did),
       fetchTopic: (params) => fake.fetchTopic(params),
     }
     let captured = (): void => {}

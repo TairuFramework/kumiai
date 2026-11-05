@@ -77,7 +77,7 @@ async function twoMemberGroup(groupID: string) {
       return token
     })
 
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -85,8 +85,8 @@ async function twoMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bobBundle = await createKeyPackageBundle(bob)
-  const addBob = await commitInvite(created, bobBundle.publicPackage, invite)
+  const bobBundle = await createKeyPackageBundle({ identity: bob })
+  const addBob = await commitInvite({ group: created, keyPackage: bobBundle.publicPackage, invite })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -118,12 +118,16 @@ describe('leaf HPKE key rotation on commit', () => {
       permission: 'member',
     })
     publish(invite)
-    const carolBundle = await createKeyPackageBundle(carol)
-    const commit = await commitInvite(aliceGroup, carolBundle.publicPackage, invite)
+    const carolBundle = await createKeyPackageBundle({ identity: carol })
+    const commit = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolBundle.publicPackage,
+      invite,
+    })
 
     // Bob applies the commit. The tree he now sees carries Alice's *new* leaf key — the
     // one a responder would seal a reply to.
-    await bobGroup.processMessage(commit.commitMessage)
+    await bobGroup.processMessage({ message: commit.commitMessage })
     expect(bobGroup.epoch).toBe(2n)
     const postCommitPublicKey = leafPublicKey(bobGroup.state, 0)
 
@@ -147,7 +151,7 @@ describe('leaf HPKE key rotation on commit', () => {
     // encrypts its path secrets to every subtree *except* the author's own, so applying it
     // to the author's own stale state finds no key it can decrypt with, and the leaf secret
     // itself is never sent to anyone. The stale handle stays stranded at its old epoch.
-    await expect(aliceGroup.processMessage(commit.commitMessage)).rejects.toThrow(
+    await expect(aliceGroup.processMessage({ message: commit.commitMessage })).rejects.toThrow(
       'No overlap between provided private keys and update path',
     )
     expect(aliceGroup.epoch).toBe(1n)
@@ -169,9 +173,13 @@ describe('leaf HPKE key rotation on commit', () => {
       permission: 'member',
     })
     publish(invite)
-    const carolBundle = await createKeyPackageBundle(carol)
-    const commit = await commitInvite(aliceGroup, carolBundle.publicPackage, invite)
-    await bobGroup.processMessage(commit.commitMessage)
+    const carolBundle = await createKeyPackageBundle({ identity: carol })
+    const commit = await commitInvite({
+      group: aliceGroup,
+      keyPackage: carolBundle.publicPackage,
+      invite,
+    })
+    await bobGroup.processMessage({ message: commit.commitMessage })
 
     // Alice's commit rotated her own leaf, not Bob's: the key she now sees for Bob is
     // the one Bob still holds the private half of.

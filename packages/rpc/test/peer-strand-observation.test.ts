@@ -27,9 +27,12 @@ async function publishUnreadable(
   rs: Uint8Array,
   layer: 'handshake' | 'commit-frame',
 ): Promise<string> {
-  const payload = encodeCommitFrame(new Uint8Array([1]), new Uint8Array())
+  const payload = encodeCommitFrame({
+    commit: new Uint8Array([1]),
+    sealedEntries: new Uint8Array(),
+  })
   if (layer === 'commit-frame') payload[0] = COMMIT_FRAME_VERSION + 1
-  const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, payload)
+  const frame = encodeHandshakeFrame({ kind: HANDSHAKE_KIND.commit, payload })
   if (layer === 'handshake') {
     frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
     frame[HANDSHAKE_MAGIC.length + 1] = 0xee
@@ -154,7 +157,9 @@ describe('commit strand observations', () => {
     const tampered = new TextEncoder().encode(JSON.stringify({ ...original, invalidContent: true }))
     const reader = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, localDID: 'carol' })
     expect(await reader.readCommitHeader(tampered)).toEqual({ epoch: 1, committerDID: 'bob' })
-    expect(await reader.processCommit(tampered, {})).toMatchObject({ advanced: false })
+    expect(await reader.processCommit({ commit: tampered, context: {} })).toMatchObject({
+      advanced: false,
+    })
 
     const { sequenceID } = await publishCommit({
       hub,
@@ -303,7 +308,10 @@ describe('commit strand observations', () => {
     await hub.publish({
       senderDID: 'zoe',
       topicID: commitTopic(rs),
-      payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([COMMIT_FRAME_VERSION])),
+      payload: encodeHandshakeFrame({
+        kind: HANDSHAKE_KIND.commit,
+        payload: new Uint8Array([COMMIT_FRAME_VERSION]),
+      }),
       retain: 'log',
     })
     const observations: Array<StrandObservation> = []

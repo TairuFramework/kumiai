@@ -29,9 +29,9 @@ describe('the app lane opens each live frame once', () => {
     const opens: Array<number> = []
     const counting: FakeCrypto = {
       ...base,
-      unwrap: (bytes) => {
+      unwrap: ({ bytes }) => {
         opens.push(bytes.length)
-        return base.unwrap(bytes)
+        return base.unwrap({ bytes })
       },
     }
 

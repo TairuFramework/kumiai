@@ -363,10 +363,13 @@ describe('offline leaf credential verification', () => {
     const direct = await f.controller.signToken({ payload: { ...f.childPayload, cap: undefined } })
     const credentials = [
       f.credential(),
-      makeMLSCredential(agent(41), {
-        id: f.controller.id,
-        prefix: [f.inception],
-        capability: stringifyToken(direct),
+      makeMLSCredential({
+        identity: agent(41),
+        controller: {
+          id: f.controller.id,
+          prefix: [f.inception],
+          capability: stringifyToken(direct),
+        },
       }),
     ]
     const clock = vi.spyOn(Date, 'now')
@@ -551,10 +554,13 @@ test('verifies direct and delegated grants under a rotated historical authority 
   const direct = await f.controller.signToken({ payload: { ...f.childPayload, cap: undefined } })
   for (const original of [
     f.credential(),
-    makeMLSCredential(agent(41), {
-      id: f.controller.id,
-      prefix: [f.inception],
-      capability: stringifyToken(direct),
+    makeMLSCredential({
+      identity: agent(41),
+      controller: {
+        id: f.controller.id,
+        prefix: [f.inception],
+        capability: stringifyToken(direct),
+      },
     }),
   ]) {
     const parsed = JSON.parse(
@@ -613,8 +619,8 @@ async function memberLeafFixture() {
     await member.identity.signToken({ payload: payload, embedLongForm: true }),
   )
   const binding = { id: epoch.did, prefix: epoch.log.chain, capability }
-  const credential = makeMLSCredential(agent(41), binding)
-  const registry = await registryForLog(epoch.did, epoch.log)
+  const credential = makeMLSCredential({ identity: agent(41), controller: binding })
+  const registry = await registryForLog({ controller: epoch.did, log: epoch.log })
   const removedLog = {
     chain: epoch.log.chain,
     events: [
@@ -628,11 +634,11 @@ async function memberLeafFixture() {
       }),
     ],
   }
-  const removed = await registryForLog(epoch.did, removedLog)
+  const removed = await registryForLog({ controller: epoch.did, log: removedLog })
   const judging: JudgingContext = { registry, stage: 'full', mode: 'admit' }
   const verify = (context: JudgingContext = judging, raw = capability) =>
     verifyLeafCredential(
-      makeMLSCredential(agent(41), { ...binding, capability: raw }),
+      makeMLSCredential({ identity: agent(41), controller: { ...binding, capability: raw } }),
       f.device.publicKey,
       {
         judging: () => context,
@@ -707,9 +713,14 @@ test('admission refuses a removed member root whose own evidence still verifies'
   const capability = stringifyToken(
     await f.f.trusted.signToken({ payload: { ...f.payload, mbr: undefined, cap: parent } }),
   )
-  const credential = makeMLSCredential(agent(41), { ...f.binding, capability, holderGrant })
+  const credential = makeMLSCredential({
+    identity: agent(41),
+    controller: { ...f.binding, capability, holderGrant },
+  })
   const root = { kind: 'member' as const, did: f.member.did, add: f.member.add, gen: 0 }
-  expect(await memberRootStatus(f.removed, f.did, root)).toEqual({ status: 'removed' })
+  expect(await memberRootStatus({ registry: f.removed, controller: f.did, root })).toEqual({
+    status: 'removed',
+  })
   expect(
     f.removed.controllers.get(f.did)?.recordedLog?.events.some(({ event }) => event.t === 'rmv'),
   ).toBe(true)
@@ -818,7 +829,10 @@ test('standard group root grants ignore lifecycle floors in the default judging 
   )
   const leaf = {
     ...held.leaf,
-    credential: makeMLSCredential(agent(41), { ...f.binding, capability }),
+    credential: makeMLSCredential({
+      identity: agent(41),
+      controller: { ...f.binding, capability },
+    }),
   }
   await expect(validateEntry(group, leaf, held.leaf)).resolves.toBeUndefined()
 })
@@ -844,9 +858,15 @@ test.each(['retain', 'rejudge'] as const)(
       leafKey: f.f.device.publicKey,
       leafIndex: 1,
     }
-    const claims = await claimsFor(f.did, f.log, projection.recordedLog, 0)
+    const claims = await claimsFor({
+      controller: f.did,
+      recorded: f.log,
+      merged: projection.recordedLog,
+      genFloor: 0,
+    })
     expect(claims).toHaveLength(1)
-    for (const claim of claims) await effectOf(f.did, projection.recordedLog, claim, 0)
+    for (const claim of claims)
+      await effectOf({ controller: f.did, log: projection.recordedLog, claim, genFloor: 0 })
     await expect(
       verifyLeafCredential(f.credential, leaf.leafKey, { judging: () => f.judging }),
     ).resolves.toBeUndefined()
@@ -855,8 +875,12 @@ test.each(['retain', 'rejudge'] as const)(
         judging: () => ({ registry: after, stage: 'full', mode }),
       }),
     ).rejects.toMatchObject({ reason: 'member-removed' })
-    expect(await effectiveAuthorityOf(leaf, after, f.did)).toEqual({ status: 'removed' })
-    expect(await cascadeOf([leaf], claims, f.registry, after, f.did)).toEqual({
+    expect(await effectiveAuthorityOf({ leaf, registry: after, controller: f.did })).toEqual({
+      status: 'removed',
+    })
+    expect(
+      await cascadeOf({ leaves: [leaf], claims, before: f.registry, after, controller: f.did }),
+    ).toEqual({
       revoked: [],
       removed: [{ did: leaf.did, cascadedFrom: f.member.identity.id }],
       removeLeafIndices: [1],
@@ -878,16 +902,20 @@ test.each(['retain', 'rejudge'] as const)(
     })
     const binding = { ...f.binding, prefix: [f.inception, rotation] }
     await expect(
-      verifyLeafCredential(makeMLSCredential(agent(41), binding), f.f.device.publicKey, {
-        judging: () => ({ registry: f.removed, stage: 'full', mode }),
-      }),
+      verifyLeafCredential(
+        makeMLSCredential({ identity: agent(41), controller: binding }),
+        f.f.device.publicKey,
+        {
+          judging: () => ({ registry: f.removed, stage: 'full', mode }),
+        },
+      ),
     ).rejects.toMatchObject({ reason: 'member-removed' })
     expect(
-      await effectiveAuthorityOf(
-        { did: f.f.device.id, binding, leafKey: f.f.device.publicKey },
-        f.removed,
-        f.did,
-      ),
+      await effectiveAuthorityOf({
+        leaf: { did: f.f.device.id, binding, leafKey: f.f.device.publicKey },
+        registry: f.removed,
+        controller: f.did,
+      }),
     ).toEqual({ status: 'removed' })
   },
 )
@@ -905,7 +933,7 @@ test('authentication refuses a saturated recorded log with a caller-provided den
   )
   await expect(
     verifyLeafCredential(
-      makeMLSCredential(agent(41), { ...f.binding, capability }),
+      makeMLSCredential({ identity: agent(41), controller: { ...f.binding, capability } }),
       f.f.device.publicKey,
       {
         judging: () => ({ registry, stage: 'full', mode: 'admit' }),
@@ -981,7 +1009,10 @@ test.each(['retain', 'rejudge'] as const)(
       )
       await expect(
         verifyLeafCredential(
-          makeMLSCredential(agent(41), { ...f.binding, capability, holderGrant: substitute }),
+          makeMLSCredential({
+            identity: agent(41),
+            controller: { ...f.binding, capability, holderGrant: substitute },
+          }),
           f.f.device.publicKey,
           { judging: () => ({ registry: f.removed, stage: 'full', mode }) },
         ),
@@ -1036,7 +1067,7 @@ async function membershipFixture() {
   }
   const verify = (judging: JudgingContext = f.judging, candidate = binding) =>
     verifyLeafCredential(
-      makeMLSCredential(f.member.identity, candidate),
+      makeMLSCredential({ identity: f.member.identity, controller: candidate }),
       f.member.identity.publicKey,
       { judging: () => judging },
     )
@@ -1048,7 +1079,7 @@ test('membership leaf authenticates when the signature key equals the pin', asyn
   await expect(f.verify()).resolves.toBeUndefined()
   await expect(
     verifyLeafCredential(
-      makeMLSCredential(f.member.identity, f.binding),
+      makeMLSCredential({ identity: f.member.identity, controller: f.binding }),
       f.other.identity.publicKey,
       {
         judging: () => f.judging,
@@ -1073,7 +1104,7 @@ test.each(['admit', 'retain', 'rejudge'] as const)(
     const f = await membershipFixture()
     await expect(
       verifyLeafCredential(
-        makeMLSCredential(f.other.identity, f.binding),
+        makeMLSCredential({ identity: f.other.identity, controller: f.binding }),
         f.other.identity.publicKey,
         { judging: () => ({ registry: f.removed, stage: 'full', mode }) },
       ),
@@ -1127,14 +1158,14 @@ test.each(['admit', 'retain', 'rejudge'] as const)(
         lease: 1000,
       },
     })
-    const registry = await registryForLog(f.did, { ...f.log, events: [add] })
+    const registry = await registryForLog({ controller: f.did, log: { ...f.log, events: [add] } })
     const binding: ControllerBinding = {
       id: f.did,
       prefix: f.log.chain,
       member: { add: digestOf(add.event), g: 0 },
       iat: 100,
     }
-    const credential = makeMLSCredential(member, binding)
+    const credential = makeMLSCredential({ identity: member, controller: binding })
     const deps = { judging: (): JudgingContext => ({ registry, stage: 'full', mode }) }
     await expect(
       verifyLeafCredential(credential, identity.publicKey, deps),
@@ -1167,7 +1198,7 @@ test('membership authority follows the judging mode when unavailable', async () 
     reason: 'controller-mismatch',
   })
   for (const mode of ['retain', 'rejudge'] as const) {
-    const registry = await registryForLog(f.did, f.log)
+    const registry = await registryForLog({ controller: f.did, log: f.log })
     const projection = registry.controllers.get(normalizeDID(f.did))
     if (projection == null) throw new Error('Missing projection')
     ;(registry.controllers as Map<string, ControllerProjection>).set(f.did, {
@@ -1199,7 +1230,7 @@ test.each(['retain', 'rejudge'] as const)(
     if (holder?.judging == null) throw new Error('Missing judging context')
     const judging = { ...holder.judging(), mode }
     holder.judging = () => judging
-    const credential = makeMLSCredential(f.member.identity, f.binding)
+    const credential = makeMLSCredential({ identity: f.member.identity, controller: f.binding })
     await expect(
       verifyLeafCredential(credential, f.member.identity.publicKey, { judging: () => judging }),
     ).rejects.toMatchObject({ reason: 'controller-mismatch' })

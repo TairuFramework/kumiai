@@ -29,7 +29,7 @@ async function setup(byte: number, onStrand?: (observation: StrandObservation) =
   })
   const recovery = { timeoutMs: 400, deadlineMs: 1200, getDelayMs: () => 10 }
   const bob = makeMLSPeer(hub, 'bob', rs, { mls: bobMLS, crypto: bobCrypto, members, recovery })
-  await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+  await bob.peer.commit({ build: buildLedgerCommit(bob, ['circle:x=Bob']) })
 
   const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
   const aliceMLS = createMemoryGroupMLS({
@@ -222,7 +222,7 @@ describe('delayed ledger bootstrap', () => {
     expect(events.filter((event) => event.phase === 'bootstrapped')).toHaveLength(1)
     expect(alice.peer.anchorEpoch()).toBe(alice.mls.epoch())
     await expect(
-      alice.peer.commit(buildLedgerCommit(alice, ['circle:y=Alice'])),
+      alice.peer.commit({ build: buildLedgerCommit(alice, ['circle:y=Alice']) }),
     ).resolves.toBeDefined()
     await alice.peer.dispose()
     await bob.peer.dispose()

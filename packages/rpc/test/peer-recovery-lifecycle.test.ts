@@ -242,7 +242,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     }
     await expect(alice.peer.recover()).rejects.toThrow('rejoin publish failed')
     const newer = 'circle:new=Alice'
-    await alice.peer.commit(buildLedgerCommit(alice, [newer]))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, [newer]) })
     expect(await alice.peer.recover()).toEqual({ advanced: true, reenact: [newer] })
     expect(await alice.peer.replay()).toEqual({})
     await alice.peer.dispose()
@@ -375,7 +375,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
       members,
       recovery: timing,
     })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:alice=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:alice=admin']) })
     const events: Array<RecoveryEvent> = []
     const alice = makeMLSPeer(hub, 'alice', rs, {
       members,
@@ -486,7 +486,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
       members,
       recovery: { timeoutMs: 30, deadlineMs: 100, getDelayMs: () => 0 },
     })
-    await carol.peer.commit(buildLedgerCommit(carol, ['role:alice=admin']))
+    await carol.peer.commit({ build: buildLedgerCommit(carol, ['role:alice=admin']) })
     const events: Array<RecoveryEvent> = []
     const bob = makeMLSPeer(hub, 'bob', rs, {
       members,
@@ -523,7 +523,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
       await replyGate
       return seal(...args)
     })
-    await carol.peer.commit(buildLedgerCommit(carol, ['circle:x=Carol']))
+    await carol.peer.commit({ build: buildLedgerCommit(carol, ['circle:x=Carol']) })
     const ahead = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
     hub.hideFrom('carol', ahead.sequenceID)
 
@@ -602,7 +602,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     await bob.peer.replay()
     await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 3 })
     await expect(
-      bob.peer.commit(buildLedgerCommit(bob, ['role:alice=admin'])),
+      bob.peer.commit({ build: buildLedgerCommit(bob, ['role:alice=admin']) }),
     ).rejects.toBeInstanceOf(RecoveryRequiredError)
     expect(strands).toHaveLength(1)
     await bob.peer.dispose()

@@ -74,8 +74,13 @@ function isHandshakeKind(value: number): value is HandshakeKind {
   return KINDS.has(value)
 }
 
+export type EncodeHandshakeFrameParams = {
+  kind: HandshakeKind
+  payload: Uint8Array
+}
+
 /** Wrap a payload with the magic + version + kind header. */
-export function encodeHandshakeFrame(kind: HandshakeKind, payload: Uint8Array): Uint8Array {
+export function encodeHandshakeFrame({ kind, payload }: EncodeHandshakeFrameParams): Uint8Array {
   const frame = new Uint8Array(HEADER_LENGTH + payload.length)
   frame.set(HANDSHAKE_MAGIC, 0)
   frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION

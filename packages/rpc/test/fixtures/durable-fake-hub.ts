@@ -5,11 +5,13 @@ import {
   type StoredMessage,
 } from '@kumiai/hub-protocol'
 import type {
+  HubBaseReceiveParams,
+  HubBaseSubscribeParams,
+  HubBaseUnsubscribeParams,
   HubFetchTopicParams,
   HubFetchTopicResult,
   HubPublishParams,
   HubReceiveSubscription,
-  HubSubscribeOptions,
   LogHub,
 } from '@kumiai/hub-tunnel'
 
@@ -62,7 +64,7 @@ export class DurableFakeHub implements LogHub {
   }
 
   /** Refuses a retention above the ceiling, as `createMemoryStore` does. See {@link FakeHub}. */
-  subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
+  subscribe({ subscriberDID, topicID, ...options }: HubBaseSubscribeParams): void {
     if (options?.retention != null && options.retention > this.#maxRetention) {
       throw new RetentionExceededError(
         `Requested retention of ${options.retention}s exceeds the maximum of ${this.#maxRetention}s`,
@@ -76,7 +78,7 @@ export class DurableFakeHub implements LogHub {
     set.add(subscriberDID)
   }
 
-  unsubscribe(subscriberDID: string, topicID: string): void {
+  unsubscribe({ subscriberDID, topicID }: HubBaseUnsubscribeParams): void {
     const set = this.#topics.get(topicID)
     if (set == null) return
     set.delete(subscriberDID)
@@ -232,7 +234,7 @@ export class DurableFakeHub implements LogHub {
     return this.#heads.get(topicID) ?? null
   }
 
-  receive(subscriberDID: string): HubReceiveSubscription {
+  receive({ subscriberDID }: HubBaseReceiveParams): HubReceiveSubscription {
     const queue: Array<StoredMessage> = []
     let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
     let closed = false

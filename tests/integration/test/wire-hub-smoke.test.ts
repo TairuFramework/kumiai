@@ -19,14 +19,14 @@ describe('LogHub over the real hub-server wire', () => {
     const received: Array<string> = []
     // ORDER MATTERS and this is the peer's order: hub-mux opens the receive stream during
     // construction and subscribes to topics afterwards.
-    const subscription = bob.receive(bobID.id)
+    const subscription = bob.receive({ subscriberDID: bobID.id })
     void (async () => {
       for await (const message of subscription) {
         received.push(new TextDecoder().decode(message.payload))
       }
     })()
     await flush()
-    await bob.subscribe(bobID.id, fixtureTopic('smoke'))
+    await bob.subscribe({ subscriberDID: bobID.id, topicID: fixtureTopic('smoke') })
     await flush()
 
     await alice.publish({
@@ -67,8 +67,8 @@ describe('Durable ack over the wire', () => {
     let bob = hub.connect(bobID)
     const topicID = fixtureTopic('ack-reclaim')
 
-    await bob.subscribe(bobID.id, topicID)
-    const firstSub = bob.receive(bobID.id)
+    await bob.subscribe({ subscriberDID: bobID.id, topicID })
+    const firstSub = bob.receive({ subscriberDID: bobID.id })
     const firstIterator = firstSub[Symbol.asyncIterator]()
 
     await alice.publish({ senderDID: aliceID.id, topicID, payload: utf8.encode('mailbox-msg') })
@@ -87,7 +87,7 @@ describe('Durable ack over the wire', () => {
     bob = hub.connect(bobID)
 
     const receivedAfterAck: Array<string> = []
-    const freshSub = bob.receive(bobID.id)
+    const freshSub = bob.receive({ subscriberDID: bobID.id })
     void (async () => {
       for await (const message of freshSub) {
         receivedAfterAck.push(new TextDecoder().decode(message.payload))
@@ -108,8 +108,8 @@ describe('Durable ack over the wire', () => {
     let bob = hub.connect(bobID)
     const topicID = fixtureTopic('ack-redeliver')
 
-    await bob.subscribe(bobID.id, topicID)
-    const firstSub = bob.receive(bobID.id)
+    await bob.subscribe({ subscriberDID: bobID.id, topicID })
+    const firstSub = bob.receive({ subscriberDID: bobID.id })
     const firstIterator = firstSub[Symbol.asyncIterator]()
 
     await alice.publish({ senderDID: aliceID.id, topicID, payload: utf8.encode('mailbox-msg') })
@@ -124,7 +124,7 @@ describe('Durable ack over the wire', () => {
     bob = hub.connect(bobID)
 
     const receivedAfterReconnect: Array<string> = []
-    const freshSub = bob.receive(bobID.id)
+    const freshSub = bob.receive({ subscriberDID: bobID.id })
     void (async () => {
       for await (const message of freshSub) {
         receivedAfterReconnect.push(new TextDecoder().decode(message.payload))
@@ -145,8 +145,8 @@ describe('Durable ack over the wire', () => {
     let bob = hub.connect(bobID)
     const topicID = fixtureTopic('ack-log-survives')
 
-    await bob.subscribe(bobID.id, topicID)
-    const subscription = bob.receive(bobID.id)
+    await bob.subscribe({ subscriberDID: bobID.id, topicID })
+    const subscription = bob.receive({ subscriberDID: bobID.id })
     const iterator = subscription[Symbol.asyncIterator]()
 
     const published = await alice.publish({
@@ -175,7 +175,7 @@ describe('Durable ack over the wire', () => {
     await bob.disconnect()
     bob = hub.connect(bobID)
     const receivedAfterAck: Array<string> = []
-    const freshSub = bob.receive(bobID.id)
+    const freshSub = bob.receive({ subscriberDID: bobID.id })
     void (async () => {
       for await (const message of freshSub) {
         receivedAfterAck.push(new TextDecoder().decode(message.payload))

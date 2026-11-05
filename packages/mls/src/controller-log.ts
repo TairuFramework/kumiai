@@ -53,12 +53,18 @@ export async function revokeIndices(
   return deviceRevokeIndices({ ...options, did: did, chain: [...chain], subject: subject })
 }
 
-export async function memberDropIndices(
-  did: string,
-  chain: ReadonlyArray<SignedEvent>,
-  add: string,
-  options?: CryptoOptions,
-): Promise<Array<number>> {
+export type MemberDropIndicesParams = {
+  did: string
+  chain: ReadonlyArray<SignedEvent>
+  add: string
+} & CryptoOptions
+
+export async function memberDropIndices({
+  did,
+  chain,
+  add,
+  ...options
+}: MemberDropIndicesParams): Promise<Array<number>> {
   const folded = await foldChain(did, chain, options)
   if (!folded.ok) return []
   const indices: Array<number> = []

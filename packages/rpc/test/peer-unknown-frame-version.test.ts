@@ -28,7 +28,10 @@ const members = ['alice', 'bob', 'carol']
  * running today's code must decide what to do about this frame WITHOUT reading them.
  */
 function futureVersionFrame(): Uint8Array {
-  const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, Uint8Array.from([9, 9, 9, 9, 9, 9]))
+  const frame = encodeHandshakeFrame({
+    kind: HANDSHAKE_KIND.commit,
+    payload: Uint8Array.from([9, 9, 9, 9, 9, 9]),
+  })
   frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
   return frame
 }
@@ -159,9 +162,9 @@ describe('a frame whose handshake version this build does not know', () => {
     // THIS is the poison failure made observable. A peer that stepped over the frame and called
     // itself reconciled would commit happily here, win the compare-and-set at a dead epoch, and
     // land a commit on a branch of one.
-    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+    await expect(
+      bob.peer.commit({ build: buildLedgerCommit(bob, ['role:zoe=admin']) }),
+    ).rejects.toThrow(RecoveryRequiredError)
 
     expect(commitFrames(hub, rs)).toBe(framesBefore)
     expect(hub.head(commitTopic(rs))).toBe(headBefore)
@@ -203,10 +206,10 @@ describe('a frame whose handshake version this build does not know', () => {
       // ephemeral key bob's own request minted, and lands his rejoin — the same path exercised by
       // `handleRecoveryReply` (peer.ts:1003) and the rejoin-landing block that clears `stranded`
       // (peer.ts:2440-2469).
-      const forged = encodeHandshakeFrame(
-        HANDSHAKE_KIND.recoveryReply,
-        encodeRecoveryReply(requestID, groupInfo),
-      )
+      const forged = encodeHandshakeFrame({
+        kind: HANDSHAKE_KIND.recoveryReply,
+        payload: encodeRecoveryReply({ requestID, groupInfo }),
+      })
       forged[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
 
       await hub.publish({
@@ -221,9 +224,9 @@ describe('a frame whose handshake version this build does not know', () => {
       // he is still refusing commits exactly as test 2's genuinely-stranded bob does, not merely
       // un-healed by coincidence of timing.
       expect(bob.mls.epoch()).toBe(1)
-      await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-        RecoveryRequiredError,
-      )
+      await expect(
+        bob.peer.commit({ build: buildLedgerCommit(bob, ['role:zoe=admin']) }),
+      ).rejects.toThrow(RecoveryRequiredError)
     } finally {
       vi.useRealTimers()
     }

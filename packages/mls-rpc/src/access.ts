@@ -3,6 +3,16 @@ import type { PendingAppFrame, SendAdmission } from '@kumiai/rpc'
 
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
 
+export type HandleAccessReplaceParams = {
+  next: GroupHandle
+  guard: (live: GroupHandle) => Promise<void>
+}
+
+export type HandleAccessOpenParams<TValue> = {
+  fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>
+  persistOpened: PersistOpened
+}
+
 export type HandleAccess = {
   /** Published with admission after mutation/open and after replacement adoption resolves. */
   epoch(): number
@@ -13,11 +23,8 @@ export type HandleAccess = {
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
   ): Promise<TValue>
   /** Must run the guard under the replacement lock, before persistence; a throw aborts. */
-  replace(next: GroupHandle, guard: (live: GroupHandle) => Promise<void>): Promise<void>
-  open<TValue>(
-    fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
-    persistOpened: PersistOpened,
-  ): Promise<TValue>
+  replace({ next, guard }: HandleAccessReplaceParams): Promise<void>
+  open<TValue>({ fn, persistOpened }: HandleAccessOpenParams<TValue>): Promise<TValue>
 }
 
 /** Refuses a replacement that drops lifecycle effects the live handle knows. */
@@ -25,10 +32,18 @@ export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => P
   return async (live) => {
     const controller = live.anchor.controller
     if (controller != null)
-      await assertRetainsKnownEffects(controller, live.registry, next.registry, {
+      await assertRetainsKnownEffects({
+        controller,
+        known: live.registry,
+        candidate: next.registry,
         crypto: live.crypto,
       })
   }
+}
+
+export type GuardedReplaceParams = {
+  access: HandleAccess
+  next: GroupHandle
 }
 
 /**
@@ -36,12 +51,15 @@ export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => P
  * implementation has already adopted `next`): this surfaces a broken adapter, it does not undo it.
  * It cannot prove the guard ran on the live handle or under the lock; that stays the port contract.
  */
-export async function guardedReplace(access: HandleAccess, next: GroupHandle): Promise<void> {
+export async function guardedReplace({ access, next }: GuardedReplaceParams): Promise<void> {
   const guard = retainsKnownEffects(next)
   let ran = false
-  await access.replace(next, async (live) => {
-    await guard(live)
-    ran = true
+  await access.replace({
+    next,
+    guard: async (live) => {
+      await guard(live)
+      ran = true
+    },
   })
   if (!ran) throw new Error('HandleAccess.replace did not run its guard')
 }
@@ -89,7 +107,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         publishedAdmission = handle.sendAdmission()
         return result
       }),
-    replace: (next, guard) =>
+    replace: ({ next, guard }) =>
       serialise(async () => {
         await guard(params.handle())
         await save(next)
@@ -97,7 +115,7 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         publishedAdmission = next.sendAdmission()
         next.confirmAdopted()
       }),
-    open: (fn, persistOpened) =>
+    open: ({ fn, persistOpened }) =>
       serialise(async () => {
         const handle = params.handle()
         const result = await fn(handle, persistOpened)

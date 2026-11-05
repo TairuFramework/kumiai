@@ -21,7 +21,7 @@ describe('InvalidPayloadError', () => {
     expect(error.name).toBe('InvalidPayloadError')
     expect(hubErrorCodeOf(error)).toBe('HUB_INVALID_PAYLOAD')
 
-    const rebuilt = hubErrorFromCode('HUB_INVALID_PAYLOAD', 'bad base64')
+    const rebuilt = hubErrorFromCode({ code: 'HUB_INVALID_PAYLOAD', message: 'bad base64' })
     expect(rebuilt).toBeInstanceOf(InvalidPayloadError)
     expect(rebuilt?.message).toBe('bad base64')
   })
@@ -53,7 +53,7 @@ describe('DoS-hardening hub errors round-trip through their wire codes', () => {
 
   test.each(cases)('%o carries %s and rebuilds with name %s', (error, code, name) => {
     expect(hubErrorCodeOf(error)).toBe(code)
-    const rebuilt = hubErrorFromCode(code, error.message)
+    const rebuilt = hubErrorFromCode({ code, message: error.message })
     expect(rebuilt).toBeInstanceOf(Error)
     expect(rebuilt?.name).toBe(name)
     expect(rebuilt?.message).toBe(error.message)
@@ -68,13 +68,13 @@ describe('WakeNotSupportedError', () => {
     // string a peer on an older build compares against.
     expect(HUB_ERROR_CODES.wakeNotSupported).toBe('HUB_WAKE_NOT_SUPPORTED')
     expect(hubErrorCodeOf(new WakeNotSupportedError('no wake'))).toBe('HUB_WAKE_NOT_SUPPORTED')
-    expect(hubErrorFromCode('HUB_WAKE_NOT_SUPPORTED', 'no wake')).toBeInstanceOf(
+    expect(hubErrorFromCode({ code: 'HUB_WAKE_NOT_SUPPORTED', message: 'no wake' })).toBeInstanceOf(
       WakeNotSupportedError,
     )
   })
 
   test('rebuilds from its code', () => {
-    const rebuilt = hubErrorFromCode(HUB_ERROR_CODES.wakeNotSupported, 'no wake')
+    const rebuilt = hubErrorFromCode({ code: HUB_ERROR_CODES.wakeNotSupported, message: 'no wake' })
     expect(rebuilt).toBeInstanceOf(WakeNotSupportedError)
     expect(rebuilt?.message).toBe('no wake')
   })
@@ -86,7 +86,7 @@ describe('RateLimitedError', () => {
     // limiters answered with enkaku's generic EK01, which says nothing about retrying.
     expect(HUB_ERROR_CODES.rateLimited).toBe('HUB_RATE_LIMITED')
     expect(hubErrorCodeOf(new RateLimitedError('slow down'))).toBe('HUB_RATE_LIMITED')
-    const rebuilt = hubErrorFromCode('HUB_RATE_LIMITED', 'slow down')
+    const rebuilt = hubErrorFromCode({ code: 'HUB_RATE_LIMITED', message: 'slow down' })
     expect(rebuilt).toBeInstanceOf(RateLimitedError)
     expect(rebuilt?.message).toBe('slow down')
   })

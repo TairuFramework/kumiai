@@ -117,8 +117,12 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
     // What Carol keeps, and keeps forever: the epoch-independent recovery secret, the per-epoch
     // secret of the last epoch her handle holds, and the topic she was on.
     const carolRecoverySecret = await carol.mls.exportRecoverySecret()
-    const { secret: carolEpochSecret } = await carol.crypto.exportSecret(APP_TOPIC_LABEL)
-    const carolTopic = protocolTopic(carolEpochSecret, carol.peer.anchorEpoch(), 'room')
+    const { secret: carolEpochSecret } = await carol.crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    const carolTopic = protocolTopic({
+      secret: carolEpochSecret,
+      epoch: carol.peer.anchorEpoch(),
+      protocol: 'room',
+    })
 
     // The eviction. An admin off-stage commits it; every member that can apply it rotates.
     await publishCommit({
@@ -144,7 +148,11 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
     // from. The rotation moved it off the one Carol is on.
     const anchor = alice.anchorStore.stored()
     if (anchor == null) throw new Error('alice anchored nothing')
-    const groupTopic = protocolTopic(anchor.secret, anchor.epoch, 'room')
+    const groupTopic = protocolTopic({
+      secret: anchor.secret,
+      epoch: anchor.epoch,
+      protocol: 'room',
+    })
     expect(groupTopic).not.toBe(carolTopic)
     expect(bob.anchorStore.stored()?.secret).toEqual(anchor.secret)
 
@@ -172,7 +180,7 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
     for (const [what, secret] of held) {
       for (let epoch = 0; epoch <= 6; epoch++) {
         expect(
-          protocolTopic(secret, epoch, 'room'),
+          protocolTopic({ secret, epoch, protocol: 'room' }),
           `carol derives the group's topic from ${what}, at epoch ${epoch}`,
         ).not.toBe(groupTopic)
       }

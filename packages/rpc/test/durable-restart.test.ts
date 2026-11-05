@@ -12,8 +12,16 @@ import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { chat, makeMLSPeer } from './fixtures/peer.js'
 
 const recoverySecret = new Uint8Array(32).fill(0x91)
-const oldTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-const newTopic = protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')
+const oldTopic = protocolTopic({
+  secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+  epoch: 1,
+  protocol: 'chat',
+})
+const newTopic = protocolTopic({
+  secret: fakeEpochSecret(2, APP_TOPIC_LABEL),
+  epoch: 2,
+  protocol: 'chat',
+})
 const payload = (text: string) =>
   fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 
@@ -41,7 +49,8 @@ describe('durable pending restoration', () => {
       hub.publish({
         topicID: oldTopic,
         senderDID: 'alice',
-        payload: await alice.wrap(payload(text), {
+        payload: await alice.wrap({
+          bytes: payload(text),
           aad: encodeAppAAD({ topicID: oldTopic, intent: 'log' }),
         }),
         retain: 'log',
@@ -93,7 +102,8 @@ describe('durable pending restoration', () => {
     await hub.publish({
       topicID: oldTopic,
       senderDID: 'alice',
-      payload: await alice.wrap(payload('waiting'), {
+      payload: await alice.wrap({
+        bytes: payload('waiting'),
         aad: encodeAppAAD({ topicID: oldTopic, intent: 'log' }),
       }),
       retain: 'log',
@@ -130,7 +140,8 @@ describe('durable pending restoration', () => {
   test('an old-segment pending record survives reset and does not advance the new topic cursor', async () => {
     const cursor = createMemoryAppCursorStore()
     const old = createFakeCrypto({ epoch: 1, localDID: 'alice' })
-    const sealed = await old.wrap(payload('old'), {
+    const sealed = await old.wrap({
+      bytes: payload('old'),
       aad: encodeAppAAD({ topicID: oldTopic, intent: 'log' }),
     })
     const record: PendingAppFrame = {

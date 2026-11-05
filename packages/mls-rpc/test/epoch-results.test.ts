@@ -27,7 +27,7 @@ test('operation results carry the epoch used by the handle', async () => {
   const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
   const epoch = Number(member.handle.epoch)
 
-  const { secret, epoch: exportedAt } = await crypto.exportSecret('kumiai/test/epoch')
+  const { secret, epoch: exportedAt } = await crypto.exportSecret({ label: 'kumiai/test/epoch' })
   expect(secret.length).toBeGreaterThan(0)
   expect(exportedAt).toBe(epoch)
 
@@ -35,14 +35,17 @@ test('operation results carry the epoch used by the handle', async () => {
   expect(await crypto.openEntries(sealed)).toEqual(new Uint8Array([1, 2]))
   expect(sealedAt).toBe(epoch)
 
-  const frame = await sender.wrap(new Uint8Array([3]))
-  const opened = await crypto.unwrap(frame)
+  const frame = await sender.wrap({ bytes: new Uint8Array([3]) })
+  const opened = await crypto.unwrap({ bytes: frame })
   expect(opened.payload).toEqual(new Uint8Array([3]))
   expect(opened.epoch).toBe(epoch)
 
   const commit = await buildRealCommit(group)
-  const result = await mls.processCommit(commit, {
-    resolveLedgerEntries: group.resolveLedgerEntries,
+  const result = await mls.processCommit({
+    commit,
+    context: {
+      resolveLedgerEntries: group.resolveLedgerEntries,
+    },
   })
   expect(result).toEqual({ advanced: true, epochBefore: epoch, epochAfter: epoch + 1 })
 })

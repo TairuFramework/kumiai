@@ -60,7 +60,7 @@ describe('control lane lifecycle', () => {
     // The app topic of the segment anchored at an epoch: that epoch's secret, under that epoch —
     // the pair the anchor holds, and the only pair any member is on.
     const chatTopic = (epoch: number): string =>
-      protocolTopic(fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, 'chat')
+      protocolTopic({ secret: fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, protocol: 'chat' })
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
     expect(hub.subscriberCount(chatTopic(1))).toBe(1)
@@ -157,7 +157,9 @@ describe('control lane lifecycle', () => {
     // that they sit strictly BELOW a default hub's ceiling is asserted in
     // `hub-mux-subscribe-failure.test.ts`.
     expect(
-      hub.requestedRetention(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')),
+      hub.requestedRetention(
+        protocolTopic({ secret: fakeEpochSecret(1, APP_TOPIC_LABEL), epoch: 1, protocol: 'chat' }),
+      ),
     ).toBe(DEFAULT_APP_LOG_RETENTION_SECONDS)
     expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(
       DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
@@ -193,7 +195,9 @@ describe('control lane lifecycle', () => {
     // The override reaches the hub on the app topic's own subscribe, and moves nothing else: the
     // two windows are aligned by choice, so they are two dials and the commit one stays home.
     expect(
-      hub.requestedRetention(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')),
+      hub.requestedRetention(
+        protocolTopic({ secret: fakeEpochSecret(1, APP_TOPIC_LABEL), epoch: 1, protocol: 'chat' }),
+      ),
     ).toBe(4321)
     expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(
       DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
@@ -238,11 +242,15 @@ describe('control lane lifecycle', () => {
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await flush()
 
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat'))).toBe(
-      1,
-    )
     expect(
-      hub.requestedRetention(protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')),
+      hub.subscriberCount(
+        protocolTopic({ secret: fakeEpochSecret(2, APP_TOPIC_LABEL), epoch: 2, protocol: 'chat' }),
+      ),
+    ).toBe(1)
+    expect(
+      hub.requestedRetention(
+        protocolTopic({ secret: fakeEpochSecret(2, APP_TOPIC_LABEL), epoch: 2, protocol: 'chat' }),
+      ),
     ).toBe(4321)
 
     await peer.dispose()
@@ -283,7 +291,9 @@ describe('control lane lifecycle', () => {
     // live lane. Building the lane is the app topic's only subscribe, and it carries the window
     // like every other one: what asks the hub to hold the log is the subscribe, wherever it is.
     expect(
-      hub.requestedRetention(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')),
+      hub.requestedRetention(
+        protocolTopic({ secret: fakeEpochSecret(1, APP_TOPIC_LABEL), epoch: 1, protocol: 'chat' }),
+      ),
     ).toBe(4321)
     await peer.dispose()
   })
@@ -295,8 +305,8 @@ describe('control lane lifecycle', () => {
     const carol = makeMLSPeer(hub, 'carol', recoverySecret)
     await flush()
 
-    const { secret } = await bob.crypto.exportSecret(APP_TOPIC_LABEL)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
+    const { secret } = await bob.crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    expect(hub.subscriberCount(protocolTopic({ secret, epoch: 1, protocol: 'chat' }))).toBe(2)
 
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     await flush()
@@ -307,10 +317,12 @@ describe('control lane lifecycle', () => {
     // epoch advancing is not a reason to move the group's messages. And the topic a live-epoch
     // derivation would have moved them to — epoch 2's secret, under epoch 2 — was never reached
     // for at all.
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat'))).toBe(
-      0,
-    )
+    expect(hub.subscriberCount(protocolTopic({ secret, epoch: 1, protocol: 'chat' }))).toBe(2)
+    expect(
+      hub.subscriberCount(
+        protocolTopic({ secret: fakeEpochSecret(2, APP_TOPIC_LABEL), epoch: 2, protocol: 'chat' }),
+      ),
+    ).toBe(0)
 
     await bob.peer.dispose()
     await carol.peer.dispose()
@@ -322,7 +334,7 @@ describe('control lane lifecycle', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret)
     await flush()
 
-    const { secret } = await bob.crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret } = await bob.crypto.exportSecret({ label: APP_TOPIC_LABEL })
     // A Commit with no bytes: read as a frame, but nothing a member can apply.
     await publishCommit({
       hub,
@@ -335,7 +347,7 @@ describe('control lane lifecycle', () => {
 
     expect(bob.mls.epoch()).toBe(1)
     expect(bob.mls.commits()).toBe(0)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(protocolTopic({ secret, epoch: 1, protocol: 'chat' }))).toBe(1)
 
     await bob.peer.dispose()
   })
@@ -347,20 +359,20 @@ describe('control lane lifecycle', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret)
     await flush()
 
-    const { secret } = await alice.crypto.exportSecret(APP_TOPIC_LABEL)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
+    const { secret } = await alice.crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    expect(hub.subscriberCount(protocolTopic({ secret, epoch: 1, protocol: 'chat' }))).toBe(2)
 
     // Alice builds a Commit and does NOT adopt it: the group is still at the epoch it was
     // framed at, which is the epoch its bodies must be sealed under. She adopts it in
     // onAccepted, once the hub has taken the frame.
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
 
     // Bob pulled the Commit, advanced, and resynced; Alice rebuilt at epoch 2. Neither app
     // lane moved with them — a ledger commit touches no leaf.
     expect(bob.mls.epoch()).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(0)
+    expect(hub.subscriberCount(protocolTopic({ secret, epoch: 1, protocol: 'chat' }))).toBe(2)
+    expect(hub.subscriberCount(protocolTopic({ secret, epoch: 2, protocol: 'chat' }))).toBe(0)
     // It went to the log, not the mailbox: it moved the topic's head, so it is still
     // there for a member invited tomorrow.
     const committed = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))

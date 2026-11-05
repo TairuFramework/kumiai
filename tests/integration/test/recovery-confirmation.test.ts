@@ -108,15 +108,15 @@ async function setup(options: { third?: boolean; deadlineMs?: number; timeoutMs?
   }
   const aliceID = randomIdentity({ crypto })
   const bobID = randomIdentity({ crypto })
-  let aliceGroup = (await createGroup(aliceID, 'confirmation', { crypto })).group
-  const bundle = await createKeyPackageBundle(bobID)
+  let aliceGroup = (await createGroup({ identity: aliceID, groupID: 'confirmation', crypto })).group
+  const bundle = await createKeyPackageBundle({ identity: bobID })
   const { invite } = await createInvite({
     group: aliceGroup,
     identity: aliceID,
     recipientDID: bobID.id,
     permission: 'member',
   })
-  const added = await commitInvite(aliceGroup, bundle.publicPackage, invite)
+  const added = await commitInvite({ group: aliceGroup, keyPackage: bundle.publicPackage, invite })
   aliceGroup = added.newGroup
   const bobSlot = createLedgerEntrySlot()
   bobSlot.install(async (ids) =>
@@ -138,16 +138,20 @@ async function setup(options: { third?: boolean; deadlineMs?: number; timeoutMs?
   const carolID = randomIdentity({ crypto })
   let carolGroup: GroupHandle | undefined
   if (options.third) {
-    const material = await createKeyPackageBundle(carolID)
+    const material = await createKeyPackageBundle({ identity: carolID })
     const offered = await createInvite({
       group: aliceGroup,
       identity: aliceID,
       recipientDID: carolID.id,
       permission: 'member',
     })
-    const commit = await commitInvite(aliceGroup, material.publicPackage, offered.invite)
+    const commit = await commitInvite({
+      group: aliceGroup,
+      keyPackage: material.publicPackage,
+      invite: offered.invite,
+    })
     aliceGroup = commit.newGroup
-    await bobGroup.processMessage(commit.commitMessage)
+    await bobGroup.processMessage({ message: commit.commitMessage })
     carolGroup = (
       await processWelcome({
         identity: carolID,
@@ -437,7 +441,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     entrySlot: createLedgerEntrySlot(),
   })
   const carol = randomIdentity({ crypto })
-  const material = await createKeyPackageBundle(carol)
+  const material = await createKeyPackageBundle({ identity: carol })
   const offered = await createInvite({
     group: source,
     identity: s.aliceID,
@@ -446,15 +450,21 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
   })
   // Alice rotates through her lane, so her walker holds the applied record the stale external
   // commit is judged against.
-  await s.alice.commit(async () => {
-    const rotated = await commitInvite(source, material.publicPackage, offered.invite)
-    return {
-      commit: rotated.commitMessage,
-      bodies: offered.invite.ledgerEntries,
-      kind: 'invite',
-      journal: encodeJournal(rotated.newGroup),
-      onAccepted: () => guardedReplace(s.aliceAccess, rotated.newGroup),
-    }
+  await s.alice.commit({
+    build: async () => {
+      const rotated = await commitInvite({
+        group: source,
+        keyPackage: material.publicPackage,
+        invite: offered.invite,
+      })
+      return {
+        commit: rotated.commitMessage,
+        bodies: offered.invite.ledgerEntries,
+        kind: 'invite',
+        journal: encodeJournal(rotated.newGroup),
+        onAccepted: () => guardedReplace({ access: s.aliceAccess, next: rotated.newGroup }),
+      }
+    },
   })
   const seal = s.aliceMLS.sealGroupInfo.bind(s.aliceMLS)
   vi.spyOn(s.aliceMLS, 'sealGroupInfo')
@@ -514,28 +524,31 @@ test('an invalid verdict envelope and a copied request for another position supp
       await s.aliceConnection.publish({
         senderDID: s.aliceID.id,
         topicID: value.topicID,
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.recoveryVerdict,
-          encodeRecoveryVerdict(request.requestID, new Uint8Array([0])),
-        ),
+        payload: encodeHandshakeFrame({
+          kind: HANDSHAKE_KIND.recoveryVerdict,
+          payload: encodeRecoveryVerdict({
+            requestID: request.requestID,
+            sealed: new Uint8Array([0]),
+          }),
+        }),
       })
       await publish({
         ...value,
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.recoveryConfirmRequest,
-          encodeRecoveryConfirmRequest({
+        payload: encodeHandshakeFrame({
+          kind: HANDSHAKE_KIND.recoveryConfirmRequest,
+          payload: encodeRecoveryConfirmRequest({
             ...request,
             position: earlier.position,
             commitDigest: earlier.commitDigest,
           }),
-        ),
+        }),
       })
       await publish({
         ...value,
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.recoveryConfirmRequest,
-          encodeRecoveryConfirmRequest({ ...request, commitDigest: 'wrong-digest' }),
-        ),
+        payload: encodeHandshakeFrame({
+          kind: HANDSHAKE_KIND.recoveryConfirmRequest,
+          payload: encodeRecoveryConfirmRequest({ ...request, commitDigest: 'wrong-digest' }),
+        }),
       })
     }
     return publish(value)
@@ -585,15 +598,15 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
         commitDigest: request.commitDigest,
         verdict: 'confirmed',
         epoch: Number(s.aliceGroup().epoch),
-        tag: confirmationTag(new Uint8Array(32), request.requestID),
+        tag: confirmationTag({ key: new Uint8Array(32), requestID: request.requestID }),
       })
       await s.aliceConnection.publish({
         senderDID: s.aliceID.id,
         topicID: value.topicID,
-        payload: encodeHandshakeFrame(
-          HANDSHAKE_KIND.recoveryVerdict,
-          encodeRecoveryVerdict(request.requestID, forged),
-        ),
+        payload: encodeHandshakeFrame({
+          kind: HANDSHAKE_KIND.recoveryVerdict,
+          payload: encodeRecoveryVerdict({ requestID: request.requestID, sealed: forged }),
+        }),
       })
     }
     return publish(value)
@@ -624,14 +637,18 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const carol = randomIdentity({ crypto })
-  const bundle = await createKeyPackageBundle(carol)
+  const bundle = await createKeyPackageBundle({ identity: carol })
   const offered = await createInvite({
     group: source,
     identity: s.aliceID,
     recipientDID: carol.id,
     permission: 'member',
   })
-  const alternative = await commitInvite(source, bundle.publicPackage, offered.invite)
+  const alternative = await commitInvite({
+    group: source,
+    keyPackage: bundle.publicPackage,
+    invite: offered.invite,
+  })
   const pause = gate()
   cleanup.push(async () => pause.release())
   const seal = s.aliceMLS.sealRecoveryVerdict.bind(s.aliceMLS)
@@ -646,15 +663,18 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
   await vi.waitFor(() => expect(sealing).toHaveBeenCalled())
   expect(
     (
-      await s.bobMLS.processCommit(alternative.commitMessage, {
-        resolveLedgerEntries: async (ids) =>
-          ids.map((id) => {
-            const token = alternative.newGroup.ledgerTokens.find(
-              (token) => ledgerEntryDigest(token) === id,
-            )
-            if (token == null) throw new Error('No alternative entry')
-            return token
-          }),
+      await s.bobMLS.processCommit({
+        commit: alternative.commitMessage,
+        context: {
+          resolveLedgerEntries: async (ids) =>
+            ids.map((id) => {
+              const token = alternative.newGroup.ledgerTokens.find(
+                (token) => ledgerEntryDigest(token) === id,
+              )
+              if (token == null) throw new Error('No alternative entry')
+              return token
+            }),
+        },
       })
     ).advanced,
   ).toBe(true)
@@ -729,8 +749,8 @@ test.each([false, true])(
     await s.carol.dispose()
     const leaf = s.aliceGroup().findMemberLeafIndex(s.carolID.id)
     if (leaf == null) throw new Error('Missing removed leaf')
-    const removal = await removeMember(s.aliceGroup(), leaf)
-    await guardedReplace(s.aliceAccess, removal.newGroup)
+    const removal = await removeMember({ group: s.aliceGroup(), leafIndex: leaf })
+    await guardedReplace({ access: s.aliceAccess, next: removal.newGroup })
     expect(s.bobGroup().findMemberLeafIndex(s.carolID.id)).toBeDefined()
     expect(s.aliceGroup().findMemberLeafIndex(s.carolID.id)).toBeUndefined()
     const { sealRealRecoveryVerdict } = await import(
@@ -758,10 +778,10 @@ test.each([false, true])(
         await s.aliceConnection.publish({
           senderDID: s.aliceID.id,
           topicID: value.topicID,
-          payload: encodeHandshakeFrame(
-            HANDSHAKE_KIND.recoveryVerdict,
-            encodeRecoveryVerdict(request.requestID, sealed),
-          ),
+          payload: encodeHandshakeFrame({
+            kind: HANDSHAKE_KIND.recoveryVerdict,
+            payload: encodeRecoveryVerdict({ requestID: request.requestID, sealed }),
+          }),
         })
       }
       return publish(value)
@@ -774,7 +794,7 @@ test.each([false, true])(
           const { sealed, requestID } = (await import('@kumiai/rpc')).decodeRecoveryVerdict(
             frame.payload,
           )
-          const opened = await s.bobMLS.openRecoveryVerdict(sealed, requestID)
+          const opened = await s.bobMLS.openRecoveryVerdict({ sealed, requestID })
           if (opened?.signer === s.aliceID.id)
             return publishVerdict({ ...value, payload: new Uint8Array([0]) })
         }
@@ -817,8 +837,8 @@ test.each(['policy', 'invalid'] as const)(
         commitPolicy: () => 'reject',
         crypto,
       })
-      await rejector.bootstrapLedger(original.ledgerTokens)
-      await guardedReplace(s.aliceAccess, rejector)
+      await rejector.bootstrapLedger({ tokens: original.ledgerTokens })
+      await guardedReplace({ access: s.aliceAccess, next: rejector })
     } else {
       const { lowLevelExternal } = await import(
         new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href

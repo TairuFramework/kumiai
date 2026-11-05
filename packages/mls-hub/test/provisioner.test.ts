@@ -107,13 +107,16 @@ describe('ensureProvisioned', () => {
   test('a stale pending record is not resumed; a fresh package is minted instead', async () => {
     const store = createMemoryLastResortStore()
     const staleRef = 'stale-ref'
-    await store.put(hub.identity.id, {
-      kind: 'last-resort',
-      ref: staleRef,
-      keyPackage: 'kp-stale',
-      privatePackage: 'priv-stale',
-      notAfter: Math.floor(Date.now() / 1000) + 10 * 86_400,
-      uploadedAt: null,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'last-resort',
+        ref: staleRef,
+        keyPackage: 'kp-stale',
+        privatePackage: 'priv-stale',
+        notAfter: Math.floor(Date.now() / 1000) + 10 * 86_400,
+        uploadedAt: null,
+      },
     })
     const provisioner = createLastResortProvisioner({
       identity: hub.identity,
@@ -221,7 +224,7 @@ describe('an interrupted provision', () => {
     if (record == null) return
 
     // Simulate the lost confirmation.
-    await store.put(hub.identity.id, { ...record, uploadedAt: null })
+    await store.put({ ownerDID: hub.identity.id, record: { ...record, uploadedAt: null } })
 
     const result = await provisioner.ensureProvisioned().value
 
@@ -290,11 +293,11 @@ describe('a store failure on the confirming write', () => {
     const storeError = new Error('disk full')
     const store: LastResortStore = {
       list: (ownerDID) => inner.list(ownerDID),
-      delete: (ownerDID, ref) => inner.delete(ownerDID, ref),
+      delete: ({ ownerDID, ref }) => inner.delete({ ownerDID, ref }),
       // The mint's put has `uploadedAt: null`; only the confirming write that follows a successful
       // upload sets it, so this targets exactly that write.
-      put: (ownerDID, record) =>
-        record.uploadedAt == null ? inner.put(ownerDID, record) : Promise.reject(storeError),
+      put: ({ ownerDID, record }) =>
+        record.uploadedAt == null ? inner.put({ ownerDID, record }) : Promise.reject(storeError),
     }
     const provisioner = createLastResortProvisioner({
       identity: hub.identity,
@@ -331,7 +334,10 @@ describe('rotation and retention', () => {
     if (original == null) return
 
     // 10 days left: inside the 30-day window.
-    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(10) })
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: { ...original, notAfter: secondsFromNow(10) },
+    })
 
     const second = await provisioner.ensureProvisioned().value
 
@@ -371,7 +377,10 @@ describe('rotation and retention', () => {
     expect(original).toBeDefined()
     if (original == null) return
     // 29 days left: one day inside the default 30-day window.
-    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(29) })
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: { ...original, notAfter: secondsFromNow(29) },
+    })
 
     const second = await provisioner.ensureProvisioned().value
 
@@ -391,7 +400,10 @@ describe('rotation and retention', () => {
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
-    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(31) })
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: { ...original, notAfter: secondsFromNow(31) },
+    })
 
     const second = await provisioner.ensureProvisioned().value
 
@@ -412,7 +424,10 @@ describe('rotation and retention', () => {
     expect(original).toBeDefined()
     if (original == null) return
     // 10 days left: inside the default 30-day window, outside the configured 5-day one.
-    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(10) })
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: { ...original, notAfter: secondsFromNow(10) },
+    })
 
     expect(await provisioner.ensureProvisioned().value).toEqual({ rotated: false, ref: first.ref })
   })
@@ -434,13 +449,16 @@ describe('rotation and retention', () => {
     expect(live).toBeDefined()
     if (live == null) return
 
-    await store.put(hub.identity.id, {
-      ...live,
-      kind: 'last-resort',
-      ref: 'stale-ref',
-      keyPackage: 'kp-stale',
-      notAfter: secondsFromNow(-8),
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        ...live,
+        kind: 'last-resort',
+        ref: 'stale-ref',
+        keyPackage: 'kp-stale',
+        notAfter: secondsFromNow(-8),
+        uploadedAt: 1,
+      },
     })
 
     const result = await provisioner.ensureProvisioned().value
@@ -467,13 +485,16 @@ describe('rotation and retention', () => {
     expect(live).toBeDefined()
     if (live == null) return
 
-    await store.put(hub.identity.id, {
-      ...live,
-      kind: 'last-resort',
-      ref: 'six-day-ref',
-      keyPackage: 'kp-six-day',
-      notAfter: secondsFromNow(-6),
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        ...live,
+        kind: 'last-resort',
+        ref: 'six-day-ref',
+        keyPackage: 'kp-six-day',
+        notAfter: secondsFromNow(-6),
+        uploadedAt: 1,
+      },
     })
 
     await provisioner.ensureProvisioned().value
@@ -497,13 +518,16 @@ describe('rotation and retention', () => {
     expect(live).toBeDefined()
     if (live == null) return
 
-    await store.put(hub.identity.id, {
-      ...live,
-      kind: 'last-resort',
-      ref: 'recent-ref',
-      keyPackage: 'kp-recent',
-      notAfter: secondsFromNow(-3),
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        ...live,
+        kind: 'last-resort',
+        ref: 'recent-ref',
+        keyPackage: 'kp-recent',
+        notAfter: secondsFromNow(-3),
+        uploadedAt: 1,
+      },
     })
 
     await provisioner.ensureProvisioned().value
@@ -526,13 +550,16 @@ describe('rotation and retention', () => {
     const live = (await store.list(hub.identity.id))[0]
     expect(live).toBeDefined()
     if (live == null) return
-    await store.put(hub.identity.id, {
-      ...live,
-      kind: 'last-resort',
-      ref: 'stale-ref',
-      keyPackage: 'kp-stale',
-      notAfter: secondsFromNow(-3),
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        ...live,
+        kind: 'last-resort',
+        ref: 'stale-ref',
+        keyPackage: 'kp-stale',
+        notAfter: secondsFromNow(-3),
+        uploadedAt: 1,
+      },
     })
 
     await provisioner.ensureProvisioned().value
@@ -556,7 +583,10 @@ describe('rotation and retention', () => {
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
-    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(-1) })
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: { ...original, notAfter: secondsFromNow(-1) },
+    })
 
     const second = await provisioner.ensureProvisioned().value
 
@@ -577,13 +607,16 @@ describe('rotation and retention', () => {
   test('a resumed record survives its own prune when the clock advances during the upload', async () => {
     const store = createMemoryLastResortStore()
     const pendingRef = 'pending-ref'
-    await store.put(hub.identity.id, {
-      kind: 'last-resort',
-      ref: pendingRef,
-      keyPackage: 'kp-pending',
-      privatePackage: 'priv-pending',
-      notAfter: secondsFromNow(31),
-      uploadedAt: null,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'last-resort',
+        ref: pendingRef,
+        keyPackage: 'kp-pending',
+        privatePackage: 'priv-pending',
+        notAfter: secondsFromNow(31),
+        uploadedAt: null,
+      },
     })
 
     // A mutable offset on top of the real clock. NOT vi.useFakeTimers(): that interferes with the
@@ -670,7 +703,8 @@ describe('the options passthrough', () => {
     // assertion below pins the extra resolution `keyPackageRef` makes without also pinning
     // @kumiai/mls internals.
     const mintCalls: Array<number> = []
-    await createLastResortKeyPackageBundle(hub.identity, {
+    await createLastResortKeyPackageBundle({
+      identity: hub.identity,
       ciphersuiteName: NON_DEFAULT_CIPHERSUITE,
       cryptoProvider: probeProvider(mintCalls),
     })
@@ -854,21 +888,27 @@ describe('option validation', () => {
     expect(live).toBeDefined()
     if (live == null) return
 
-    await store.put(hub.identity.id, {
-      ...live,
-      kind: 'last-resort',
-      ref: 'just-expired-ref',
-      keyPackage: 'kp-just-expired',
-      notAfter: Math.floor(Date.now() / 1000) - 60,
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        ...live,
+        kind: 'last-resort',
+        ref: 'just-expired-ref',
+        keyPackage: 'kp-just-expired',
+        notAfter: Math.floor(Date.now() / 1000) - 60,
+        uploadedAt: 1,
+      },
     })
-    await store.put(hub.identity.id, {
-      ...live,
-      kind: 'last-resort',
-      ref: 'still-valid-ref',
-      keyPackage: 'kp-still-valid',
-      notAfter: secondsFromNow(1),
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        ...live,
+        kind: 'last-resort',
+        ref: 'still-valid-ref',
+        keyPackage: 'kp-still-valid',
+        notAfter: secondsFromNow(1),
+        uploadedAt: 1,
+      },
     })
 
     await provisioner.ensureProvisioned().value
@@ -912,22 +952,28 @@ describe('ensureProvisioned failure paths', () => {
     const store = createMemoryLastResortStore()
     // The live candidate: uploaded, comfortably outside the rotation window, so `run` takes the
     // readback branch instead of resuming or minting.
-    await store.put(hub.identity.id, {
-      kind: 'last-resort',
-      ref: 'live-ref',
-      keyPackage: 'kp-live',
-      privatePackage: 'priv-live',
-      notAfter: secondsFromNow(90),
-      uploadedAt: Date.now(),
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'last-resort',
+        ref: 'live-ref',
+        keyPackage: 'kp-live',
+        privatePackage: 'priv-live',
+        notAfter: secondsFromNow(90),
+        uploadedAt: Date.now(),
+      },
     })
     // An expired record the prune must still remove even though the hub call failed.
-    await store.put(hub.identity.id, {
-      kind: 'last-resort',
-      ref: 'dead',
-      keyPackage: 'a',
-      privatePackage: 'b',
-      notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'last-resort',
+        ref: 'dead',
+        keyPackage: 'a',
+        privatePackage: 'b',
+        notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
+        uploadedAt: 1,
+      },
     })
     vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
@@ -996,15 +1042,18 @@ describe('ensureProvisioned failure paths', () => {
   test('a transport failure resuming a pending record returns a retryable error and leaves it resumable', async () => {
     const store = createMemoryLastResortStore()
     const pendingRef = 'pending-ref'
-    await store.put(hub.identity.id, {
-      kind: 'last-resort',
-      ref: pendingRef,
-      keyPackage: 'kp-pending',
-      privatePackage: 'priv-pending',
-      // Comfortably outside the default 30-day rotation window, so the candidate is resumed
-      // rather than falling through to a mint.
-      notAfter: secondsFromNow(60),
-      uploadedAt: null,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'last-resort',
+        ref: pendingRef,
+        keyPackage: 'kp-pending',
+        privatePackage: 'priv-pending',
+        // Comfortably outside the default 30-day rotation window, so the candidate is resumed
+        // rather than falling through to a mint.
+        notAfter: secondsFromNow(60),
+        uploadedAt: null,
+      },
     })
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
@@ -1068,13 +1117,16 @@ describe('ensureProvisioned failure paths', () => {
     // An expired record the prune must still remove even though the hub call was refused. Its
     // uploadedAt of 1 keeps it from being resumed as a pending candidate, so the run falls through
     // to a mint, whose upload catch is the one under test.
-    await store.put(hub.identity.id, {
-      kind: 'last-resort',
-      ref: 'dead',
-      keyPackage: 'a',
-      privatePackage: 'b',
-      notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'last-resort',
+        ref: 'dead',
+        keyPackage: 'a',
+        privatePackage: 'b',
+        notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
+        uploadedAt: 1,
+      },
     })
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(
       Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),
@@ -1096,13 +1148,16 @@ describe('ensureProvisioned failure paths', () => {
 
   test('an expired record is pruned on a failure path', async () => {
     const store = createMemoryLastResortStore()
-    await store.put(hub.identity.id, {
-      kind: 'last-resort',
-      ref: 'dead',
-      keyPackage: 'a',
-      privatePackage: 'b',
-      notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
-      uploadedAt: 1,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'last-resort',
+        ref: 'dead',
+        keyPackage: 'a',
+        privatePackage: 'b',
+        notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
+        uploadedAt: 1,
+      },
     })
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({

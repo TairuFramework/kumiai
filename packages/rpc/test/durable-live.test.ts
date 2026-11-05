@@ -9,7 +9,11 @@ import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
-const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+const topicID = protocolTopic({
+  secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+  epoch: 1,
+  protocol: 'chat',
+})
 const payload = (text: string) =>
   fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 
@@ -61,7 +65,8 @@ async function setup(hub = new DurableFakeHub(), handlers: Record<string, unknow
     hub.publish({
       topicID,
       senderDID: 'alice',
-      payload: await alice.wrap(payload(text), {
+      payload: await alice.wrap({
+        bytes: payload(text),
         aad: encodeAppAAD({ topicID, intent: retain }),
       }),
       retain: retain === 'log' ? 'log' : 'mailbox',
@@ -143,7 +148,7 @@ describe('durable live app delivery', () => {
     hub.detach('bob')
     await publish('before commit')
     vi.spyOn(store.port, 'persistOpened').mockRejectedValueOnce(new Error('transient storage'))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toThrow(
       'failed to persist opened app frame',
     )
     await vi.waitFor(() => expect(store.opened).toHaveLength(1), { timeout: 2500 })
@@ -153,7 +158,8 @@ describe('durable live app delivery', () => {
   test('the pull after listener registration finds a publication in the startup gap', async () => {
     const hub = new DurableFakeHub()
     const alice = createFakeCrypto({ epoch: 1, localDID: 'alice' })
-    const bytes = await alice.wrap(payload('gap'), {
+    const bytes = await alice.wrap({
+      bytes: payload('gap'),
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     })
     const fetch = hub.fetchTopic.bind(hub)

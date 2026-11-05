@@ -123,11 +123,16 @@ export function buildGroupAnchorExtension(anchor: GroupAnchor): GroupContextExte
   })
 }
 
+export type BuildCurrentGroupAnchorExtensionParams = {
+  creatorDID: string
+  app?: unknown
+}
+
 /** Build the anchor extension for a freshly created group at the current version. */
-export function buildCurrentGroupAnchorExtension(
-  creatorDID: string,
-  app?: unknown,
-): GroupContextExtension {
+export function buildCurrentGroupAnchorExtension({
+  creatorDID,
+  app,
+}: BuildCurrentGroupAnchorExtensionParams): GroupContextExtension {
   return buildGroupAnchorExtension({ creatorDID, version: CURRENT_VERSION, app })
 }
 

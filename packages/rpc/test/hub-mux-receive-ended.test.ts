@@ -61,8 +61,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
     const mux = createHubMux({
       hub: {
         ...wrapped,
-        receive: (did: string) => {
-          const subscription = wrapped.receive(did)
+        receive: ({ subscriberDID: did }) => {
+          const subscription = wrapped.receive({ subscriberDID: did })
           lane = subscription as unknown as { endLane: () => void }
           return subscription
         },
@@ -96,8 +96,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
     const mux = createHubMux({
       hub: {
         ...wrapped,
-        receive: (did: string) => {
-          const subscription = wrapped.receive(did)
+        receive: ({ subscriberDID: did }) => {
+          const subscription = wrapped.receive({ subscriberDID: did })
           lane = subscription as unknown as { endLane: () => void }
           return subscription
         },
@@ -139,8 +139,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       const mux = createHubMux({
         hub: {
           ...wrapped,
-          receive: (did: string) => {
-            const subscription = wrapped.receive(did)
+          receive: ({ subscriberDID: did }) => {
+            const subscription = wrapped.receive({ subscriberDID: did })
             lane = subscription as unknown as { endLane: () => void }
             return subscription
           },
@@ -177,8 +177,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       const mux = createHubMux({
         hub: {
           ...wrapped,
-          receive: (did: string) => {
-            const subscription = wrapped.receive(did)
+          receive: ({ subscriberDID: did }) => {
+            const subscription = wrapped.receive({ subscriberDID: did })
             lane = subscription as unknown as { endLane: () => void }
             return subscription
           },
@@ -237,8 +237,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       const mux = createHubMux({
         hub: {
           ...wrapped,
-          receive: (did: string) => {
-            const subscription = wrapped.receive(did)
+          receive: ({ subscriberDID: did }) => {
+            const subscription = wrapped.receive({ subscriberDID: did })
             lane = subscription as unknown as { endLane: () => void }
             return subscription
           },
@@ -289,8 +289,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       const mux = createHubMux({
         hub: {
           ...wrapped,
-          receive: (did: string) => {
-            const subscription = wrapped.receive(did)
+          receive: ({ subscriberDID: did }) => {
+            const subscription = wrapped.receive({ subscriberDID: did })
             lane = subscription as unknown as { endLane: () => void }
             return subscription
           },

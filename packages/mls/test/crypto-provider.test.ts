@@ -110,9 +110,11 @@ describe('controller fold', () => {
       controller: await bindingFor(identity),
       controllerLog: asControllerLog([inception]),
     }
-    await expect(createGroup(identity, 'fold-default', options)).resolves.toBeDefined()
     await expect(
-      createGroup(identity, 'fold-refused', { ...options, crypto: refusing() }),
+      createGroup({ identity, groupID: 'fold-default', ...options }),
+    ).resolves.toBeDefined()
+    await expect(
+      createGroup({ identity, groupID: 'fold-refused', ...options, crypto: refusing() }),
     ).rejects.toThrow()
   })
 })
@@ -126,9 +128,9 @@ describe('ledger entry verification', () => {
   })
 
   test('verifyLedgerEntry judges with the given provider', async () => {
-    const token = await signLedgerEntry(randomIdentity(), entry('ledger'))
-    expect(await verifyLedgerEntry(token)).not.toBeNull()
-    expect(await verifyLedgerEntry(token, { crypto: refusing() })).toBeNull()
+    const token = await signLedgerEntry({ identity: randomIdentity(), entry: entry('ledger') })
+    expect(await verifyLedgerEntry({ token })).not.toBeNull()
+    expect(await verifyLedgerEntry({ token, crypto: refusing() })).toBeNull()
   })
 
   describe('when the provider fails', () => {
@@ -189,8 +191,8 @@ describe('ledger entry verification', () => {
 
   test('a token another provider accepted is not reused from either ledger cache', async () => {
     const identity = randomIdentity()
-    const { group, credential } = await createGroup(identity, 'ledger-cache')
-    const token = await signLedgerEntry(identity, entry(group.groupID))
+    const { group, credential } = await createGroup({ identity, groupID: 'ledger-cache' })
+    const token = await signLedgerEntry({ identity, entry: entry(group.groupID) })
     expect(await group.applyLedgerEntries([token])).toHaveLength(1)
     const exported = group.ledgerTokens
     expect(exported).toEqual([token])
@@ -240,7 +242,7 @@ describe('leaf authentication', () => {
 
   test('verifyLeafCredential judges a direct capability with the given provider', async () => {
     const binding = await bindingFor(leaf)
-    const credential = makeMLSCredential(leaf, binding)
+    const credential = makeMLSCredential({ identity: leaf, controller: binding })
     await expect(verifyLeafCredential(credential, leaf.publicKey)).resolves.toBeUndefined()
     await expect(
       verifyLeafCredential(credential, leaf.publicKey, {
@@ -258,7 +260,7 @@ describe('leaf authentication', () => {
       identity: issuer,
       parent: await trustedGrant(issuer),
     })
-    const credential = makeMLSCredential(leaf, binding)
+    const credential = makeMLSCredential({ identity: leaf, controller: binding })
     await expect(verifyLeafCredential(credential, leaf.publicKey)).resolves.toBeUndefined()
     // The child token's signature is checked by the raw verifier, not verifyToken.
     await expect(
@@ -272,7 +274,7 @@ describe('leaf authentication', () => {
     const issuer = agent(85)
     const parent = await trustedGrant(issuer)
     const binding = await bindingFor(leaf, [inception], { identity: issuer, parent })
-    const credential = makeMLSCredential(leaf, binding)
+    const credential = makeMLSCredential({ identity: leaf, controller: binding })
     await expect(
       verifyLeafCredential(credential, leaf.publicKey, { crypto: refusingToken(parent) }),
     ).rejects.toHaveProperty('reason', 'signature-invalid')
@@ -286,7 +288,7 @@ describe('leaf authentication', () => {
   })
 
   test('the authentication services of a context and of deps use the provider', async () => {
-    const credential = makeMLSCredential(leaf, await bindingFor(leaf))
+    const credential = makeMLSCredential({ identity: leaf, controller: await bindingFor(leaf) })
     const validate = async (service: {
       validateCredential: ReturnType<typeof createDIDAuthenticationService>['validateCredential']
     }) => await service.validateCredential(credential, leaf.publicKey)
@@ -310,9 +312,9 @@ describe('leaf authentication', () => {
 
   test('createKeyPackageBundle refuses its own leaf under a refusing provider', async () => {
     const options = { controller: await bindingFor(leaf) }
-    await expect(createKeyPackageBundle(leaf, options)).resolves.toBeDefined()
+    await expect(createKeyPackageBundle({ identity: leaf, ...options })).resolves.toBeDefined()
     await expect(
-      createKeyPackageBundle(leaf, { ...options, crypto: refusing() }),
+      createKeyPackageBundle({ identity: leaf, ...options, crypto: refusing() }),
     ).rejects.toBeInstanceOf(LeafBindingError)
   })
 })
@@ -343,7 +345,9 @@ describe('lifecycle proof', () => {
     const run = async (refuse: boolean) => {
       const identity = agent(87)
       const { state, provider } = switchable()
-      const { group } = await createGroup(identity, `lifecycle-handle-${refuse}`, {
+      const { group } = await createGroup({
+        identity,
+        groupID: `lifecycle-handle-${refuse}`,
         controller: await bindingFor(identity),
         controllerLog: asControllerLog([inception]),
         commitPolicy: () => 'accept',
@@ -356,7 +360,10 @@ describe('lifecycle proof', () => {
         chain: [inception],
       })
       state.refuse = refuse
-      const published = await publishControllerLog(group, asControllerLog([inception, rotation]))
+      const published = await publishControllerLog({
+        group,
+        log: asControllerLog([inception, rotation]),
+      })
       return { group, published, provider }
     }
 
@@ -371,15 +378,15 @@ describe('lifecycle proof', () => {
 describe('recovery', () => {
   test('a request is verified with the given provider, and the handle provider when sealing', async () => {
     const identity = randomIdentity()
-    const { group } = await createGroup(identity, 'recovery-request')
+    const { group } = await createGroup({ identity, groupID: 'recovery-request' })
     const held = await createRecoveryRequest({ group, identity, requestID: 'request' })
-    await expect(verifyRecoveryRequest(held.request)).resolves.toBeDefined()
+    await expect(verifyRecoveryRequest({ token: held.request })).resolves.toBeDefined()
     await expect(
-      verifyRecoveryRequest(held.request, { crypto: refusing() }),
+      verifyRecoveryRequest({ token: held.request, crypto: refusing() }),
     ).rejects.toHaveProperty('reason', 'unverified')
     await expect(sealGroupInfo({ group, identity, request: held.request })).resolves.toBeDefined()
 
-    const refused = await createGroup(identity, 'recovery-request', { crypto: refusing() })
+    const refused = await createGroup({ identity, groupID: 'recovery-request', crypto: refusing() })
     const request = await createRecoveryRequest({
       group: refused.group,
       identity,
@@ -393,7 +400,9 @@ describe('recovery', () => {
   const sealedVerdict = async (refuse: boolean) => {
     const identity = randomIdentity()
     const { state, provider } = switchable()
-    const { group } = await createGroup(identity, `recovery-verdict-${refuse}`, {
+    const { group } = await createGroup({
+      identity,
+      groupID: `recovery-verdict-${refuse}`,
       crypto: provider,
     })
     const held = await createRecoveryRequest({ group, identity, requestID: 'request' })
@@ -428,7 +437,9 @@ describe('recovery', () => {
   const sealedAttestation = async (refuse: boolean) => {
     const identity = randomIdentity()
     const { state, provider } = switchable()
-    const { group } = await createGroup(identity, `recovery-attestation-${refuse}`, {
+    const { group } = await createGroup({
+      identity,
+      groupID: `recovery-attestation-${refuse}`,
       crypto: provider,
     })
     const held = await createRecoveryRequest({ group, identity, requestID: 'request' })
@@ -508,7 +519,9 @@ describe('default provider', () => {
         commitPolicy: () => 'accept' as const,
         resolveLedgerEntries: async (ids: Array<string>) => ids.map((id) => tokens.get(id) ?? ''),
       }
-      const { group } = await createGroup(author, 'default-provider', {
+      const { group } = await createGroup({
+        identity: author,
+        groupID: 'default-provider',
         ...shared,
         controller: {
           id: did,
@@ -525,7 +538,8 @@ describe('default provider', () => {
       })
 
       // A delegated leaf: raw signature check, parent token, capability walk and holder grant.
-      const bundle = await createKeyPackageBundle(joiner, {
+      const bundle = await createKeyPackageBundle({
+        identity: joiner,
         crypto,
         controller: {
           id: did,
@@ -546,7 +560,7 @@ describe('default provider', () => {
         identity: author,
         recipientDID: joiner.id,
       })
-      const added = await commitInvite(group, bundle.publicPackage, invite)
+      const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
       const joined = await processWelcome({
         identity: joiner,
         invite,
@@ -559,13 +573,13 @@ describe('default provider', () => {
       }
 
       const settled = await rotation(seed, did, [first], crypto)
-      const published = await publishControllerLog(
-        added.newGroup,
-        asControllerLog([first, settled]),
-      )
+      const published = await publishControllerLog({
+        group: added.newGroup,
+        log: asControllerLog([first, settled]),
+      })
       if (published == null) throw new Error('Missing log commit')
       remember(published.newGroup)
-      await joined.group.processMessage(published.commitMessage)
+      await joined.group.processMessage({ message: published.commitMessage })
 
       const target = randomIdentity().id
       const denied = await rotation(seed, did, [first, settled], crypto, [target])
@@ -575,7 +589,7 @@ describe('default provider', () => {
       })
       if (built.status !== 'built') throw new Error(`Revoke not built: ${built.status}`)
       remember(built.result.newGroup)
-      await joined.group.processMessage(built.result.commitMessage)
+      await joined.group.processMessage({ message: built.result.commitMessage })
 
       const live = built.result.newGroup
       const held = await createRecoveryRequest({

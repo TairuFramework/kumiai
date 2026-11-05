@@ -184,12 +184,15 @@ describe('ensureStocked', () => {
       lowWater: 1,
     })
     // A record written before a crash: in the store, never counted by the hub.
-    await store.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'orphan',
-      keyPackage: 'kp-orphan',
-      privatePackage: 'priv-orphan',
-      notAfter: Math.floor(Date.now() / 1000) + 86_400,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'orphan',
+        keyPackage: 'kp-orphan',
+        privatePackage: 'priv-orphan',
+        notAfter: Math.floor(Date.now() / 1000) + 86_400,
+      },
     })
 
     await pool.ensureStocked().value
@@ -215,19 +218,25 @@ describe('ensureStocked', () => {
     })
     await pool.ensureStocked().value
     const nowSeconds = Math.floor(Date.now() / 1000)
-    await store.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'stale',
-      keyPackage: 'kp-stale',
-      privatePackage: 'priv-stale',
-      notAfter: nowSeconds - 8 * 86_400,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'stale',
+        keyPackage: 'kp-stale',
+        privatePackage: 'priv-stale',
+        notAfter: nowSeconds - 8 * 86_400,
+      },
     })
-    await store.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'within-grace',
-      keyPackage: 'kp-grace',
-      privatePackage: 'priv-grace',
-      notAfter: nowSeconds - 6 * 86_400,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'within-grace',
+        keyPackage: 'kp-grace',
+        privatePackage: 'priv-grace',
+        notAfter: nowSeconds - 6 * 86_400,
+      },
     })
 
     // Depth is already at target, so this takes the no-op branch — which must still prune, or a
@@ -346,12 +355,15 @@ describe('bundles', () => {
       lowWater: 1,
     })
     await pool.ensureStocked().value
-    await store.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'corrupt',
-      keyPackage: 'not-a-key-package',
-      privatePackage: 'not-a-private-package',
-      notAfter: Math.floor(Date.now() / 1000) + 86_400,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'corrupt',
+        keyPackage: 'not-a-key-package',
+        privatePackage: 'not-a-private-package',
+        notAfter: Math.floor(Date.now() / 1000) + 86_400,
+      },
     })
 
     // Narrowing a corrupt store to "you appear to have fewer packages" recreates the silent failure
@@ -371,7 +383,7 @@ describe('a store failure minting a record', () => {
     const storeError = new Error('disk full')
     const store: KeyPackagePoolStore = {
       list: (ownerDID) => inner.list(ownerDID),
-      delete: (ownerDID, ref) => inner.delete(ownerDID, ref),
+      delete: ({ ownerDID, ref }) => inner.delete({ ownerDID, ref }),
       put: () => Promise.reject(storeError),
     }
     const pool = createKeyPackagePool({
@@ -390,12 +402,15 @@ describe('ensureStocked failure paths', () => {
   test('a transport failure at the status stage returns a retryable error and prunes', async () => {
     const store = createMemoryKeyPackagePoolStore()
     // An expired record the prune must still remove even though the hub call failed.
-    await store.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'dead',
-      keyPackage: 'a',
-      privatePackage: 'b',
-      notAfter: Math.floor(Date.now() / 1000) - 30 * 86_400,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'dead',
+        keyPackage: 'a',
+        privatePackage: 'b',
+        notAfter: Math.floor(Date.now() / 1000) - 30 * 86_400,
+      },
     })
     vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
     const pool = createKeyPackagePool({ identity: hub.identity, client: hub.client, store })
@@ -475,12 +490,15 @@ describe('ensureStocked failure paths', () => {
   test('a refusal at the status stage still prunes an expired record', async () => {
     const store = createMemoryKeyPackagePoolStore()
     // An expired record the prune must still remove even though the hub call was refused.
-    await store.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'dead',
-      keyPackage: 'a',
-      privatePackage: 'b',
-      notAfter: Math.floor(Date.now() / 1000) - 30 * 86_400,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'dead',
+        keyPackage: 'a',
+        privatePackage: 'b',
+        notAfter: Math.floor(Date.now() / 1000) - 30 * 86_400,
+      },
     })
     vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(
       Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),

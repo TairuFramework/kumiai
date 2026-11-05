@@ -19,10 +19,12 @@ import { memberRootsOf } from './member-root.js'
 import { registryForLog } from './registry.js'
 import type { GroupOptions, KeyPackageBundle } from './types.js'
 
-export function makeMLSCredential(
-  identity: OwnIdentity,
-  controller?: ControllerBinding,
-): Credential {
+export type MakeMLSCredentialParams = {
+  identity: OwnIdentity
+  controller?: ControllerBinding
+}
+
+export function makeMLSCredential({ identity, controller }: MakeMLSCredentialParams): Credential {
   const id = identity.id
   const isPeer = isPeer4(id)
   if (
@@ -75,16 +77,18 @@ async function buildBundle(
   overrides: { extensions?: Array<CustomExtension>; lifetime?: Lifetime } = {},
 ): Promise<KeyPackageBundle> {
   assertBindingAuthorTime(options?.controller)
-  const credential = makeMLSCredential(identity, options?.controller)
+  const credential = makeMLSCredential({ identity, controller: options?.controller })
   if (options?.controller != null) {
-    const memberRooted = memberRootsOf(options.controller, identity.id).some(
+    const memberRooted = memberRootsOf({ binding: options.controller, leafDID: identity.id }).some(
       ({ root }) => root.kind === 'member',
     )
     if (memberRooted && options.controllerLog == null)
       throw new LeafBindingError('member-unavailable')
     const registry =
       memberRooted && options.controllerLog != null
-        ? await registryForLog(options.controller.id, options.controllerLog, {
+        ? await registryForLog({
+            controller: options.controller.id,
+            log: options.controllerLog,
             crypto: options.crypto,
           })
         : undefined
@@ -125,11 +129,15 @@ function ordinaryLifetime(): Lifetime {
   }
 }
 
+export type CreateKeyPackageBundleParams = {
+  identity: OwnIdentity
+} & GroupOptions
+
 /** Generate a key package for joining groups. */
-export async function createKeyPackageBundle(
-  identity: OwnIdentity,
-  options?: GroupOptions,
-): Promise<KeyPackageBundle> {
+export async function createKeyPackageBundle({
+  identity,
+  ...options
+}: CreateKeyPackageBundleParams): Promise<KeyPackageBundle> {
   return buildBundle(identity, options, { lifetime: ordinaryLifetime() })
 }
 
@@ -173,6 +181,10 @@ function lastResortLifetime(): Lifetime {
   }
 }
 
+export type CreateLastResortKeyPackageBundleParams = {
+  identity: OwnIdentity
+} & GroupOptions
+
 /**
  * Generate a reusable last-resort key package for joining groups.
  *
@@ -190,10 +202,10 @@ function lastResortLifetime(): Lifetime {
  * package stops working while the hub still reports the slot as full and keeps serving it. Both
  * obligations fail the same way: silently, and precisely when the floor is needed.
  */
-export async function createLastResortKeyPackageBundle(
-  identity: OwnIdentity,
-  options?: GroupOptions,
-): Promise<KeyPackageBundle> {
+export async function createLastResortKeyPackageBundle({
+  identity,
+  ...options
+}: CreateLastResortKeyPackageBundleParams): Promise<KeyPackageBundle> {
   return buildBundle(identity, options, {
     // Supplying `extensions` at all suppresses ts-mls's own default of
     // `greaseExtensions(defaultGreaseConfig)`. `defaultGreaseConfig` is not exported, so its 0.1

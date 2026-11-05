@@ -174,7 +174,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         const hinted = crypto.frameAAD(b)
         const decoded = hinted == null ? null : decodeAppAAD(hinted)
         const intent = decoded?.topicID === topicID ? decoded.intent : 'ephemeral'
-        return crypto.unwrap(b, { expectedAAD: encodeAppAAD({ topicID, intent }) })
+        return crypto.unwrap({ bytes: b, expectedAAD: encodeAppAAD({ topicID, intent }) })
       },
       retainOnFailure,
       project: (_message, opened) => {
@@ -228,12 +228,12 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         // `builtFor` is the topic this transport was constructed with, and it is the fallback
         // rather than the answer: anything published through here was sealed by the `wrap` below,
         // so the recorded topic is the one that agrees with the seal.
-        publish: async (builtFor, payload) => {
-          await mux.bus.publish(sealedOn.get(payload) ?? builtFor, payload)
+        publish: async ({ topicID: builtFor, payload }) => {
+          await mux.bus.publish({ topicID: sealedOn.get(payload) ?? builtFor, payload })
         },
         // Already-opened plaintext, from the topic's one inbound path. The `unwrap` below only
         // recovers the sender the open already authenticated.
-        subscribe: (_listenOn, onMessage) => inbound(onMessage),
+        subscribe: ({ topicID: _listenOn, onMessage }) => inbound(onMessage),
       },
       wrap: async (bytes) => {
         const sealed = await sealForSegment(name, bytes)
@@ -249,7 +249,11 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     // ONE inbox lane for the whole peer, not one per protocol: the topic does not name a
     // protocol, so every acceptor and directed client opening its own frames is the defect this
     // shape prevents.
-    const selfInbox = inboxTopic(anchor().secret, anchor().epoch, localDID)
+    const selfInbox = inboxTopic({
+      secret: anchor().secret,
+      epoch: anchor().epoch,
+      memberDID: localDID,
+    })
     inboxLane = {
       topicID: selfInbox,
       path: createInboxPath({
@@ -257,7 +261,8 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         topicID: selfInbox,
         ingress,
         unwrap: (b) =>
-          crypto.unwrap(b, {
+          crypto.unwrap({
+            bytes: b,
             expectedAAD: encodeAppAAD({ topicID: selfInbox, intent: 'ephemeral' }),
           }),
         retainOnFailure,
@@ -275,7 +280,11 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch — see {@link sealForSegment}.
       // Content stays sealed under the live epoch crypto below; only the topic ID is anchor-bound.
-      const topicID = protocolTopic(anchor().secret, anchor().epoch, name)
+      const topicID = protocolTopic({
+        secret: anchor().secret,
+        epoch: anchor().epoch,
+        protocol: name,
+      })
       // Subscribed for the member's whole life, like the commit and rendezvous topics: the mux
       // never unsubscribes on rotation, only tears down the LISTENERS on the epoch left.
       // Unsubscribing would tell the hub to drop this member's pending deliveries and free any
@@ -306,7 +315,8 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         localDID,
         selfInboxTopic: selfInbox,
         inbound: inboxLane.path,
-        resolveSendTopic: (senderDID) => inboxTopic(anchor().secret, anchor().epoch, senderDID),
+        resolveSendTopic: (senderDID) =>
+          inboxTopic({ secret: anchor().secret, epoch: anchor().epoch, memberDID: senderDID }),
         protocol: protocol as ProtocolDefinition,
         protocolName: name,
         handlers: handlers[name] as unknown as ProcedureHandlers<ProtocolDefinition>,
@@ -360,8 +370,8 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         continue
       }
       const at = anchor()
-      const topicID = protocolTopic(at.secret, at.epoch, name)
-      const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
+      const topicID = protocolTopic({ secret: at.secret, epoch: at.epoch, protocol: name })
+      const payload = await crypto.wrap({ bytes, aad: encodeAppAAD({ topicID, intent }) })
       if (isDisposed()) throw new PeerDisposedError('Peer is disposed')
       const refusedAfter = sealError()
       if (refusedAfter != null) throw refusedAfter
@@ -386,8 +396,9 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
   ): Promise<SegmentFrame> => {
     while (true) {
       const at = anchor()
-      const topicID = inboxTopic(at.secret, at.epoch, recipientDID)
-      const payload = await crypto.wrap(tagged, {
+      const topicID = inboxTopic({ secret: at.secret, epoch: at.epoch, memberDID: recipientDID })
+      const payload = await crypto.wrap({
+        bytes: tagged,
         aad: encodeAppAAD({ topicID, intent: 'ephemeral' }),
       })
       if (anchor() === at) return { topicID, payload }
@@ -406,24 +417,28 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
         // subscribers still receive it through the same drain.
         const protocol = protocols[name]
         if (protocol === undefined) throw new Error(`Unknown protocol: ${name}`)
-        if (retentionOf(protocol, prc) === 'log') {
+        if (retentionOf({ protocol, procedureName: prc }) === 'log') {
           const { topicID, payload } = await sealForSegment(
             name,
-            encodeEventFrame(prc, data),
+            encodeEventFrame({ prc, data }),
             'log',
           )
           await mux.publish({ topicID, payload, retain: 'log' })
           return
         }
-        await runtime.client.dispatch(prc, data)
+        await runtime.client.dispatch({ prc, data })
       },
       request: (prc, config) =>
-        runtime.client.request(prc, config?.param, {
+        runtime.client.request({
+          prc,
+          prm: config?.param,
           errorThreshold: config?.errorThreshold,
           timeoutMs: config?.timeoutMs,
         }),
       gather: (prc, config) =>
-        runtime.client.gather(prc, config?.param, {
+        runtime.client.gather({
+          prc,
+          prm: config?.param,
           quorum: config?.quorum,
           timeoutMs: config?.timeoutMs,
           onReply: config == null ? undefined : wrapGatherOptions(boundary, config).onReply,
@@ -443,7 +458,11 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
           mux,
           localDID,
           memberDID: member,
-          sendTopicID: inboxTopic(anchor().secret, anchor().epoch, member),
+          sendTopicID: inboxTopic({
+            secret: anchor().secret,
+            epoch: anchor().epoch,
+            memberDID: member,
+          }),
           // The epoch's own inbox topic and its one open path: reading replies through a path
           // built for a topic this client does not receive on would spend keys opening frames for
           // a lane nobody listens to.

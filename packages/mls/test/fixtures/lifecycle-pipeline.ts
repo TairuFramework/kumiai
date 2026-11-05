@@ -177,7 +177,9 @@ export type PipelineGroupOptions = {
 export async function pipelineGroup(options: PipelineGroupOptions = {}) {
   const identity = agent(41)
   const tokens = new Map<string, string>()
-  const { group } = await createGroup(identity, 'lifecycle-pipeline', {
+  const { group } = await createGroup({
+    identity,
+    groupID: 'lifecycle-pipeline',
     ...(options.standard
       ? {}
       : {
@@ -208,7 +210,7 @@ export async function rawBundle(
   binding?: ControllerBinding,
 ) {
   return generateKeyPackageWithKey({
-    credential: makeMLSCredential(identity, binding),
+    credential: makeMLSCredential({ identity, controller: binding }),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite: group.context.cipherSuite,
     capabilities:
@@ -250,7 +252,7 @@ export async function rawCommit(params: RawCommitParams) {
     const head = readLedgerHead(group)
     if (head == null) throw new Error('Missing ledger head')
     const ids = tokens.map(ledgerEntryDigest)
-    const extension = buildLedgerHeadExtension(extendHead(head.head, ids))
+    const extension = buildLedgerHeadExtension(extendHead({ head: head.head, entryIDs: ids }))
     extraProposals.push({
       proposalType: defaultProposalTypes.group_context_extensions,
       groupContextExtensions: {
@@ -307,7 +309,7 @@ export async function lowLevelWelcome(
     commitPolicy: () => 'accept',
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
-  await joined.bootstrapLedger(group.ledgerTokens)
+  await joined.bootstrapLedger({ tokens: group.ledgerTokens })
   return { ...added, joined, author: await deriveGroup(group, added.result.newState) }
 }
 
@@ -336,7 +338,7 @@ export async function belowGateWelcome(
     commitPolicy: () => 'accept',
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
-  await joined.bootstrapLedger(group.ledgerTokens)
+  await joined.bootstrapLedger({ tokens: group.ledgerTokens })
   return { ...added, joined, author: await deriveGroup(group, added.result.newState) }
 }
 
@@ -386,7 +388,7 @@ export async function rawUpdate(
   const state = structuredClone(group.state)
   const node = state.ratchetTree[state.privatePath.leafIndex * 2]
   if (node?.nodeType !== nodeTypes.leaf) throw new Error('Missing own leaf')
-  node.leaf.credential = makeMLSCredential(identity, binding)
+  node.leaf.credential = makeMLSCredential({ identity, controller: binding })
   state.signaturePrivateKey = identity.privateKey
   node.leaf.signaturePublicKey = identity.publicKey
   const result = await createUpdateProposal({ context: group.context, state })

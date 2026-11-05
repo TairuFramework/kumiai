@@ -202,18 +202,18 @@ test('rmv keeps a leaf whose holder grant came from another effective member', a
   const result = built(await f.build())
   expect(result.newGroup.findMemberLeafIndex(f.device.id)).toBeDefined()
   expect(
-    await effectiveAuthorityOf(
-      { did: f.device.id, binding: f.binding, leafKey: f.device.publicKey },
-      result.newGroup.registry,
-      f.did,
-    ),
+    await effectiveAuthorityOf({
+      leaf: { did: f.device.id, binding: f.binding, leafKey: f.device.publicKey },
+      registry: result.newGroup.registry,
+      controller: f.did,
+    }),
   ).toMatchObject({ slot: 'holder', expiry: 900 })
 })
 
 test('settled rmv proved by chain index removes the same leaves', async () => {
   const f = await fixture()
   const snapshotted = await settle(f, f.log)
-  const published = await api.publishControllerLog(f.group, snapshotted)
+  const published = await api.publishControllerLog({ group: f.group, log: snapshotted })
   if (published == null) throw new Error('Missing settlement')
   const rmv = await createRemove({
     did: f.did,
@@ -240,7 +240,7 @@ test('settled rmv of a never-snapshotted incarnation is proved by its tombstone'
     effects: [{ kind: 'remove', ref: { chainIndex: 1 } }],
   })
   f.publish(result.newGroup)
-  await f.receiver.processMessage(result.commitMessage)
+  await f.receiver.processMessage({ message: result.commitMessage })
   for (const group of [result.newGroup, f.receiver]) {
     expect(group.findMemberLeafIndex(f.device.id)).toBeUndefined()
     expect(group.registry.controllers.get(f.did)?.removedMembers.get(f.a.add)).toEqual({
@@ -254,7 +254,7 @@ test('settled rmv of a never-snapshotted incarnation is proved by its tombstone'
 test('an rmv proved by its epoch event upgrades to the tombstone after the settle', async () => {
   const f = await fixture()
   const result = built(await f.build())
-  const next = await api.publishControllerLog(result.newGroup, await settle(f))
+  const next = await api.publishControllerLog({ group: result.newGroup, log: await settle(f) })
   expect(
     next?.newGroup.registry.controllers.get(f.did)?.removedMembers.get(f.a.add)?.proofRef,
   ).toEqual({ chainIndex: 1 })
@@ -264,10 +264,14 @@ test('a settle that drops the tombstone needs the epoch proof', async () => {
   const f = await fixture()
   const log = await settle(f, f.removedLog, [f.a.add])
   expect((await head(f.did, log)).tombstones?.has(f.a.add) ?? false).toBe(false)
-  await expect(api.publishControllerLog(f.group, log)).rejects.toMatchObject({
+  await expect(api.publishControllerLog({ group: f.group, log })).rejects.toMatchObject({
     reason: 'effects-mismatch',
   })
-  const evidence = await api.removalEvidence(f.did, f.removedLog, digestOf(f.rmv.event))
+  const evidence = await api.removalEvidence({
+    controller: f.did,
+    log: f.removedLog,
+    rmv: digestOf(f.rmv.event),
+  })
   expect(evidence).toBeDefined()
   const result = built(
     await api.revokeWithProof(f.group, {
@@ -276,7 +280,7 @@ test('a settle that drops the tombstone needs the epoch proof', async () => {
       evidence: evidence == null ? [] : [evidence],
     }),
   )
-  const next = await api.publishControllerLog(result.newGroup, await settle(f, log))
+  const next = await api.publishControllerLog({ group: result.newGroup, log: await settle(f, log) })
   expect(
     next?.newGroup.registry.controllers.get(f.did)?.removedMembers.get(f.a.add)?.proofRef,
   ).toEqual({ event: digestOf(f.rmv.event), epoch: digestOf(f.inception.event) })
@@ -284,7 +288,11 @@ test('a settle that drops the tombstone needs the epoch proof', async () => {
 
 test('evidence takes precedence over the tombstone', async () => {
   const f = await fixture()
-  const evidence = await api.removalEvidence(f.did, f.removedLog, digestOf(f.rmv.event))
+  const evidence = await api.removalEvidence({
+    controller: f.did,
+    log: f.removedLog,
+    rmv: digestOf(f.rmv.event),
+  })
   if (evidence == null) throw new Error('Missing evidence')
   const result = built(
     await api.revokeWithProof(f.group, {
@@ -302,14 +310,18 @@ test('seeding from a settled log learns no removal from tombstones alone, as 0.1
   const f = await fixture()
   const log = await settle(f)
   expect(
-    (await registryForLog(f.did, log)).controllers.get(f.did)?.removedMembers.has(f.a.add),
+    (await registryForLog({ controller: f.did, log })).controllers
+      .get(f.did)
+      ?.removedMembers.has(f.a.add),
   ).toBe(false)
   // A pre-reset tombstone must not block claims at the new generation.
   const reset = {
     chain: [...log.chain, await createReset({ seed: f.seed, profile: 0, gen: 1 })],
     events: [],
   }
-  await expect(claimsFor(f.did, undefined, reset, 1)).resolves.not.toThrow()
+  await expect(
+    claimsFor({ controller: f.did, recorded: undefined, merged: reset, genFloor: 1 }),
+  ).resolves.not.toThrow()
 })
 
 test('the tombstone upgrade index is bound to the removed DID', async () => {
@@ -327,13 +339,17 @@ test('a tombstone proof is checked against the tombstoned DID and the generation
     member: { did, add: f.a.add },
     ref: { chainIndex: 1 },
   })
-  await expect(effectOf(f.did, log, claim(f.a.identity.id), 0)).resolves.not.toThrow()
-  await expect(async () => await effectOf(f.did, log, claim(f.b.identity.id), 0)).rejects.toThrow(
-    expect.objectContaining({ reason: 'effects-mismatch' }),
-  )
-  await expect(async () => await effectOf(f.did, log, claim(f.a.identity.id), 1)).rejects.toThrow(
-    expect.objectContaining({ reason: 'generation-floor' }),
-  )
+  await expect(
+    effectOf({ controller: f.did, log, claim: claim(f.a.identity.id), genFloor: 0 }),
+  ).resolves.not.toThrow()
+  await expect(
+    async () =>
+      await effectOf({ controller: f.did, log, claim: claim(f.b.identity.id), genFloor: 0 }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
+  await expect(
+    async () =>
+      await effectOf({ controller: f.did, log, claim: claim(f.a.identity.id), genFloor: 1 }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'generation-floor' }))
 })
 
 test.each([
@@ -370,14 +386,18 @@ test.each([
             },
           },
         },
-        await registryForLog(f.did, f.log),
+        await registryForLog({ controller: f.did, log: f.log }),
       ),
   ).rejects.toThrow(expect.objectContaining({ constructor: RevokeProofError, reason }))
 })
 
 test('revokeWithProof with retained removal evidence lands after a tombstone-dropping settle, and Welcome and restore agree', async () => {
   const f = await fixture()
-  const evidence = await api.removalEvidence(f.did, f.removedLog, digestOf(f.rmv.event))
+  const evidence = await api.removalEvidence({
+    controller: f.did,
+    log: f.removedLog,
+    rmv: digestOf(f.rmv.event),
+  })
   if (evidence == null) throw new Error('Missing evidence')
   const log = await pruneLog({ did: f.did, input: await settle(f, f.removedLog, [f.a.add]) })
   expect(log.events).toEqual([])
@@ -397,7 +417,7 @@ test('revokeWithProof with retained removal evidence lands after a tombstone-dro
   // Build on the same tree the observer joined.
   const received = built(await api.revokeWithProof(observer.author, inputs))
   f.publish(received.newGroup)
-  await observer.joined.processMessage(received.commitMessage)
+  await observer.joined.processMessage({ message: received.commitMessage })
   const welcome = await welcomeBoundary(
     received.newGroup,
     agent(82),
@@ -442,7 +462,10 @@ test("removed member's earlier-signed leaf arriving after the removal is refused
   const f = await fixture()
   const result = built(await f.build())
   // Root can settle a concurrent view that still includes the removed incarnation.
-  const published = await api.publishControllerLog(result.newGroup, await settle(f, f.log))
+  const published = await api.publishControllerLog({
+    group: result.newGroup,
+    log: await settle(f, f.log),
+  })
   if (published == null) throw new Error('Missing settlement')
   const stale = await rawBundle(published.newGroup, agent(83), {
     id: f.did,
@@ -470,9 +493,12 @@ test("removed member's concurrent log entry is refused", async () => {
   })
   const result = built(await f.build())
   await expect(
-    api.publishControllerLog(result.newGroup, {
-      ...f.removedLog,
-      events: [...f.removedLog.events, concurrent],
+    api.publishControllerLog({
+      group: result.newGroup,
+      log: {
+        ...f.removedLog,
+        events: [...f.removedLog.events, concurrent],
+      },
     }),
   ).rejects.toMatchObject({ reason: 'not-endorsed' })
 })
@@ -500,9 +526,12 @@ test.each([
         lease: 2000,
       },
     })
-    const published = await api.publishControllerLog(group, {
-      ...f.removedLog,
-      events: [...f.removedLog.events, add],
+    const published = await api.publishControllerLog({
+      group,
+      log: {
+        ...f.removedLog,
+        events: [...f.removedLog.events, add],
+      },
     })
     if (published == null) throw new Error('Missing add')
     group = published.newGroup
@@ -520,7 +549,7 @@ test.each([
 
 test('survivor grant keeps a direct mbr leaf; one from the removed member is refused', async () => {
   const f = await fixture()
-  expect(await api.survivorTargets(f.group, f.a.add)).toEqual([
+  expect(await api.survivorTargets({ group: f.group, add: f.a.add })).toEqual([
     { did: f.device.id, leafKey: f.device.publicKey },
   ])
   const survivor = await f.grant(f.b, f.device)
@@ -624,11 +653,11 @@ test.each(['direct', 'membership'] as const)(
     const { newGroup } = built(await f.build())
     const candidateRegistry = newGroup.registry
     expect(
-      await effectiveAuthorityOf(
-        { did: f.device.id, binding: f.binding, leafKey: f.device.publicKey },
-        candidateRegistry,
-        f.did,
-      ),
+      await effectiveAuthorityOf({
+        leaf: { did: f.device.id, binding: f.binding, leafKey: f.device.publicKey },
+        registry: candidateRegistry,
+        controller: f.did,
+      }),
     ).toEqual({ status: 'removed' })
     const gate = await prepareLifecycleGate({
       group: f.group,
@@ -675,14 +704,20 @@ test('a substituted capability expires at the earlier of its own and substitute 
   const f = await fixture()
   for (const expiry of [250, 1200]) {
     const result = built(await f.build([await f.grant(f.b, f.device, { exp: expiry })]))
-    expect(await leafExpiry(f.binding, result.newGroup.registry, f.did)).toBe(Math.min(900, expiry))
+    expect(
+      await leafExpiry({
+        binding: f.binding,
+        registry: result.newGroup.registry,
+        controller: f.did,
+      }),
+    ).toBe(Math.min(900, expiry))
   }
 })
 
 test('a later removal cascades through the survivor grant root', async () => {
   const f = await fixture()
   const first = built(await f.build([await f.grant(f.b, f.device)]))
-  expect(await api.survivorTargets(first.newGroup, f.b.add)).toEqual([
+  expect(await api.survivorTargets({ group: first.newGroup, add: f.b.add })).toEqual([
     { did: f.device.id, leafKey: f.device.publicKey },
   ])
   const rmv = await createRemove({
@@ -710,17 +745,20 @@ test.each(['survivor authors its next commit', 'survivor appears in a later Welc
     const f = await fixture('membership')
     const result = built(await f.build([await f.grant(f.b, f.device)]))
     f.publish(result.newGroup)
-    await f.receiver.processMessage(result.commitMessage)
+    await f.receiver.processMessage({ message: result.commitMessage })
     if (name.includes('authors')) {
-      const note = await signLedgerEntry(f.device, {
-        type: 'test.note',
-        groupID: f.group.groupID,
-        subject: f.device.id,
-        value: 'survived',
+      const note = await signLedgerEntry({
+        identity: f.device,
+        entry: {
+          type: 'test.note',
+          groupID: f.group.groupID,
+          subject: f.device.id,
+          value: 'survived',
+        },
       })
-      const commit = await commitLedgerEntries(f.receiver, [note])
+      const commit = await commitLedgerEntries({ group: f.receiver, tokens: [note] })
       f.publish(commit.newGroup)
-      await result.newGroup.processMessage(commit.commitMessage)
+      await result.newGroup.processMessage({ message: commit.commitMessage })
       expect(result.newGroup.epoch).toBe(commit.epoch)
     } else {
       const welcome = await welcomeBoundary(
@@ -737,7 +775,7 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
   const f = await fixture('membership')
   const result = built(await f.build([await f.grant(f.b, f.device, { exp: 250 })]))
   f.publish(result.newGroup)
-  await f.receiver.processMessage(result.commitMessage)
+  await f.receiver.processMessage({ message: result.commitMessage })
   const early = await rawApplication(f.receiver)
   expect(
     await recoverySignerEligible({
@@ -752,7 +790,9 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
     result.newGroup.findMemberLeafIndex(f.device.id) ?? -1,
   )
   if (leaf == null) throw new Error('Missing survivor')
-  expect(await leafExpiry(f.binding, result.newGroup.registry, f.did)).toBe(250)
+  expect(
+    await leafExpiry({ binding: f.binding, registry: result.newGroup.registry, controller: f.did }),
+  ).toBe(250)
   const clocker = agent(84)
   const later = await belowGateWelcome(
     result.newGroup,
@@ -760,7 +800,7 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
     await timedBinding({ identity: clocker, iat: 251, exp: 900 }),
   )
   const group = later.author
-  await f.receiver.processMessage(later.message)
+  await f.receiver.processMessage({ message: later.message })
   const late = await rawApplication(f.receiver)
   expect(await isLapsed(group, leaf)).toBe(true)
   expect(
@@ -771,8 +811,8 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
       now: 252,
     }),
   ).toBe(false)
-  await expect(group.processMessage(early)).resolves.toBeDefined()
-  await expect(group.processMessage(late)).rejects.toMatchObject({ reason: 'lapsed' })
+  await expect(group.processMessage({ message: early })).resolves.toBeDefined()
+  await expect(group.processMessage({ message: late })).rejects.toMatchObject({ reason: 'lapsed' })
   const welcome = await welcomeBoundary(
     group,
     agent(85),
@@ -785,16 +825,19 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
 
 test('Welcome joiner refuses a leaf the ledger removed', async () => {
   const f = await fixture()
-  const token = await signLedgerEntry(f.identity, {
-    type: DEVICE_ENTRY_TYPE,
-    groupID: f.group.groupID,
-    subject: f.did,
-    value: {
-      op: 'revoke',
-      proof: { chain: [], events: [f.rmv] },
-      effects: [{ kind: 'remove', member: f.remove[0], ref: { event: digestOf(f.rmv.event) } }],
-      revoked: [],
-      removed: [{ did: f.device.id, cascadedFrom: f.a.identity.id }],
+  const token = await signLedgerEntry({
+    identity: f.identity,
+    entry: {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: f.group.groupID,
+      subject: f.did,
+      value: {
+        op: 'revoke',
+        proof: { chain: [], events: [f.rmv] },
+        effects: [{ kind: 'remove', member: f.remove[0], ref: { event: digestOf(f.rmv.event) } }],
+        revoked: [],
+        removed: [{ did: f.device.id, cascadedFrom: f.a.identity.id }],
+      },
     },
   })
   const joiner = agent(82)
@@ -817,7 +860,10 @@ test('Welcome joiner refuses a leaf the ledger removed', async () => {
     if (judging?.stage !== 'structural') {
       observed.push(group.registry.controllers.get(f.did)?.removedMembers.has(f.a.add) === true)
       expect(readLedgerHead(group)?.head).toEqual(
-        computeHead(group.groupID, [...f.group.ledgerTokens, token].map(ledgerEntryDigest)),
+        computeHead({
+          groupID: group.groupID,
+          entryIDs: [...f.group.ledgerTokens, token].map(ledgerEntryDigest),
+        }),
       )
     }
     await original(group, judging)
@@ -883,7 +929,7 @@ test('a partial current-epoch removal closure is refused with effects-mismatch',
             },
           },
         },
-        await registryForLog(f.did, { chain: f.log.chain, events: [] }),
+        await registryForLog({ controller: f.did, log: { chain: f.log.chain, events: [] } }),
       ),
   ).rejects.toThrow(
     expect.objectContaining({ constructor: RevokeProofError, reason: 'effects-mismatch' }),
@@ -910,10 +956,10 @@ test('a new denial after reset is not mistaken for an earlier-generation record'
     chain: [f.inception, await createReset({ seed: f.seed, profile: 0, gen: 1 })],
     events: [],
   }
-  const renewed = await api.renewLeaf(
-    first.newGroup,
-    await timedBinding({ identity: f.identity, iat: 150, exp: 900, prefix: log.chain }),
-  )
+  const renewed = await api.renewLeaf({
+    group: first.newGroup,
+    binding: await timedBinding({ identity: f.identity, iat: 150, exp: 900, prefix: log.chain }),
+  })
   const reset = built(await api.revokeWithProof(renewed.newGroup, { reset: true, log }))
   const next = await createRevoke({
     did: f.did,
@@ -965,7 +1011,7 @@ test.each(['tombstoned', 're-added'] as const)(
       log = { ...f.removedLog, events: [...f.removedLog.events, fresh] }
     }
     const settled = await settle(f, log)
-    const published = await api.publishControllerLog(removed.newGroup, settled)
+    const published = await api.publishControllerLog({ group: removed.newGroup, log: settled })
     if (published == null) throw new Error('Missing settlement')
     const group = published.newGroup
     expect(group.registry.controllers.get(f.did)?.removedMembers.has(f.a.add)).toBe(true)
@@ -1024,7 +1070,7 @@ test.each(['tombstoned', 're-added'] as const)(
       lease: 3000,
     })
     await expect(
-      api.publishControllerLog(group, { ...settled, events: [renewal] }),
+      api.publishControllerLog({ group, log: { ...settled, events: [renewal] } }),
     ).rejects.toMatchObject({ reason: 'not-endorsed' })
   },
 )
@@ -1054,13 +1100,18 @@ test.each(['retain', 'Welcome rejudge'] as const)(
       expect(joined.findMemberLeafIndex(f.device.id)).toBeUndefined()
     } else {
       expect(result.newGroup.findMemberLeafIndex(f.device.id)).toBeUndefined()
-      const note = await signLedgerEntry(f.identity, {
-        type: 'test.note',
-        groupID: f.group.groupID,
-        subject: f.identity.id,
-        value: 'after removal',
+      const note = await signLedgerEntry({
+        identity: f.identity,
+        entry: {
+          type: 'test.note',
+          groupID: f.group.groupID,
+          subject: f.identity.id,
+          value: 'after removal',
+        },
       })
-      await expect(commitLedgerEntries(result.newGroup, [note])).resolves.toBeDefined()
+      await expect(
+        commitLedgerEntries({ group: result.newGroup, tokens: [note] }),
+      ).resolves.toBeDefined()
     }
   },
 )

@@ -46,13 +46,15 @@ describe('retained pushes precede later group opens', () => {
     })
     const unwrap = crypto.unwrap.bind(crypto)
     const secret = fakeEpochSecret(1, APP_TOPIC_LABEL)
-    const retainedTopic = protocolTopic(secret, 1, 'chat')
-    const liveTopic = protocolTopic(secret, 1, liveName)
+    const retainedTopic = protocolTopic({ secret, epoch: 1, protocol: 'chat' })
+    const liveTopic = protocolTopic({ secret, epoch: 1, protocol: liveName })
     const alice = createFakeCrypto({ localDID: 'alice' })
-    const a = await alice.wrap(encodeEventFrame('chat/posted', { text: 'A' }), {
+    const a = await alice.wrap({
+      bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'A' } }),
       aad: encodeAppAAD({ topicID: retainedTopic, intent: 'log' }),
     })
-    const b = await alice.wrap(encodeEventFrame('chat/changed', { text: 'B' }), {
+    const b = await alice.wrap({
+      bytes: encodeEventFrame({ prc: 'chat/changed', data: { text: 'B' } }),
       aad: encodeAppAAD({ topicID: liveTopic, intent: 'ephemeral' }),
     })
     const openFailures: Array<unknown> = []

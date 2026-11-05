@@ -17,8 +17,11 @@ test('a refused bound candidate is not reused by the memory port', async () => {
   }
   const alice = createMemoryGroupMLS({ ...options, localDID: 'alice' })
   const bob = createMemoryGroupMLS({ ...options, localDID: 'bob' })
-  const request = await bob.createRecoveryRequest('refused-binding')
-  const pending = await bob.applyRecovery(await alice.sealGroupInfo(request), 'refused-binding')
+  const request = await bob.createRecoveryRequest({ requestID: 'refused-binding' })
+  const pending = await bob.applyRecovery({
+    sealed: await alice.sealGroupInfo(request),
+    requestID: 'refused-binding',
+  })
   if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
   pending.markBindingUnusable()
   expect(await bob.prepareRecovery()).toBe('renewal-required')

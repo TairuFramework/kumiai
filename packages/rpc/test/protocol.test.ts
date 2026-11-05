@@ -42,21 +42,25 @@ describe('defineGroupProtocol', () => {
   // every procedure has. Nothing caught it, because the only request in the suite
   // sat under a `@ts-expect-error` meant for `retain`, which swallowed it whole.
   test('accepts a request procedure that declares no retention', () => {
-    expect(retentionOf(protocol, 'room/roster')).toBe('ephemeral')
+    expect(retentionOf({ protocol, procedureName: 'room/roster' })).toBe('ephemeral')
   })
 
   test('accepts an event with and without retention, and reports each', () => {
-    expect(retentionOf(protocol, 'room/posted')).toBe('log')
-    expect(retentionOf(protocol, 'room/typing')).toBe('ephemeral')
+    expect(retentionOf({ protocol, procedureName: 'room/posted' })).toBe('log')
+    expect(retentionOf({ protocol, procedureName: 'room/typing' })).toBe('ephemeral')
   })
 
   // Saying `ephemeral` and saying nothing are the same declaration, and a definition
   // that states its choice must not read differently from one that leaves the default.
   test('reads an explicit ephemeral the same as an omitted one, on both kinds', () => {
-    expect(retentionOf(protocol, 'room/said')).toBe(retentionOf(protocol, 'room/typing'))
-    expect(retentionOf(protocol, 'room/asked')).toBe(retentionOf(protocol, 'room/roster'))
-    expect(retentionOf(protocol, 'room/said')).toBe('ephemeral')
-    expect(retentionOf(protocol, 'room/asked')).toBe('ephemeral')
+    expect(retentionOf({ protocol, procedureName: 'room/said' })).toBe(
+      retentionOf({ protocol, procedureName: 'room/typing' }),
+    )
+    expect(retentionOf({ protocol, procedureName: 'room/asked' })).toBe(
+      retentionOf({ protocol, procedureName: 'room/roster' }),
+    )
+    expect(retentionOf({ protocol, procedureName: 'room/said' })).toBe('ephemeral')
+    expect(retentionOf({ protocol, procedureName: 'room/asked' })).toBe('ephemeral')
   })
 
   // `ephemeral` is the only retention correlated traffic has, so declaring it is legal
@@ -133,7 +137,7 @@ describe('defineGroupProtocol', () => {
 
 describe('retentionOf', () => {
   test('treats an unknown procedure as ephemeral', () => {
-    expect(retentionOf(protocol, 'room/absent')).toBe('ephemeral')
+    expect(retentionOf({ protocol, procedureName: 'room/absent' })).toBe('ephemeral')
   })
 
   // `retain` is only meaningful on an event. A value smuggled onto another kind by
@@ -143,6 +147,6 @@ describe('retentionOf', () => {
     const smuggled = {
       'room/ask': { type: 'request', retain: 'log', param: {}, result: {} },
     } as unknown as Parameters<typeof retentionOf>[0]
-    expect(retentionOf(smuggled, 'room/ask')).toBe('ephemeral')
+    expect(retentionOf({ protocol: smuggled, procedureName: 'room/ask' })).toBe('ephemeral')
   })
 })

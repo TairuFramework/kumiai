@@ -21,7 +21,7 @@ const MEMBERS = ['alice', 'bob', 'carol']
 
 /** The chat topic of the segment anchored at `epoch`: that epoch's secret, under that epoch. */
 const chatTopic = (epoch: number): string =>
-  protocolTopic(fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, 'chat')
+  protocolTopic({ secret: fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, protocol: 'chat' })
 
 /**
  * A handle does not ratchet past an epoch until that epoch's frames are read and its anchor is
@@ -66,7 +66,7 @@ describe('the member that authors a roster change rotates with the members that 
 
     // Alice evicts Carol herself, through `commit()`. Bob learns of it the ordinary way, by
     // applying the frame from the log.
-    await alice.peer.commit(buildRemoveCommit(alice, 'carol'))
+    await alice.peer.commit({ build: buildRemoveCommit(alice, 'carol') })
     await flush()
 
     expect(alice.mls.leaves()).not.toContain('carol')
@@ -124,7 +124,7 @@ describe('the member that authors a roster change rotates with the members that 
     })
     await flush()
 
-    await alice.peer.commit(buildInviteCommit(alice, 'dave'))
+    await alice.peer.commit({ build: buildInviteCommit(alice, 'dave') })
     await flush()
 
     expect(alice.welcomes).toEqual(['dave'])
@@ -179,7 +179,7 @@ describe('a same-DID leaf replacement rotates the anchor its Welcome joiner seed
     })
     await flush()
 
-    await alice.peer.commit(buildReplaceCommit(alice, 'carol'))
+    await alice.peer.commit({ build: buildReplaceCommit(alice, 'carol') })
     await flush()
 
     expect(alice.welcomes).toEqual(['carol'])
@@ -240,12 +240,14 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
     // carries the sequenceID it landed as, so the restart adopts straight out of it.
     const build = buildRemoveCommit(bob, 'carol')
     await expect(
-      bob.peer.commit(async () => ({
-        ...(await build()),
-        onAccepted: async () => {
-          throw new Error('the process died here')
-        },
-      })),
+      bob.peer.commit({
+        build: async () => ({
+          ...(await build()),
+          onAccepted: async () => {
+            throw new Error('the process died here')
+          },
+        }),
+      }),
     ).rejects.toThrow('the process died here')
     expect(bob.mls.epoch()).toBe(1) // it never adopted
     expect(bob.peer.anchorEpoch()).toBe(1)
@@ -262,7 +264,8 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
       senderDID: 'alice',
       topicID: chatTopic(1),
       retain: 'log',
-      payload: await alice.wrap(encodeEventFrame('chat/posted', { text: 'while he was gone' }), {
+      payload: await alice.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'while he was gone' } }),
         aad: encodeAppAAD({ topicID: chatTopic(1), intent: 'log' }),
       }),
     })

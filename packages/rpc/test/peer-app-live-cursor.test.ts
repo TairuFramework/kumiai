@@ -41,10 +41,14 @@ describe('the live lane and the drain share one read position', () => {
     // No roster change anywhere here, so the anchor never moves and there is one app topic for the
     // whole run: what separates the delivered frame from the missed one is WHEN it was published,
     // never which segment it landed on.
-    const appTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const appTopic = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     for (let index = 0; index < 4; index++) {
-      await alice.peer.commit(buildLedgerCommit(alice, []))
+      await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     }
     await flush()
     expect(alice.mls.epoch()).toBe(5)
@@ -123,7 +127,11 @@ describe('the live lane and the drain share one read position', () => {
     // ASSERTED ON THE STORE, because silence is ambiguous: no re-delivery is also what a restart
     // that never pulled the segment looks like, and that would make this test green forever
     // whether or not the live lane writes a position. The written position is the claim.
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
     const published = hub.published.filter((message) => message.topicID === topicID)
     expect(published).toHaveLength(1)
     expect(bob.appCursorStore.stored(topicID)).toBe(published[0]?.sequenceID)

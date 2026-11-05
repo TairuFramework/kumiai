@@ -56,9 +56,12 @@ describe('bundles', () => {
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
-    await store.put(hub.identity.id, {
-      ...original,
-      notAfter: Math.floor(Date.now() / 1000) + 10 * 86_400,
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: {
+        ...original,
+        notAfter: Math.floor(Date.now() / 1000) + 10 * 86_400,
+      },
     })
     const second = await provisioner.ensureProvisioned().value
 
@@ -66,7 +69,9 @@ describe('bundles', () => {
     expect(bundles).toHaveLength(2)
     expect(bundles.map((b) => b.ownerDID)).toEqual([hub.identity.id, hub.identity.id])
 
-    expect(await Promise.all(bundles.map((b) => keyPackageRef(b.publicPackage)))).toEqual([
+    expect(
+      await Promise.all(bundles.map((b) => keyPackageRef({ keyPackage: b.publicPackage }))),
+    ).toEqual([
       second.ref, // the rotation's package leads
       first.ref, // the retired one follows
     ])
@@ -95,23 +100,23 @@ describe('bundles', () => {
 
     // A second, genuinely distinct last-resort bundle, forced to share `first`'s `notAfter` exactly
     // so the ref tie-break — not the notAfter ordering — is what decides.
-    const secondBundle = await createLastResortKeyPackageBundle(hub.identity)
+    const secondBundle = await createLastResortKeyPackageBundle({ identity: hub.identity })
     const secondRecord: LastResortRecord = {
       kind: 'last-resort',
-      ref: await keyPackageRef(secondBundle.publicPackage),
+      ref: await keyPackageRef({ keyPackage: secondBundle.publicPackage }),
       keyPackage: encodeKeyPackage(secondBundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(secondBundle.privatePackage),
       notAfter: first.notAfter,
       uploadedAt: Date.now(),
     }
-    await store.put(hub.identity.id, secondRecord)
+    await store.put({ ownerDID: hub.identity.id, record: secondRecord })
 
     const bundles = await provisioner.bundles()
     expect(bundles).toHaveLength(2)
     const [leader] = bundles
     expect(leader).toBeDefined()
     if (leader == null) return
-    const leaderRef = await keyPackageRef(leader.publicPackage)
+    const leaderRef = await keyPackageRef({ keyPackage: leader.publicPackage })
     const expectedLeader = [first.ref, secondRecord.ref].sort().at(-1)
     expect(leaderRef).toBe(expectedLeader)
 
@@ -138,7 +143,10 @@ describe('bundles', () => {
     const record = (await store.list(hub.identity.id))[0]
     expect(record).toBeDefined()
     if (record == null) return
-    await store.put(hub.identity.id, { ...record, privatePackage: 'not base64 !!!' })
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: { ...record, privatePackage: 'not base64 !!!' },
+    })
 
     await expect(provisioner.bundles()).rejects.toThrow(record.ref)
   })
@@ -155,7 +163,10 @@ describe('bundles', () => {
     const record = (await store.list(hub.identity.id))[0]
     expect(record).toBeDefined()
     if (record == null) return
-    await store.put(hub.identity.id, { ...record, keyPackage: 'not base64 !!!' })
+    await store.put({
+      ownerDID: hub.identity.id,
+      record: { ...record, keyPackage: 'not base64 !!!' },
+    })
 
     await expect(provisioner.bundles()).rejects.toThrow(record.ref)
   })
@@ -192,7 +203,9 @@ describe('a provisioned bundle against real MLS', () => {
 
     const alice = randomIdentity()
     const ledger = createLedger()
-    const { group } = await createGroup(alice, 'group:provisioned', {
+    const { group } = await createGroup({
+      identity: alice,
+      groupID: 'group:provisioned',
       resolveLedgerEntries: ledger.resolveLedgerEntries,
     })
     const { invite } = await createInvite({
@@ -203,7 +216,7 @@ describe('a provisioned bundle against real MLS', () => {
     })
     ledger.publish(invite)
 
-    const added = await commitInvite(group, bundle.publicPackage, invite)
+    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
     const { group: joined } = await processWelcome({
       identity: hub.identity,
       invite,
@@ -236,7 +249,9 @@ describe('a provisioned bundle against real MLS', () => {
 
     const ledger = createLedger()
     const join = async (inviter: ReturnType<typeof randomIdentity>, groupID: string) => {
-      const { group } = await createGroup(inviter, groupID, {
+      const { group } = await createGroup({
+        identity: inviter,
+        groupID,
         resolveLedgerEntries: ledger.resolveLedgerEntries,
       })
       const { invite } = await createInvite({
@@ -246,7 +261,7 @@ describe('a provisioned bundle against real MLS', () => {
         permission: 'member',
       })
       ledger.publish(invite)
-      const added = await commitInvite(group, bundle.publicPackage, invite)
+      const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
       const { group: joined } = await processWelcome({
         identity: hub.identity,
         invite,

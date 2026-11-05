@@ -15,9 +15,7 @@ import type { ObservabilityEventListener } from './events.js'
 import { precedesSequenceID } from './sequence.js'
 import {
   createHubTunnelTransport,
-  type HubReceiveOptions,
   type HubReceiveSubscription,
-  type HubSubscribeOptions,
   type HubTunnelTransportParams,
   type MailboxHub,
   type MailboxPublishParams,
@@ -80,18 +78,14 @@ function wrapHub({
       remember(result.sequenceID)
       return result
     },
-    subscribe(
-      subscriberDID: string,
-      topicID: string,
-      options?: HubSubscribeOptions,
-    ): Promise<void> | void {
-      return hub.subscribe(subscriberDID, topicID, options)
+    subscribe({ subscriberDID, topicID, ...options }): Promise<void> | void {
+      return hub.subscribe({ subscriberDID, topicID, ...options })
     },
-    unsubscribe(subscriberDID: string, topicID: string): Promise<void> | void {
-      return hub.unsubscribe?.(subscriberDID, topicID)
+    unsubscribe({ subscriberDID, topicID }): Promise<void> | void {
+      return hub.unsubscribe?.({ subscriberDID, topicID })
     },
-    receive(subscriberDID: string, options?: HubReceiveOptions): HubReceiveSubscription {
-      const inner = hub.receive(subscriberDID, options)
+    receive({ subscriberDID, ...options }): HubReceiveSubscription {
+      const inner = hub.receive({ subscriberDID, ...options })
       const innerIterator = inner[Symbol.asyncIterator]()
       const ackedOnDecrypt = new Set<string>()
       const inFlightDecrypts = new Set<Promise<void>>()

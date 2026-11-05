@@ -61,8 +61,8 @@ describe('per-procedure retention for app events', () => {
 
     // Only the logged event is retained: draining the topic returns it and nothing else, decoded
     // to its plaintext — proving pull-ability independently of the live delivery above.
-    const { secret } = await alice.crypto.exportSecret(APP_TOPIC_LABEL)
-    const topicID = protocolTopic(secret, 1, 'room')
+    const { secret } = await alice.crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    const topicID = protocolTopic({ secret, epoch: 1, protocol: 'room' })
     const drained = await hub.fetchTopic({ subscriberDID: 'bob', topicID })
     expect(drained.messages).toHaveLength(1)
 
@@ -73,7 +73,7 @@ describe('per-procedure retention for app events', () => {
     const reader = createFakeCrypto({ epoch: 1, localDID: 'carol' })
     const [firstMessage] = drained.messages
     if (firstMessage === undefined) throw new Error('expected a drained message')
-    const opened = await reader.unwrap(firstMessage.payload)
+    const opened = await reader.unwrap({ bytes: firstMessage.payload })
     // `v` included deliberately: the retained bytes are produced by `encodeEventFrame` off the
     // transport, and a retained frame that omitted the wire version would be refused by the
     // decode a live one passes. Pinning it here is what says the two paths agree.

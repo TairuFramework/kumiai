@@ -26,7 +26,9 @@ test('a Proposal on the commit topic cannot enter the next Commit', async () => 
 
   const before = group.committer.handle.epoch
   expect(await port.readCommitHeader(bytes)).toBeNull()
-  expect(await port.processCommit(bytes, { senderDID: member.identity.id })).toMatchObject({
+  expect(
+    await port.processCommit({ commit: bytes, context: { senderDID: member.identity.id } }),
+  ).toMatchObject({
     advanced: false,
   })
   expect(group.committer.handle.epoch).toBe(before)
@@ -36,7 +38,7 @@ test('a Proposal on the commit topic cannot enter the next Commit', async () => 
 
   const next = await buildRealCommit(group)
   expect(group.committer.handle.epoch).toBe(before + 1n)
-  await observer.handle.processMessage(next)
+  await observer.handle.processMessage({ message: next })
   expect(observer.handle.epoch).toBe(before + 1n)
 })
 
@@ -52,11 +54,16 @@ test('garbage and application messages on the commit topic leave the handle unto
     entrySlot: member.slot,
   })
   const before = member.handle.epoch
-  const application = await group.committer.handle.encrypt(new TextEncoder().encode('message'))
+  const application = await group.committer.handle.encrypt({
+    plaintext: new TextEncoder().encode('message'),
+  })
   for (const bytes of [new Uint8Array([0xff, 0xff]), application]) {
     expect(await port.readCommitHeader(bytes)).toBeNull()
     expect(
-      await port.processCommit(bytes, { senderDID: group.committer.identity.id }),
+      await port.processCommit({
+        commit: bytes,
+        context: { senderDID: group.committer.identity.id },
+      }),
     ).toMatchObject({ advanced: false })
     expect(member.handle.epoch).toBe(before)
     expect(Object.keys(member.handle.state.unappliedProposals)).toHaveLength(0)

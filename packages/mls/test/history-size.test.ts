@@ -79,13 +79,16 @@ test('historyCountsUtf8AndEveryCopy', async () => {
     },
     { effects: [], removed: [], op: 'reset', proof: asControllerLog(resetPrefix), revoked: [] },
   ]) {
-    const token = await signLedgerEntry(alice, {
-      type: 'kumiai.device',
-      groupID: initial.group.groupID,
-      subject: controllerID,
-      value,
+    const token = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'kumiai.device',
+        groupID: initial.group.groupID,
+        subject: controllerID,
+        value,
+      },
     })
-    const verified = await verifyLedgerEntry(token)
+    const verified = await verifyLedgerEntry({ token })
     if (verified == null) throw new Error('Invalid test proof token')
     entries.push(verified)
     tokens.push(token)
@@ -94,7 +97,7 @@ test('historyCountsUtf8AndEveryCopy', async () => {
   expect(historyBytes(prefix)).toBeGreaterThan(
     prefix.reduce((size, event) => size + JSON.stringify(event).length, 0),
   )
-  expect(history.historySize(added.group.state.ratchetTree, entries)).toBe(
+  expect(history.historySize({ tree: added.group.state.ratchetTree, entries })).toBe(
     historyBytes(prefix) * 2 + proofUtf8Bytes,
   )
   const resetGroup = await lifecycleGroup(resetPrefix)
@@ -106,7 +109,7 @@ test('historyCountsUtf8AndEveryCopy', async () => {
   const revoked = await enact(renewed.group, [tokens[0] as string])
   const recorded = await enact(revoked.group, [tokens[1] as string])
   expect(recorded.group.ledgerTokens).toEqual([...renewed.group.ledgerTokens, ...tokens])
-  expect(history.historySize(recorded.group.state.ratchetTree, entries)).toBe(
+  expect(history.historySize({ tree: recorded.group.state.ratchetTree, entries })).toBe(
     historyBytes(resetPrefix) * 2 + proofUtf8Bytes,
   )
   const consumer: VerifiedLedgerEntry = {
@@ -118,11 +121,13 @@ test('historyCountsUtf8AndEveryCopy', async () => {
       value: { data: '組'.repeat(65536), proof: oldProof },
     },
   }
-  expect(history.historySize(renewed.group.state.ratchetTree, [...entries, consumer])).toBe(
-    historyBytes(resetPrefix) * 2 + proofUtf8Bytes,
+  expect(
+    history.historySize({ tree: renewed.group.state.ratchetTree, entries: [...entries, consumer] }),
+  ).toBe(historyBytes(resetPrefix) * 2 + proofUtf8Bytes)
+  const floating = await createGroup({ identity: agent(71), groupID: 'floating-history' })
+  expect(history.historySize({ tree: floating.group.state.ratchetTree, entries: [consumer] })).toBe(
+    0,
   )
-  const floating = await createGroup(agent(71), 'floating-history')
-  expect(history.historySize(floating.group.state.ratchetTree, [consumer])).toBe(0)
 })
 
 test('history shares the UTF-8 log size primitive with proof accounting', async () => {
@@ -154,7 +159,9 @@ test('history counts every proof copy', async () => {
   const entries = [logEntry(did, 'seed', log), logEntry(did, 'log', repeated)]
   const each = history.controllerLogSize(log.chain) + history.controllerLogSize(log.events)
   expect(history.proofSize(log)).toBe(each)
-  expect(history.historySize([], entries)).toBe(each + history.controllerLogSize(repeated.events))
+  expect(history.historySize({ tree: [], entries })).toBe(
+    each + history.controllerLogSize(repeated.events),
+  )
   expect(history.proofSize(asControllerLog(log.chain))).toBe(history.controllerLogSize(log.chain))
   for (const value of [null, {}, 'proof', { chain: [], events: null }]) {
     expect(history.proofSize(value)).toBe(0)
@@ -177,15 +184,15 @@ test('history does not shrink after a settlement', async () => {
     },
   })
   const entries = [seedEntry, logEntry(did, 'log', { chain: [rotate], events: [] })]
-  const state = await foldControl(
-    entries.map((verified, index) => ({ verified, entryID: String(index) })),
-    { creatorDID: did, controller: did, version: 1 },
-    'history-log',
-  )
-  expect(recordedLogOf(state.registry, did)?.events).toEqual([])
-  expect(recordedLogOf(state.registry, did)?.chain).toHaveLength(2)
-  expect(history.historySize([], entries)).toBe(
-    history.historySize([], [seedEntry]) + history.controllerLogSize([rotate]),
+  const state = await foldControl({
+    entries: entries.map((verified, index) => ({ verified, entryID: String(index) })),
+    anchor: { creatorDID: did, controller: did, version: 1 },
+    groupID: 'history-log',
+  })
+  expect(recordedLogOf({ registry: state.registry, controller: did })?.events).toEqual([])
+  expect(recordedLogOf({ registry: state.registry, controller: did })?.chain).toHaveLength(2)
+  expect(history.historySize({ tree: [], entries })).toBe(
+    history.historySize({ tree: [], entries: [seedEntry] }) + history.controllerLogSize([rotate]),
   )
 })
 
@@ -202,25 +209,26 @@ test('P2 workload fits the horizon held once', async () => {
     ...deltas.map((proof) => logEntry(did, 'log', proof)),
   ]
   const drops: Array<FoldDrop> = []
-  const state = await foldControl(
-    entries.map((verified, index) => ({ verified, entryID: String(index) })),
-    { creatorDID: did, controller: did, version: 1 },
-    'history-log',
-    (drop) => drops.push(drop),
-  )
+  const state = await foldControl({
+    entries: entries.map((verified, index) => ({ verified, entryID: String(index) })),
+    anchor: { creatorDID: did, controller: did, version: 1 },
+    groupID: 'history-log',
+    onDrop: (drop) => drops.push(drop),
+  })
   expect(drops).toEqual([])
-  expect(recordedLogOf(state.registry, did)?.events).toHaveLength(31)
+  expect(recordedLogOf({ registry: state.registry, controller: did })?.events).toHaveLength(31)
   expect(deltas).toHaveLength(24)
   const tree = []
   for (let index = 0; index < 50; index++) {
     const identity = agent(80 + index)
-    const bundle = await createKeyPackageBundle(identity, {
+    const bundle = await createKeyPackageBundle({
+      identity,
       controller: await bindingFor(identity, log.chain),
     })
     if (index > 0) tree.push(undefined)
     tree.push({ nodeType: nodeTypes.leaf, leaf: bundle.publicPackage.leafNode })
   }
-  const bytes = history.historySize(tree, entries)
+  const bytes = history.historySize({ tree, entries })
   expect(bytes).toBe(
     50 * history.controllerLogSize(log.chain) +
       history.controllerLogSize(log.chain) +

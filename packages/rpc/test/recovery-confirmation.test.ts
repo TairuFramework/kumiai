@@ -35,12 +35,15 @@ describe('recovery ordering', { concurrent: false }, () => {
       const alice = createMemoryGroupMLS({ ...options, localDID: 'alice' })
       const bob = createMemoryGroupMLS({ ...options, localDID: 'bob' })
       const requestID = 'precedence-ask'
-      const request = await bob.createRecoveryRequest(requestID)
-      const pending = await bob.applyRecovery(await alice.sealGroupInfo(request), requestID)
+      const request = await bob.createRecoveryRequest({ requestID })
+      const pending = await bob.applyRecovery({
+        sealed: await alice.sealGroupInfo(request),
+        requestID,
+      })
       if (pending == null || 'renewalRequired' in pending) throw new Error('No pending recovery')
       const position = 'position'
       const commitDigest = 'digest'
-      const key = await pending.confirmationKey(position, commitDigest)
+      const key = await pending.confirmationKey({ position, commitDigest })
       const tag = confirmationTag(key, requestID)
       vi.useFakeTimers()
       const waiters = new Map<
@@ -62,7 +65,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         waiters,
       })
       const receive = async (value: RecoveryVerdict) => {
-        const sealed = await alice.sealRecoveryVerdict(request, value)
+        const sealed = await alice.sealRecoveryVerdict({ request, verdict: value })
         waiters.get(requestID)?.receive(sealed)
         await vi.advanceTimersByTimeAsync(0)
       }

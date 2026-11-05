@@ -19,7 +19,7 @@ describe('the commit frame', () => {
   test('carries the commit and the sealed bodies, and splits them back apart', () => {
     const commit = Uint8Array.from([1, 2, 3, 4, 5])
     const sealed = Uint8Array.from([9, 9, 9])
-    const frame = decodeCommitFrame(encodeCommitFrame(commit, sealed))
+    const frame = decodeCommitFrame(encodeCommitFrame({ commit, sealedEntries: sealed }))
     expect(Array.from(frame.commit)).toEqual([1, 2, 3, 4, 5])
     expect(Array.from(frame.sealedEntries)).toEqual([9, 9, 9])
   })
@@ -29,27 +29,32 @@ describe('the commit frame', () => {
     // cannot read the commit. Every peer walking the log meets frames like this one.
     const commit = Uint8Array.from([7, 7])
     const unopenable = Uint8Array.from([0xde, 0xad, 0xbe, 0xef])
-    const frame = decodeCommitFrame(encodeCommitFrame(commit, unopenable))
+    const frame = decodeCommitFrame(encodeCommitFrame({ commit, sealedEntries: unopenable }))
     expect(Array.from(frame.commit)).toEqual([7, 7])
   })
 
   test('a commit with no bodies still frames, with an empty blob', () => {
-    const frame = decodeCommitFrame(encodeCommitFrame(Uint8Array.from([1]), new Uint8Array()))
+    const frame = decodeCommitFrame(
+      encodeCommitFrame({ commit: Uint8Array.from([1]), sealedEntries: new Uint8Array() }),
+    )
     expect(frame.sealedEntries).toHaveLength(0)
   })
 
   test('bytes that are not a frame are rejected', () => {
     expect(() => decodeCommitFrame(Uint8Array.from([1, 2]))).toThrow(/too short/)
     // A length that runs past the end: truncated, not a frame.
-    const truncated = encodeCommitFrame(Uint8Array.from([1, 2, 3, 4]), new Uint8Array()).subarray(
-      0,
-      6,
-    )
+    const truncated = encodeCommitFrame({
+      commit: Uint8Array.from([1, 2, 3, 4]),
+      sealedEntries: new Uint8Array(),
+    }).subarray(0, 6)
     expect(() => decodeCommitFrame(truncated)).toThrow(/truncated/)
   })
 
   test('leads with the version byte', () => {
-    const frame = encodeCommitFrame(Uint8Array.from([1]), new Uint8Array())
+    const frame = encodeCommitFrame({
+      commit: Uint8Array.from([1]),
+      sealedEntries: new Uint8Array(),
+    })
     expect(frame[0]).toBe(COMMIT_FRAME_VERSION)
   })
 
@@ -59,7 +64,10 @@ describe('the commit frame', () => {
     // silently swallowed into `sealedEntries`. The assertion is the named refusal, never
     // falsiness — a decoder that merely returned nothing would be indistinguishable from an
     // empty frame.
-    const frame = encodeCommitFrame(Uint8Array.from([1, 2]), Uint8Array.from([3]))
+    const frame = encodeCommitFrame({
+      commit: Uint8Array.from([1, 2]),
+      sealedEntries: Uint8Array.from([3]),
+    })
     frame[0] = COMMIT_FRAME_VERSION + 1
     expect(() => decodeCommitFrame(frame)).toThrow(UnsupportedCommitFrameVersionError)
     expect(() => decodeCommitFrame(frame)).toThrow(/unsupported commit frame version: 2/)
@@ -70,7 +78,10 @@ describe('the commit frame', () => {
     // cannot read), while "not a frame" is dropped. Proving only that both throw — which is all
     // this file did while the lane dropped both — is how that distinction went missing for a
     // whole release. `peer-unknown-commit-frame-version.test.ts` proves the lane end of it.
-    const unknownVersion = encodeCommitFrame(Uint8Array.from([1, 2]), new Uint8Array())
+    const unknownVersion = encodeCommitFrame({
+      commit: Uint8Array.from([1, 2]),
+      sealedEntries: new Uint8Array(),
+    })
     unknownVersion[0] = COMMIT_FRAME_VERSION + 1
     expect(isUnsupportedCommitFrameVersion(caught(unknownVersion))).toBe(true)
 
@@ -79,10 +90,10 @@ describe('the commit frame', () => {
     expect(
       isUnsupportedCommitFrameVersion(caught(Uint8Array.from([COMMIT_FRAME_VERSION, 0]))),
     ).toBe(false)
-    const truncated = encodeCommitFrame(Uint8Array.from([1, 2, 3, 4]), new Uint8Array()).subarray(
-      0,
-      6,
-    )
+    const truncated = encodeCommitFrame({
+      commit: Uint8Array.from([1, 2, 3, 4]),
+      sealedEntries: new Uint8Array(),
+    }).subarray(0, 6)
     expect(isUnsupportedCommitFrameVersion(caught(truncated))).toBe(false)
   })
 })
@@ -120,7 +131,10 @@ describe('the sealed ledger-entry blob', () => {
   test('the resolver serves the bodies sealed into the frame being applied', async () => {
     const crypto = createFakeCrypto({ epoch: 3, localDID: 'alice' })
     const { sealed } = await crypto.sealEntries(encodeLedgerEntries(['a-token']))
-    const resolve = createLedgerEntryResolver(sealed, crypto.openEntries)
+    const resolve = createLedgerEntryResolver({
+      sealedEntries: sealed,
+      openEntries: crypto.openEntries,
+    })
     expect(await resolve(['some-id'])).toEqual(['a-token'])
   })
 
@@ -130,7 +144,10 @@ describe('the sealed ledger-entry blob', () => {
     // that consumed a ratchet generation would be unsound however it was scheduled.
     const crypto = createFakeCrypto({ epoch: 3, localDID: 'alice' })
     const { sealed } = await crypto.sealEntries(encodeLedgerEntries(['a-token']))
-    const resolve = createLedgerEntryResolver(sealed, crypto.openEntries)
+    const resolve = createLedgerEntryResolver({
+      sealedEntries: sealed,
+      openEntries: crypto.openEntries,
+    })
     expect(await resolve(['some-id'])).toEqual(['a-token'])
     expect(await resolve(['some-id'])).toEqual(['a-token'])
   })
@@ -141,7 +158,10 @@ describe('the sealed ledger-entry blob', () => {
     // A member at another epoch derives a different key. The frame is history it cannot open,
     // not corruption: it answers with nothing rather than raising.
     const behind = createFakeCrypto({ epoch: 1, localDID: 'dave' })
-    const resolve = createLedgerEntryResolver(sealed, behind.openEntries)
+    const resolve = createLedgerEntryResolver({
+      sealedEntries: sealed,
+      openEntries: behind.openEntries,
+    })
     expect(await resolve(['some-id'])).toEqual([])
   })
 })

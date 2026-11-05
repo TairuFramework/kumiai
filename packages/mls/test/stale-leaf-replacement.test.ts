@@ -51,7 +51,7 @@ test('assertNewerBinding orders a membership binding against a capability bindin
     iat: 120,
   }
   const old = (await rawBundle(group, identity, capability)).publicPackage.leafNode
-  const next = { ...old, credential: makeMLSCredential(identity, membership) }
+  const next = { ...old, credential: makeMLSCredential({ identity, controller: membership }) }
   expect(bindingIssuedAt(capability)).toBe(100)
   expect(bindingIssuedAt(membership)).toBe(120)
   expect(() => assertNewerBinding(next, old)).not.toThrow()
@@ -115,7 +115,7 @@ async function packageFor(
 ) {
   const own = group.state.ratchetTree[0]
   return generateKeyPackageWithKey({
-    credential: makeMLSCredential(holder, binding),
+    credential: makeMLSCredential({ identity: holder, controller: binding }),
     signatureKeyPair: { signKey: signer.privateKey, publicKey: signer.publicKey },
     cipherSuite: group.context.cipherSuite,
     capabilities: own?.nodeType === nodeTypes.leaf ? own.leaf.capabilities : undefined,
@@ -129,7 +129,7 @@ test('admitting a fresh key package replaces the stale leaf of the same DID', as
     bob,
     await timedBinding({ identity: bob, iat: 120, exp: 200 }),
   )
-  const result = await commitInvite(author, bundle.publicPackage, invite)
+  const result = await commitInvite({ group: author, keyPackage: bundle.publicPackage, invite })
 
   for (const group of [result.newGroup]) {
     expect(leavesOf(group, bob.id)).toHaveLength(1)
@@ -139,7 +139,7 @@ test('admitting a fresh key package replaces the stale leaf of the same DID', as
       bundle.publicPackage.leafNode.hpkePublicKey,
     )
   }
-  await expect(carolGroup.processMessage(result.commitMessage)).resolves.toBeNull()
+  await expect(carolGroup.processMessage({ message: result.commitMessage })).resolves.toBeNull()
   expect(carolGroup.epoch).toBe(result.newGroup.epoch)
   expect(leavesOf(carolGroup, bob.id)).toHaveLength(1)
   expect(
@@ -156,14 +156,14 @@ test('admitting a fresh key package replaces the stale leaf of the same DID', as
     keyPackageBundle: { ...bundle, ownerDID: bob.id },
   })
   expect(bobGroup.epoch).toBe(result.newGroup.epoch)
-  const fromBob = await bobGroup.encrypt(utf8.encode('back again'))
+  const fromBob = await bobGroup.encrypt({ plaintext: utf8.encode('back again') })
   for (const receiver of [result.newGroup, carolGroup]) {
-    const opened = await receiver.decrypt(fromBob)
+    const opened = await receiver.decrypt({ message: fromBob })
     expect(new TextDecoder().decode(opened.payload)).toBe('back again')
     expect(opened.senderDID).toBe(bob.id)
   }
-  const fromCarol = await carolGroup.encrypt(utf8.encode('welcome back'))
-  const opened = await bobGroup.decrypt(fromCarol)
+  const fromCarol = await carolGroup.encrypt({ plaintext: utf8.encode('welcome back') })
+  const opened = await bobGroup.decrypt({ message: fromCarol })
   expect(new TextDecoder().decode(opened.payload)).toBe('welcome back')
   expect(opened.senderDID).toBe(carol.id)
 })
@@ -178,12 +178,19 @@ test('the delivered input invite includes the stale replacement preservation clo
     await timedBinding({ identity: f.bob, iat: 145, exp: 200, parent, issuer: f.identity }),
   )
   const before = [...f.invite.ledgerEntries]
-  const result = await commitInvite(f.author, bundle.publicPackage, f.invite)
-  const clock = await signLedgerEntry(f.identity, {
-    type: 'kumiai.device',
-    groupID: f.author.groupID,
-    subject: controllerID,
-    value: { op: 'clock', time: 140 },
+  const result = await commitInvite({
+    group: f.author,
+    keyPackage: bundle.publicPackage,
+    invite: f.invite,
+  })
+  const clock = await signLedgerEntry({
+    identity: f.identity,
+    entry: {
+      type: 'kumiai.device',
+      groupID: f.author.groupID,
+      subject: controllerID,
+      value: { op: 'clock', time: 140 },
+    },
   })
   expect(result.newGroup.ledgerTokens).toEqual([...before, clock])
   for (const token of f.invite.ledgerEntries) f.tokens.set(ledgerEntryDigest(token), token)
@@ -196,10 +203,12 @@ test('the delivered input invite includes the stale replacement preservation clo
   expect(result.invite).toBe(f.invite)
   expect(joined.ledgerTokens).toEqual([...before, clock])
   expect(joined.registry.controllers.get(controllerID)?.timeFloor).toBe(140)
-  await f.carolGroup.processMessage(result.commitMessage)
+  await f.carolGroup.processMessage({ message: result.commitMessage })
   expect(f.carolGroup.registry).toEqual(joined.registry)
   const payload = utf8.encode('replacement with preserved time')
-  await expect(f.carolGroup.decrypt(await joined.encrypt(payload))).resolves.toMatchObject({
+  await expect(
+    f.carolGroup.decrypt({ message: await joined.encrypt({ plaintext: payload }) }),
+  ).resolves.toMatchObject({
     payload,
     senderDID: f.bob.id,
   })
@@ -217,8 +226,8 @@ test("a replacement brings a fresh admission; the re-added member's own path onl
     bob,
     await timedBinding({ identity: bob, iat: 120, exp: 200 }),
   )
-  const result = await commitInvite(author, bundle.publicPackage, invite)
-  await carolGroup.processMessage(result.commitMessage)
+  const result = await commitInvite({ group: author, keyPackage: bundle.publicPackage, invite })
+  await carolGroup.processMessage({ message: result.commitMessage })
 
   // The DID set did not move; the fresh KeyPackage leaf is what says a leaf was Added.
   for (const group of [result.newGroup, carolGroup]) {
@@ -239,7 +248,7 @@ test("a replacement brings a fresh admission; the re-added member's own path onl
   })
   const replaced = admissionsOf(carolGroup)
   const path = await commitWithEntries({ group: bobGroup, extraProposals: [], enacted: [] })
-  await carolGroup.processMessage(encode(mlsMessageEncoder, path.commit))
+  await carolGroup.processMessage({ message: encode(mlsMessageEncoder, path.commit) })
   expect(carolGroup.epoch).toBe(result.newGroup.epoch + 1n)
   expect(admissionsOf(carolGroup).filter((admission) => !replaced.includes(admission))).toEqual([])
   expect(leavesOf(carolGroup, bob.id)[0]?.admission).toBeUndefined()
@@ -260,7 +269,7 @@ test('a Remove paired with an Add of a different DID stays unauthorised', async 
   const forged = await rawCommit({ group: author, proposals })
   const snapshot = structuredClone(carolGroup.state)
   await expect(
-    carolGroup.processMessage(encode(mlsMessageEncoder, forged.commit)),
+    carolGroup.processMessage({ message: encode(mlsMessageEncoder, forged.commit) }),
   ).rejects.toMatchObject({ name: 'CommitRejectedError', reason: 'invalid' })
   expect(carolGroup.state).toEqual(snapshot)
 })
@@ -288,7 +297,9 @@ test.each([
   const { author, bob, carolGroup, invite, staleIndex } = await staleGroup()
   const bundle = await build(author, bob)
   const authorSnapshot = structuredClone(author.state)
-  await expect(commitInvite(author, bundle.publicPackage, invite)).rejects.toMatchObject({
+  await expect(
+    commitInvite({ group: author, keyPackage: bundle.publicPackage, invite }),
+  ).rejects.toMatchObject({
     name: 'LeafBindingError',
     reason,
   })
@@ -299,10 +310,12 @@ test.each([
     proposals: replacement(staleIndex, bundle.publicPackage),
   })
   const snapshot = structuredClone(carolGroup.state)
-  const rejected = await carolGroup.processMessage(encode(mlsMessageEncoder, forged.commit)).then(
-    () => null,
-    (error: unknown) => error,
-  )
+  const rejected = await carolGroup
+    .processMessage({ message: encode(mlsMessageEncoder, forged.commit) })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    )
   expect(rejected).toMatchObject({ name: 'CommitRejectedError' })
   expect((rejected as Error).cause).toMatchObject({ name: 'LeafBindingError', reason })
   expect(carolGroup.state).toEqual(snapshot)
@@ -313,7 +326,9 @@ test("a key package under the live leaf's own binding cannot evict that leaf", a
   const { author, bob, bobBinding, carolGroup, invite, staleIndex } = await staleGroup()
   const bundle = await rawBundle(author, bob, bobBinding)
   const authorSnapshot = structuredClone(author.state)
-  await expect(commitInvite(author, bundle.publicPackage, invite)).rejects.toMatchObject({
+  await expect(
+    commitInvite({ group: author, keyPackage: bundle.publicPackage, invite }),
+  ).rejects.toMatchObject({
     name: 'LeafBindingError',
     reason: 'renewal-order',
   })
@@ -324,10 +339,12 @@ test("a key package under the live leaf's own binding cannot evict that leaf", a
     proposals: replacement(staleIndex, bundle.publicPackage),
   })
   const snapshot = structuredClone(carolGroup.state)
-  const rejected = await carolGroup.processMessage(encode(mlsMessageEncoder, forged.commit)).then(
-    () => null,
-    (error: unknown) => error,
-  )
+  const rejected = await carolGroup
+    .processMessage({ message: encode(mlsMessageEncoder, forged.commit) })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    )
   expect(rejected).toMatchObject({ name: 'CommitRejectedError' })
   expect((rejected as Error).cause).toMatchObject({
     name: 'LeafBindingError',
@@ -347,7 +364,9 @@ test('a group without a lifecycle controller still refuses re-adding a present D
       if (token == null) throw new Error('Missing test token')
       return token
     })
-  const { group: created } = await createGroup(alice, 'stale-leaf-standard', {
+  const { group: created } = await createGroup({
+    identity: alice,
+    groupID: 'stale-leaf-standard',
     resolveLedgerEntries,
   })
   const first = await createInvite({
@@ -357,11 +376,11 @@ test('a group without a lifecycle controller still refuses re-adding a present D
     permission: 'member',
   })
   for (const token of first.invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-  const added = await commitInvite(
-    created,
-    (await createKeyPackageBundle(bob)).publicPackage,
-    first.invite,
-  )
+  const added = await commitInvite({
+    group: created,
+    keyPackage: (await createKeyPackageBundle({ identity: bob })).publicPackage,
+    invite: first.invite,
+  })
   const group = added.newGroup
   expect(group.anchor.controller).toBeUndefined()
   expect(leavesOf(group, bob.id)).toHaveLength(1)
@@ -373,7 +392,11 @@ test('a group without a lifecycle controller still refuses re-adding a present D
   })
   const snapshot = structuredClone(group.state)
   await expect(
-    commitInvite(group, (await createKeyPackageBundle(bob)).publicPackage, second.invite),
+    commitInvite({
+      group,
+      keyPackage: (await createKeyPackageBundle({ identity: bob })).publicPackage,
+      invite: second.invite,
+    }),
   ).rejects.toThrow('Commit cannot contain an Add proposal for someone already in the group')
   expect(group.state).toEqual(snapshot)
   expect(leavesOf(group, bob.id)).toHaveLength(1)
@@ -392,7 +415,9 @@ test('two leaves for the admitted DID are refused as ambiguous', async () => {
     bob,
     await timedBinding({ identity: bob, iat: 120, exp: 200 }),
   )
-  await expect(commitInvite(duplicated, bundle.publicPackage, invite)).rejects.toMatchObject({
+  await expect(
+    commitInvite({ group: duplicated, keyPackage: bundle.publicPackage, invite }),
+  ).rejects.toMatchObject({
     name: 'DuplicateMemberLeafError',
   })
   await expect(
@@ -421,11 +446,14 @@ async function staleMembership() {
     },
   })
   await f.author.applyLedgerEntries([
-    await signLedgerEntry(f.identity, {
-      type: 'kumiai.device',
-      groupID: f.author.groupID,
-      subject: controllerID,
-      value: { op: 'log', proof: { chain: [], events: [add] } },
+    await signLedgerEntry({
+      identity: f.identity,
+      entry: {
+        type: 'kumiai.device',
+        groupID: f.author.groupID,
+        subject: controllerID,
+        value: { op: 'log', proof: { chain: [], events: [add] } },
+      },
     }),
   ])
   const binding: ControllerBinding = {
@@ -436,7 +464,7 @@ async function staleMembership() {
   }
   const old = leafAt(f.author.state.ratchetTree, f.staleIndex)
   if (old == null) throw new Error('Missing stale leaf')
-  old.credential = makeMLSCredential(f.bob, binding)
+  old.credential = makeMLSCredential({ identity: f.bob, controller: binding })
   const { invite } = await createInvite({
     group: f.author,
     identity: f.identity,
@@ -449,7 +477,11 @@ test('membership key package replaces a stale leaf only when newer', async () =>
   const f = await staleMembership()
   for (const iat of [90, 100, 120]) {
     const bundle = await rawBundle(f.author, f.bob, { ...f.binding, iat })
-    const result = commitInvite(f.author, bundle.publicPackage, f.invite)
+    const result = commitInvite({
+      group: f.author,
+      keyPackage: bundle.publicPackage,
+      invite: f.invite,
+    })
     if (iat <= 100) await expect(result).rejects.toMatchObject({ reason: 'renewal-order' })
     else {
       const { newGroup } = await result

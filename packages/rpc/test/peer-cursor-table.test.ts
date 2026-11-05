@@ -101,7 +101,7 @@ describe('a peer that meets its own un-merged commit', { concurrent: false }, ()
     await waitFor(() => bob.mls.epoch() === 2, "bob applies alice's orphaned commit")
     // ...and the group commits again on top of it, at epoch 2.
     const token = 'signed-token: bob enacted this while alice was dead'
-    await bob.peer.commit(buildLedgerCommit(bob, [token]))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, [token]) })
     await waitFor(() => bob.mls.epoch() === 3, "bob's own commit lands at epoch 3")
     expect(bob.mls.epoch()).toBe(3)
 
@@ -414,9 +414,9 @@ describe('a peer that must recover before it can commit', { concurrent: false },
 
     // Her host commits anyway. The lane will not race a head it has not reconciled to, and it
     // will not silently do nothing: it unwinds and says why.
-    await expect(alice.peer.commit(buildLedgerCommit(alice, ['signed-token: a']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+    await expect(
+      alice.peer.commit({ build: buildLedgerCommit(alice, ['signed-token: a']) }),
+    ).rejects.toThrow(RecoveryRequiredError)
     // Nothing was published, and nothing was journalled: the commit did not happen.
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
     expect(alice.journal.slot()).toBeNull()

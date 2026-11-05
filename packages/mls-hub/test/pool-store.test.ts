@@ -18,8 +18,8 @@ function record(ref: string): KeyPackageRecord {
 describe('createMemoryKeyPackagePoolStore', () => {
   test('list is scoped to the owner', async () => {
     const store = createMemoryKeyPackagePoolStore()
-    await store.put(ALICE, record('a'))
-    await store.put(BOB, record('b'))
+    await store.put({ ownerDID: ALICE, record: record('a') })
+    await store.put({ ownerDID: BOB, record: record('b') })
 
     expect((await store.list(ALICE)).map((entry) => entry.ref)).toEqual(['a'])
     expect((await store.list(BOB)).map((entry) => entry.ref)).toEqual(['b'])
@@ -27,8 +27,8 @@ describe('createMemoryKeyPackagePoolStore', () => {
 
   test('put replaces by ref rather than appending', async () => {
     const store = createMemoryKeyPackagePoolStore()
-    await store.put(ALICE, record('a'))
-    await store.put(ALICE, { ...record('a'), notAfter: 200 })
+    await store.put({ ownerDID: ALICE, record: record('a') })
+    await store.put({ ownerDID: ALICE, record: { ...record('a'), notAfter: 200 } })
 
     const records = await store.list(ALICE)
     expect(records).toHaveLength(1)
@@ -37,19 +37,19 @@ describe('createMemoryKeyPackagePoolStore', () => {
 
   test('delete is scoped to the owner and no-ops for an unknown ref', async () => {
     const store = createMemoryKeyPackagePoolStore()
-    await store.put(ALICE, record('a'))
+    await store.put({ ownerDID: ALICE, record: record('a') })
 
-    await store.delete(BOB, 'a')
+    await store.delete({ ownerDID: BOB, ref: 'a' })
     expect(await store.list(ALICE)).toHaveLength(1)
 
-    await expect(store.delete(ALICE, 'missing')).resolves.toBeUndefined()
-    await store.delete(ALICE, 'a')
+    await expect(store.delete({ ownerDID: ALICE, ref: 'missing' })).resolves.toBeUndefined()
+    await store.delete({ ownerDID: ALICE, ref: 'a' })
     expect(await store.list(ALICE)).toHaveLength(0)
   })
 
   test('list does not alias the store own state', async () => {
     const store = createMemoryKeyPackagePoolStore()
-    await store.put(ALICE, record('a'))
+    await store.put({ ownerDID: ALICE, record: record('a') })
 
     const records = await store.list(ALICE)
     // Mutating what a caller was handed must not reach back into the store — this holds SECRET key

@@ -48,7 +48,7 @@ describe('createWakeDispatcher', () => {
 
     const leadingEdge = sent[0]
     if (leadingEdge === undefined) throw new Error('expected a sent wake ping')
-    expect(openWakeHint(leadingEdge.body, opener)).toEqual({
+    expect(openWakeHint({ body: leadingEdge.body, opener })).toEqual({
       topicID: 'topic-a',
       sequenceID: '001',
       count: 1,
@@ -73,7 +73,7 @@ describe('createWakeDispatcher', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(2))
     const trailingPing = sent[1]
     if (trailingPing === undefined) throw new Error('expected a trailing wake ping')
-    expect(openWakeHint(trailingPing.body, opener)).toEqual({
+    expect(openWakeHint({ body: trailingPing.body, opener })).toEqual({
       topicID: 'topic-b',
       sequenceID: '004',
       count: 3,
@@ -132,7 +132,7 @@ describe('createWakeDispatcher', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(2))
     const rearmedPing = sent[1]
     if (rearmedPing === undefined) throw new Error('expected a re-armed wake ping')
-    expect(openWakeHint(rearmedPing.body, opener)).toEqual({
+    expect(openWakeHint({ body: rearmedPing.body, opener })).toEqual({
       topicID: 'topic-c',
       sequenceID: '003',
       count: 1,
@@ -166,7 +166,7 @@ describe('createWakeDispatcher', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(3))
     const summaryPing = sent[2]
     if (summaryPing === undefined) throw new Error('expected a summary wake ping')
-    expect(openWakeHint(summaryPing.body, opener)).toEqual({
+    expect(openWakeHint({ body: summaryPing.body, opener })).toEqual({
       topicID: 'topic-a',
       sequenceID: '003',
       count: 1,

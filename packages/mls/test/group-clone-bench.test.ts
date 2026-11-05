@@ -16,15 +16,18 @@ test('reports clone versus serialized restore with 50 held ledger entries', asyn
     ],
     didMethod: 'peer:4',
   })
-  const { group } = await createGroup(identity, 'clone-benchmark')
+  const { group } = await createGroup({ identity, groupID: 'clone-benchmark' })
   const tokens: Array<string> = []
   for (let index = 0; index < 50; index++) {
     tokens.push(
-      await signLedgerEntry(identity, {
-        type: 'app.record',
-        groupID: group.groupID,
-        subject: identity.id,
-        value: { index, text: 'ledger entry payload '.repeat(5) },
+      await signLedgerEntry({
+        identity,
+        entry: {
+          type: 'app.record',
+          groupID: group.groupID,
+          subject: identity.id,
+          value: { index, text: 'ledger entry payload '.repeat(5) },
+        },
       }),
     )
   }

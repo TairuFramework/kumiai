@@ -32,9 +32,10 @@ const flush = () => new Promise((r) => setTimeout(r, 30))
 function recordingHub(hub: FakeHub, topicID: string, pulled: Array<string>): LogHub {
   return {
     publish: (params: HubPublishParams) => hub.publish(params),
-    subscribe: (did, topic, options) => hub.subscribe(did, topic, options),
-    unsubscribe: (did, topic) => hub.unsubscribe(did, topic),
-    receive: (did) => hub.receive(did),
+    subscribe: ({ subscriberDID: did, topicID: topic, ...options }) =>
+      hub.subscribe(did, topic, options),
+    unsubscribe: ({ subscriberDID: did, topicID: topic }) => hub.unsubscribe(did, topic),
+    receive: ({ subscriberDID: did }) => hub.receive(did),
     fetchTopic: async (params: HubFetchTopicParams): Promise<HubFetchTopicResult> => {
       const result = await hub.fetchTopic(params)
       if (params.topicID === topicID) {
@@ -91,7 +92,7 @@ async function crashBeforeTheAcceptanceWasRecorded(
   const alice = makeMLSPeer(hub, 'alice', recoverySecret, { journal })
   await flush()
 
-  await expect(alice.peer.commit(buildInviteCommit(alice, 'dave'))).rejects.toThrow(
+  await expect(alice.peer.commit({ build: buildInviteCommit(alice, 'dave') })).rejects.toThrow(
     'the process died here',
   )
   await alice.peer.dispose()
@@ -112,12 +113,14 @@ async function crashBeforeTheHostAdopted(
 
   const build = buildInviteCommit(alice, 'dave')
   await expect(
-    alice.peer.commit(async () => ({
-      ...(await build()),
-      onAccepted: async () => {
-        throw new Error('the process died here')
-      },
-    })),
+    alice.peer.commit({
+      build: async () => ({
+        ...(await build()),
+        onAccepted: async () => {
+          throw new Error('the process died here')
+        },
+      }),
+    }),
   ).rejects.toThrow('the process died here')
   await alice.peer.dispose()
   return alice
@@ -165,7 +168,7 @@ async function expectRecoveredFromTheJournalAlone(
   // And it can still commit. A group that cannot take a second commit is not alive; it is a
   // corpse at the right epoch.
   const token = 'signed-token: dave is an admin'
-  expect(await restarted.peer.commit(buildLedgerCommit(restarted, [token]))).toEqual({})
+  expect(await restarted.peer.commit({ build: buildLedgerCommit(restarted, [token]) })).toEqual({})
   expect(restarted.mls.epoch()).toBe(3)
   expect(restarted.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
   expect(commitFrames(hub, recoverySecret)).toHaveLength(2)

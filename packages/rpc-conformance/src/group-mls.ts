@@ -95,6 +95,41 @@ export type ConformanceRosterEntry = {
   admission?: string
 }
 
+export type ConformanceGroupMLSConfirmationKeyParams = {
+  position: string
+  commitDigest: string
+}
+
+export type ConformanceGroupMLSSealRecoveryVerdictParams = {
+  request: Uint8Array
+  verdict: ConformanceRecoveryVerdict
+}
+
+export type ConformanceGroupMLSOpenRecoveryVerdictParams = {
+  sealed: Uint8Array
+  requestID: string
+}
+
+export type ConformanceGroupMLSProcessCommitParams = {
+  commit: Uint8Array
+  context: ConformanceCommitContext
+}
+
+export type ConformanceGroupMLSCreateRecoveryRequestParams = {
+  requestID: string
+  deadlineMs?: number
+}
+
+export type ConformanceGroupMLSApplyRecoveryParams = {
+  sealed: Uint8Array
+  requestID: string
+}
+
+export type ConformanceGroupMLSOpenSealedLedgerParams = {
+  sealed: Uint8Array
+  requestID: string
+}
+
 /**
  * The `GroupMLS` this suite exercises — ALL of it.
  *
@@ -106,34 +141,46 @@ export type ConformanceRosterEntry = {
  */
 export type ConformanceGroupMLS = {
   verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
-  confirmationKey: (position: string, commitDigest: string) => Promise<ConformanceConfirmationKey>
-  sealRecoveryVerdict: (
-    request: Uint8Array,
-    verdict: ConformanceRecoveryVerdict,
-  ) => Promise<Uint8Array>
-  openRecoveryVerdict: (
-    sealed: Uint8Array,
-    requestID: string,
-  ) => Promise<ConformanceOpenedRecoveryVerdict | null>
+  confirmationKey: ({
+    position,
+    commitDigest,
+  }: ConformanceGroupMLSConfirmationKeyParams) => Promise<ConformanceConfirmationKey>
+  sealRecoveryVerdict: ({
+    request,
+    verdict,
+  }: ConformanceGroupMLSSealRecoveryVerdictParams) => Promise<Uint8Array>
+  openRecoveryVerdict: ({
+    sealed,
+    requestID,
+  }: ConformanceGroupMLSOpenRecoveryVerdictParams) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
   prepareCommitBuild?: () => Promise<void>
   commitBuildFramed?: () => Promise<void>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
-  processCommit: (
-    commit: Uint8Array,
-    context: ConformanceCommitContext,
-  ) => Promise<ConformanceProcessCommitResult>
+  processCommit: ({
+    commit,
+    context,
+  }: ConformanceGroupMLSProcessCommitParams) => Promise<ConformanceProcessCommitResult>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
   prepareRecovery: () => Promise<'ready' | 'renewal-required'>
-  createRecoveryRequest: (requestID: string, deadlineMs?: number) => Promise<Uint8Array>
+  createRecoveryRequest: ({
+    requestID,
+    deadlineMs,
+  }: ConformanceGroupMLSCreateRecoveryRequestParams) => Promise<Uint8Array>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
-  applyRecovery: (sealed: Uint8Array, requestID: string) => Promise<ConformanceAppliedRecovery>
+  applyRecovery: ({
+    sealed,
+    requestID,
+  }: ConformanceGroupMLSApplyRecoveryParams) => Promise<ConformanceAppliedRecovery>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
-  openSealedLedger: (sealed: Uint8Array, requestID: string) => Promise<Array<string> | null>
+  openSealedLedger: ({
+    sealed,
+    requestID,
+  }: ConformanceGroupMLSOpenSealedLedgerParams) => Promise<Array<string> | null>
   bootstrapLedger: (tokens: Array<string>) => Promise<void>
 }
 
@@ -148,14 +195,20 @@ export type ConformanceCommit = {
   context: ConformanceCommitContext
 }
 
+export type ConformanceMLSGroupSealVerdictPayloadParams = {
+  member: number
+  request: Uint8Array
+  verdict: Record<string, unknown>
+}
+
 export type ConformanceMLSGroup = {
   groupID: string
   /** Authenticated malformed payloads bypass the sender port's shape guard. */
-  sealVerdictPayload: (
-    member: number,
-    request: Uint8Array,
-    verdict: Record<string, unknown>,
-  ) => Promise<Uint8Array>
+  sealVerdictPayload: ({
+    member,
+    request,
+    verdict,
+  }: ConformanceMLSGroupSealVerdictPayloadParams) => Promise<Uint8Array>
   /**
    * The ports under test. The COMMITTER is not among them: every Commit here is authored by a
    * member outside this list, so `processCommit` is only ever asked about a RECEIVED commit —
@@ -196,11 +249,19 @@ export type ConformanceMLSGroup = {
   dispose?: () => void | Promise<void>
 }
 
+export type GroupMLSConformanceParamsCreateGroupParams = {
+  size: number
+  id: string
+}
+
 export type GroupMLSConformanceParams = {
   /** Prefix for the describe block, so a failure names the implementation it came from. */
   label: string
   /** A fresh group of `size` ports plus an outside committer. `id` is unique per case. */
-  createGroup: (size: number, id: string) => Promise<ConformanceMLSGroup>
+  createGroup: ({
+    size,
+    id,
+  }: GroupMLSConformanceParamsCreateGroupParams) => Promise<ConformanceMLSGroup>
   createBoundRecovery: (
     binding?: 'root' | 'mbr' | 'membership',
   ) => Promise<ConformanceBoundRecovery>
@@ -280,9 +341,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         expect(member.mls.sendAdmission()).toEqual({ epoch, admissible: true })
         const commit = await group.buildCommit()
         expect(member.mls.sendAdmission()).toEqual({ epoch, admissible: true })
-        await member.mls.processCommit(commit.commit, commit.context)
+        await member.mls.processCommit({ commit: commit.commit, context: commit.context })
         expect(member.mls.sendAdmission()).toEqual({ epoch: epoch + 1, admissible: true })
-        await member.mls.processCommit(commit.commit, commit.context)
+        await member.mls.processCommit({ commit: commit.commit, context: commit.context })
         expect(member.mls.sendAdmission()).toEqual({ epoch: epoch + 1, admissible: true })
       })
     })
@@ -298,22 +359,30 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           group.setEpochHintOffset(offset)
           const member = memberAt(group.members, index)
           expect(await member.mls.readEpoch()).toBe(epoch)
-          expect(await member.mls.processCommit(future.commit, future.context)).toEqual({
+          expect(
+            await member.mls.processCommit({ commit: future.commit, context: future.context }),
+          ).toEqual({
             advanced: false,
             epochBefore: epoch,
             epochAfter: epoch,
           })
-          expect(await member.mls.processCommit(first.commit, first.context)).toEqual({
+          expect(
+            await member.mls.processCommit({ commit: first.commit, context: first.context }),
+          ).toEqual({
             advanced: true,
             epochBefore: epoch,
             epochAfter: epoch + 1,
           })
-          expect(await member.mls.processCommit(first.commit, first.context)).toEqual({
+          expect(
+            await member.mls.processCommit({ commit: first.commit, context: first.context }),
+          ).toEqual({
             advanced: false,
             epochBefore: epoch + 1,
             epochAfter: epoch + 1,
           })
-          expect(await member.mls.processCommit(new Uint8Array([0]), {})).toEqual({
+          expect(
+            await member.mls.processCommit({ commit: new Uint8Array([0]), context: {} }),
+          ).toEqual({
             advanced: false,
             epochBefore: epoch + 1,
             epochAfter: epoch + 1,
@@ -344,7 +413,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(atOwnEpoch?.committerDID).toBe(group.committerDID)
 
           // Alice applies it and is now one epoch ON from where that commit was framed.
-          expect(await alice.mls.processCommit(first.commit, first.context)).toMatchObject({
+          expect(
+            await alice.mls.processCommit({ commit: first.commit, context: first.context }),
+          ).toMatchObject({
             advanced: true,
           })
 
@@ -397,7 +468,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(dids(await alice.mls.rosterEntries())).toContain(carol.did)
 
           const removal = await group.buildCommit({ removes: 2 })
-          expect(await alice.mls.processCommit(removal.commit, removal.context)).toMatchObject({
+          expect(
+            await alice.mls.processCommit({ commit: removal.commit, context: removal.context }),
+          ).toMatchObject({
             advanced: true,
           })
           // Nothing was adopted, and the roster moved anyway.
@@ -418,7 +491,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const carol = memberAt(group.members, 2)
 
           const removal = await group.buildCommit({ removes: 2 })
-          expect(await carol.mls.processCommit(removal.commit, removal.context)).toMatchObject({
+          expect(
+            await carol.mls.processCommit({ commit: removal.commit, context: removal.context }),
+          ).toMatchObject({
             advanced: false,
           })
 
@@ -436,7 +511,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
 
           // And the commit is perfectly applicable by everyone else, so what refused it was the
           // removal and not the bytes.
-          expect(await bob.mls.processCommit(removal.commit, removal.context)).toMatchObject({
+          expect(
+            await bob.mls.processCommit({ commit: removal.commit, context: removal.context }),
+          ).toMatchObject({
             advanced: true,
           })
         })
@@ -454,21 +531,29 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const bob = memberAt(group.members, 1)
 
           const first = await group.buildCommit()
-          expect(await alice.mls.processCommit(first.commit, first.context)).toMatchObject({
+          expect(
+            await alice.mls.processCommit({ commit: first.commit, context: first.context }),
+          ).toMatchObject({
             advanced: true,
           })
           // BELOW: alice is past it now. Re-reading the frame she has already applied.
-          expect(await alice.mls.processCommit(first.commit, first.context)).toMatchObject({
+          expect(
+            await alice.mls.processCommit({ commit: first.commit, context: first.context }),
+          ).toMatchObject({
             advanced: false,
           })
 
           // ABOVE: bob never applied the first, so the second is framed an epoch ahead of him.
           const second = await group.buildCommit()
-          expect(await bob.mls.processCommit(second.commit, second.context)).toMatchObject({
+          expect(
+            await bob.mls.processCommit({ commit: second.commit, context: second.context }),
+          ).toMatchObject({
             advanced: false,
           })
           // Bob is exactly where he was: a refusal advances nothing.
-          expect(await bob.mls.processCommit(first.commit, first.context)).toMatchObject({
+          expect(
+            await bob.mls.processCommit({ commit: first.commit, context: first.context }),
+          ).toMatchObject({
             advanced: true,
           })
         })
@@ -478,7 +563,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(1, 'apply-garbage', async (group) => {
           const alice = memberAt(group.members, 0)
           for (const bytes of NOT_A_COMMIT) {
-            expect(await alice.mls.processCommit(bytes, {})).toMatchObject({ advanced: false })
+            expect(await alice.mls.processCommit({ commit: bytes, context: {} })).toMatchObject({
+              advanced: false,
+            })
           }
         })
       })
@@ -506,7 +593,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           // Merely BUILDING it changes nobody's roster: the group moves when a member applies.
           expect(new Set(dids(await alice.mls.rosterEntries()))).toEqual(new Set(before))
 
-          await alice.mls.processCommit(removal.commit, removal.context)
+          await alice.mls.processCommit({ commit: removal.commit, context: removal.context })
           expect(dids(await alice.mls.rosterEntries())).not.toContain(carol.did)
           // Bob was handed nothing, so his roster is untouched — the lane must be able to tell
           // "this member applied a remove" from "a remove happened somewhere".
@@ -555,7 +642,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const carol = memberAt(group.members, 2)
           expect(dids(entries)).toContain(carol.did)
           const removal = await group.buildCommit({ removes: 2 })
-          await alice.mls.processCommit(removal.commit, removal.context)
+          await alice.mls.processCommit({ commit: removal.commit, context: removal.context })
           const after = await alice.mls.rosterEntries()
           const aliceAfter = after.find((e) => e.did === alice.did)
           if (aliceAfter == null) {
@@ -602,11 +689,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const rightFreed = Math.max(bobEntry.leafIndex, daveEntry.leafIndex)
 
           const removeBob = await group.buildCommit({ removes: 1 })
-          await alice.mls.processCommit(removeBob.commit, removeBob.context)
+          await alice.mls.processCommit({ commit: removeBob.commit, context: removeBob.context })
           const removeDave = await group.buildCommit({ removes: 3 })
-          await alice.mls.processCommit(removeDave.commit, removeDave.context)
+          await alice.mls.processCommit({ commit: removeDave.commit, context: removeDave.context })
           const add = await group.buildCommit({ adds: true })
-          await alice.mls.processCommit(add.commit, add.context)
+          await alice.mls.processCommit({ commit: add.commit, context: add.context })
 
           const entries = await alice.mls.rosterEntries()
           const newcomer = entries.find(
@@ -635,7 +722,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
 
           const before = await alice.mls.rosterEntries()
           const add = await group.buildCommit({ adds: true })
-          await alice.mls.processCommit(add.commit, add.context)
+          await alice.mls.processCommit({ commit: add.commit, context: add.context })
           const added = await alice.mls.rosterEntries()
           const newcomer = added.find((e) => !dids(before).includes(e.did))
           if (newcomer == null) throw new Error('the harness reported no arriving leaf')
@@ -643,7 +730,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(admissions(before)).not.toContain(newcomer.admission)
 
           const removal = await group.buildCommit({ removes: 2 })
-          await alice.mls.processCommit(removal.commit, removal.context)
+          await alice.mls.processCommit({ commit: removal.commit, context: removal.context })
           const removed = await alice.mls.rosterEntries()
           expect(admissions(removed).filter((a) => !admissions(added).includes(a))).toEqual([])
         })
@@ -664,7 +751,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
 
           const before = await alice.mls.rosterEntries()
           const plain = await group.buildCommit()
-          expect(await alice.mls.processCommit(plain.commit, plain.context)).toMatchObject({
+          expect(
+            await alice.mls.processCommit({ commit: plain.commit, context: plain.context }),
+          ).toMatchObject({
             advanced: true,
           })
           const after = await alice.mls.rosterEntries()
@@ -694,8 +783,8 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await bob.mls.exportRecoverySecret()).toEqual(before)
 
           const removal = await group.buildCommit({ removes: 2 })
-          await alice.mls.processCommit(removal.commit, removal.context)
-          await bob.mls.processCommit(removal.commit, removal.context)
+          await alice.mls.processCommit({ commit: removal.commit, context: removal.context })
+          await bob.mls.processCommit({ commit: removal.commit, context: removal.context })
 
           expect(await alice.mls.exportRecoverySecret()).toEqual(before)
           expect(await bob.mls.exportRecoverySecret()).toEqual(before)
@@ -740,7 +829,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           // And the committer is what a forger does not get to choose.
           expect(fake?.committerDID).toBeUndefined()
           const receiver = memberAt(group.members, 1)
-          expect(await receiver.mls.processCommit(forged, {})).toMatchObject({
+          expect(await receiver.mls.processCommit({ commit: forged, context: {} })).toMatchObject({
             advanced: false,
             refusal: 'invalid',
           })
@@ -759,7 +848,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(2, 'verify-recovery-request', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
-          const request = await bob.mls.createRecoveryRequest('verified-ask')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'verified-ask' })
           expect(await alice.mls.verifyRecoveryRequest(request)).toEqual({
             groupID: group.groupID,
             requestID: 'verified-ask',
@@ -775,11 +864,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const { requester, responder, ratchet, replaceBinding } =
             await params.createBoundRecovery(binding)
           expect(await requester.prepareRecovery()).toBe('ready')
-          const request = await requester.createRecoveryRequest('mark-binding')
-          const pending = await requester.applyRecovery(
-            await responder.sealGroupInfo(request),
-            'mark-binding',
-          )
+          const request = await requester.createRecoveryRequest({ requestID: 'mark-binding' })
+          const pending = await requester.applyRecovery({
+            sealed: await responder.sealGroupInfo(request),
+            requestID: 'mark-binding',
+          })
           if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
           const before = await requester.readEpoch()
           expect(pending.markBindingUnusable()).toBeUndefined()
@@ -800,13 +889,15 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const { requester, requesterDID, responder } = await params.createBoundRecovery(binding)
           expect(dids(await responder.rosterEntries())).toContain(requesterDID)
           expect(await requester.prepareRecovery()).toBe('ready')
-          const request = await requester.createRecoveryRequest('member-binding')
-          const pending = await requester.applyRecovery(
-            await responder.sealGroupInfo(request),
-            'member-binding',
-          )
+          const request = await requester.createRecoveryRequest({ requestID: 'member-binding' })
+          const pending = await requester.applyRecovery({
+            sealed: await responder.sealGroupInfo(request),
+            requestID: 'member-binding',
+          })
           if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
-          expect(await responder.processCommit(pending.commit, {})).toMatchObject({
+          expect(
+            await responder.processCommit({ commit: pending.commit, context: {} }),
+          ).toMatchObject({
             advanced: true,
           })
           await pending.onAccepted()
@@ -824,7 +915,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const before = await requester.readEpoch()
           const built = await buildManagementCommit(op)
           expect(built.entries.length).toBeGreaterThan(0)
-          expect(await requester.processCommit(built.commit, built.context)).toMatchObject({
+          expect(
+            await requester.processCommit({ commit: built.commit, context: built.context }),
+          ).toMatchObject({
             advanced: true,
             epochBefore: before,
             epochAfter: before + 1,
@@ -832,7 +925,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await requester.getLedger()).toEqual(await responder.getLedger())
           expect(await requester.getLedger()).toEqual(expect.arrayContaining(built.entries))
           const admission = await buildAdmission(op === 'log' ? 'unavailable' : 'effective')
-          expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject(
+          expect(
+            await requester.processCommit({ commit: admission.commit, context: admission.context }),
+          ).toMatchObject(
             op === 'log' ? { advanced: true } : { advanced: false, refusal: 'invalid' },
           )
         },
@@ -842,23 +937,31 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const { requester, responder, buildManagementCommit, buildAdmission } =
           await params.createBoundRecovery()
         expect(await requester.prepareRecovery()).toBe('ready')
-        const request = await requester.createRecoveryRequest('retain-denial')
+        const request = await requester.createRecoveryRequest({ requestID: 'retain-denial' })
         const staleReply = await responder.sealGroupInfo(request)
         const denial = await buildManagementCommit('deny')
-        expect(await requester.processCommit(denial.commit, denial.context)).toMatchObject({
+        expect(
+          await requester.processCommit({ commit: denial.commit, context: denial.context }),
+        ).toMatchObject({
           advanced: true,
         })
         const epoch = await requester.readEpoch()
         const roster = await requester.rosterEntries()
         const ledger = await requester.getLedger()
         const admission = await buildAdmission('effective')
-        expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+        expect(
+          await requester.processCommit({ commit: admission.commit, context: admission.context }),
+        ).toMatchObject({
           advanced: false,
           refusal: 'invalid',
         })
 
-        expect(await requester.applyRecovery(staleReply, 'retain-denial')).toBeNull()
-        expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+        expect(
+          await requester.applyRecovery({ sealed: staleReply, requestID: 'retain-denial' }),
+        ).toBeNull()
+        expect(
+          await requester.processCommit({ commit: admission.commit, context: admission.context }),
+        ).toMatchObject({
           advanced: false,
           refusal: 'invalid',
         })
@@ -873,7 +976,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         const roster = await requester.rosterEntries()
         const ledger = await requester.getLedger()
         const admission = await buildAdmission('foreign')
-        expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+        expect(
+          await requester.processCommit({ commit: admission.commit, context: admission.context }),
+        ).toMatchObject({
           advanced: false,
           refusal: 'binding',
         })
@@ -888,14 +993,18 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         expect(denialAliases.long).toMatch(/^did:peer:4/)
         expect(denialAliases.long.startsWith(`${denialAliases.short}:`)).toBe(true)
         const denial = await buildManagementCommit('deny-alias')
-        expect(await requester.processCommit(denial.commit, denial.context)).toMatchObject({
+        expect(
+          await requester.processCommit({ commit: denial.commit, context: denial.context }),
+        ).toMatchObject({
           advanced: true,
         })
         const epoch = await requester.readEpoch()
         const roster = await requester.rosterEntries()
         const ledger = await requester.getLedger()
         const admission = await buildAdmission('effective')
-        expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+        expect(
+          await requester.processCommit({ commit: admission.commit, context: admission.context }),
+        ).toMatchObject({
           advanced: false,
           refusal: 'invalid',
         })
@@ -915,9 +1024,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const epoch = await requester.readEpoch()
           const roster = await requester.rosterEntries()
           const ledger = await requester.getLedger()
-          const request = await requester.createRecoveryRequest('removed-root')
+          const request = await requester.createRecoveryRequest({ requestID: 'removed-root' })
           const sealed = await responder.sealGroupInfo(request)
-          const candidate = await requester.applyRecovery(sealed, 'removed-root')
+          const candidate = await requester.applyRecovery({ sealed, requestID: 'removed-root' })
           expect(candidate == null || 'renewalRequired' in candidate).toBe(true)
           expect(await requester.readEpoch()).toBe(epoch)
           expect(await requester.rosterEntries()).toEqual(roster)
@@ -935,7 +1044,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const roster = await responder.rosterEntries()
           const ledger = await responder.getLedger()
           const recovery = await buildRecoveryCommit()
-          expect(await responder.processCommit(recovery.commit, recovery.context)).toMatchObject({
+          expect(
+            await responder.processCommit({ commit: recovery.commit, context: recovery.context }),
+          ).toMatchObject({
             advanced: false,
             refusal: 'binding',
           })
@@ -952,7 +1063,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             await params.createBoundRecovery()
           if (authority === 'removed') {
             const removal = await buildManagementCommit('remove')
-            expect(await requester.processCommit(removal.commit, removal.context)).toMatchObject({
+            expect(
+              await requester.processCommit({ commit: removal.commit, context: removal.context }),
+            ).toMatchObject({
               advanced: true,
             })
           }
@@ -960,7 +1073,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const roster = await requester.rosterEntries()
           const ledger = await requester.getLedger()
           const admission = await buildAdmission(authority)
-          expect(await requester.processCommit(admission.commit, admission.context)).toMatchObject({
+          expect(
+            await requester.processCommit({ commit: admission.commit, context: admission.context }),
+          ).toMatchObject({
             advanced: false,
             refusal: 'binding',
           })
@@ -974,11 +1089,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
           const before = await bob.mls.readEpoch()
-          const request = await bob.mls.createRecoveryRequest('confirm')
-          const pending = await bob.mls.applyRecovery(
-            await alice.mls.sealGroupInfo(request),
-            'confirm',
-          )
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'confirm' })
+          const pending = await bob.mls.applyRecovery({
+            sealed: await alice.mls.sealGroupInfo(request),
+            requestID: 'confirm',
+          })
           if (pending == null || 'renewalRequired' in pending)
             throw new Error('No pending recovery')
           const deriving = pending.confirmationKey('position', 'digest')
@@ -989,14 +1104,20 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(key).toHaveLength(32)
           expect(await bob.mls.readEpoch()).toBe(before)
           expect(pending.epoch).toBe((await alice.mls.readEpoch()) + 1)
-          const result = await alice.mls.processCommit(pending.commit, {})
+          const result = await alice.mls.processCommit({ commit: pending.commit, context: {} })
           expect(result.advanced).toBe(true)
-          expect(await alice.mls.confirmationKey('position', 'digest')).toEqual({
+          expect(
+            await alice.mls.confirmationKey({ position: 'position', commitDigest: 'digest' }),
+          ).toEqual({
             epoch: pending.epoch,
             key,
           })
-          expect((await alice.mls.confirmationKey('position', 'other')).key).not.toEqual(key)
-          expect((await alice.mls.confirmationKey('other', 'digest')).key).not.toEqual(key)
+          expect(
+            (await alice.mls.confirmationKey({ position: 'position', commitDigest: 'other' })).key,
+          ).not.toEqual(key)
+          expect(
+            (await alice.mls.confirmationKey({ position: 'other', commitDigest: 'digest' })).key,
+          ).not.toEqual(key)
           await pending.onAccepted()
           await pending.onAccepted()
           expect(await bob.mls.readEpoch()).toBe(pending.epoch)
@@ -1006,9 +1127,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(2, 'verdict-contract', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
-          const request = await bob.mls.createRecoveryRequest('verdict')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'verdict' })
           const reply = await alice.mls.sealGroupInfo(request)
-          const pending = await bob.mls.applyRecovery(reply, 'verdict')
+          const pending = await bob.mls.applyRecovery({ sealed: reply, requestID: 'verdict' })
           if (pending == null || 'renewalRequired' in pending)
             throw new Error('No pending recovery')
           await pending.confirmationKey('position', 'digest')
@@ -1020,13 +1141,17 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             verdict: 'refused',
             reason: 'policy',
           }
-          const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
-          const opened = await bob.mls.openRecoveryVerdict(sealed, 'verdict')
+          const sealed = await alice.mls.sealRecoveryVerdict({ request, verdict })
+          const opened = await bob.mls.openRecoveryVerdict({ sealed, requestID: 'verdict' })
           expect(opened).toEqual({ signer: alice.did, verdict })
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'verdict')).toEqual(opened)
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'other')).toBeNull()
-          expect(await bob.mls.openRecoveryVerdict(reply, 'verdict')).toBeNull()
-          expect(await bob.mls.openSealedLedger(sealed, 'verdict')).toBeNull()
+          expect(await bob.mls.openRecoveryVerdict({ sealed, requestID: 'verdict' })).toEqual(
+            opened,
+          )
+          expect(await bob.mls.openRecoveryVerdict({ sealed, requestID: 'other' })).toBeNull()
+          expect(
+            await bob.mls.openRecoveryVerdict({ sealed: reply, requestID: 'verdict' }),
+          ).toBeNull()
+          expect(await bob.mls.openSealedLedger({ sealed, requestID: 'verdict' })).toBeNull()
           if (opened == null) throw new Error('No opened verdict')
           expect(await pending.judgeVerdict(opened)).toBe('authoritative')
           expect(await pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe(
@@ -1051,7 +1176,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(2, 'malformed-verdict', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
-          const request = await bob.mls.createRecoveryRequest('malformed')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'malformed' })
           const verdict = {
             groupID: group.groupID,
             requestID: 'malformed',
@@ -1059,10 +1184,13 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             commitDigest: 'digest',
             ...change,
           }
-          const sealed = await group.sealVerdictPayload(0, request, verdict)
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'malformed')).toBeNull()
+          const sealed = await group.sealVerdictPayload({ member: 0, request, verdict })
+          expect(await bob.mls.openRecoveryVerdict({ sealed, requestID: 'malformed' })).toBeNull()
           await expect(
-            alice.mls.sealRecoveryVerdict(request, verdict as ConformanceRecoveryVerdict),
+            alice.mls.sealRecoveryVerdict({
+              request,
+              verdict: verdict as ConformanceRecoveryVerdict,
+            }),
           ).rejects.toThrow()
         })
       })
@@ -1075,9 +1203,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const epochBefore = await bob.mls.readEpoch()
           expect(await bob.mls.prepareRecovery()).toBe('ready')
           expect(await bob.mls.readEpoch()).toBe(epochBefore)
-          const request = await bob.mls.createRecoveryRequest('req-1')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'req-1' })
           const sealed = await alice.mls.sealGroupInfo(request)
-          const pending = await bob.mls.applyRecovery(sealed, 'req-1')
+          const pending = await bob.mls.applyRecovery({ sealed, requestID: 'req-1' })
 
           // Narrowed rather than optional-chained: `expect` does not narrow, and a chain that
           // short-circuits would TypeError on `.length` instead of failing this assertion.
@@ -1106,12 +1234,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           // Bob is removed. Alice applies it; Bob cannot, so he still holds a live handle and the
           // rendezvous secret — exactly the position an evicted member is in.
           const removal = await group.buildCommit({ removes: 1 })
-          expect(await alice.mls.processCommit(removal.commit, removal.context)).toMatchObject({
+          expect(
+            await alice.mls.processCommit({ commit: removal.commit, context: removal.context }),
+          ).toMatchObject({
             advanced: true,
           })
           expect(dids(await alice.mls.rosterEntries())).not.toContain(bob.did)
 
-          const request = await bob.mls.createRecoveryRequest('req-removed')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'req-removed' })
           await expect(alice.mls.sealGroupInfo(request)).rejects.toThrow()
         })
       })
@@ -1121,12 +1251,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
-          const request = await bob.mls.createRecoveryRequest('req-a')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'req-a' })
           const sealed = await alice.mls.sealGroupInfo(request)
 
           // The same bytes, opened against a different request's key. `null` or a throw — the lane
           // reads both the same way — but never a PendingRecovery.
-          await expect(bob.mls.applyRecovery(sealed, 'req-b').catch(() => null)).resolves.toBeNull()
+          await expect(
+            bob.mls.applyRecovery({ sealed, requestID: 'req-b' }).catch(() => null),
+          ).resolves.toBeNull()
         })
       })
 
@@ -1140,7 +1272,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const before = await alice.mls.exportRecoverySecret()
           const commit = await group.buildCommit()
-          await alice.mls.processCommit(commit.commit, commit.context)
+          await alice.mls.processCommit({ commit: commit.commit, context: commit.context })
           expect(await alice.mls.exportRecoverySecret()).toEqual(before)
         })
       })
@@ -1157,9 +1289,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
-          const request = await bob.mls.createRecoveryRequest('gather-1')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'gather-1' })
           const sealed = await alice.mls.sealLedger(request)
-          const opened = await bob.mls.openSealedLedger(sealed, 'gather-1')
+          const opened = await bob.mls.openSealedLedger({ sealed, requestID: 'gather-1' })
 
           expect(opened).toEqual(await alice.mls.getLedger())
         })
@@ -1177,9 +1309,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const bob = memberAt(group.members, 1)
 
           const removal = await group.buildCommit({ removes: 1 })
-          await alice.mls.processCommit(removal.commit, removal.context)
+          await alice.mls.processCommit({ commit: removal.commit, context: removal.context })
 
-          const request = await bob.mls.createRecoveryRequest('gather-removed')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'gather-removed' })
           await expect(alice.mls.sealLedger(request)).rejects.toThrow()
         })
       })
@@ -1196,12 +1328,16 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const bob = memberAt(group.members, 1)
           const carol = memberAt(group.members, 2)
 
-          const request = await carol.mls.createRecoveryRequest('gather-many')
+          const request = await carol.mls.createRecoveryRequest({ requestID: 'gather-many' })
           const fromAlice = await alice.mls.sealLedger(request)
           const fromBob = await bob.mls.sealLedger(request)
 
-          expect(await carol.mls.openSealedLedger(fromAlice, 'gather-many')).not.toBeNull()
-          expect(await carol.mls.openSealedLedger(fromBob, 'gather-many')).not.toBeNull()
+          expect(
+            await carol.mls.openSealedLedger({ sealed: fromAlice, requestID: 'gather-many' }),
+          ).not.toBeNull()
+          expect(
+            await carol.mls.openSealedLedger({ sealed: fromBob, requestID: 'gather-many' }),
+          ).not.toBeNull()
         })
       })
 
@@ -1210,10 +1346,10 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
-          const request = await bob.mls.createRecoveryRequest('gather-a')
+          const request = await bob.mls.createRecoveryRequest({ requestID: 'gather-a' })
           const sealed = await alice.mls.sealLedger(request)
           await expect(
-            bob.mls.openSealedLedger(sealed, 'gather-b').catch(() => null),
+            bob.mls.openSealedLedger({ sealed, requestID: 'gather-b' }).catch(() => null),
           ).resolves.toBeNull()
         })
       })

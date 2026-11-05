@@ -27,7 +27,7 @@ test('confirmation requests and verdicts round trip with fixed handshake kinds',
     longPosition,
   )
   const sealed = new Uint8Array([3, 4])
-  expect(decodeRecoveryVerdict(encodeRecoveryVerdict('request', sealed))).toEqual({
+  expect(decodeRecoveryVerdict(encodeRecoveryVerdict({ requestID: 'request', sealed }))).toEqual({
     requestID: 'request',
     sealed,
   })
@@ -36,17 +36,17 @@ test('confirmation requests and verdicts round trip with fixed handshake kinds',
   expect(HANDSHAKE_KIND.recoveryVerdict).toBe(6)
   expect(
     decodeHandshakeFrame(
-      encodeHandshakeFrame(
-        HANDSHAKE_KIND.recoveryVerdict,
-        encodeRecoveryVerdict('request', sealed),
-      ),
+      encodeHandshakeFrame({
+        kind: HANDSHAKE_KIND.recoveryVerdict,
+        payload: encodeRecoveryVerdict({ requestID: 'request', sealed }),
+      }),
     ).kind,
   ).toBe(6)
   expect(() =>
-    encodeHandshakeFrame(
-      HANDSHAKE_KIND.recoveryVerdict,
-      encodeRecoveryVerdict('request', new Uint8Array(786_432)),
-    ),
+    encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.recoveryVerdict,
+      payload: encodeRecoveryVerdict({ requestID: 'request', sealed: new Uint8Array(786_432) }),
+    }),
   ).toThrow(FrameTooLargeError)
   const payload = encodeRecoveryConfirmRequest(request)
   for (let length = 0; length < payload.length - request.request.length; length++) {

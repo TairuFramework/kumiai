@@ -138,7 +138,7 @@ export function waitForRecoveryConfirmation(
         opening = opening
           .then(async () => {
             if (finished) return
-            const opened = await port.openRecoveryVerdict(sealed, requestID)
+            const opened = await port.openRecoveryVerdict({ sealed, requestID })
             if (finished || opened == null) return
             const verdict = opened.verdict
             const boundToAttempt =

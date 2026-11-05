@@ -35,7 +35,7 @@ function hinted(access: HandleAccess, offset: () => number): HandleAccess {
 
 testGroupCryptoConformance({
   label: 'createGroupCrypto over a transactional HandleAccess',
-  createGroup: async (size, id) => {
+  createGroup: async ({ size, id }) => {
     const group = await createRealGroup(size, `tx-crypto-conformance-${id}`)
     let hintOffset = 0
     const hosts = await Promise.all(
@@ -56,13 +56,17 @@ testGroupCryptoConformance({
       advance: async () => {
         const commit = await buildRealCommit(group, {})
         for (const access of accesses)
-          await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+          await access.mutate((handle, persist) =>
+            handle.processMessage({ message: commit, persist }),
+          )
       },
       removeMember: async (index) => {
         const commit = await buildRealCommit(group, { removes: index })
         for (const [at, access] of accesses.entries()) {
           if (at === index) continue
-          await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+          await access.mutate((handle, persist) =>
+            handle.processMessage({ message: commit, persist }),
+          )
         }
       },
     }
@@ -151,7 +155,9 @@ testPendingGroupCryptoConformance({
       },
       advance: async () => {
         const commit = await buildRealCommit(group, {})
-        await host.access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
+        await host.access.mutate((handle, persist) =>
+          handle.processMessage({ message: commit, persist }),
+        )
       },
     }
   },
@@ -171,7 +177,7 @@ testGroupMLSConformance({
       binding,
     ),
   label: 'createGroupMLS over a transactional HandleAccess',
-  createGroup: async (size, id) => {
+  createGroup: async ({ size, id }) => {
     const group = await createRealGroup(size, `tx-mls-conformance-${id}`)
     let hintOffset = 0
     const hosts = await Promise.all(
@@ -181,7 +187,7 @@ testGroupMLSConformance({
     )
     return {
       groupID: group.committer.handle.groupID,
-      sealVerdictPayload: async (index, request, verdict) => {
+      sealVerdictPayload: async ({ member: index, request, verdict }) => {
         const member = group.members[index]
         if (member == null) throw new Error('missing member')
         return await sealRealRecoveryVerdict(member, request, verdict)

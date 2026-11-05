@@ -39,7 +39,7 @@ function pendingStore() {
 
 function retainedLane() {
   const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
-  const topicID = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+  const topicID = protocolTopic({ secret: anchor.secret, epoch: anchor.epoch, protocol: 'chat' })
   const store = pendingStore()
   const reader = createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port })
   const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -68,12 +68,11 @@ function retainedLane() {
   const append = async (position: string, intent: 'log' | 'ephemeral') => {
     messages.push({
       sequenceID: position,
-      payload: await sender.wrap(
-        fromUTF('{"payload":{"typ":"event","prc":"chat/posted","data":{}}}'),
-        {
-          aad: encodeAppAAD({ topicID, intent }),
-        },
-      ),
+      payload: await sender.wrap({
+        bytes: fromUTF('{"payload":{"typ":"event","prc":"chat/posted","data":{}}}'),
+
+        aad: encodeAppAAD({ topicID, intent }),
+      }),
     })
   }
   return { lane, reader, store, cursor, topicID, append }
@@ -124,11 +123,12 @@ describe('durable retained drain', () => {
         logPosition: '000000000001',
         senderDID: 'alice',
         topicID,
-        payload: await ahead.wrap(fromUTF('untrusted push'), {
+        payload: await ahead.wrap({
+          bytes: fromUTF('untrusted push'),
           aad: encodeAppAAD({ topicID, intent: 'log' }),
         }),
       },
-      new FrameEpochError(2, 1),
+      new FrameEpochError({ frameEpoch: 2, handleEpoch: 1 }),
     )
     await new Promise((resolve) => setTimeout(resolve, 0))
     await append('000000000001', 'log')
@@ -139,7 +139,7 @@ describe('durable retained drain', () => {
 
   test('a rejected fetch waits for the other protocol before a retry starts', async () => {
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
-    const chatTopic = protocolTopic(anchor.secret, 1, 'chat')
+    const chatTopic = protocolTopic({ secret: anchor.secret, epoch: 1, protocol: 'chat' })
     let releaseDelayed: (() => void) | undefined
     const delayed = new Promise<void>((resolve) => {
       releaseDelayed = resolve
@@ -195,14 +195,14 @@ describe('durable retained drain', () => {
     hub.detach('bob')
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'first' } })
     await flush()
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     store.setFail(true)
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
     expect(bob.mls.epoch()).toBe(1)
     store.setFail(false)
-    await bob.peer.commit(buildLedgerCommit(bob, []))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     expect(bob.mls.epoch()).toBe(3)
     expect(store.records.size).toBe(1)
     await alice.peer.dispose()
@@ -231,7 +231,7 @@ describe('durable retained drain', () => {
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'new topic' } })
     await flush()
     store.setFail(true)
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
     expect(bob.mls.epoch()).toBe(2)

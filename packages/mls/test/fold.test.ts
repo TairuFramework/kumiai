@@ -18,10 +18,10 @@ const adminReducer: LedgerReducer<AdminOp, AdminState> = {
   },
   // Authority is evaluated against the state accumulated so far, never the final
   // state — that is what makes a later revoke leave earlier claims standing.
-  verifyAuthority(verified, state) {
+  verifyAuthority({ verified, stateSoFar: state }) {
     return state.admins.has(verified.issuer)
   },
-  apply(verified, state) {
+  apply({ verified, stateSoFar: state }) {
     const admins = new Set(state.admins)
     if (verified.entry.value.op === 'grant') {
       admins.add(verified.entry.subject)
@@ -67,7 +67,7 @@ describe('foldLedger', () => {
   test('a caller defines a reducer, folds a list, and reads the projection', () => {
     const entries: Array<FoldInput<AdminOp>> = [grant(ALICE, BOB, '1'), grant(BOB, CAROL, '2')]
 
-    const state = foldLedger(entries, anchor, adminReducer)
+    const state = foldLedger({ entries, anchor, reducer: adminReducer })
 
     expect([...state.admins].sort()).toEqual([ALICE, BOB, CAROL].sort())
   })
@@ -77,8 +77,8 @@ describe('foldLedger', () => {
     const forward: Array<FoldInput<AdminOp>> = [grant(ALICE, BOB, '1'), revoke(ALICE, BOB, '2')]
     const reversed: Array<FoldInput<AdminOp>> = [revoke(ALICE, BOB, '2'), grant(ALICE, BOB, '1')]
 
-    const forwardState = foldLedger(forward, anchor, adminReducer)
-    const reversedState = foldLedger(reversed, anchor, adminReducer)
+    const forwardState = foldLedger({ entries: forward, anchor, reducer: adminReducer })
+    const reversedState = foldLedger({ entries: reversed, anchor, reducer: adminReducer })
 
     // Forward: Bob is granted then revoked, so only Alice remains.
     expect([...forwardState.admins]).toEqual([ALICE])
@@ -97,8 +97,8 @@ describe('foldLedger', () => {
       pushed.push(entry)
     }
 
-    const spreadState = foldLedger(spread, anchor, adminReducer)
-    const pushedState = foldLedger(pushed, anchor, adminReducer)
+    const spreadState = foldLedger({ entries: spread, anchor, reducer: adminReducer })
+    const pushedState = foldLedger({ entries: pushed, anchor, reducer: adminReducer })
 
     expect([...spreadState.admins].sort()).toEqual([...pushedState.admins].sort())
   })
@@ -115,7 +115,7 @@ describe('foldLedger', () => {
       revoke(ALICE, BOB, '3'),
     ]
 
-    const state = foldLedger(entries, anchor, adminReducer)
+    const state = foldLedger({ entries, anchor, reducer: adminReducer })
 
     expect(state.admins.has(CAROL)).toBe(true)
     expect(state.admins.has(BOB)).toBe(false)
@@ -132,7 +132,12 @@ describe('foldLedger', () => {
     }
     const drops: Array<FoldDrop> = []
 
-    const state = foldLedger([unrelated], anchor, adminReducer, (drop) => drops.push(drop))
+    const state = foldLedger({
+      entries: [unrelated],
+      anchor,
+      reducer: adminReducer,
+      onDrop: (drop) => drops.push(drop),
+    })
 
     expect([...state.admins]).toEqual([ALICE])
     expect(drops).toHaveLength(1)
@@ -151,7 +156,12 @@ describe('foldLedger', () => {
     ]
     const drops: Array<FoldDrop> = []
 
-    const state = foldLedger(entries, anchor, adminReducer, (drop) => drops.push(drop))
+    const state = foldLedger({
+      entries,
+      anchor,
+      reducer: adminReducer,
+      onDrop: (drop) => drops.push(drop),
+    })
 
     expect(state.admins.has(CAROL)).toBe(false)
     expect(state.admins.has(BOB)).toBe(true)
@@ -169,7 +179,7 @@ describe('foldLedger', () => {
     const before = [...entries]
 
     expect(() =>
-      foldLedger(entries as Array<FoldInput<AdminOp>>, anchor, adminReducer),
+      foldLedger({ entries: entries as Array<FoldInput<AdminOp>>, anchor, reducer: adminReducer }),
     ).not.toThrow()
     expect([...entries]).toEqual(before)
     expect(entries[0]?.entryID).toBe('1')

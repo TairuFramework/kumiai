@@ -15,29 +15,37 @@ const RECOVERY_SECRET = new Uint8Array(32).fill(9)
 
 describe('topic derivation', () => {
   test('protocolTopic matches deriveTopicID for the protocol label', () => {
-    expect(protocolTopic(SECRET, 1, 'control')).toBe(deriveTopicID(SECRET, 1, 'control'))
+    expect(protocolTopic({ secret: SECRET, epoch: 1, protocol: 'control' })).toBe(
+      deriveTopicID({ secret: SECRET, epoch: 1, label: 'control' }),
+    )
   })
 
   test('protocolTopic scope discriminates subgroups', () => {
-    const a = protocolTopic(SECRET, 1, 'sync', 'roomA')
-    const b = protocolTopic(SECRET, 1, 'sync', 'roomB')
+    const a = protocolTopic({ secret: SECRET, epoch: 1, protocol: 'sync', scope: 'roomA' })
+    const b = protocolTopic({ secret: SECRET, epoch: 1, protocol: 'sync', scope: 'roomB' })
     expect(a).not.toBe(b)
-    expect(a).toBe(deriveTopicID(SECRET, 1, 'sync', 'roomA'))
+    expect(a).toBe(deriveTopicID({ secret: SECRET, epoch: 1, label: 'sync', scope: 'roomA' }))
   })
 
   test('inboxTopic uses the reserved inbox label with the DID as scope', () => {
-    expect(inboxTopic(SECRET, 1, 'did:key:zABC')).toBe(
-      deriveTopicID(SECRET, 1, INBOX_LABEL, 'did:key:zABC'),
+    expect(inboxTopic({ secret: SECRET, epoch: 1, memberDID: 'did:key:zABC' })).toBe(
+      deriveTopicID({ secret: SECRET, epoch: 1, label: INBOX_LABEL, scope: 'did:key:zABC' }),
     )
   })
 
   test('inbox and protocol topics never collide for the same name', () => {
-    expect(inboxTopic(SECRET, 1, 'control')).not.toBe(protocolTopic(SECRET, 1, 'control'))
+    expect(inboxTopic({ secret: SECRET, epoch: 1, memberDID: 'control' })).not.toBe(
+      protocolTopic({ secret: SECRET, epoch: 1, protocol: 'control' }),
+    )
   })
 
   test('topics rotate per epoch', () => {
-    expect(protocolTopic(SECRET, 1, 'control')).not.toBe(protocolTopic(SECRET, 2, 'control'))
-    expect(inboxTopic(SECRET, 1, 'did:key:zABC')).not.toBe(inboxTopic(SECRET, 2, 'did:key:zABC'))
+    expect(protocolTopic({ secret: SECRET, epoch: 1, protocol: 'control' })).not.toBe(
+      protocolTopic({ secret: SECRET, epoch: 2, protocol: 'control' }),
+    )
+    expect(inboxTopic({ secret: SECRET, epoch: 1, memberDID: 'did:key:zABC' })).not.toBe(
+      inboxTopic({ secret: SECRET, epoch: 2, memberDID: 'did:key:zABC' }),
+    )
   })
 
   test('commitTopic is pinned (no rotation)', () => {
@@ -48,7 +56,9 @@ describe('topic derivation', () => {
     // They want opposite things from the hub: the commit topic is a log whose head every
     // commit moves; a rendezvous frame must never move that head.
     expect(commitTopic(RECOVERY_SECRET)).not.toBe(rendezvousTopic(RECOVERY_SECRET))
-    expect(commitTopic(RECOVERY_SECRET)).not.toBe(protocolTopic(RECOVERY_SECRET, 0, 'chat'))
+    expect(commitTopic(RECOVERY_SECRET)).not.toBe(
+      protocolTopic({ secret: RECOVERY_SECRET, epoch: 0, protocol: 'chat' }),
+    )
   })
 
   test('both control topics are stable for the group and do not rotate with the epoch', () => {
@@ -69,22 +79,41 @@ describe('topic derivation', () => {
   })
 
   test('protocolTopic rejects the reserved kumiai/ namespace', () => {
-    expect(() => protocolTopic(SECRET, 1, 'kumiai/inbox/v1', 'did:key:zABC')).toThrow(/reserved/)
-    expect(() => protocolTopic(SECRET, 0, 'kumiai/commit/v1')).toThrow(/reserved/)
-    expect(() => protocolTopic(SECRET, 0, 'kumiai/rendezvous/v1')).toThrow(/reserved/)
-    expect(() => protocolTopic(SECRET, 1, 'kumiai/anything')).toThrow(/reserved/)
+    expect(() =>
+      protocolTopic({
+        secret: SECRET,
+        epoch: 1,
+        protocol: 'kumiai/inbox/v1',
+        scope: 'did:key:zABC',
+      }),
+    ).toThrow(/reserved/)
+    expect(() => protocolTopic({ secret: SECRET, epoch: 0, protocol: 'kumiai/commit/v1' })).toThrow(
+      /reserved/,
+    )
+    expect(() =>
+      protocolTopic({ secret: SECRET, epoch: 0, protocol: 'kumiai/rendezvous/v1' }),
+    ).toThrow(/reserved/)
+    expect(() => protocolTopic({ secret: SECRET, epoch: 1, protocol: 'kumiai/anything' })).toThrow(
+      /reserved/,
+    )
   })
 
   test('protocolTopic still accepts ordinary host protocols unchanged', () => {
-    expect(protocolTopic(SECRET, 1, 'chat')).toBe(deriveTopicID(SECRET, 1, 'chat'))
-    expect(protocolTopic(SECRET, 1, 'sync', 'roomA')).toBe(
-      deriveTopicID(SECRET, 1, 'sync', 'roomA'),
+    expect(protocolTopic({ secret: SECRET, epoch: 1, protocol: 'chat' })).toBe(
+      deriveTopicID({ secret: SECRET, epoch: 1, label: 'chat' }),
+    )
+    expect(protocolTopic({ secret: SECRET, epoch: 1, protocol: 'sync', scope: 'roomA' })).toBe(
+      deriveTopicID({ secret: SECRET, epoch: 1, label: 'sync', scope: 'roomA' }),
     )
   })
 
   test('inboxTopic rejects a NUL-bearing or lone-surrogate DID (via deriveTopicID)', () => {
-    expect(() => inboxTopic(SECRET, 1, 'did:key:z\0evil')).toThrow(/scope/)
-    expect(() => inboxTopic(SECRET, 1, 'did:key:z\uD800')).toThrow(/scope/)
+    expect(() => inboxTopic({ secret: SECRET, epoch: 1, memberDID: 'did:key:z\0evil' })).toThrow(
+      /scope/,
+    )
+    expect(() => inboxTopic({ secret: SECRET, epoch: 1, memberDID: 'did:key:z\uD800' })).toThrow(
+      /scope/,
+    )
   })
 
   test('discoveryTopic rejects a lone-surrogate DID but accepts a NUL', () => {
@@ -98,8 +127,8 @@ describe('topic derivation', () => {
   test('deriveTopicID can intentionally reproduce a reserved rpc tuple (layering boundary)', () => {
     // The reservation lives in protocolTopic, not the label-agnostic primitive: the helpers, not
     // deriveTopicID, carry domain separation. This documents that boundary; it is not a guard.
-    expect(deriveTopicID(SECRET, 1, INBOX_LABEL, 'did:key:zABC')).toBe(
-      inboxTopic(SECRET, 1, 'did:key:zABC'),
-    )
+    expect(
+      deriveTopicID({ secret: SECRET, epoch: 1, label: INBOX_LABEL, scope: 'did:key:zABC' }),
+    ).toBe(inboxTopic({ secret: SECRET, epoch: 1, memberDID: 'did:key:zABC' }))
   })
 })

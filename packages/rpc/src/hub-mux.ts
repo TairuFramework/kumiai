@@ -376,7 +376,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     try {
       // Inside the try, and awaited: `subscribe` may reject OR throw synchronously (the type
       // allows `void`), and the old code's `Promise.resolve(...).catch()` caught only the first.
-      await hub.subscribe(localDID, topicID, options)
+      await hub.subscribe({ subscriberDID: localDID, topicID, ...options })
       if (disposed) return
       subscriptions.set(topicID, { kind: 'held' })
       return
@@ -548,7 +548,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     }
   }
 
-  const subscription = hub.receive(localDID)
+  const subscription = hub.receive({ subscriberDID: localDID })
   const iterator = subscription[Symbol.asyncIterator]()
 
   const pending = new Map<string, PendingAck>()
@@ -698,7 +698,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
   })()
 
   const bus: BroadcastBus = {
-    publish: async (topicID, payload) => {
+    publish: async ({ topicID, payload }) => {
       // A publish not yet reached: see `publishSuspended`'s note above for why this awaits
       // nothing and what it does NOT cover.
       if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
@@ -706,7 +706,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       assertFrameFits(payload)
       await hub.publish({ senderDID: localDID, topicID, payload })
     },
-    subscribe: (topicID, onMessage) =>
+    subscribe: ({ topicID, onMessage }) =>
       onInbound(topicID, (message, ack) => onMessage(message.payload, ack)),
   }
 
@@ -718,13 +718,13 @@ export function createHubMux(params: HubMuxParams): HubMux {
       assertFrameFits(publishParams.payload)
       return await hub.publish(publishParams)
     },
-    subscribe: (_subscriberDID, topicID) => {
+    subscribe: ({ subscriberDID: _subscriberDID, topicID }) => {
       retain(topicID)
     },
-    unsubscribe: (_subscriberDID, topicID) => {
+    unsubscribe: ({ subscriberDID: _subscriberDID, topicID }) => {
       release(topicID)
     },
-    receive: (_subscriberDID, options): HubReceiveSubscription => {
+    receive: ({ subscriberDID: _subscriberDID, ...options }): HubReceiveSubscription => {
       const queue: Array<StoredMessage> = []
       let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
       let closed = false

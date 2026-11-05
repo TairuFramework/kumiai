@@ -85,7 +85,8 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
     try {
       return await call
     } catch (error) {
-      if (error instanceof RequestError) throw hubErrorFromCode(error.code, error.message) ?? error
+      if (error instanceof RequestError)
+        throw hubErrorFromCode({ code: error.code, message: error.message }) ?? error
       throw error
     }
   }

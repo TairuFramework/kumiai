@@ -52,7 +52,11 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     const seen: Array<unknown> = []
     const pruned: Array<AppWindowPruned> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -68,7 +72,9 @@ describe('the drain retains future claims and passes no epoch it failed to read'
       senderDID: 'mallory',
       topicID,
       retain: 'log',
-      payload: await forged.wrap(encodeEventFrame('chat/posted', { text: 'from nowhere' })),
+      payload: await forged.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'from nowhere' } }),
+      }),
     })
     await flush()
 
@@ -100,7 +106,11 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     const recoverySecret = new Uint8Array(32).fill(0x92)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -112,9 +122,9 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     // one anchor and one topic throughout — and a frame sealed at 3. Bob is still at 1.
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     await flush()
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     expect(alice.mls.epoch()).toBe(3)
     expect(alice.peer.anchorEpoch()).toBe(1)
@@ -157,7 +167,11 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     const recoverySecret = new Uint8Array(32).fill(0x97)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -174,9 +188,9 @@ describe('the drain retains future claims and passes no epoch it failed to read'
       retain: 'log',
       payload: new Uint8Array([0x03, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
     })
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     expect(alice.mls.epoch()).toBe(3)
     expect(alice.peer.anchorEpoch()).toBe(1) // one segment, one topic
@@ -211,7 +225,11 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     const recoverySecret = new Uint8Array(32).fill(0x93)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -221,7 +239,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     await flush()
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch two' } })
     await flush()
@@ -243,7 +261,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
 
     // The next wakeup retries the pull, and the backlog is whole: the epoch-1 frame is still
     // openable because the handle never left epoch 1.
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
 
     expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'at epoch two' }])
@@ -269,7 +287,11 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x94)
     const seen: Array<unknown> = []
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1 })
@@ -279,7 +301,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     await flush()
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     expect(alice.mls.epoch()).toBe(2)
 
@@ -298,7 +320,8 @@ describe('the drain retains future claims and passes no epoch it failed to read'
           senderDID: 'alice',
           topicID,
           retain: 'log',
-          payload: await atTwo.wrap(encodeEventFrame('chat/posted', { text: 'mid-walk, at two' }), {
+          payload: await atTwo.wrap({
+            bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'mid-walk, at two' } }),
             aad: encodeAppAAD({ topicID, intent: 'log' }),
           }),
         })
@@ -347,7 +370,11 @@ describe('the drain delivers only what the live lane would', () => {
       'chat/posted': (ctx: { data: unknown }) => void posted.push(ctx.data),
       'chat/changed': (ctx: { data: unknown }) => void changed.push(ctx.data),
     }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -365,12 +392,13 @@ describe('the drain delivers only what the live lane would', () => {
     // generation is refused by `unwrap` as a spent key, so the frame dies as unopenable and the
     // retention check below is never reached: the assertion holds for the wrong reason and the
     // guard it is written about can be deleted with this test still green.
-    await atOne.wrap(new Uint8Array())
+    await atOne.wrap({ bytes: new Uint8Array() })
     await hub.publish({
       senderDID: 'alice',
       topicID,
       retain: 'log',
-      payload: await atOne.wrap(encodeEventFrame('chat/changed', { text: 'alice is typing' }), {
+      payload: await atOne.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/changed', data: { text: 'alice is typing' } }),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
     })
@@ -404,7 +432,11 @@ describe('the drain delivers only what the live lane would', () => {
     const recoverySecret = new Uint8Array(32).fill(0x98)
     const posted: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void posted.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -419,7 +451,8 @@ describe('the drain delivers only what the live lane would', () => {
       senderDID: 'alice',
       topicID,
       retain: 'log',
-      payload: await atOne.wrap(encodeEventFrame('chat/posted', { kind: 'req', rid: 'x' }), {
+      payload: await atOne.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/posted', data: { kind: 'req', rid: 'x' } }),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
     })
@@ -454,7 +487,11 @@ describe('the drain delivers only what the live lane would', () => {
     const recoverySecret = new Uint8Array(32).fill(0x96)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })

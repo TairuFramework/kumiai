@@ -46,7 +46,7 @@ export function createMemoryCommitJournal(
       if (entry != null) putWhileOccupied += 1
       entry = next
     },
-    async markAccepted(publishID: string, sequenceID: string) {
+    async markAccepted({ publishID, sequenceID }) {
       options.onMarkAccepted?.()
       // Only ever marks the entry it was given, exactly as `clear` does. It is a second
       // write to the SAME slot, not a new pending commit — so it is no `put`, and the

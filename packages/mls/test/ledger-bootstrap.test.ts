@@ -67,10 +67,10 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle(invitee)
-  const commit = await commitInvite(admin, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: invitee })
+  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
   for (const other of others) {
-    await other.processMessage(commit.commitMessage)
+    await other.processMessage({ message: commit.commitMessage })
   }
   const { group } = await processWelcome({
     identity: invitee,
@@ -92,16 +92,19 @@ async function commitRole(
   value: 'admin' | 'member',
   others: Array<GroupHandle> = [],
 ): Promise<{ admin: GroupHandle; token: string }> {
-  const token = await signLedgerEntry(adminIdentity, {
-    type: 'kumiai.role',
-    groupID: admin.groupID,
-    subject: subject.id,
-    value,
+  const token = await signLedgerEntry({
+    identity: adminIdentity,
+    entry: {
+      type: 'kumiai.role',
+      groupID: admin.groupID,
+      subject: subject.id,
+      value,
+    },
   })
   fixture.record(token)
-  const commit = await commitLedgerEntries(admin, [token])
+  const commit = await commitLedgerEntries({ group: admin, tokens: [token] })
   for (const other of others) {
-    await other.processMessage(commit.commitMessage)
+    await other.processMessage({ message: commit.commitMessage })
   }
   return { admin: commit.newGroup, token }
 }
@@ -123,9 +126,9 @@ async function rejoin(
     resync: true,
     options: { resolveLedgerEntries: fixture.resolveLedgerEntries },
   })
-  await live.processMessage(commitMessage)
+  await live.processMessage({ message: commitMessage })
   for (const other of others) {
-    await other.processMessage(commitMessage)
+    await other.processMessage({ message: commitMessage })
   }
   return group
 }
@@ -146,7 +149,9 @@ async function demotedAdminGroup(groupID: string) {
   const bob = randomIdentity()
   const carol = randomIdentity()
 
-  const { group: created } = await createGroup(alice, groupID, {
+  const { group: created } = await createGroup({
+    identity: alice,
+    groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
   })
   const withBob = await inviteMember(fixture, created, alice, bob)
@@ -196,7 +201,7 @@ describe('bootstrapping a ledger from an untrusted responder', () => {
     // If they did not, the test would prove nothing: signature verification would
     // have caught the attack on its own.
     for (const token of doctored) {
-      const verified = await verifyLedgerEntry(token)
+      const verified = await verifyLedgerEntry({ token })
       expect(verified).not.toBeNull()
       expect(verified?.entry.groupID).toBe(groupID)
       expect(verified?.issuer).toBe(normalizeDID(alice.id))
@@ -212,7 +217,9 @@ describe('bootstrapping a ledger from an untrusted responder', () => {
     expect(folded.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
 
     // The head check catches it.
-    await expect(carolRejoined.bootstrapLedger(doctored)).rejects.toThrow(LedgerIncompleteError)
+    await expect(carolRejoined.bootstrapLedger({ tokens: doctored })).rejects.toThrow(
+      LedgerIncompleteError,
+    )
 
     // And nothing was folded. Not "the throw happened" — the handle is untouched.
     expect(carolRejoined.ledger).toHaveLength(0)
@@ -241,7 +248,7 @@ describe('bootstrapping a ledger from an untrusted responder', () => {
     ]
     expect([...reordered].sort()).toEqual([...honestLedger].sort())
     for (const token of reordered) {
-      expect(await verifyLedgerEntry(token)).not.toBeNull()
+      expect(await verifyLedgerEntry({ token })).not.toBeNull()
     }
 
     // Folding the permutation would leave the demoted admin an admin.
@@ -252,7 +259,9 @@ describe('bootstrapping a ledger from an untrusted responder', () => {
     })
     expect(folded.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
 
-    await expect(carolRejoined.bootstrapLedger(reordered)).rejects.toThrow(LedgerIncompleteError)
+    await expect(carolRejoined.bootstrapLedger({ tokens: reordered })).rejects.toThrow(
+      LedgerIncompleteError,
+    )
 
     expect(carolRejoined.ledger).toHaveLength(0)
     expect([...carolRejoined.roster.roles.entries()]).toEqual([[normalizeDID(alice.id), 'admin']])
@@ -266,7 +275,7 @@ describe('bootstrapping a ledger from an untrusted responder', () => {
 
     await expect(carolRejoined.isLedgerComplete()).resolves.toBe(false)
 
-    await carolRejoined.bootstrapLedger(honestLedger)
+    await carolRejoined.bootstrapLedger({ tokens: honestLedger })
 
     expect(carolRejoined.ledgerTokens).toEqual(honestLedger)
     expect(carolRejoined.roster.roles.get(normalizeDID(alice.id))).toBe('admin')
@@ -297,21 +306,26 @@ describe('bootstrapLedger surfaces what it brought in', () => {
     const carol = randomIdentity()
     const groupID = 'bootstrap-surfaces'
 
-    const { group: created } = await createGroup(alice, groupID, {
+    const { group: created } = await createGroup({
+      identity: alice,
+      groupID,
       resolveLedgerEntries: fixture.resolveLedgerEntries,
     })
     const withCarol = await inviteMember(fixture, created, alice, carol)
 
     // An app-level entry: notarized, admin-authored, and NOT `kumiai.*`, so it is the kind a
     // consumer is told about rather than one the fold consumes itself.
-    const appToken = await signLedgerEntry(alice, {
-      type: 'note',
-      groupID,
-      subject: carol.id,
-      value: 'enacted while carol was away',
+    const appToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'note',
+        groupID,
+        subject: carol.id,
+        value: 'enacted while carol was away',
+      },
     })
     fixture.record(appToken)
-    const enacted = await commitLedgerEntries(withCarol.admin, [appToken])
+    const enacted = await commitLedgerEntries({ group: withCarol.admin, tokens: [appToken] })
     const aliceGroup = enacted.newGroup
 
     const surfaced: Array<string> = []
@@ -340,7 +354,8 @@ describe('bootstrapLedger surfaces what it brought in', () => {
       epoch: healed.epoch,
     }
     await expect(
-      healed.bootstrapLedger(honestLedger, {
+      healed.bootstrapLedger({
+        tokens: honestLedger,
         persist: async () => {
           throw new Error('disk failed')
         },
@@ -360,7 +375,8 @@ describe('bootstrapLedger surfaces what it brought in', () => {
       release = resolve
     })
     let entered = false
-    const applying = healed.bootstrapLedger(honestLedger, {
+    const applying = healed.bootstrapLedger({
+      tokens: honestLedger,
       persist: async (handle) => {
         expect(handle).toBe(healed)
         expect(handle.ledgerTokens).toEqual(honestLedger)
@@ -383,7 +399,7 @@ describe('bootstrapLedger surfaces what it brought in', () => {
 
     // Bootstrapping again over the same ledger says nothing more — a peer is not re-notified of
     // entries it already holds.
-    await healed.bootstrapLedger(await aliceGroup.getLedger())
+    await healed.bootstrapLedger({ tokens: await aliceGroup.getLedger() })
     expect(surfaced).toEqual(['enacted while carol was away'])
   })
 })
@@ -404,7 +420,9 @@ async function promotedAdminWorld(groupID: string) {
   const bob = randomIdentity()
   const carol = randomIdentity()
 
-  const { group: created } = await createGroup(alice, groupID, {
+  const { group: created } = await createGroup({
+    identity: alice,
+    groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
   })
   const withBob = await inviteMember(fixture, created, alice, bob)
@@ -424,16 +442,19 @@ async function promotedAdminWorld(groupID: string) {
   const honestLedger = await aliceGroup.getLedger()
 
   // Bob, the promoted admin, authors a commit.
-  const bobToken = await signLedgerEntry(bob, {
-    type: 'kumiai.role',
-    groupID,
-    subject: carol.id,
-    value: 'admin',
+  const bobToken = await signLedgerEntry({
+    identity: bob,
+    entry: {
+      type: 'kumiai.role',
+      groupID,
+      subject: carol.id,
+      value: 'admin',
+    },
   })
   fixture.record(bobToken)
-  const bobCommit = await commitLedgerEntries(bobGroup, [bobToken])
+  const bobCommit = await commitLedgerEntries({ group: bobGroup, tokens: [bobToken] })
   // A peer with the whole ledger accepts it — Bob is an admin there.
-  await aliceGroup.processMessage(bobCommit.commitMessage)
+  await aliceGroup.processMessage({ message: bobCommit.commitMessage })
   expect(aliceGroup.roster.roles.get(normalizeDID(carol.id))).toBe('admin')
 
   return { alice, bob, carol, carolRejoined, honestLedger, bobCommit: bobCommit.commitMessage }
@@ -449,21 +470,21 @@ describe("a rejoined peer's empty ledger is a roster reset", () => {
     expect(stranded.carolRejoined.ledger).toHaveLength(0)
     await expect(stranded.carolRejoined.isLedgerComplete()).resolves.toBe(false)
     expect(stranded.carolRejoined.roster.roles.get(normalizeDID(stranded.bob.id))).toBeUndefined()
-    await expect(stranded.carolRejoined.processMessage(stranded.bobCommit)).rejects.toThrow(
-      CommitRejectedError,
-    )
+    await expect(
+      stranded.carolRejoined.processMessage({ message: stranded.bobCommit }),
+    ).rejects.toThrow(CommitRejectedError)
   })
 
   test('a bootstrapped peer applies the promoted admin’s commit', async () => {
     // Leg 2 — bootstrap first, from an honest responder. The ledger is complete,
     // the promoted admin is an admin again, and the same commit APPLIES.
     const healed = await promotedAdminWorld('bootstrap-liveness-healed')
-    await healed.carolRejoined.bootstrapLedger(healed.honestLedger)
+    await healed.carolRejoined.bootstrapLedger({ tokens: healed.honestLedger })
     await expect(healed.carolRejoined.isLedgerComplete()).resolves.toBe(true)
     expect(healed.carolRejoined.roster.roles.get(normalizeDID(healed.bob.id))).toBe('admin')
 
     const epochBefore = healed.carolRejoined.epoch
-    await healed.carolRejoined.processMessage(healed.bobCommit)
+    await healed.carolRejoined.processMessage({ message: healed.bobCommit })
     expect(healed.carolRejoined.epoch).toBe(epochBefore + 1n)
     expect(healed.carolRejoined.roster.roles.get(normalizeDID(healed.carol.id))).toBe('admin')
     await expect(healed.carolRejoined.isLedgerComplete()).resolves.toBe(true)
@@ -477,7 +498,9 @@ describe("a rejoined peer's empty ledger is a roster reset", () => {
 describe('the ledger-completeness invariant', () => {
   test('a genesis-only group is complete against a real, group-bound head', async () => {
     const dave = randomIdentity()
-    const { group } = await createGroup(dave, 'bootstrap-genesis-only', {
+    const { group } = await createGroup({
+      identity: dave,
+      groupID: 'bootstrap-genesis-only',
       resolveLedgerEntries: async () => {
         throw new Error('the completeness invariant consulted a peer')
       },
@@ -491,7 +514,9 @@ describe('the ledger-completeness invariant', () => {
     // comparison is between two real 32-byte digests bound to THIS group.
     const authenticated = readLedgerHead(group)
     expect(authenticated?.head).toHaveLength(32)
-    expect(authenticated?.head).toEqual(computeHead('bootstrap-genesis-only', []))
+    expect(authenticated?.head).toEqual(
+      computeHead({ groupID: 'bootstrap-genesis-only', entryIDs: [] }),
+    )
     expect(authenticated?.head).toEqual(genesisHead('bootstrap-genesis-only'))
     expect(authenticated?.head).not.toEqual(genesisHead('some-other-group'))
     expect(authenticated?.head).not.toEqual(new Uint8Array(32))
@@ -510,7 +535,9 @@ describe('the ledger-completeness invariant', () => {
 
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group: created } = await createGroup(alice, 'bootstrap-invariant', {
+    const { group: created } = await createGroup({
+      identity: alice,
+      groupID: 'bootstrap-invariant',
       resolveLedgerEntries: spied.resolveLedgerEntries,
     })
     const withBob = await inviteMember(spied, created, alice, bob)
@@ -535,8 +562,8 @@ describe('the ledger-completeness invariant', () => {
     expect(await aliceGroup.getLedger()).toEqual(aliceGroup.ledgerTokens)
     expect(await aliceGroup.getLedger()).toEqual(honestLedger)
     // Order is load-bearing: the head is a chain digest over the ids in order.
-    expect(computeHead(aliceGroup.groupID, honestLedger.map(ledgerEntryDigest))).toEqual(
-      readLedgerHead(aliceGroup)?.head,
-    )
+    expect(
+      computeHead({ groupID: aliceGroup.groupID, entryIDs: honestLedger.map(ledgerEntryDigest) }),
+    ).toEqual(readLedgerHead(aliceGroup)?.head)
   })
 })

@@ -172,7 +172,7 @@ test('a rejoin that lands on the stranded epoch number clears the strand', async
   await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
   expect(await bob.mls.readEpoch()).toBe(3)
   expect((await store.getCommitCursor())?.stranded).toBeUndefined()
-  await bob.peer.commit(buildLedgerCommit(bob, []))
+  await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
   expect(await bob.mls.readEpoch()).toBe(4)
 })
 
@@ -225,7 +225,7 @@ test('an ambiguous same-number anchor record found at startup asks for confirmed
     },
   })
   await drainUntil(() => events.some((event) => event.phase === 'started'), 'recovery start')
-  await expect(again.peer.commit(buildLedgerCommit(again, []))).rejects.toThrow(
+  await expect(again.peer.commit({ build: buildLedgerCommit(again, []) })).rejects.toThrow(
     'app anchor requires confirmed recovery',
   )
 })
@@ -320,15 +320,15 @@ test('a walker without an applied epoch record stays silent for an external hist
   await hub.publish({
     senderDID: 'alice',
     topicID: rendezvousTopic(secret),
-    payload: encodeHandshakeFrame(
-      HANDSHAKE_KIND.recoveryConfirmRequest,
-      encodeRecoveryConfirmRequest({
+    payload: encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.recoveryConfirmRequest,
+      payload: encodeRecoveryConfirmRequest({
         requestID: 'history',
         request,
         position: published.sequenceID,
         commitDigest: digestAppliedCommit(commit),
       }),
-    ),
+    }),
   })
   await drainUntil(() => verify.mock.calls.length > 0, 'confirmation request')
   await bob.peer.resync()

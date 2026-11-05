@@ -439,7 +439,7 @@ describe('foldEnvelope — kumiai.device branch', () => {
     })
     expect(result.ok).toBe(true)
     if (result.ok) {
-      expect(_authority(result.registry, dev)).toBe(normalizeDID(profile))
+      expect(_authority({ registry: result.registry, issuer: dev })).toBe(normalizeDID(profile))
       expect(result.surfaced).toEqual([]) // kumiai.* is consumed, never surfaced
     }
   })
@@ -525,7 +525,10 @@ describe('foldEnvelope beacon', () => {
 
     expect(result.ok).toBe(true)
     if (result.ok)
-      expect(beaconOf(result.registry, profile)).toEqual({ logLength: 5, headDigest: 'zH' })
+      expect(beaconOf({ registry: result.registry, controllerDID: profile })).toEqual({
+        logLength: 5,
+        headDigest: 'zH',
+      })
   })
 
   test('a base registry beacon survives folding an unrelated device entry', async () => {
@@ -561,7 +564,10 @@ describe('foldEnvelope beacon', () => {
 
     expect(next.ok).toBe(true)
     if (next.ok)
-      expect(beaconOf(next.registry, profile)).toEqual({ logLength: 2, headDigest: 'zOld' })
+      expect(beaconOf({ registry: next.registry, controllerDID: profile })).toEqual({
+        logLength: 2,
+        headDigest: 'zOld',
+      })
   })
 })
 

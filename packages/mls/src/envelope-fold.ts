@@ -138,7 +138,7 @@ export async function foldEnvelope(params: FoldEnvelopeParams): Promise<Envelope
 
     // The universal invariant, now authority-aware: the issuer's AUTHORITY (controller ?? id,
     // read off the registry-so-far) must be an admin in state-so-far.
-    if (workingRoster.roles.get(authority(workingRegistry, issuer)) !== 'admin') {
+    if (workingRoster.roles.get(authority({ registry: workingRegistry, issuer })) !== 'admin') {
       return { ok: false, reason: `non-admin issuer '${issuer}'`, entryID }
     }
 
@@ -150,7 +150,7 @@ export async function foldEnvelope(params: FoldEnvelopeParams): Promise<Envelope
         issuer,
         entry: { ...entry, value: entry.value },
       }
-      workingRoster = roleReducer.apply(roleEntry, workingRoster)
+      workingRoster = roleReducer.apply({ verified: roleEntry, stateSoFar: workingRoster })
       // A group with zero admins can never again add, remove, promote, or demote.
       if (adminCount(workingRoster) === 0) {
         return { ok: false, reason: 'would empty the admin set', entryID }

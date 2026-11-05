@@ -104,9 +104,9 @@ describe('a subscribe the hub refuses', () => {
     await expect(
       mux.publish({ topicID: 'topic:refused', payload: fromUTF('x'), retain: 'log' }),
     ).rejects.toThrow(RetentionExceededError)
-    await expect(mux.bus.publish('topic:refused', fromUTF('x'))).rejects.toThrow(
-      RetentionExceededError,
-    )
+    await expect(
+      mux.bus.publish({ topicID: 'topic:refused', payload: fromUTF('x') }),
+    ).rejects.toThrow(RetentionExceededError)
     await expect(
       mux.mailbox.publish({ senderDID: 'bob', topicID: 'topic:refused', payload: fromUTF('x') }),
     ).rejects.toThrow(RetentionExceededError)
@@ -486,11 +486,11 @@ describe('a peer whose app-topic subscribe is refused', () => {
     })
     await flush()
 
-    const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
-    const topicID = protocolTopic(secret, 1, 'room')
+    const { secret } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    const topicID = protocolTopic({ secret, epoch: 1, protocol: 'room' })
 
     expect(hub.subscriberCount(topicID)).toBe(0)
-    const selfInbox = inboxTopic(secret, 1, 'bob')
+    const selfInbox = inboxTopic({ secret, epoch: 1, memberDID: 'bob' })
     expect(hub.subscriberCount(selfInbox)).toBe(0)
     expect(failures.map((f) => f.topicID)).toEqual([topicID, selfInbox])
     for (const failure of failures) {

@@ -138,41 +138,44 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
   const readable = new ReadableStream<R>({
     start(controller) {
       readableController = controller
-      unsubscribe = bus.subscribe(topicID, (payload, ack) => {
-        // Mirrors `hub-tunnel/src/transport.ts`'s read pump: every outcome is HANDLED (enqueued, or
-        // dropped as another group's/epoch's) except `enqueue` throwing — the readable had already
-        // closed, so that frame never reached a consumer and must not ack.
-        let handled = true
-        Promise.resolve(unwrap(payload))
-          .then((result) => {
-            const { payload: bytes, senderDID } = normalizeUnwrap(result)
-            const message = decodeFrame(bytes)
-            if (authenticating) {
-              // The recovered sender is the ONLY sender here and REPLACES what the bytes claimed
-              // even when nothing was recovered — else a forged claim would survive exactly when
-              // the open failed to contradict it. Left alone on a non-authenticating transport,
-              // where the wire value is all there is.
-              if (senderDID == null) delete message.senderDID
-              else message.senderDID = senderDID
-            }
-            try {
-              controller.enqueue(message as R)
-            } catch (error) {
-              handled = false
-              throw error
-            }
-          })
-          .catch(() => {
-            // Drop this message and keep the subscription alive — expected for messages from
-            // other groups/epochs where decryption fails, and for the enqueue-after-close race
-            // above (already flagged unhandled there).
-          })
-          .finally(() => {
-            // Acked unless `handled` was flipped false: a frame dropped on purpose (another
-            // group/epoch) still acks, else the same undecryptable bytes redeliver every reconnect.
-            // A frame lost to an already-closed readable must NOT ack — the hub redelivers it.
-            if (handled) ack?.()
-          })
+      unsubscribe = bus.subscribe({
+        topicID,
+        onMessage: (payload, ack) => {
+          // Mirrors `hub-tunnel/src/transport.ts`'s read pump: every outcome is HANDLED (enqueued, or
+          // dropped as another group's/epoch's) except `enqueue` throwing — the readable had already
+          // closed, so that frame never reached a consumer and must not ack.
+          let handled = true
+          Promise.resolve(unwrap(payload))
+            .then((result) => {
+              const { payload: bytes, senderDID } = normalizeUnwrap(result)
+              const message = decodeFrame(bytes)
+              if (authenticating) {
+                // The recovered sender is the ONLY sender here and REPLACES what the bytes claimed
+                // even when nothing was recovered — else a forged claim would survive exactly when
+                // the open failed to contradict it. Left alone on a non-authenticating transport,
+                // where the wire value is all there is.
+                if (senderDID == null) delete message.senderDID
+                else message.senderDID = senderDID
+              }
+              try {
+                controller.enqueue(message as R)
+              } catch (error) {
+                handled = false
+                throw error
+              }
+            })
+            .catch(() => {
+              // Drop this message and keep the subscription alive — expected for messages from
+              // other groups/epochs where decryption fails, and for the enqueue-after-close race
+              // above (already flagged unhandled there).
+            })
+            .finally(() => {
+              // Acked unless `handled` was flipped false: a frame dropped on purpose (another
+              // group/epoch) still acks, else the same undecryptable bytes redeliver every reconnect.
+              // A frame lost to an already-closed readable must NOT ack — the hub redelivers it.
+              if (handled) ack?.()
+            })
+        },
       })
     },
     cancel() {
@@ -191,7 +194,7 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
         )
       }
       const bytes = await wrap(encodeFrame(value as BroadcastMessage))
-      await bus.publish(topicID, bytes)
+      await bus.publish({ topicID, payload: bytes })
     },
     close() {
       unsubscribe?.()

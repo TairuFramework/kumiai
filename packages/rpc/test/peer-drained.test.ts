@@ -57,23 +57,25 @@ describe('peer host drain', { concurrent: false }, () => {
       }
       const member = makeMLSPeer(new FakeHub(), 'alice', new Uint8Array(32).fill(0x73), { journal })
       const build = buildLedgerCommit(member, ['role:alice=member'])
-      const operation = member.peer.commit(async () => {
-        if (path === 'build') {
-          entered = true
-          await pause.promise
-        }
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            if (disposed) hostCallsAfterDispose++
-            if (path === 'onAccepted') {
-              entered = true
-              await pause.promise
-            }
-            await pending.onAccepted()
-          },
-        }
+      const operation = member.peer.commit({
+        build: async () => {
+          if (path === 'build') {
+            entered = true
+            await pause.promise
+          }
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              if (disposed) hostCallsAfterDispose++
+              if (path === 'onAccepted') {
+                entered = true
+                await pause.promise
+              }
+              await pending.onAccepted()
+            },
+          }
+        },
       })
       const owned = operation.catch(() => {})
       await vi.waitFor(() => expect(entered).toBe(true))
@@ -210,7 +212,7 @@ describe('peer host drain', { concurrent: false }, () => {
     const members = ['alice', 'bob']
     const recovery = { timeoutMs: 1000, getDelayMs: () => 0, deadlineMs: 3000 }
     const bob = makeMLSPeer(hub, 'bob', secret, { members, recovery })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:bob=member']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:bob=member']) })
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({
       recoverySecret: secret,
@@ -385,7 +387,7 @@ describe('peer host drain', { concurrent: false }, () => {
     const readEpoch = vi.spyOn(member.mls, 'readEpoch')
     const pending = await buildLedgerCommit(member, ['role:alice=member'])()
     const onAccepted = vi.spyOn(pending, 'onAccepted')
-    const operation = member.peer.commit(async () => pending)
+    const operation = member.peer.commit({ build: async () => pending })
     const owned = operation.catch(() => {})
     await vi.waitFor(() => expect(entered).toBe(true))
     const readsBeforeDispose = readEpoch.mock.calls.length
@@ -423,7 +425,8 @@ describe('peer host drain', { concurrent: false }, () => {
     }
     const member = makeMLSPeer(hub, 'alice', secret, { journal })
     await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'survived' } })
-    const operation = member.peer.commit(buildLedgerCommit(member, ['proof']), {
+    const operation = member.peer.commit({
+      build: buildLedgerCommit(member, ['proof']),
       holdLogSends: true,
     })
     const observed = operation.catch(() => {})
@@ -476,15 +479,15 @@ describe('peer host drain', { concurrent: false }, () => {
       })
       for (const kind of [HANDSHAKE_KIND.recoveryRequest, HANDSHAKE_KIND.ledgerRequest]) {
         const id = crypto.randomUUID()
-        const request = await sender.createRecoveryRequest(id)
+        const request = await sender.createRecoveryRequest({ requestID: id })
         const payload =
           kind === HANDSHAKE_KIND.recoveryRequest
-            ? encodeRecoveryRequest(id, request)
-            : encodeLedgerRequest(id, request)
+            ? encodeRecoveryRequest({ requestID: id, request })
+            : encodeLedgerRequest({ requestID: id, request })
         await hub.publish({
           senderDID: 'alice',
           topicID: rendezvousTopic(secret),
-          payload: encodeHandshakeFrame(kind, payload),
+          payload: encodeHandshakeFrame({ kind, payload }),
         })
       }
       await vi.waitFor(() => expect(callbacks).toHaveLength(2))
@@ -539,7 +542,7 @@ describe('peer host drain', { concurrent: false }, () => {
     const member = makeMLSPeer(new FakeHub(), 'alice', new Uint8Array(32).fill(0x78))
     await expect(member.peer.drained()).rejects.toThrow('dispose')
     await expect(
-      member.peer.commit(buildLedgerCommit(member, ['role:alice=member'])),
+      member.peer.commit({ build: buildLedgerCommit(member, ['role:alice=member']) }),
     ).resolves.toMatchObject({})
     expect(member.mls.epoch()).toBe(2)
     await member.peer.dispose()
@@ -552,10 +555,11 @@ describe('peer host drain', { concurrent: false }, () => {
     const member = makeMLSPeer(
       {
         publish: (params) => fake.publish(params),
-        subscribe: (did, topic, options) => fake.subscribe(did, topic, options),
-        unsubscribe: (did, topic) => fake.unsubscribe(did, topic),
+        subscribe: ({ subscriberDID: did, topicID: topic, ...options }) =>
+          fake.subscribe(did, topic, options),
+        unsubscribe: ({ subscriberDID: did, topicID: topic }) => fake.unsubscribe(did, topic),
         fetchTopic: (params) => fake.fetchTopic(params),
-        receive: (did) => {
+        receive: ({ subscriberDID: did }) => {
           const inner = fake.receive(did)
           const iterator = inner[Symbol.asyncIterator]()
           return {

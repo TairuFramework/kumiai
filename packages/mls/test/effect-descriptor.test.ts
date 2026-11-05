@@ -42,16 +42,16 @@ async function effects() {
 test('effectOf accepts a member rev by event digest', async () => {
   const f = await effects()
   await expect(
-    api.effectOf(
-      f.did,
-      f.merged,
-      {
+    api.effectOf({
+      controller: f.did,
+      log: f.merged,
+      claim: {
         kind: 'deny',
         did: 'did:key:edge',
         ref: { event: digestOf(f.rev.event) },
       },
-      0,
-    ),
+      genFloor: 0,
+    }),
   ).resolves.not.toThrow()
 })
 
@@ -60,16 +60,16 @@ test('effectOf refuses an applied but unrelated event digest', async () => {
   expect((await fold(f.did, f.merged)).applied).toContain(f.b.add)
   await expect(
     async () =>
-      await api.effectOf(
-        f.did,
-        f.merged,
-        {
+      await api.effectOf({
+        controller: f.did,
+        log: f.merged,
+        claim: {
           kind: 'deny',
           did: 'did:key:edge',
           ref: { event: f.b.add },
         },
-        0,
-      ),
+        genFloor: 0,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
 })
 
@@ -77,16 +77,16 @@ test('effectOf refuses an rmv ref under a deny claim', async () => {
   const f = await effects()
   await expect(
     async () =>
-      await api.effectOf(
-        f.did,
-        f.merged,
-        {
+      await api.effectOf({
+        controller: f.did,
+        log: f.merged,
+        claim: {
           kind: 'deny',
           did: f.a.did,
           ref: { event: digestOf(f.rmv.event) },
         },
-        0,
-      ),
+        genFloor: 0,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
 })
 
@@ -97,19 +97,21 @@ test('effectOf checks the incarnation DID and generation of an event ref', async
     member: { did: f.a.identity.id, add: f.a.add },
     ref: { event: digestOf(f.rmv.event) },
   }
-  await expect(api.effectOf(f.did, f.merged, claim, 0)).resolves.not.toThrow()
+  await expect(
+    api.effectOf({ controller: f.did, log: f.merged, claim, genFloor: 0 }),
+  ).resolves.not.toThrow()
   await expect(
     async () =>
-      await api.effectOf(
-        f.did,
-        f.merged,
-        { ...claim, member: { ...claim.member, did: f.b.did } },
-        0,
-      ),
+      await api.effectOf({
+        controller: f.did,
+        log: f.merged,
+        claim: { ...claim, member: { ...claim.member, did: f.b.did } },
+        genFloor: 0,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
-  await expect(async () => await api.effectOf(f.did, f.merged, claim, 1)).rejects.toThrow(
-    expect.objectContaining({ reason: 'generation-floor' }),
-  )
+  await expect(
+    async () => await api.effectOf({ controller: f.did, log: f.merged, claim, genFloor: 1 }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'generation-floor' }))
 })
 
 test('settled rmv is proved by chain index', async () => {
@@ -138,25 +140,32 @@ test('settled rmv is proved by chain index', async () => {
     snapshot: snapshotOf({ state: (await fold(f.did, removed)).head }),
   })
   const log = { chain: [...prior.chain, settle], events: [] }
-  expect(await api.memberDropIndices(f.did, log.chain, f.a.add)).toEqual([2])
+  expect(await api.memberDropIndices({ did: f.did, chain: log.chain, add: f.a.add })).toEqual([2])
   await expect(
-    api.effectOf(
-      f.did,
+    api.effectOf({
+      controller: f.did,
       log,
-      {
+      claim: {
         kind: 'remove',
         member: { did: f.a.did, add: f.a.add },
         ref: { chainIndex: 2 },
       },
-      0,
-    ),
+      genFloor: 0,
+    }),
   ).resolves.not.toThrow()
-  const claims = await api.claimsFor(f.did, prior, log, 0)
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: prior,
+    merged: log,
+    genFloor: 0,
+  })
   expect(claims).toEqual([
     { kind: 'remove', member: { did: f.a.identity.id, add: f.a.add }, ref: { chainIndex: 2 } },
   ])
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
 })
 
 test('settled rmv of a never-snapshotted incarnation keeps its epoch proof', async () => {
@@ -174,16 +183,24 @@ test('settled rmv of a never-snapshotted incarnation keeps its epoch proof', asy
     member: { did: f.a.did, add: f.a.add },
     ref: { event: digestOf(f.rmv.event), epoch: digestOf(f.inception.event) },
   }
-  expect(await api.memberDropIndices(f.did, log.chain, f.a.add)).toEqual([])
-  await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
+  expect(await api.memberDropIndices({ did: f.did, chain: log.chain, add: f.a.add })).toEqual([])
+  await expect(api.effectOf({ controller: f.did, log, claim, genFloor: 0 })).resolves.not.toThrow()
   await expect(
-    async () => await api.effectOf(f.did, { ...log, events: [] }, claim, 0),
+    async () =>
+      await api.effectOf({ controller: f.did, log: { ...log, events: [] }, claim, genFloor: 0 }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'no-rev' }))
   await expect(
     async () =>
-      await api.effectOf(f.did, log, { ...claim, ref: { event: digestOf(f.rmv.event) } }, 0),
+      await api.effectOf({
+        controller: f.did,
+        log,
+        claim: { ...claim, ref: { event: digestOf(f.rmv.event) } },
+        genFloor: 0,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
-  expect(await api.claimsFor(f.did, f.log, log, 0)).toContainEqual({
+  expect(
+    await api.claimsFor({ controller: f.did, recorded: f.log, merged: log, genFloor: 0 }),
+  ).toContainEqual({
     ...claim,
     member: { did: f.a.identity.id, add: f.a.add },
   })
@@ -207,16 +224,16 @@ test('member rev of a member DID is never applied', async () => {
     expect(result.head.deny.size).toBe(0)
     await expect(
       async () =>
-        await api.effectOf(
-          f.did,
+        await api.effectOf({
+          controller: f.did,
           log,
-          {
+          claim: {
             kind: 'deny',
             did: f.a.did,
             ref: { event: digestOf(rev.event) },
           },
-          0,
-        ),
+          genFloor: 0,
+        }),
     ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
   }
 })
@@ -236,25 +253,39 @@ test('reset snapshot refs authenticate the target, generation and signature', as
   expect(await deviceRevokeIndices({ did: f.did, chain: log.chain, subject: denied.did })).toEqual(
     [],
   )
-  expect(await api.claimsFor(f.did, undefined, log, 0)).toEqual([claim])
-  await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
-  await expect(
-    async () => await api.effectOf(f.did, log, { ...claim, did: 'did:key:other' }, 0),
-  ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
-  await expect(async () => await api.effectOf(f.did, log, claim, 2)).rejects.toThrow(
-    expect.objectContaining({ reason: 'generation-floor' }),
-  )
+  expect(
+    await api.claimsFor({ controller: f.did, recorded: undefined, merged: log, genFloor: 0 }),
+  ).toEqual([claim])
+  await expect(api.effectOf({ controller: f.did, log, claim, genFloor: 0 })).resolves.not.toThrow()
   await expect(
     async () =>
-      await api.effectOf(
-        f.did,
-        { ...log, chain: [f.inception, { ...reset, sigs: f.inception.sigs }] },
-        claim,
-        0,
-      ),
+      await api.effectOf({
+        controller: f.did,
+        log,
+        claim: { ...claim, did: 'did:key:other' },
+        genFloor: 0,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
   await expect(
-    async () => await api.effectOf(f.did, log, { ...claim, ref: { chainIndex: 1 } }, 0),
+    async () => await api.effectOf({ controller: f.did, log, claim, genFloor: 2 }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'generation-floor' }))
+  await expect(
+    async () =>
+      await api.effectOf({
+        controller: f.did,
+        log: { ...log, chain: [f.inception, { ...reset, sigs: f.inception.sigs }] },
+        claim,
+        genFloor: 0,
+      }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'effects-mismatch' }))
+  await expect(
+    async () =>
+      await api.effectOf({
+        controller: f.did,
+        log,
+        claim: { ...claim, ref: { chainIndex: 1 } },
+        genFloor: 0,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'no-rev' }))
 })
 
@@ -274,19 +305,36 @@ test('re-revoke after reset is proved at gen 2', async () => {
     await createDeviceRevoke({ seed: f.seed, profile: 0, did: f.did, chain, subject: target }),
   )
   const log = { chain, events: [] }
-  const claims = await api.claimsFor(f.did, { chain: chain.slice(0, 3), events: [] }, log, 2)
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: { chain: chain.slice(0, 3), events: [] },
+    merged: log,
+    genFloor: 2,
+  })
   expect(claims).toEqual([{ kind: 'deny', did: target, ref: { chainIndex: 3 } }])
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 2)).resolves.not.toThrow()
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 2 }),
+    ).resolves.not.toThrow()
   await expect(
     async () =>
-      await api.effectOf(f.did, log, { kind: 'deny', did: target, ref: { chainIndex: 1 } }, 2),
+      await api.effectOf({
+        controller: f.did,
+        log,
+        claim: { kind: 'deny', did: target, ref: { chainIndex: 1 } },
+        genFloor: 2,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'generation-floor' }))
 })
 
 test('claimsFor output passes effectOf for every claim', async () => {
   const f = await effects()
-  const claims = await api.claimsFor(f.did, f.log, f.merged, 0)
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: f.log,
+    merged: f.merged,
+    genFloor: 0,
+  })
   expect(claims).toEqual([
     { kind: 'deny', did: 'did:key:edge', ref: { event: digestOf(f.rev.event) } },
     {
@@ -296,9 +344,15 @@ test('claimsFor output passes effectOf for every claim', async () => {
     },
   ])
   for (const claim of claims)
-    await expect(api.effectOf(f.did, f.merged, claim, 0)).resolves.not.toThrow()
-  expect(await api.claimsFor(f.did, f.merged, f.merged, 0)).toEqual([])
-  expect(await api.claimsFor(f.did, undefined, f.merged, 0)).toEqual(claims)
+    await expect(
+      api.effectOf({ controller: f.did, log: f.merged, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
+  expect(
+    await api.claimsFor({ controller: f.did, recorded: f.merged, merged: f.merged, genFloor: 0 }),
+  ).toEqual([])
+  expect(
+    await api.claimsFor({ controller: f.did, recorded: undefined, merged: f.merged, genFloor: 0 }),
+  ).toEqual(claims)
 })
 
 test('claimsFor orders denies by DID then removals by add digest', async () => {
@@ -325,7 +379,12 @@ test('claimsFor orders denies by DID then removals by add digest', async () => {
       }),
     )
   const log = { chain: f.log.chain, events }
-  const claims = await api.claimsFor(f.did, f.log, log, 0)
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: f.log,
+    merged: log,
+    genFloor: 0,
+  })
   expect(claims.slice(0, 2).map((claim) => claim.kind === 'deny' && claim.did)).toEqual([
     'did:key:a',
     'did:key:z',
@@ -334,7 +393,9 @@ test('claimsFor orders denies by DID then removals by add digest', async () => {
     f.members.map((member) => member.add).sort(),
   )
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
 })
 
 test('claimsFor proves a carried denial at the reset that introduces its generation', async () => {
@@ -354,9 +415,9 @@ test('claimsFor proves a carried denial at the reset that introduces its generat
     snapshot: { members: [], deny: [target] },
   })
   const log = { chain: [f.inception, rev, reset], events: [] }
-  expect(await api.claimsFor(f.did, undefined, log, 0)).toEqual([
-    { kind: 'deny', did: target, ref: { snapshot: 2 } },
-  ])
+  expect(
+    await api.claimsFor({ controller: f.did, recorded: undefined, merged: log, genFloor: 0 }),
+  ).toEqual([{ kind: 'deny', did: target, ref: { snapshot: 2 } }])
 })
 
 test('memberDropIndices ignores resets and refuses unauthenticated snapshots', async () => {
@@ -371,7 +432,13 @@ test('memberDropIndices ignores resets and refuses unauthenticated snapshots', a
     snapshot: snapshotOf({ state: f.head }),
   })
   const reset = await createReset({ seed: f.seed, profile: 0, gen: 1 })
-  expect(await api.memberDropIndices(f.did, [f.inception, snapshot, reset], member.add)).toEqual([])
+  expect(
+    await api.memberDropIndices({
+      did: f.did,
+      chain: [f.inception, snapshot, reset],
+      add: member.add,
+    }),
+  ).toEqual([])
   const drop = await createRotate({
     seed: f.seed,
     profile: 0,
@@ -380,11 +447,11 @@ test('memberDropIndices ignores resets and refuses unauthenticated snapshots', a
     snapshot: { members: [], deny: [] },
   })
   expect(
-    await api.memberDropIndices(
-      f.did,
-      [f.inception, snapshot, { ...drop, sigs: f.inception.sigs }],
-      member.add,
-    ),
+    await api.memberDropIndices({
+      did: f.did,
+      chain: [f.inception, snapshot, { ...drop, sigs: f.inception.sigs }],
+      add: member.add,
+    }),
   ).toEqual([])
 })
 
@@ -409,12 +476,12 @@ test('claimsFor uses digest order independent of locale collation', async () => 
     prior: snapshot.event,
     snapshot: { members: [], deny: [] },
   })
-  const claims = await api.claimsFor(
-    f.did,
-    prior,
-    { chain: [...prior.chain, dropped], events: [] },
-    0,
-  )
+  const claims = await api.claimsFor({
+    controller: f.did,
+    recorded: prior,
+    merged: { chain: [...prior.chain, dropped], events: [] },
+    genFloor: 0,
+  })
   expect(claims.map((claim) => claim.kind === 'remove' && claim.member.add)).toEqual(['Z', 'a'])
 })
 
@@ -434,14 +501,21 @@ test('claimsFor folds once when deriving and validating many event effects', asy
   spy.mockClear()
   let claims: Array<EffectClaim>
   try {
-    claims = await api.claimsFor(f.did, undefined, log, 0)
+    claims = await api.claimsFor({
+      controller: f.did,
+      recorded: undefined,
+      merged: log,
+      genFloor: 0,
+    })
     expect(claims).toHaveLength(9)
     expect(spy).toHaveBeenCalledTimes(1)
   } finally {
     spy.mockRestore()
   }
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
 })
 
 test('claimsFor indexes snapshot drops once across repeated member snapshots', async () => {
@@ -472,7 +546,12 @@ test('claimsFor indexes snapshot drops once across repeated member snapshots', a
   spy.mockClear()
   let claims: Array<EffectClaim>
   try {
-    claims = await api.claimsFor(f.did, undefined, log, 0)
+    claims = await api.claimsFor({
+      controller: f.did,
+      recorded: undefined,
+      merged: log,
+      genFloor: 0,
+    })
     expect(claims).toHaveLength(3)
     expect(spy).toHaveBeenCalledTimes(1)
   } finally {
@@ -480,23 +559,27 @@ test('claimsFor indexes snapshot drops once across repeated member snapshots', a
   }
   for (const claim of claims) {
     expect(claim.ref).toEqual({ chainIndex: 3 })
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
   }
 })
 
 test('claimsFor keeps no-rev for an explicit removal without an admissible ref', async () => {
   const f = await effects()
   const removed = { ...f.log, events: [...f.log.events, f.rmv] }
-  await expect(async () => await api.claimsFor(f.did, undefined, removed, 1)).rejects.toThrow(
-    expect.objectContaining({ reason: 'no-rev' }),
-  )
+  await expect(
+    async () =>
+      await api.claimsFor({ controller: f.did, recorded: undefined, merged: removed, genFloor: 1 }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'no-rev' }))
   const reset = {
     chain: [f.inception, await createReset({ seed: f.seed, profile: 0, gen: 1 })],
     events: removed.events,
   }
-  await expect(async () => await api.claimsFor(f.did, f.log, reset, 1)).rejects.toThrow(
-    expect.objectContaining({ reason: 'no-rev' }),
-  )
+  await expect(
+    async () =>
+      await api.claimsFor({ controller: f.did, recorded: f.log, merged: reset, genFloor: 1 }),
+  ).rejects.toThrow(expect.objectContaining({ reason: 'no-rev' }))
   const settle = async (drop: Array<string>) =>
     await createRotate({
       seed: f.seed,
@@ -507,16 +590,21 @@ test('claimsFor keeps no-rev for an explicit removal without an admissible ref',
     })
   await expect(
     async () =>
-      await api.claimsFor(
-        f.did,
-        f.log,
-        { chain: [...f.log.chain, await settle([f.rmv.event.add])], events: [] },
-        0,
-      ),
+      await api.claimsFor({
+        controller: f.did,
+        recorded: f.log,
+        merged: { chain: [...f.log.chain, await settle([f.rmv.event.add])], events: [] },
+        genFloor: 0,
+      }),
   ).rejects.toThrow(expect.objectContaining({ reason: 'no-rev' }))
   // Keeping the tombstone (the default) proves the removal from the chain.
   expect(
-    await api.claimsFor(f.did, f.log, { chain: [...f.log.chain, await settle([])], events: [] }, 0),
+    await api.claimsFor({
+      controller: f.did,
+      recorded: f.log,
+      merged: { chain: [...f.log.chain, await settle([])], events: [] },
+      genFloor: 0,
+    }),
   ).toContainEqual(expect.objectContaining({ kind: 'remove', ref: { chainIndex: 1 } }))
 })
 
@@ -547,12 +635,19 @@ test('claimsFor folds a refused historical epoch once and still uses an authenti
   spy.mockClear()
   let claims: Array<EffectClaim>
   try {
-    claims = await api.claimsFor(f.did, undefined, log, 0)
+    claims = await api.claimsFor({
+      controller: f.did,
+      recorded: undefined,
+      merged: log,
+      genFloor: 0,
+    })
     expect(claims).toEqual([{ kind: 'deny', did: 'did:key:edge', ref: { chainIndex: 1 } }])
     expect(spy).toHaveBeenCalledTimes(2)
   } finally {
     spy.mockRestore()
   }
   for (const claim of claims)
-    await expect(api.effectOf(f.did, log, claim, 0)).resolves.not.toThrow()
+    await expect(
+      api.effectOf({ controller: f.did, log, claim, genFloor: 0 }),
+    ).resolves.not.toThrow()
 })

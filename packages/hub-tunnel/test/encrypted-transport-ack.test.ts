@@ -15,7 +15,7 @@ describe('the encrypting wrapper passes the receive scope inward', () => {
       publish: async () => ({ sequenceID: '1' }),
       subscribe: () => {},
       unsubscribe: () => {},
-      receive: (_subscriberDID, options): HubReceiveSubscription => {
+      receive: ({ subscriberDID: _subscriberDID, ...options }): HubReceiveSubscription => {
         scopes.push(options?.topicID)
         return {
           [Symbol.asyncIterator]: () => ({

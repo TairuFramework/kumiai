@@ -80,6 +80,11 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
   return tokens
 }
 
+export type CreateLedgerEntryResolverParams = {
+  sealedEntries: Uint8Array
+  openEntries: GroupCrypto['openEntries']
+}
+
 /**
  * A ledger-entry resolver over the blob of the commit frame being applied. The MLS port calls
  * it with the ids the Commit's control envelope names; it answers with the bodies sealed into
@@ -114,10 +119,10 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
  * order it is scheduled in. `openEntries` derives its key from the epoch's exporter secret, so it
  * is pure and re-entrant and this resolver may be called from anywhere the epoch is right.
  */
-export function createLedgerEntryResolver(
-  sealedEntries: Uint8Array,
-  openEntries: GroupCrypto['openEntries'],
-): (ids: Array<string>) => Promise<Array<string>> {
+export function createLedgerEntryResolver({
+  sealedEntries,
+  openEntries,
+}: CreateLedgerEntryResolverParams): (ids: Array<string>) => Promise<Array<string>> {
   return async (_ids: Array<string>): Promise<Array<string>> => {
     try {
       // Body trust comes from the token's own signature + content-address, which the caller

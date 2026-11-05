@@ -15,7 +15,7 @@ import {
 describe('inspectGroupInfo', () => {
   test('round-trips epoch and treeHash matching the source handle', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup(alice, 'inspect-rt')
+    const { group } = await createGroup({ identity: alice, groupID: 'inspect-rt' })
 
     const { groupInfo } = await exportGroupInfo({ group })
     const result = inspectGroupInfo(groupInfo)
@@ -29,7 +29,7 @@ describe('inspectGroupInfo', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'inspect-advance')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'inspect-advance' })
     const before = inspectGroupInfo((await exportGroupInfo({ group: aliceGroup })).groupInfo)
 
     // Add Bob → new epoch, new tree.
@@ -39,8 +39,12 @@ describe('inspectGroupInfo', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { newGroup: aliceAfterBob } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { newGroup: aliceAfterBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite,
+    })
     const after = inspectGroupInfo((await exportGroupInfo({ group: aliceAfterBob })).groupInfo)
 
     expect(after.epoch).toBe(before.epoch + 1n)
@@ -56,19 +60,19 @@ describe('inspectGroupInfo', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'inspect-wf')
+    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'inspect-wf' })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      bobInvite,
-    )
+    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite({
+      group: aliceGroup,
+      keyPackage: bobKP.publicPackage,
+      invite: bobInvite,
+    })
     const { credential: bobCred } = await processWelcome({
       identity: bob,
       invite: bobInvite,

@@ -78,10 +78,10 @@ function logHubOver(store: HubStore): ConformanceLogHub {
   }
 
   return {
-    subscribe: (subscriberDID, topicID, options) => {
+    subscribe: ({ subscriberDID, topicID, ...options }) => {
       return chain(() => store.subscribe({ subscriberDID, topicID, retention: options?.retention }))
     },
-    unsubscribe: (subscriberDID, topicID) => {
+    unsubscribe: ({ subscriberDID, topicID }) => {
       return chain(() => store.unsubscribe({ subscriberDID, topicID }))
     },
     receive,

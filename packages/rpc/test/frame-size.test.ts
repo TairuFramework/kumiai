@@ -11,10 +11,13 @@ import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 test('measures final base64 at the hub boundary', () => {
   const rows = [786431, 786432, 786433].map((rawBytes) => {
-    const frame = encodeHandshakeFrame(
-      HANDSHAKE_KIND.commit,
-      encodeCommitFrame(new Uint8Array(rawBytes - 9), new Uint8Array()),
-    )
+    const frame = encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.commit,
+      payload: encodeCommitFrame({
+        commit: new Uint8Array(rawBytes - 9),
+        sealedEntries: new Uint8Array(),
+      }),
+    })
     return {
       rawBytes: frame.length,
       base64Chars: Buffer.from(frame).toString('base64').length,
@@ -40,12 +43,10 @@ test('frameCapBeforeSideEffects', async () => {
         epoch: member.mls.epoch(),
       })
       const before = hub.published.length
-      const error = await member.peer
-        .commit(async () => pending)
-        .then(
-          () => null,
-          (reason: unknown) => reason,
-        )
+      const error = await member.peer.commit({ build: async () => pending }).then(
+        () => null,
+        (reason: unknown) => reason,
+      )
       if (rawFrameBytes === 786_432) {
         expect(error).toBeNull()
         expect(member.journal.puts()).toBe(1)
@@ -68,7 +69,7 @@ test('all publishing routes reject oversized final payloads', async () => {
   try {
     const payload = new Uint8Array(786_433)
     for (const publish of [
-      () => mux.bus.publish('topic:frames', payload),
+      () => mux.bus.publish({ topicID: 'topic:frames', payload }),
       () => mux.mailbox.publish({ senderDID: 'alice', topicID: 'topic:frames', payload }),
       () => mux.publish({ topicID: 'topic:frames', payload, retain: 'log' }),
     ]) {
@@ -112,14 +113,17 @@ test('control reply limits include handshake and request framing', async () => {
     const requestID = 'reply-request'
     for (const kind of [HANDSHAKE_KIND.recoveryReply, HANDSHAKE_KIND.ledgerReply]) {
       const sealed = new Uint8Array(786_432 - 6 - requestID.length)
-      const payload = encodeHandshakeFrame(kind, encodeRecoveryReply(requestID, sealed))
+      const payload = encodeHandshakeFrame({
+        kind,
+        payload: encodeRecoveryReply({ requestID, groupInfo: sealed }),
+      })
       expect(payload.length).toBe(786_432)
       await mux.publish({ topicID: 'topic:replies', payload })
       const before = hub.published.length
-      const oversized = encodeHandshakeFrame(
+      const oversized = encodeHandshakeFrame({
         kind,
-        encodeRecoveryReply(requestID, new Uint8Array(sealed.length + 1)),
-      )
+        payload: encodeRecoveryReply({ requestID, groupInfo: new Uint8Array(sealed.length + 1) }),
+      })
       await expect(mux.publish({ topicID: 'topic:replies', payload: oversized })).rejects.toThrow(
         FrameTooLargeError,
       )

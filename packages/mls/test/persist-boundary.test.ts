@@ -33,16 +33,19 @@ test('restored handle takes its own admission from the replayed ledger', async (
     const params = { state: joined.state, credential: joined.credential }
     const unknown = await restoreGroup(params)
     expect(unknown.sendAdmission()).toMatchObject({ admissible: true })
-    const floor = await signLedgerEntry(identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: epoch.did,
-      value: { op: 'clock', time: 1001 },
+    const floor = await signLedgerEntry({
+      identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: epoch.did,
+        value: { op: 'clock', time: 1001 },
+      },
     })
     const ledgerEntries = [...joined.ledgerTokens, floor]
     const restored = await restoreGroup({ ...params, ledgerEntries })
     expect(restored.sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
-    await expect(restored.encrypt(new Uint8Array([1]))).rejects.toMatchObject({
+    await expect(restored.encrypt({ plaintext: new Uint8Array([1]) })).rejects.toMatchObject({
       reason: 'lapsed',
     })
     expect(ledgerEntries).toEqual([...joined.ledgerTokens, floor])
@@ -62,7 +65,9 @@ describe('received commit persistence boundary', () => {
         if (token == null) throw new Error(`missing ${id}`)
         return token
       })
-    const { group: created } = await createGroup(alice, 'persist-received', {
+    const { group: created } = await createGroup({
+      identity: alice,
+      groupID: 'persist-received',
       resolveLedgerEntries,
     })
     const bobInvite = await createInvite({
@@ -72,8 +77,12 @@ describe('received commit persistence boundary', () => {
       permission: 'member',
     })
     for (const token of bobInvite.invite.ledgerEntries) bodies.set(ledgerEntryDigest(token), token)
-    const bobBundle = await createKeyPackageBundle(bob)
-    const addedBob = await commitInvite(created, bobBundle.publicPackage, bobInvite.invite)
+    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const addedBob = await commitInvite({
+      group: created,
+      keyPackage: bobBundle.publicPackage,
+      invite: bobInvite.invite,
+    })
     const notified = vi.fn()
     const { group: receiver } = await processWelcome({
       identity: bob,
@@ -83,14 +92,17 @@ describe('received commit persistence boundary', () => {
       ratchetTree: addedBob.newGroup.state.ratchetTree,
       options: { resolveLedgerEntries, onLedgerEntries: notified },
     })
-    const note = await signLedgerEntry(alice, {
-      type: 'note',
-      groupID: receiver.groupID,
-      subject: bob.id,
-      value: 'durable',
+    const note = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'note',
+        groupID: receiver.groupID,
+        subject: bob.id,
+        value: 'durable',
+      },
     })
     bodies.set(ledgerEntryDigest(note), note)
-    const addedNote = await commitLedgerEntries(addedBob.newGroup, [note])
+    const addedNote = await commitLedgerEntries({ group: addedBob.newGroup, tokens: [note] })
     const controlEvents = vi.spyOn(receiver, 'emitControlEvents')
     const before = {
       state: receiver.state,
@@ -103,7 +115,7 @@ describe('received commit persistence boundary', () => {
       throw new Error('disk failed')
     })
     await expect(
-      receiver.processMessage(addedNote.commitMessage, { persist: failed }),
+      receiver.processMessage({ message: addedNote.commitMessage, persist: failed }),
     ).rejects.toThrow('disk failed')
     expect(failed).toHaveBeenCalledOnce()
     expect(receiver.state).toBe(before.state)
@@ -124,7 +136,7 @@ describe('received commit persistence boundary', () => {
       expect(notified).not.toHaveBeenCalled()
       await pending
     })
-    const applying = receiver.processMessage(addedNote.commitMessage, { persist })
+    const applying = receiver.processMessage({ message: addedNote.commitMessage, persist })
     await vi.waitFor(() => expect(persist).toHaveBeenCalledOnce())
     expect(notified).not.toHaveBeenCalled()
     expect(controlEvents).not.toHaveBeenCalled()
@@ -137,15 +149,18 @@ describe('received commit persistence boundary', () => {
   test('persists a public member commit and rolls it back on failure', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group: original } = await createGroup(alice, 'persist-public-member')
+    const { group: original } = await createGroup({
+      identity: alice,
+      groupID: 'persist-public-member',
+    })
     const { invite } = await createInvite({
       group: original,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bundle = await createKeyPackageBundle(bob)
-    const added = await commitInvite(original, bundle.publicPackage, invite)
+    const bundle = await createKeyPackageBundle({ identity: bob })
+    const added = await commitInvite({ group: original, keyPackage: bundle.publicPackage, invite })
     const { group: receiver } = await processWelcome({
       identity: bob,
       invite,
@@ -164,11 +179,11 @@ describe('received commit persistence boundary', () => {
     const persist = vi.fn(async () => {
       throw new Error('disk failed')
     })
-    await expect(receiver.processMessage(message, { persist })).rejects.toThrow('disk failed')
+    await expect(receiver.processMessage({ message, persist })).rejects.toThrow('disk failed')
     expect(persist).toHaveBeenCalledOnce()
     expect(receiver.state).toBe(before)
     const saved = vi.fn()
-    await receiver.processMessage(message, { persist: saved })
+    await receiver.processMessage({ message, persist: saved })
     expect(saved).toHaveBeenCalledOnce()
     expect(receiver.epoch).toBe(before.groupContext.epoch + 1n)
   })
@@ -176,15 +191,15 @@ describe('received commit persistence boundary', () => {
   test('persists an accepted standalone proposal and rolls it back on failure', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group: original } = await createGroup(alice, 'persist-proposal')
+    const { group: original } = await createGroup({ identity: alice, groupID: 'persist-proposal' })
     const { invite } = await createInvite({
       group: original,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bundle = await createKeyPackageBundle(bob)
-    const added = await commitInvite(original, bundle.publicPackage, invite)
+    const bundle = await createKeyPackageBundle({ identity: bob })
+    const added = await commitInvite({ group: original, keyPackage: bundle.publicPackage, invite })
     const { group: receiver } = await processWelcome({
       identity: bob,
       invite,
@@ -201,12 +216,12 @@ describe('received commit persistence boundary', () => {
     const persist = vi.fn(async () => {
       throw new Error('disk failed')
     })
-    await expect(receiver.processMessage(message, { persist })).rejects.toThrow('disk failed')
+    await expect(receiver.processMessage({ message, persist })).rejects.toThrow('disk failed')
     expect(persist).toHaveBeenCalledOnce()
     expect(receiver.state).toBe(before)
     expect(Object.keys(receiver.state.unappliedProposals)).toHaveLength(0)
     const saved = vi.fn()
-    await receiver.processMessage(message, { persist: saved })
+    await receiver.processMessage({ message, persist: saved })
     expect(saved).toHaveBeenCalledOnce()
     expect(Object.keys(receiver.state.unappliedProposals)).toHaveLength(1)
   })
@@ -220,7 +235,9 @@ describe('received commit persistence boundary', () => {
         const body = bodies.get(id)
         return body == null ? [] : [body]
       })
-    const { group: original } = await createGroup(alice, 'persist-body-rollback', {
+    const { group: original } = await createGroup({
+      identity: alice,
+      groupID: 'persist-body-rollback',
       resolveLedgerEntries,
     })
     const { invite } = await createInvite({
@@ -230,8 +247,8 @@ describe('received commit persistence boundary', () => {
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) bodies.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle(bob)
-    const added = await commitInvite(original, bundle.publicPackage, invite)
+    const bundle = await createKeyPackageBundle({ identity: bob })
+    const added = await commitInvite({ group: original, keyPackage: bundle.publicPackage, invite })
     const { group: receiver } = await processWelcome({
       identity: bob,
       invite,
@@ -240,27 +257,31 @@ describe('received commit persistence boundary', () => {
       ratchetTree: added.newGroup.state.ratchetTree,
       options: { resolveLedgerEntries },
     })
-    const note = await signLedgerEntry(alice, {
-      type: 'note',
-      groupID: receiver.groupID,
-      subject: bob.id,
-      value: 'body',
+    const note = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'note',
+        groupID: receiver.groupID,
+        subject: bob.id,
+        value: 'body',
+      },
     })
     const id = ledgerEntryDigest(note)
     bodies.set(id, note)
-    const committed = await commitLedgerEntries(added.newGroup, [note])
+    const committed = await commitLedgerEntries({ group: added.newGroup, tokens: [note] })
     await expect(
-      receiver.processMessage(committed.commitMessage, {
+      receiver.processMessage({
+        message: committed.commitMessage,
         persist: () => {
           throw new Error('disk failed')
         },
       }),
     ).rejects.toThrow('disk failed')
     bodies.delete(id)
-    await expect(receiver.processMessage(committed.commitMessage)).rejects.toThrow(
+    await expect(receiver.processMessage({ message: committed.commitMessage })).rejects.toThrow(
       MissingLedgerEntriesError,
     )
     bodies.set(id, note)
-    await receiver.processMessage(committed.commitMessage)
+    await receiver.processMessage({ message: committed.commitMessage })
   })
 })

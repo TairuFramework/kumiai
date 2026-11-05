@@ -31,13 +31,20 @@ export type IngestedControllerLog = {
   introduced: Array<string>
 }
 
-export async function ingestControllerLog(
-  controller: string,
-  recorded: ControllerLog | undefined,
-  proof: ControllerLog,
-  previous?: ControllerProjection,
-  options?: CryptoOptions,
-): Promise<IngestedControllerLog> {
+export type IngestControllerLogParams = {
+  controller: string
+  recorded: ControllerLog | undefined
+  proof: ControllerLog
+  previous?: ControllerProjection
+} & CryptoOptions
+
+export async function ingestControllerLog({
+  controller,
+  recorded,
+  proof,
+  previous,
+  ...options
+}: IngestControllerLogParams): Promise<IngestedControllerLog> {
   const did = normalizeDID(controller)
   let before: FoldOk | undefined
   if (recorded != null) {
@@ -133,10 +140,16 @@ export async function ingestControllerLog(
   return { log, ...(before == null ? {} : { before }), after, introduced }
 }
 
-export function effectDelta(
-  before: KeyState | undefined,
-  after: KeyState,
-): { denied: Array<string>; removed: Array<{ did: string; add: string }>; generation: boolean } {
+export type EffectDeltaParams = {
+  before: KeyState | undefined
+  after: KeyState
+}
+
+export function effectDelta({ before, after }: EffectDeltaParams): {
+  denied: Array<string>
+  removed: Array<{ did: string; add: string }>
+  generation: boolean
+} {
   const denials = (state: KeyState | undefined) => {
     return new Set(
       [...(state?.deny ?? [])].filter((target) => target.startsWith('did:')).map(normalizeDID),

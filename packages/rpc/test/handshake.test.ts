@@ -12,7 +12,7 @@ describe('handshake frame codec', () => {
   test('round-trips each kind with its payload', () => {
     for (const kind of Object.values(HANDSHAKE_KIND)) {
       const payload = new Uint8Array([1, 2, 3, kind])
-      const decoded = decodeHandshakeFrame(encodeHandshakeFrame(kind, payload))
+      const decoded = decodeHandshakeFrame(encodeHandshakeFrame({ kind, payload }))
       expect(decoded.kind).toBe(kind)
       expect(Array.from(decoded.payload)).toEqual([1, 2, 3, kind])
     }
@@ -20,7 +20,10 @@ describe('handshake frame codec', () => {
 
   test('frames lead with magic, version, then the kind tag', () => {
     expect(HANDSHAKE_VERSION).toBe(1)
-    const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([9]))
+    const frame = encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.commit,
+      payload: new Uint8Array([9]),
+    })
     expect(frame[0]).toBe(HANDSHAKE_MAGIC[0])
     expect(frame[1]).toBe(HANDSHAKE_MAGIC[1])
     expect(frame[2]).toBe(HANDSHAKE_VERSION)
@@ -35,7 +38,7 @@ describe('handshake frame codec', () => {
 
   test('an empty payload round-trips', () => {
     const decoded = decodeHandshakeFrame(
-      encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, new Uint8Array()),
+      encodeHandshakeFrame({ kind: HANDSHAKE_KIND.recoveryRequest, payload: new Uint8Array() }),
     )
     expect(decoded.kind).toBe(HANDSHAKE_KIND.recoveryRequest)
     expect(decoded.payload.length).toBe(0)
@@ -73,7 +76,7 @@ describe('handshake frame codec', () => {
 
   test('a frame this build does read reports the current version', () => {
     const decoded = decodeHandshakeFrame(
-      encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([1])),
+      encodeHandshakeFrame({ kind: HANDSHAKE_KIND.commit, payload: new Uint8Array([1]) }),
     )
     expect(decoded.version).toBe(HANDSHAKE_VERSION)
   })

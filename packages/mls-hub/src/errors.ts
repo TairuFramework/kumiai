@@ -5,6 +5,12 @@ import { Result } from '@sozai/result'
 /** Which hub call failed. `'status'`: nothing was attempted. `'upload'`: attempted, outcome unknown. */
 export type HubCallStage = 'status' | 'upload'
 
+export type HubRetryableErrorParams = {
+  stage: HubCallStage
+  code: string | null
+  cause: unknown
+}
+
 /**
  * The hub could not be made to answer, or answered something that clears on its own. Retrying later
  * can succeed and nothing needs changing, so this is returned rather than thrown — an unhandled
@@ -15,7 +21,7 @@ export class HubRetryableError extends Error {
   #code: string | null
   #stage: HubCallStage
 
-  constructor(stage: HubCallStage, code: string | null, cause: unknown) {
+  constructor({ stage, code, cause }: HubRetryableErrorParams) {
     super(
       `mls-hub: the hub could not complete the ${stage} request${code == null ? '' : ` (${code})`}; retry later`,
       { cause },
@@ -34,6 +40,12 @@ export class HubRetryableError extends Error {
   }
 }
 
+export type HubRefusedErrorParams = {
+  stage: HubCallStage
+  code: string
+  cause: unknown
+}
+
 /**
  * The hub has answered settled: the app or its operator must change something before this call can
  * ever succeed. Thrown, so a host that writes no handler still gets told.
@@ -43,7 +55,7 @@ export class HubRefusedError extends Error {
   #code: string
   #stage: HubCallStage
 
-  constructor(stage: HubCallStage, code: string, cause: unknown) {
+  constructor({ stage, code, cause }: HubRefusedErrorParams) {
     super(`mls-hub: the hub refused the ${stage} request (${code})`, { cause })
     this.#code = code
     this.#stage = stage
@@ -106,9 +118,9 @@ function codeOf(error: unknown): string | null {
 export function toRetryableOrThrow(error: unknown, stage: HubCallStage): HubRetryableError {
   const code = codeOf(error)
   if (code != null && REFUSED_CODES.has(code)) {
-    throw new HubRefusedError(stage, code, error)
+    throw new HubRefusedError({ stage, code, cause: error })
   }
-  return new HubRetryableError(stage, code, error)
+  return new HubRetryableError({ stage, code, cause: error })
 }
 
 /**

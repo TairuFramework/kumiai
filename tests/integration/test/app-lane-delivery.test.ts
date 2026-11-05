@@ -56,17 +56,25 @@ test('the app-lane invite build publishes its preservation clock and delivers th
   const aliceSlot = createLedgerEntrySlot()
   const carolSlot = createLedgerEntrySlot()
   const bobSlot = createLedgerEntrySlot()
-  const { group } = await createGroup(aliceID, 'app-lane-preservation-clock', {
+  const { group } = await createGroup({
+    identity: aliceID,
+    groupID: 'app-lane-preservation-clock',
     controller: creatorBinding,
     controllerLog: { chain: creatorBinding.prefix, events: [] },
     resolveLedgerEntries: aliceSlot.resolve,
   })
-  const staleBundle = await createKeyPackageBundle(bobID, {
+  const staleBundle = await createKeyPackageBundle({
+    identity: bobID,
     controller: await lifecycle.timedBinding({ identity: bobID, iat: now - 10, exp: now + 1000 }),
   })
   const stale = await createInvite({ group, identity: aliceID, recipientDID: bobID.id })
-  const withBob = await commitInvite(group, staleBundle.publicPackage, stale.invite)
-  const carolBundle = await createKeyPackageBundle(carolID, {
+  const withBob = await commitInvite({
+    group,
+    keyPackage: staleBundle.publicPackage,
+    invite: stale.invite,
+  })
+  const carolBundle = await createKeyPackageBundle({
+    identity: carolID,
     controller: await lifecycle.timedBinding({ identity: carolID, iat: now - 20, exp: now + 1000 }),
   })
   const carolInvite = await createInvite({
@@ -74,11 +82,11 @@ test('the app-lane invite build publishes its preservation clock and delivers th
     identity: aliceID,
     recipientDID: carolID.id,
   })
-  const withCarol = await commitInvite(
-    withBob.newGroup,
-    carolBundle.publicPackage,
-    carolInvite.invite,
-  )
+  const withCarol = await commitInvite({
+    group: withBob.newGroup,
+    keyPackage: carolBundle.publicPackage,
+    invite: carolInvite.invite,
+  })
   const { group: carolGroup } = await processWelcome({
     identity: carolID,
     invite: carolInvite.invite,
@@ -105,7 +113,8 @@ test('the app-lane invite build publishes its preservation clock and delivers th
       identity: aliceID,
       recipientDID: bobID.id,
     })
-    const bundle = await createKeyPackageBundle(bobID, {
+    const bundle = await createKeyPackageBundle({
+      identity: bobID,
       controller: await lifecycle.timedBinding({
         identity: bobID,
         iat: now - 5,
@@ -118,12 +127,15 @@ test('the app-lane invite build publishes its preservation clock and delivers th
     const pending = await buildInviteCommit(alice, { invite, bundle }, (message) => {
       welcome = message
     })()
-    const result = await alice.peer.commit(async () => pending)
+    const result = await alice.peer.commit({ build: async () => pending })
     expect(result.lost).toBeUndefined()
     expect(pending.bodies).toEqual(alice.handle().ledgerTokens)
     const clock = pending.bodies?.at(-1)
     if (clock == null) throw new Error('Missing preservation clock')
-    expect((await verifyLedgerEntry(clock))?.entry.value).toEqual({ op: 'clock', time: now - 10 })
+    expect((await verifyLedgerEntry({ token: clock }))?.entry.value).toEqual({
+      op: 'clock',
+      time: now - 10,
+    })
     await vi.waitFor(() => expect(carol.handle().epoch).toBe(alice.handle().epoch))
     expect(carol.handle().ledgerTokens).toEqual(alice.handle().ledgerTokens)
     if (welcome == null) throw new Error('Missing accepted Welcome')
@@ -138,7 +150,9 @@ test('the app-lane invite build publishes its preservation clock and delivers th
     expect(joined.ledgerTokens).toEqual(alice.handle().ledgerTokens)
     expect(joined.registry.controllers.get(creatorBinding.id)?.timeFloor).toBe(now - 10)
     const payload = new TextEncoder().encode('app-lane preserved time')
-    await expect(carol.handle().decrypt(await joined.encrypt(payload))).resolves.toMatchObject({
+    await expect(
+      carol.handle().decrypt({ message: await joined.encrypt({ plaintext: payload }) }),
+    ).resolves.toMatchObject({
       payload,
       senderDID: bobID.id,
     })
@@ -242,7 +256,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       ratchetTree: aliceHandle.state.ratchetTree,
       entrySlot: carolSlot,
     })
-    await bobHandle.processMessage(addCarol.commitMessage)
+    await bobHandle.processMessage({ message: addCarol.commitMessage })
 
     expect(aliceHandle.epoch).toBe(2n)
     expect(bobHandle.epoch).toBe(2n)
@@ -284,16 +298,16 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     let daveWelcome: Uint8Array | undefined
-    const addResult = await alice.peer.commit(
-      buildInviteCommit(alice, daveMaterial, (welcome) => {
+    const addResult = await alice.peer.commit({
+      build: buildInviteCommit(alice, daveMaterial, (welcome) => {
         daveWelcome = welcome
       }),
-    )
+    })
     // `lost` is how the lane reports a commit that did not land. Absent means accepted.
     expect(addResult.lost).toBeUndefined()
     await flush()
 
-    const removeResult = await alice.peer.commit(buildRemoveCommit(alice, bobID.id))
+    const removeResult = await alice.peer.commit({ build: buildRemoveCommit(alice, bobID.id) })
     expect(removeResult.lost).toBeUndefined()
     await flush()
 
@@ -391,17 +405,29 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     // Everything Bob holds while he is still a member — including the exact topic the group
     // is on, which he can name because he is on it.
-    const bobSecretAsMember = await bob.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
-    const topicAsMember = protocolTopic(bobSecretAsMember, Number(bob.handle().epoch), 'chat')
+    const bobSecretAsMember = await bob
+      .handle()
+      .exportSecret({ label: APP_TOPIC_LABEL, context: new Uint8Array() })
+    const topicAsMember = protocolTopic({
+      secret: bobSecretAsMember,
+      epoch: Number(bob.handle().epoch),
+      protocol: 'chat',
+    })
 
-    const removal = await alice.peer.commit(buildRemoveCommit(alice, bobID.id))
+    const removal = await alice.peer.commit({ build: buildRemoveCommit(alice, bobID.id) })
     expect(removal.lost).toBeUndefined()
     await flush()
     expect(alice.handle().epoch).toBe(2n)
 
     // The group's topic after the rotation.
-    const groupSecret = await alice.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
-    const groupTopic = protocolTopic(groupSecret, Number(alice.handle().epoch), 'chat')
+    const groupSecret = await alice
+      .handle()
+      .exportSecret({ label: APP_TOPIC_LABEL, context: new Uint8Array() })
+    const groupTopic = protocolTopic({
+      secret: groupSecret,
+      epoch: Number(alice.handle().epoch),
+      protocol: 'chat',
+    })
     expect(groupTopic).not.toBe(topicAsMember)
 
     // Bob's handle never advanced — the remove commit's UpdatePath excludes his leaf, so
@@ -411,10 +437,12 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // Nothing Bob holds names the group's new topic. Not his own secret, at any epoch number
     // he cares to try — and enumerating them is free.
     const bobsGuesses = new Set<string>()
-    const bobSecret = await bob.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
+    const bobSecret = await bob
+      .handle()
+      .exportSecret({ label: APP_TOPIC_LABEL, context: new Uint8Array() })
     for (let epoch = 0; epoch <= 8; epoch++) {
-      bobsGuesses.add(protocolTopic(bobSecret, epoch, 'chat'))
-      bobsGuesses.add(protocolTopic(bobSecretAsMember, epoch, 'chat'))
+      bobsGuesses.add(protocolTopic({ secret: bobSecret, epoch, protocol: 'chat' }))
+      bobsGuesses.add(protocolTopic({ secret: bobSecretAsMember, epoch, protocol: 'chat' }))
     }
     // ...nor the lifelong recovery secret, which really is his for life.
     const recovery = await (async () => {
@@ -426,7 +454,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       }).exportRecoverySecret()
     })()
     for (let epoch = 0; epoch <= 8; epoch++) {
-      bobsGuesses.add(protocolTopic(recovery, epoch, 'chat'))
+      bobsGuesses.add(protocolTopic({ secret: recovery, epoch, protocol: 'chat' }))
     }
 
     expect(bobsGuesses.has(topicAsMember)).toBe(true) // the enumeration is real: it finds the old one
@@ -598,9 +626,9 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // Bob is away. One frame at epoch 1, then a roster-neutral commit carrying the group to
     // epoch 2 — the anchor does not move, so both frames live on one topic.
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
-    const advanced = await alice.peer.commit(
-      buildLedgerCommit(alice, aliceID, `did:key:subject-${Date.now()}`, 'member'),
-    )
+    const advanced = await alice.peer.commit({
+      build: buildLedgerCommit(alice, aliceID, `did:key:subject-${Date.now()}`, 'member'),
+    })
     expect(advanced.lost).toBeUndefined()
     await flush()
     expect(alice.handle().epoch).toBe(2n)
@@ -691,9 +719,9 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // a walk that has to ratchet twice to read all of it.
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     for (const [index, value] of [['a', 'member'] as const, ['b', 'member'] as const].entries()) {
-      const result = await alice.peer.commit(
-        buildLedgerCommit(alice, aliceID, `did:key:subject-${value[0]}-${index}`, value[1]),
-      )
+      const result = await alice.peer.commit({
+        build: buildLedgerCommit(alice, aliceID, `did:key:subject-${value[0]}-${index}`, value[1]),
+      })
       expect(result.lost).toBeUndefined()
       await flush()
       await alice.peer
@@ -871,13 +899,19 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     // Captured BEFORE the commit — a ledger commit does not rotate the anchor, but it does
     // rotate the live exporter secret, so this must be read at epoch 1.
-    const anchorSecret = await alice.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
-    const appTopic = protocolTopic(anchorSecret, alice.peer.anchorEpoch(), 'chat')
+    const anchorSecret = await alice
+      .handle()
+      .exportSecret({ label: APP_TOPIC_LABEL, context: new Uint8Array() })
+    const appTopic = protocolTopic({
+      secret: anchorSecret,
+      epoch: alice.peer.anchorEpoch(),
+      protocol: 'chat',
+    })
 
     // The second process's FIRST act is to author, not to catch up.
-    const result = await alice.peer.commit(
-      buildLedgerCommit(alice, aliceID, 'did:key:subject-after-restart', 'member'),
-    )
+    const result = await alice.peer.commit({
+      build: buildLedgerCommit(alice, aliceID, 'did:key:subject-after-restart', 'member'),
+    })
     expect(result.lost).toBeUndefined()
     await flush()
     expect(alice.handle().epoch).toBe(2n)
@@ -900,7 +934,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // observer joins first. It still reads the frame published before it joined: `fetchTopic`
     // serves the topic's retained LOG (`chat/posted` is `retain: 'log'`, see the `chat` protocol
     // definition in `app-lane-e2e.ts`), which subscribing does not gate.
-    await observer.subscribe(observerID.id, appTopic)
+    await observer.subscribe({ subscriberDID: observerID.id, topicID: appTopic })
     const observed = await vi.waitFor(
       async () => {
         const result = await observer.fetchTopic({

@@ -37,7 +37,7 @@ test('frame and storage errors from another copy of the package are classified',
 })
 
 test('unrelated errors are not classified', () => {
-  expect(isFrameAhead(new FrameEpochError(1, 2))).toBe(false)
+  expect(isFrameAhead(new FrameEpochError({ frameEpoch: 1, handleEpoch: 2 }))).toBe(false)
   expect(isFrameAhead(Object.assign(new Error('x'), { name: 'FrameEpochError' }))).toBe(false)
   expect(isFrameAhead({ name: 'FrameEpochError', frameEpoch: 3, handleEpoch: 2 })).toBe(false)
   expect(isAppFrameStorageError(new Error('write failed'))).toBe(false)

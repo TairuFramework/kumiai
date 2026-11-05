@@ -78,13 +78,15 @@ test.each(['build', 'receipt', 'Welcome'] as const)(
         recipientDID: f.device.id,
       })
       await expect(
-        commitInvite(f.group, bundle.publicPackage, invite).then(() => undefined),
+        commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }).then(
+          () => undefined,
+        ),
       ).rejects.toMatchObject({
         reason: 'missing-holder-evidence',
       })
     } else if (path === 'receipt') {
       const forged = await rawAdd(f.group, f.device, f.binding)
-      await expect(f.group.processMessage(forged.message)).rejects.toMatchObject({
+      await expect(f.group.processMessage({ message: forged.message })).rejects.toMatchObject({
         reason: 'binding',
         cause: { reason: 'missing-holder-evidence' },
       })
@@ -98,13 +100,13 @@ test.each(['build', 'receipt', 'Welcome'] as const)(
 
 test('boundDeviceRenewedByPeerAccepted', async () => {
   const f = await fixture()
-  const bundle = await createKeyPackageBundle(f.device, { controller: f.evidenced })
+  const bundle = await createKeyPackageBundle({ identity: f.device, controller: f.evidenced })
   const { invite } = await createInvite({
     group: f.group,
     identity: f.identity,
     recipientDID: f.device.id,
   })
-  const added = await commitInvite(f.group, bundle.publicPackage, invite)
+  const added = await commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite })
   const { group: joined } = await processWelcome({
     identity: f.device,
     invite,
@@ -125,8 +127,8 @@ test('boundDeviceRenewedByPeerAccepted', async () => {
     })),
     holderGrant: f.evidenced.holderGrant,
   }
-  const renewed = await renewLeaf(joined, updatedBinding)
-  await added.newGroup.processMessage(renewed.commitMessage)
+  const renewed = await renewLeaf({ group: joined, binding: updatedBinding })
+  await added.newGroup.processMessage({ message: renewed.commitMessage })
   expect(added.newGroup.bindingOfDID(f.device.id)).toMatchObject({
     capability: updatedBinding.capability,
     holderGrant: f.evidenced.holderGrant,
@@ -161,7 +163,7 @@ test.each(['aud', 'cnf'] as const)('holderGrantMustNameLeafKey: %s', async (clai
   )
   await expect(
     verifyLeafCredential(
-      makeMLSCredential(f.device, { ...f.evidenced, holderGrant }),
+      makeMLSCredential({ identity: f.device, controller: { ...f.evidenced, holderGrant } }),
       f.device.publicKey,
     ),
   ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
@@ -186,7 +188,9 @@ test('deniedHolderGrantRefused', async () => {
   expect(group.currentDenySet().has(f.holder.id)).toBe(false)
   const bundle = await rawBundle(group, f.device, f.evidenced)
   const { invite } = await createInvite({ group, identity: f.identity, recipientDID: f.device.id })
-  await expect(commitInvite(group, bundle.publicPackage, invite)).rejects.toMatchObject({
+  await expect(
+    commitInvite({ group, keyPackage: bundle.publicPackage, invite }),
+  ).rejects.toMatchObject({
     reason: 'denied-id',
   })
 })
@@ -194,7 +198,7 @@ test('deniedHolderGrantRefused', async () => {
 test('directCLeafUnchanged', async () => {
   const f = await fixture()
   const binding = await timedBinding({ identity: f.device, iat: 100, exp: 200 })
-  const credential = makeMLSCredential(f.device, binding)
+  const credential = makeMLSCredential({ identity: f.device, controller: binding })
   await expect(verifyLeafCredential(credential, f.device.publicKey)).resolves.toBeUndefined()
   expect(credential.credentialType).toBe(defaultCredentialTypes.basic)
 })
@@ -226,7 +230,7 @@ test.each(['signature', 'issuer', 'subject', 'chain', 'permission', 'lifetime'] 
     }
     await expect(
       verifyLeafCredential(
-        makeMLSCredential(f.device, { ...f.evidenced, holderGrant }),
+        makeMLSCredential({ identity: f.device, controller: { ...f.evidenced, holderGrant } }),
         f.device.publicKey,
       ),
     ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
@@ -244,7 +248,7 @@ test('missing evidence refused on a forged update', async () => {
   })
   delete replacement.holderGrant
   const forged = await rawCommit({ group: f.group, binding: replacement })
-  const processing = f.group.processMessage(encode(mlsMessageEncoder, forged.commit))
+  const processing = f.group.processMessage({ message: encode(mlsMessageEncoder, forged.commit) })
   await expect(processing).rejects.toMatchObject({
     reason: 'binding',
     cause: { reason: 'missing-holder-evidence' },
@@ -256,7 +260,7 @@ test('missing evidence refused on a forged update', async () => {
 test('public key package builder refuses missing evidence', async () => {
   const f = await fixture()
   await expect(
-    createKeyPackageBundle(f.device, { controller: f.binding }).then(() => undefined),
+    createKeyPackageBundle({ identity: f.device, controller: f.binding }).then(() => undefined),
   ).rejects.toMatchObject({
     reason: 'missing-holder-evidence',
   })
@@ -270,7 +274,11 @@ test('external replacement refuses missing evidence', async () => {
     identity: f.identity,
     recipientDID: f.device.id,
   })
-  const { newGroup: author } = await commitInvite(f.group, bundle.publicPackage, invite)
+  const { newGroup: author } = await commitInvite({
+    group: f.group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const replacement = await timedBinding({
     identity: f.identity,
     issuer: f.holder,
@@ -284,7 +292,7 @@ test('external replacement refuses missing evidence', async () => {
     identity: f.identity,
     binding: replacement,
   })
-  const processing = author.processMessage(message)
+  const processing = author.processMessage({ message })
   await expect(processing).rejects.toMatchObject({
     reason: 'binding',
     cause: { reason: 'missing-holder-evidence' },
@@ -306,7 +314,7 @@ test.each(
   const binding = { ...f.binding, holderGrant: grant.capability }
   if (path === 'key-package build') {
     await expect(
-      createKeyPackageBundle(f.device, { controller: binding }).then(() => undefined),
+      createKeyPackageBundle({ identity: f.device, controller: binding }).then(() => undefined),
     ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
   } else if (path === 'Add build') {
     const bundle = await rawBundle(f.group, f.device, binding)
@@ -316,11 +324,13 @@ test.each(
       recipientDID: f.device.id,
     })
     await expect(
-      commitInvite(f.group, bundle.publicPackage, invite).then(() => undefined),
+      commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }).then(
+        () => undefined,
+      ),
     ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
   } else if (path === 'Add receipt') {
     const forged = await rawAdd(f.group, f.device, binding)
-    const processing = f.group.processMessage(forged.message)
+    const processing = f.group.processMessage({ message: forged.message })
     await expect(processing).rejects.toMatchObject({
       reason: 'binding',
       cause: { reason: 'holder-evidence-mismatch' },
@@ -340,7 +350,8 @@ test.each([
   const f = await fixture()
   const grant = await timedBinding({ identity: f.device, iat, exp })
   await expect(
-    createKeyPackageBundle(f.device, {
+    createKeyPackageBundle({
+      identity: f.device,
       controller: { ...f.binding, holderGrant: grant.capability },
     }),
   ).resolves.toBeDefined()
@@ -371,7 +382,7 @@ test.each(['key-package build', 'Add receipt'] as const)(
     )
     const binding = { ...f.binding, holderGrant }
     if (path === 'key-package build') {
-      const building = createKeyPackageBundle(f.device, { controller: binding })
+      const building = createKeyPackageBundle({ identity: f.device, controller: binding })
       await expect(building).rejects.toBeInstanceOf(LeafBindingError)
       await expect(building).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
       // Pinned verification also refuses nbf; this cause proves the structural gate ran.
@@ -381,7 +392,7 @@ test.each(['key-package build', 'Add receipt'] as const)(
       })
     } else {
       const forged = await rawAdd(f.group, f.device, binding)
-      const processing = f.group.processMessage(forged.message)
+      const processing = f.group.processMessage({ message: forged.message })
       await expect(processing).rejects.toBeInstanceOf(CommitRejectedError)
       await expect(processing).rejects.toMatchObject({
         reason: 'binding',
@@ -411,7 +422,7 @@ test('expired holder grant refused on renewal', async () => {
     holderGrant: grant.capability,
   }
   const epoch = f.group.epoch
-  const renewing = renewLeaf(f.group, binding)
+  const renewing = renewLeaf({ group: f.group, binding })
   await expect(renewing).rejects.toBeInstanceOf(LeafBindingError)
   await expect(renewing).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
   expect(f.group.epoch).toBe(epoch)
@@ -425,7 +436,11 @@ test('expired holder grant refused on external replacement', async () => {
     identity: f.identity,
     recipientDID: f.device.id,
   })
-  const { newGroup: author } = await commitInvite(f.group, bundle.publicPackage, invite)
+  const { newGroup: author } = await commitInvite({
+    group: f.group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const grant = await timedBinding({ identity: f.identity, iat: 10, exp: 50 })
   const binding = {
     ...(await timedBinding({
@@ -439,7 +454,7 @@ test('expired holder grant refused on external replacement', async () => {
   }
   const message = await lowLevelExternal({ group: author, identity: f.identity, binding })
   const epoch = author.epoch
-  const processing = author.processMessage(message)
+  const processing = author.processMessage({ message })
   await expect(processing).rejects.toBeInstanceOf(CommitRejectedError)
   await expect(processing).rejects.toMatchObject({
     reason: 'binding',
@@ -479,7 +494,7 @@ async function memberHolderFixture() {
   const leafPayload = { ...payload, mbr: undefined, iat: 200, nbf: 200, exp: 3800, cap: parent }
   const capability = stringifyToken(await f.trusted.signToken({ payload: leafPayload }))
   const binding = { id: epoch.did, prefix: epoch.log.chain, capability, holderGrant }
-  const registry = await registryForLog(epoch.did, epoch.log)
+  const registry = await registryForLog({ controller: epoch.did, log: epoch.log })
   const deps: DIDAuthenticationDependencies = {
     judging: () => ({ registry, stage: 'full' as const, mode: 'admit' as const }),
     leafLifetime: () => 3600,
@@ -487,7 +502,7 @@ async function memberHolderFixture() {
   }
   const verify = (overrides = {}, dependencies = deps) =>
     verifyLeafCredential(
-      makeMLSCredential(agent(41), { ...binding, ...overrides }),
+      makeMLSCredential({ identity: agent(41), controller: { ...binding, ...overrides } }),
       f.device.publicKey,
       dependencies,
     )

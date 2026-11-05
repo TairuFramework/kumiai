@@ -144,57 +144,87 @@ function commit(
 describe('defaultCommitPolicy', () => {
   test('add is admin-gated', () => {
     const add = addProposal(MEMBER_DID)
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), context())).toBe(
-      'reject',
-    )
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(add, undefined)]), context())).toBe(
-      'accept',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(add, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context: context(),
+      }),
+    ).toBe('accept')
   })
 
   test('remove of a third party is admin-gated', () => {
     const remove = removeProposal(THIRD_LEAF)
     expect(
-      defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), context()),
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(remove, undefined)]),
+        context: context(),
+      }),
     ).toBe('reject')
     expect(
-      defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(remove, undefined)]), context()),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context: context(),
+      }),
     ).toBe('accept')
   })
 
   test('self-removal is allowed for a member', () => {
     const remove = removeProposal(MEMBER_LEAF)
     expect(
-      defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), context()),
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(remove, undefined)]),
+        context: context(),
+      }),
     ).toBe('accept')
   })
 
   test('update is always allowed', () => {
     const update = taggedProposal(defaultProposalTypes.update)
     expect(
-      defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(update, undefined)]), context()),
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(update, undefined)]),
+        context: context(),
+      }),
     ).toBe('accept')
   })
 
   test('psk and reinit are admin-gated', () => {
     const psk = taggedProposal(defaultProposalTypes.psk)
     const reinit = taggedProposal(defaultProposalTypes.reinit)
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(psk, undefined)]), context())).toBe(
-      'reject',
-    )
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(psk, undefined)]), context())).toBe(
-      'accept',
-    )
     expect(
-      defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(reinit, undefined)]), context()),
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(psk, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(psk, undefined)]),
+        context: context(),
+      }),
+    ).toBe('accept')
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(reinit, undefined)]),
+        context: context(),
+      }),
     ).toBe('reject')
   })
 
   test('group_context_extensions accepts an admin re-including the anchor and the expected head', () => {
     const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'accept',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context(),
+      }),
+    ).toBe('accept')
   })
 
   test('group_context_extensions rejects a mutated anchor', () => {
@@ -202,37 +232,52 @@ describe('defaultCommitPolicy', () => {
       anchorExtension(new Uint8Array([0xff, 0xff])),
       headExtension(HEAD_BYTES.slice()),
     ])
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('group_context_extensions rejects a list with no anchor extension', () => {
     const gce = gceProposal([headExtension(HEAD_BYTES.slice())])
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('group_context_extensions rejects a list with no head extension', () => {
     const gce = gceProposal([anchorExtension(ANCHOR_BYTES.slice())])
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('group_context_extensions rejects a head the envelope does not account for', () => {
     const gce = gceProposal(controlExtensions(OTHER_HEAD_BYTES))
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('group_context_extensions by a member is rejected even when the anchor is intact', () => {
     const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(gce, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('group_context_extensions accepts moving only the head while every other extension is unchanged', () => {
@@ -249,10 +294,13 @@ describe('defaultCommitPolicy', () => {
       headExtension(OTHER_HEAD_BYTES.slice()),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: OTHER_HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context({
+          currentExtensions: current,
+          expectedHeadExtensionData: OTHER_HEAD_BYTES,
+        }),
+      }),
     ).toBe('accept')
   })
 
@@ -264,10 +312,10 @@ describe('defaultCommitPolicy', () => {
       extraExtension(EXTRA_BYTES.slice()),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      }),
     ).toBe('reject')
   })
 
@@ -281,10 +329,10 @@ describe('defaultCommitPolicy', () => {
       reservedExtension(new Uint8Array()),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(installsReserved, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(installsReserved, undefined)]),
+        context: context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      }),
     ).toBe('accept')
 
     const installsUnreserved = gceProposal([
@@ -293,10 +341,10 @@ describe('defaultCommitPolicy', () => {
       extraExtension(EXTRA_BYTES.slice()),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(installsUnreserved, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(installsUnreserved, undefined)]),
+        context: context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      }),
     ).toBe('reject')
   })
 
@@ -315,10 +363,10 @@ describe('defaultCommitPolicy', () => {
       reservedExtension(Uint8Array.from([0x01])),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(installsWithData, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(installsWithData, undefined)]),
+        context: context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      }),
     ).toBe('reject')
   })
 
@@ -337,10 +385,10 @@ describe('defaultCommitPolicy', () => {
       reservedExtension(new Uint8Array()),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      }),
     ).toBe('reject')
   })
 
@@ -355,10 +403,10 @@ describe('defaultCommitPolicy', () => {
       headExtension(HEAD_BYTES.slice()),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      }),
     ).toBe('reject')
   })
 
@@ -374,10 +422,10 @@ describe('defaultCommitPolicy', () => {
       headExtension(HEAD_BYTES.slice()),
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
-        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context: context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      }),
     ).toBe('reject')
   })
 
@@ -386,16 +434,19 @@ describe('defaultCommitPolicy', () => {
     // covering the ledger and an omission would become undetectable.
     const add = addProposal(MEMBER_DID)
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(add, undefined)]),
-        context({ commitEnactsEntries: true }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context: context({ commitEnactsEntries: true }),
+      }),
     ).toBe('reject')
   })
 
   test('an empty commit that enacts entries is rejected', () => {
     expect(
-      defaultCommitPolicy(commit(ADMIN_LEAF, []), context({ commitEnactsEntries: true })),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, []),
+        context: context({ commitEnactsEntries: true }),
+      }),
     ).toBe('reject')
   })
 
@@ -403,13 +454,13 @@ describe('defaultCommitPolicy', () => {
     const add = addProposal(MEMBER_DID)
     const gce = gceProposal(controlExtensions(OTHER_HEAD_BYTES.slice()))
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(add, undefined), withSender(gce, undefined)]),
-        context({
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(add, undefined), withSender(gce, undefined)]),
+        context: context({
           commitEnactsEntries: true,
           expectedHeadExtensionData: OTHER_HEAD_BYTES,
         }),
-      ),
+      }),
     ).toBe('accept')
   })
 
@@ -418,9 +469,12 @@ describe('defaultCommitPolicy', () => {
       withSender(taggedProposal(defaultProposalTypes.external_init), undefined),
       withSender(removeProposal(MEMBER_LEAF), undefined),
     ])
-    expect(defaultCommitPolicy(externalCommit, context({ externalCommitDID: MEMBER_DID }))).toBe(
-      'accept',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: externalCommit,
+        context: context({ externalCommitDID: MEMBER_DID }),
+      }),
+    ).toBe('accept')
   })
 
   test('external_init commit rejects a DID absent from the roster', () => {
@@ -428,9 +482,12 @@ describe('defaultCommitPolicy', () => {
       withSender(taggedProposal(defaultProposalTypes.external_init), undefined),
       withSender(removeProposal(MEMBER_LEAF), undefined),
     ])
-    expect(defaultCommitPolicy(externalCommit, context({ externalCommitDID: OUTSIDER_DID }))).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: externalCommit,
+        context: context({ externalCommitDID: OUTSIDER_DID }),
+      }),
+    ).toBe('reject')
   })
 
   test('external_init commit rejects any proposal beyond external_init and the self-remove', () => {
@@ -439,9 +496,12 @@ describe('defaultCommitPolicy', () => {
       withSender(removeProposal(MEMBER_LEAF), undefined),
       withSender(addProposal(MEMBER_DID), undefined),
     ])
-    expect(defaultCommitPolicy(externalCommit, context({ externalCommitDID: MEMBER_DID }))).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: externalCommit,
+        context: context({ externalCommitDID: MEMBER_DID }),
+      }),
+    ).toBe('reject')
   })
 
   test('external_init commit rejects a remove that targets a different leaf', () => {
@@ -449,20 +509,25 @@ describe('defaultCommitPolicy', () => {
       withSender(taggedProposal(defaultProposalTypes.external_init), undefined),
       withSender(removeProposal(THIRD_LEAF), undefined),
     ])
-    expect(defaultCommitPolicy(externalCommit, context({ externalCommitDID: MEMBER_DID }))).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: externalCommit,
+        context: context({ externalCommitDID: MEMBER_DID }),
+      }),
+    ).toBe('reject')
   })
 
   test('an empty commit is a key rotation any member may make', () => {
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, []), context())).toBe('accept')
+    expect(defaultCommitPolicy({ incoming: commit(MEMBER_LEAF, []), context: context() })).toBe(
+      'accept',
+    )
   })
 
   test('an admin cannot launder a member by-reference remove of a third party', () => {
     // The committer is an admin, but the Remove was authored by a member; the
     // effective sender is the member, so the third-party remove is rejected.
     const laundered = commit(ADMIN_LEAF, [withSender(removeProposal(THIRD_LEAF), MEMBER_LEAF)])
-    expect(defaultCommitPolicy(laundered, context())).toBe('reject')
+    expect(defaultCommitPolicy({ incoming: laundered, context: context() })).toBe('reject')
   })
 
   test('a commit mixing a passing and a failing proposal is rejected', () => {
@@ -470,12 +535,12 @@ describe('defaultCommitPolicy', () => {
       withSender(taggedProposal(defaultProposalTypes.update), undefined),
       withSender(addProposal(MEMBER_DID), undefined),
     ])
-    expect(defaultCommitPolicy(mixed, context())).toBe('reject')
+    expect(defaultCommitPolicy({ incoming: mixed, context: context() })).toBe('reject')
   })
 
   test('an unknown proposal type is rejected even for an admin', () => {
     const unknown = commit(ADMIN_LEAF, [withSender(customProposal(0xa0a0), undefined)])
-    expect(defaultCommitPolicy(unknown, context())).toBe('reject')
+    expect(defaultCommitPolicy({ incoming: unknown, context: context() })).toBe('reject')
   })
 
   test('a standalone by-reference proposal is gated by its own sender', () => {
@@ -483,19 +548,19 @@ describe('defaultCommitPolicy', () => {
       kind: 'proposal' as const,
       proposal: withSender(removeProposal(THIRD_LEAF), MEMBER_LEAF),
     }
-    expect(defaultCommitPolicy(thirdPartyRemove, context())).toBe('reject')
+    expect(defaultCommitPolicy({ incoming: thirdPartyRemove, context: context() })).toBe('reject')
 
     const selfRemove = {
       kind: 'proposal' as const,
       proposal: withSender(removeProposal(MEMBER_LEAF), MEMBER_LEAF),
     }
-    expect(defaultCommitPolicy(selfRemove, context())).toBe('accept')
+    expect(defaultCommitPolicy({ incoming: selfRemove, context: context() })).toBe('accept')
 
     const update = {
       kind: 'proposal' as const,
       proposal: withSender(taggedProposal(defaultProposalTypes.update), MEMBER_LEAF),
     }
-    expect(defaultCommitPolicy(update, context())).toBe('accept')
+    expect(defaultCommitPolicy({ incoming: update, context: context() })).toBe('accept')
   })
 
   test('a standalone external_init is rejected', () => {
@@ -503,22 +568,25 @@ describe('defaultCommitPolicy', () => {
       kind: 'proposal' as const,
       proposal: withSender(taggedProposal(defaultProposalTypes.external_init), MEMBER_LEAF),
     }
-    expect(defaultCommitPolicy(standalone, context())).toBe('reject')
+    expect(defaultCommitPolicy({ incoming: standalone, context: context() })).toBe('reject')
   })
 
   test('the policy never throws, even on an unresolvable sender', () => {
     expect(() =>
-      defaultCommitPolicy(
-        commit(undefined, [withSender(addProposal(MEMBER_DID), undefined)]),
-        context(),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(undefined, [withSender(addProposal(MEMBER_DID), undefined)]),
+        context: context(),
+      }),
     ).not.toThrow()
   })
 
   test('an admin may remove a plain member', () => {
     const remove = removeProposal(MEMBER_LEAF)
     expect(
-      defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(remove, undefined)]), context()),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context: context(),
+      }),
     ).toBe('accept')
   })
 
@@ -530,19 +598,19 @@ describe('defaultCommitPolicy', () => {
     ])
     const remove = removeProposal(THIRD_LEAF)
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(remove, undefined)]),
-        context({ baseRoster: roles, candidateRoster: roles }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context: context({ baseRoster: roles, candidateRoster: roles }),
+      }),
     ).toBe('reject')
   })
 
   test('removing an admin the same envelope demoted to member is accepted', () => {
     const remove = removeProposal(THIRD_LEAF)
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(remove, undefined)]),
-        context({
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context: context({
           baseRoster: roster([
             [ADMIN_DID, 'admin'],
             [THIRD_DID, 'admin'],
@@ -552,7 +620,7 @@ describe('defaultCommitPolicy', () => {
             [THIRD_DID, 'member'],
           ]),
         }),
-      ),
+      }),
     ).toBe('accept')
   })
 
@@ -561,17 +629,20 @@ describe('defaultCommitPolicy', () => {
     // must demote itself in the same envelope before it may remove its own leaf.
     const remove = removeProposal(ADMIN_LEAF)
     expect(
-      defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(remove, undefined)]), context()),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context: context(),
+      }),
     ).toBe('reject')
   })
 
   test('an admin may self-remove when the same envelope demotes it to member', () => {
     const remove = removeProposal(ADMIN_LEAF)
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(remove, undefined)]),
-        context({ candidateRoster: roster([[ADMIN_DID, 'member']]) }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context: context({ candidateRoster: roster([[ADMIN_DID, 'member']]) }),
+      }),
     ).toBe('accept')
   })
 
@@ -580,9 +651,12 @@ describe('defaultCommitPolicy', () => {
     // group's own roster never granted a role to. Honest paths always enact the grant in the
     // same commit, so a DID absent from the candidate roster is one nothing admitted.
     const add = addProposal(OUTSIDER_DID)
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(add, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('an add is accepted when only the candidate roster grants the added DID', () => {
@@ -596,10 +670,10 @@ describe('defaultCommitPolicy', () => {
     ])
     const add = addProposal(OUTSIDER_DID)
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(add, undefined)]),
-        context({ candidateRoster: granted }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context: context({ candidateRoster: granted }),
+      }),
     ).toBe('accept')
   })
 
@@ -607,17 +681,23 @@ describe('defaultCommitPolicy', () => {
     // A re-add — a second device, or a rejoin after removal — enacts no new entry. The rule
     // asks whether the added DID holds a role, never whether this commit granted it.
     const add = addProposal(MEMBER_DID)
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(add, undefined)]), context())).toBe(
-      'accept',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context: context(),
+      }),
+    ).toBe('accept')
   })
 
   test('a non-admin add of a granted DID is still rejected', () => {
     // The admin gate runs first and is unchanged: a granted DID does not let a member add.
     const add = addProposal(MEMBER_DID)
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(add, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('an add with an empty identity is rejected even if the roster grants it', () => {
@@ -626,10 +706,10 @@ describe('defaultCommitPolicy', () => {
       ['', 'member'],
     ])
     expect(
-      defaultCommitPolicy(
-        commit(ADMIN_LEAF, [withSender(addProposal(''), undefined)]),
-        context({ candidateRoster: granted }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(addProposal(''), undefined)]),
+        context: context({ candidateRoster: granted }),
+      }),
     ).toBe('reject')
   })
 
@@ -638,9 +718,12 @@ describe('defaultCommitPolicy', () => {
       credentialType: defaultCredentialTypes.x509,
       certificates: [],
     })
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(add, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('an add whose credential identity is malformed is rejected without throwing', () => {
@@ -651,8 +734,8 @@ describe('defaultCommitPolicy', () => {
       identity: new TextEncoder().encode('not json at all'),
     })
     const incoming = commit(ADMIN_LEAF, [withSender(add, undefined)])
-    expect(() => defaultCommitPolicy(incoming, context())).not.toThrow()
-    expect(defaultCommitPolicy(incoming, context())).toBe('reject')
+    expect(() => defaultCommitPolicy({ incoming, context: context() })).not.toThrow()
+    expect(defaultCommitPolicy({ incoming, context: context() })).toBe('reject')
   })
 
   test('a standalone add of an ungranted DID is rejected', () => {
@@ -662,7 +745,7 @@ describe('defaultCommitPolicy', () => {
       kind: 'proposal' as const,
       proposal: withSender(addProposal(OUTSIDER_DID), ADMIN_LEAF),
     }
-    expect(defaultCommitPolicy(standalone, context())).toBe('reject')
+    expect(defaultCommitPolicy({ incoming: standalone, context: context() })).toBe('reject')
   })
 
   test('psk and reinit stay admin-gated and read no leaf', () => {
@@ -671,10 +754,16 @@ describe('defaultCommitPolicy', () => {
     for (const proposalType of [defaultProposalTypes.psk, defaultProposalTypes.reinit]) {
       const proposal = taggedProposal(proposalType)
       expect(
-        defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(proposal, undefined)]), context()),
+        defaultCommitPolicy({
+          incoming: commit(ADMIN_LEAF, [withSender(proposal, undefined)]),
+          context: context(),
+        }),
       ).toBe('accept')
       expect(
-        defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(proposal, undefined)]), context()),
+        defaultCommitPolicy({
+          incoming: commit(MEMBER_LEAF, [withSender(proposal, undefined)]),
+          context: context(),
+        }),
       ).toBe('reject')
     }
   })
@@ -690,9 +779,12 @@ describe('defaultCommitPolicy', () => {
     })
     // An admin-gated proposal from the device leaf is accepted because
     // authority(deviceDID) === profileDID === admin.
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(psk, undefined)]), ctx)).toBe(
-      'accept',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(psk, undefined)]),
+        context: ctx,
+      }),
+    ).toBe('accept')
   })
 
   test('a device of a NON-admin profile is not admin', () => {
@@ -704,9 +796,12 @@ describe('defaultCommitPolicy', () => {
       didOfLeaf: (leafIndex) => (leafIndex === ADMIN_LEAF ? deviceDID : undefined),
       controllerOf: (did) => (did === normalizeDID(deviceDID) ? nonAdminProfileDID : undefined),
     })
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(psk, undefined)]), ctx)).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(ADMIN_LEAF, [withSender(psk, undefined)]),
+        context: ctx,
+      }),
+    ).toBe('reject')
   })
 
   test('a device-only commit head-move by a non-admin sender is accepted', () => {
@@ -714,10 +809,10 @@ describe('defaultCommitPolicy', () => {
     // proposal, authorized structurally because enactsOnlyDeviceEntries is true.
     const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
     expect(
-      defaultCommitPolicy(
-        commit(MEMBER_LEAF, [withSender(gce, undefined)]),
-        context({ enactsOnlyDeviceEntries: true }),
-      ),
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(gce, undefined)]),
+        context: context({ enactsOnlyDeviceEntries: true }),
+      }),
     ).toBe('accept')
   })
 
@@ -725,9 +820,12 @@ describe('defaultCommitPolicy', () => {
     // Same proposal shape as the accepted case above, but enactsOnlyDeviceEntries stays false
     // (the default) — a mixed or non-device commit falls back to the plain admin rule.
     const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(gce, undefined)]),
+        context: context(),
+      }),
+    ).toBe('reject')
   })
 
   test('an add matching an enacted device add entry is accepted for a non-admin sender', () => {
@@ -735,9 +833,12 @@ describe('defaultCommitPolicy', () => {
     const ctx = context({
       enactedDeviceEntries: [{ subject: normalizeDID(OUTSIDER_DID), op: 'add' }],
     })
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), ctx)).toBe(
-      'accept',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(add, undefined)]),
+        context: ctx,
+      }),
+    ).toBe('accept')
   })
 
   test('an add with no matching enacted device add entry is rejected for a non-admin sender', () => {
@@ -746,9 +847,12 @@ describe('defaultCommitPolicy', () => {
       // Wrong op: a revoke entry for the same subject does not authorize an Add.
       enactedDeviceEntries: [{ subject: normalizeDID(OUTSIDER_DID), op: 'revoke' }],
     })
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), ctx)).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(add, undefined)]),
+        context: ctx,
+      }),
+    ).toBe('reject')
   })
 
   test('a remove matching an enacted device revoke entry is accepted for a non-admin sender', () => {
@@ -756,9 +860,12 @@ describe('defaultCommitPolicy', () => {
     const ctx = context({
       enactedDeviceEntries: [{ subject: normalizeDID(THIRD_DID), op: 'revoke' }],
     })
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), ctx)).toBe(
-      'accept',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(remove, undefined)]),
+        context: ctx,
+      }),
+    ).toBe('accept')
   })
 
   test('a remove with no matching enacted device revoke entry is rejected for a non-admin sender', () => {
@@ -767,9 +874,12 @@ describe('defaultCommitPolicy', () => {
       // Matches a different subject entirely.
       enactedDeviceEntries: [{ subject: normalizeDID(OUTSIDER_DID), op: 'revoke' }],
     })
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), ctx)).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(remove, undefined)]),
+        context: ctx,
+      }),
+    ).toBe('reject')
   })
 
   test('the anti-demotion guard still rejects a remove of an admin leaf even with a matching revoke entry', () => {
@@ -785,9 +895,12 @@ describe('defaultCommitPolicy', () => {
       candidateRoster: roles,
       enactedDeviceEntries: [{ subject: normalizeDID(THIRD_DID), op: 'revoke' }],
     })
-    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), ctx)).toBe(
-      'reject',
-    )
+    expect(
+      defaultCommitPolicy({
+        incoming: commit(MEMBER_LEAF, [withSender(remove, undefined)]),
+        context: ctx,
+      }),
+    ).toBe('reject')
   })
 })
 
@@ -815,7 +928,10 @@ test('lifecycle extension policy pins caller bytes and refuses reserved installa
   const currentExtensions = [anchor, headExtension(HEAD_BYTES), extraExtension(EXTRA_BYTES)]
   const ctx = context({ currentExtensions })
   const evaluate = (extensions: Array<GroupContextExtension>) =>
-    defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gceProposal(extensions), undefined)]), ctx)
+    defaultCommitPolicy({
+      incoming: commit(ADMIN_LEAF, [withSender(gceProposal(extensions), undefined)]),
+      context: ctx,
+    })
   expect(evaluate(currentExtensions)).toBe('accept')
   expect(evaluate([...currentExtensions, reservedExtension(new Uint8Array())])).toBe('reject')
   expect(evaluate([anchor, headExtension(HEAD_BYTES), extraExtension(new Uint8Array([1]))])).toBe(

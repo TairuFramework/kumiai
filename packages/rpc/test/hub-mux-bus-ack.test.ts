@@ -11,8 +11,11 @@ describe('the bus view relays its ack', () => {
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
 
     let release: (() => void) | undefined
-    mux.bus.subscribe('topic:x', (_payload, ack) => {
-      release = ack
+    mux.bus.subscribe({
+      topicID: 'topic:x',
+      onMessage: (_payload, ack) => {
+        release = ack
+      },
     })
     await flush()
 

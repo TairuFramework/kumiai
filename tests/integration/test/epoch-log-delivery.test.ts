@@ -70,7 +70,9 @@ async function setup(
     )
   const group = options.lifecycle
     ? (
-        await createGroup(aliceID, 'delivery-integration', {
+        await createGroup({
+          identity: aliceID,
+          groupID: 'delivery-integration',
           controllerLog: { chain: [lifecycle.inception], events: [] },
           controller: await lifecycle.timedBinding({ identity: aliceID, iat: 100, exp: 500 }),
         })
@@ -79,13 +81,18 @@ async function setup(
   const material = options.lifecycle
     ? {
         invite: (await createInvite({ group, identity: aliceID, recipientDID: bobID.id })).invite,
-        bundle: await createKeyPackageBundle(bobID, {
+        bundle: await createKeyPackageBundle({
+          identity: bobID,
           controller: await lifecycle.timedBinding({ identity: bobID, iat: 100, exp: 200 }),
         }),
       }
     : await mintInvite({ admin: group, adminIdentity: aliceID, invitee: bobID, bodies })
   bodies.publish(material.invite)
-  const added = await commitInvite(group, material.bundle.publicPackage, material.invite)
+  const added = await commitInvite({
+    group,
+    keyPackage: material.bundle.publicPackage,
+    invite: material.invite,
+  })
   const joined = await joinFromWelcome({
     identity: bobID,
     invite: material.invite,
@@ -131,7 +138,9 @@ test('real MLS delivers accepted plaintext after a commit overtakes publication'
       !injected
     ) {
       injected = true
-      await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
+      await alice.peer.commit({
+        build: buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'),
+      })
     }
     return publish(params)
   })
@@ -145,7 +154,9 @@ test('real MLS delivers accepted plaintext after a commit overtakes publication'
     (m) => m.senderDID === bob.identity.id && m.topicID !== topic,
   )
   expect(publications).toHaveLength(2)
-  expect(publications.at(-1)?.topicID).toBe(protocolTopic(anchor.secret, anchor.epoch, 'chat'))
+  expect(publications.at(-1)?.topicID).toBe(
+    protocolTopic({ secret: anchor.secret, epoch: anchor.epoch, protocol: 'chat' }),
+  )
   expect(bob.handle().epoch).toBe(alice.handle().epoch)
 })
 
@@ -170,25 +181,30 @@ test.each([
     let bob = initial.bob
     const topic = commitTopic(await deriveRecoverySecret(alice.handle()))
     const commit = (value: string) =>
-      alice.peer.commit(async () => {
-        const token = await signLedgerEntry(alice.identity, {
-          groupID: alice.handle().groupID,
-          type: 'note',
-          subject: alice.identity.id,
-          value,
-        })
-        const result = await commitLedgerEntries(alice.handle(), [token])
-        return {
-          commit: result.commitMessage,
-          bodies: [token],
-          kind: 'ledger',
-          journal: encodeJournal(result.newGroup),
-          onAccepted: () => alice.adopt(result.newGroup),
-        }
+      alice.peer.commit({
+        build: async () => {
+          const token = await signLedgerEntry({
+            identity: alice.identity,
+            entry: {
+              groupID: alice.handle().groupID,
+              type: 'note',
+              subject: alice.identity.id,
+              value,
+            },
+          })
+          const result = await commitLedgerEntries({ group: alice.handle(), tokens: [token] })
+          return {
+            commit: result.commitMessage,
+            bodies: [token],
+            kind: 'ledger',
+            journal: encodeJournal(result.newGroup),
+            onAccepted: () => alice.adopt(result.newGroup),
+          }
+        },
       })
     await commit('floor')
     await vi.waitFor(() => expect(bob.handle().epoch).toBe(alice.handle().epoch))
-    hub.log.unsubscribe?.(bob.identity.id, topic)
+    hub.log.unsubscribe?.({ subscriberDID: bob.identity.id, topicID: topic })
     await commit('gap')
     hub.log.trim(topic, '999999999999')
     if (fresh) {
@@ -212,7 +228,7 @@ test.each([
       await bob.peer.resync()
       await vi.waitFor(() => expect(events.some((event) => event.phase === 'started')).toBe(true))
     } else {
-      hub.log.subscribe(bob.identity.id, topic)
+      hub.log.subscribe({ subscriberDID: bob.identity.id, topicID: topic })
       if (expired) now.mockReturnValue(250_000)
     }
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'bound recovery' } })
@@ -246,9 +262,9 @@ test('real MLS holds removed senders and clears their accepted plaintext', async
   const { hub, alice, bob, received } = await setup()
   const secret = await deriveRecoverySecret(alice.handle())
   const topic = commitTopic(secret)
-  hub.log.unsubscribe?.(bob.identity.id, topic)
-  await alice.peer.commit(buildRemoveCommit(alice, bob.identity.id))
-  hub.log.subscribe(bob.identity.id, topic)
+  hub.log.unsubscribe?.({ subscriberDID: bob.identity.id, topicID: topic })
+  await alice.peer.commit({ build: buildRemoveCommit(alice, bob.identity.id) })
+  hub.log.subscribe({ subscriberDID: bob.identity.id, topicID: topic })
   await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } })
   await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]), { timeout: 1500 })
   expect(received).toEqual([])

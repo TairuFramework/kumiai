@@ -49,6 +49,21 @@ type PendingEntry = {
   onDispose: () => void
 }
 
+export type BroadcastClientDispatchParams = {
+  prc: string
+  data?: Record<string, unknown>
+}
+
+export type BroadcastClientRequestParams = {
+  prc: string
+  prm?: unknown
+} & RequestOptions
+
+export type BroadcastClientGatherParams = {
+  prc: string
+  prm?: unknown
+} & GatherOptions
+
 export class BroadcastClient extends Disposer {
   #transport: TransportType<BroadcastMessage, BroadcastMessage>
   #getRandomID: () => string
@@ -94,11 +109,11 @@ export class BroadcastClient extends Disposer {
     }
   }
 
-  async dispatch(prc: string, data: Record<string, unknown> = {}): Promise<void> {
-    await this.#transport.write(buildEventMessage(prc, data))
+  async dispatch({ prc, data = {} }: BroadcastClientDispatchParams): Promise<void> {
+    await this.#transport.write(buildEventMessage({ prc, data }))
   }
 
-  async request(prc: string, prm: unknown = {}, options: RequestOptions = {}): Promise<unknown> {
+  async request({ prc, prm = {}, ...options }: BroadcastClientRequestParams): Promise<unknown> {
     const rid = this.#getRandomID()
     const errorThreshold = options.errorThreshold ?? Number.POSITIVE_INFINITY
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -141,11 +156,11 @@ export class BroadcastClient extends Disposer {
     })
   }
 
-  async gather(
-    prc: string,
-    prm: unknown = {},
-    options: GatherOptions = {},
-  ): Promise<Array<GatheredReply>> {
+  async gather({
+    prc,
+    prm = {},
+    ...options
+  }: BroadcastClientGatherParams): Promise<Array<GatheredReply>> {
     if (options.signal?.aborted) return []
     const rid = this.#getRandomID()
     const quorum = options.quorum ?? Number.POSITIVE_INFINITY

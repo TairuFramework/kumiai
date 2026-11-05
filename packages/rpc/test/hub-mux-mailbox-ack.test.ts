@@ -26,8 +26,8 @@ describe('the mailbox facade relays its ack', () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
 
-    mux.mailbox.subscribe('bob', 'topic:x')
-    const subscription = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    mux.mailbox.subscribe({ subscriberDID: 'bob', topicID: 'topic:x' })
+    const subscription = mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
     const iterator = subscription[Symbol.asyncIterator]()
     await flush()
 
@@ -52,11 +52,11 @@ describe('the mailbox facade relays its ack', () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
 
-    mux.mailbox.subscribe('bob', 'topic:x')
+    mux.mailbox.subscribe({ subscriberDID: 'bob', topicID: 'topic:x' })
     // Held open and never read or acked: if this scoped sink were (wrongly) a holder for every
     // topic rather than just its own, it would keep a topic:y frame pending forever, since
     // nothing here ever closes or acks it.
-    mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
 
     let ackY: (() => void) | undefined
     mux.onInbound('topic:y', (_message, ack) => {
@@ -85,8 +85,8 @@ describe('the mailbox facade relays its ack', () => {
     const { hub: wrappedHub, ackCalls } = hubCountingAcks(new DurableFakeHub())
     const mux = createHubMux({ hub: wrappedHub, localDID: 'bob', onSubscribeFailed: () => {} })
 
-    mux.mailbox.subscribe('bob', 'topic:x')
-    const subscription = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    mux.mailbox.subscribe({ subscriberDID: 'bob', topicID: 'topic:x' })
+    const subscription = mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
     const iterator = subscription[Symbol.asyncIterator]()
     await flush()
 
@@ -112,8 +112,8 @@ describe('the mailbox facade relays its ack', () => {
     const { hub: wrappedHub, ackCalls } = hubCountingAcks(new DurableFakeHub())
     const mux = createHubMux({ hub: wrappedHub, localDID: 'bob', onSubscribeFailed: () => {} })
 
-    mux.mailbox.subscribe('bob', 'topic:x')
-    const subscription = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    mux.mailbox.subscribe({ subscriberDID: 'bob', topicID: 'topic:x' })
+    const subscription = mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
     await flush()
 
     // Two frames delivered, neither ever pulled via `next()` — they sit unread in `queue`.
@@ -143,8 +143,8 @@ describe('the mailbox facade relays its ack', () => {
     const { hub: wrappedHub, ackCalls } = hubCountingAcks(new DurableFakeHub())
     const mux = createHubMux({ hub: wrappedHub, localDID: 'bob', onSubscribeFailed: () => {} })
 
-    mux.mailbox.subscribe('bob', 'topic:x')
-    const subscription = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    mux.mailbox.subscribe({ subscriberDID: 'bob', topicID: 'topic:x' })
+    const subscription = mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
     const iterator = subscription[Symbol.asyncIterator]()
     await flush()
 
@@ -170,9 +170,9 @@ describe('the mailbox facade relays its ack', () => {
     const { hub: wrappedHub, ackCalls } = hubCountingAcks(new DurableFakeHub())
     const mux = createHubMux({ hub: wrappedHub, localDID: 'bob', onSubscribeFailed: () => {} })
 
-    mux.mailbox.subscribe('bob', 'topic:x')
-    const a = mux.mailbox.receive('bob', { topicID: 'topic:x' })
-    const b = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    mux.mailbox.subscribe({ subscriberDID: 'bob', topicID: 'topic:x' })
+    const a = mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
+    const b = mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
     const iterA = a[Symbol.asyncIterator]()
     const iterB = b[Symbol.asyncIterator]()
     await flush()
@@ -202,8 +202,8 @@ describe('the mailbox facade relays its ack', () => {
     const { hub: wrappedHub, ackCalls } = hubCountingAcks(new DurableFakeHub())
     const mux = createHubMux({ hub: wrappedHub, localDID: 'bob', onSubscribeFailed: () => {} })
 
-    mux.mailbox.subscribe('bob', 'topic:x')
-    const subscription = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    mux.mailbox.subscribe({ subscriberDID: 'bob', topicID: 'topic:x' })
+    const subscription = mux.mailbox.receive({ subscriberDID: 'bob', topicID: 'topic:x' })
     const iterator = subscription[Symbol.asyncIterator]()
     await flush()
 

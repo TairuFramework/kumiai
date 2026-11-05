@@ -69,17 +69,20 @@ describe('createWakeKeys', () => {
 
   test('opens what the hub would seal for it', () => {
     const keys = createWakeKeys()
-    const body = sealWakeHint(
-      { topicID: 'topic-a', sequenceID: '007', count: 2 },
-      {
+    const body = sealWakeHint({
+      hint: { topicID: 'topic-a', sequenceID: '007', count: 2 },
+      recipient: {
         publicKey: new Uint8Array(Buffer.from(keys.publicKey, 'base64url')),
         authSecret: new Uint8Array(Buffer.from(keys.authSecret, 'base64url')),
       },
-    )
+    })
     expect(
-      openWakeHint(body, {
-        privateKey: keys.privateKey,
-        authSecret: new Uint8Array(Buffer.from(keys.authSecret, 'base64url')),
+      openWakeHint({
+        body,
+        opener: {
+          privateKey: keys.privateKey,
+          authSecret: new Uint8Array(Buffer.from(keys.authSecret, 'base64url')),
+        },
       }),
     ).toEqual({ topicID: 'topic-a', sequenceID: '007', count: 2 })
   })
@@ -255,18 +258,21 @@ describe('wake registration round trip', () => {
     // The base64url round trip through registration, decoded here exactly as the hub's own
     // dispatch path would, is what this test exists to prove — not the seal/open primitives
     // themselves, which have their own coverage above.
-    const body = sealWakeHint(
-      { topicID: 'topic-a', sequenceID: '007', count: 2 },
-      {
+    const body = sealWakeHint({
+      hint: { topicID: 'topic-a', sequenceID: '007', count: 2 },
+      recipient: {
         publicKey: fromB64U(stored.publicKey),
         authSecret: fromB64U(stored.authSecret),
       },
-    )
+    })
 
     expect(
-      openWakeHintViaIndex(body, {
-        privateKey: keys.privateKey,
-        authSecret: fromB64U(keys.authSecret),
+      openWakeHintViaIndex({
+        body,
+        opener: {
+          privateKey: keys.privateKey,
+          authSecret: fromB64U(keys.authSecret),
+        },
       }),
     ).toEqual({ topicID: 'topic-a', sequenceID: '007', count: 2 })
 

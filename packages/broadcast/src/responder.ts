@@ -10,21 +10,27 @@ export type BusEvent = { data: unknown; senderDID?: string }
 /** Event fan-out keyed by procedure name. */
 export type BusEvents = Record<string, BusEvent>
 
-export type BroadcastHandler = (
-  prm: unknown,
-  context?: { senderDID?: string; signal?: AbortSignal },
-) => unknown | Promise<unknown>
+export type BroadcastHandlerParams = {
+  prm: unknown
+  context?: { senderDID?: string; signal?: AbortSignal }
+}
+
+export type BroadcastHandler = ({
+  prm,
+  context,
+}: BroadcastHandlerParams) => unknown | Promise<unknown>
 export type SuppressConfig = { jitterMs?: number; suppressTtlMs?: number }
 export type SuppressibleHandler = BroadcastHandler & { suppress: SuppressConfig }
 
 const DEFAULT_JITTER_MS = 250
 const DEFAULT_SUPPRESS_TTL_MS = 30_000
 
+export type SuppressibleParams = {
+  handler: BroadcastHandler
+} & SuppressConfig
+
 /** Tag a handler for jitter + observe-and-suppress storm-collapse. */
-export function suppressible(
-  handler: BroadcastHandler,
-  config: SuppressConfig = {},
-): SuppressibleHandler {
+export function suppressible({ handler, ...config }: SuppressibleParams): SuppressibleHandler {
   return Object.assign(handler.bind(null) as BroadcastHandler, { suppress: config })
 }
 

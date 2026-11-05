@@ -14,7 +14,7 @@ import { deferred } from './fixtures/single-connection-host.js'
 const entry = (text: string) => ({
   protocol: 'chat',
   prc: 'chat/posted',
-  data: encodeEventFrame('chat/posted', { text }),
+  data: encodeEventFrame({ prc: 'chat/posted', data: { text } }),
 })
 const admissible = () => ({ epoch: 1, admissible: true as const })
 
@@ -244,7 +244,7 @@ test('a live listing failure cannot erase accepted entries or pending reservatio
 
 test('peer enforces the encoded plaintext boundary and lapsed admission before durable acceptance', async () => {
   const member = makeMLSPeer(new FakeHub(), 'alice', new Uint8Array(32).fill(2))
-  const overhead = encodeEventFrame('chat/posted', { text: '' }).byteLength
+  const overhead = encodeEventFrame({ prc: 'chat/posted', data: { text: '' } }).byteLength
   const text = 'x'.repeat(524_288 - overhead)
   await expect(
     member.peer.protocol('chat').dispatch('chat/posted', { data: { text: `${text}x` } }),

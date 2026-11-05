@@ -124,9 +124,8 @@ describe('createHubTunnelTransport reconnect', () => {
 
     const hubWithoutEvents: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
-      subscribe: (subscriberDID: string, topicID: string) =>
-        fakeHub.subscribe(subscriberDID, topicID),
-      receive: (subscriberDID: string): HubReceiveSubscription => fakeHub.receive(subscriberDID),
+      subscribe: ({ subscriberDID, topicID }) => fakeHub.subscribe(subscriberDID, topicID),
+      receive: ({ subscriberDID }): HubReceiveSubscription => fakeHub.receive(subscriberDID),
     }
 
     const transport = createHubTunnelTransport<Msg, Msg>({

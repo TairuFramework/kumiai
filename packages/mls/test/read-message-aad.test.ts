@@ -14,9 +14,9 @@ import {
 
 describe('readMessageAAD', () => {
   test('reads an application frame before opening and without a receiving key', async () => {
-    const { group } = await createGroup(randomIdentity(), 'read-aad')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'read-aad' })
     const aad = new Uint8Array([1, 1, 0, 255])
-    const sealed = await group.encrypt(new Uint8Array([42]), { aad })
+    const sealed = await group.encrypt({ plaintext: new Uint8Array([42]), aad })
     expect(readMessageAAD(sealed)).toEqual(aad)
   })
 
@@ -45,7 +45,11 @@ describe('readMessageAAD', () => {
         if (token == null) throw new Error(`missing entry ${id}`)
         return token
       })
-    const { group } = await createGroup(alice, 'rewrite-aad', { resolveLedgerEntries })
+    const { group } = await createGroup({
+      identity: alice,
+      groupID: 'rewrite-aad',
+      resolveLedgerEntries,
+    })
     const { invite } = await createInvite({
       group,
       identity: alice,
@@ -53,8 +57,8 @@ describe('readMessageAAD', () => {
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle(bob)
-    const added = await commitInvite(group, bundle.publicPackage, invite)
+    const bundle = await createKeyPackageBundle({ identity: bob })
+    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
     expect(readMessageAAD(added.commitMessage)).toBeNull()
     const { group: receiver } = await processWelcome({
       identity: bob,
@@ -65,17 +69,22 @@ describe('readMessageAAD', () => {
       options: { resolveLedgerEntries },
     })
     const originalAAD = new Uint8Array([1, 1, 97])
-    const sealed = await added.newGroup.encrypt(new Uint8Array([42]), { aad: originalAAD })
+    const sealed = await added.newGroup.encrypt({
+      plaintext: new Uint8Array([42]),
+      aad: originalAAD,
+    })
     const decoded = decode(mlsMessageDecoder, sealed.slice())
     if (decoded?.wireformat !== wireformats.mls_private_message) throw new Error('expected private')
     decoded.privateMessage.authenticatedData[1] = 0
     const rewritten = encode(mlsMessageEncoder, decoded)
     expect(readMessageAAD(rewritten)).toEqual(new Uint8Array([1, 0, 97]))
     await expect(
-      receiver.decrypt(rewritten, { expectedAAD: new Uint8Array([1, 0, 97]) }),
+      receiver.decrypt({ message: rewritten, expectedAAD: new Uint8Array([1, 0, 97]) }),
     ).rejects.toThrow()
     // A rejected rewrite must not consume the original frame's key.
-    await expect(receiver.decrypt(sealed, { expectedAAD: originalAAD })).resolves.toMatchObject({
+    await expect(
+      receiver.decrypt({ message: sealed, expectedAAD: originalAAD }),
+    ).resolves.toMatchObject({
       payload: new Uint8Array([42]),
     })
   })

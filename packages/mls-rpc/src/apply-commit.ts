@@ -111,7 +111,8 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
       }),
   )
   try {
-    await handle.processMessage(commit, {
+    await handle.processMessage({
+      message: commit,
       ...(persist != null && {
         persist: async (current: GroupHandle) => {
           try {

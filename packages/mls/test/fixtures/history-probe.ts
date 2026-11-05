@@ -245,12 +245,17 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
         seal: 's'.repeat(gap - 7),
       })
     }
-    const { group } = await createGroup(alice, groupID, {
+    const { group } = await createGroup({
+      identity: alice,
+      groupID,
       controller: await binding(alice, prefix),
       controllerLog: { chain: prefix, events: [] },
       commitPolicy: () => 'accept',
     })
-    const bundle = await createKeyPackageBundle(bob, { controller: await binding(bob, prefix) })
+    const bundle = await createKeyPackageBundle({
+      identity: bob,
+      controller: await binding(bob, prefix),
+    })
     const tokens: Array<string> = []
     let proof: Array<SignedEvent> = []
     if (distribution === 'proof') {
@@ -300,32 +305,38 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
         if (!matched) throw new Error('Cannot reach exact history horizon')
       }
       tokens.push(
-        await signLedgerEntry(alice, {
-          type: 'kumiai.device',
-          groupID,
-          subject: controllerID,
-          value: {
-            effects: denyEffects(proof, target.id),
-            removed: [],
-            op: 'revoke',
-            subject: target.id,
-            proof: asControllerLog(proof),
-            revoked: [{ did: target.id }],
+        await signLedgerEntry({
+          identity: alice,
+          entry: {
+            type: 'kumiai.device',
+            groupID,
+            subject: controllerID,
+            value: {
+              effects: denyEffects(proof, target.id),
+              removed: [],
+              op: 'revoke',
+              subject: target.id,
+              proof: asControllerLog(proof),
+              revoked: [{ did: target.id }],
+            },
           },
         }),
       )
     }
     if (consumer)
       tokens.push(
-        await signLedgerEntry(alice, {
-          type: 'consumer.data',
-          groupID,
-          subject: bob.id,
-          value: { data: 'a'.repeat(64 * 1024), label: '組合 café 🚀' },
+        await signLedgerEntry({
+          identity: alice,
+          entry: {
+            type: 'consumer.data',
+            groupID,
+            subject: bob.id,
+            value: { data: 'a'.repeat(64 * 1024), label: '組合 café 🚀' },
+          },
         }),
       )
     const ids = tokens.map(ledgerEntryDigest)
-    const head = buildLedgerHeadExtension(computeHead(groupID, ids))
+    const head = buildLedgerHeadExtension(computeHead({ groupID, entryIDs: ids }))
     const result = await createCommit({
       context: group.context,
       state: group.state,
@@ -350,7 +361,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     const sealedEntries = entrySeal.sealEntries(await entrySeal.deriveEntryKey(group), ledger)
     const commitFrame = rpc.encodeHandshakeFrame(0, rpc.encodeCommitFrame(commit, sealedEntries))
     const derived = await deriveGroup(group, result.newState)
-    await derived.bootstrapLedger(tokens)
+    await derived.bootstrapLedger({ tokens })
     const { groupInfo } = await exportGroupInfo({ group: derived })
     const attestation = stringifyToken(
       await alice.signToken({

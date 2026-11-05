@@ -324,7 +324,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       throw new Error('cannot open: not a well-formed sealed frame')
     }
     if (sealedAt !== epoch) {
-      throw new FrameEpochError(sealedAt, epoch)
+      throw new FrameEpochError({ frameEpoch: sealedAt, handleEpoch: epoch })
     }
     // Tag-verify BEFORE the expectedAAD compare and BEFORE spending the generation: a tampered or
     // forged frame — including one an attacker rewrote by exploiting the XOR's linearity — must
@@ -370,7 +370,10 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       try {
         await pending.persistOpened(saveState(spentKey), record)
       } catch (error) {
-        throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
+        throw new AppFrameStorageError({
+          message: 'failed to persist opened app frame',
+          cause: error,
+        })
       }
       spent.add(spentKey)
       return { payload, senderDID, epoch: openedAt }
@@ -452,7 +455,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     // fell back to a default for an omitted label would hide the exact caller mistake the port's
     // required parameter exists to make loud. See {@link fakeEpochSecret}: its own default label
     // is a convenience for OTHER test call sites, not something this method may lean on.
-    exportSecret: (label, length = secret.length) => ({
+    exportSecret: ({ label, length = secret.length }) => ({
       secret: fakeEpochSecret(epoch, label, length, secret),
       epoch,
     }),

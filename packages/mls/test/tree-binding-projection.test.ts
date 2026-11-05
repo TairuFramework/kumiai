@@ -28,7 +28,7 @@ test.each([true, false])(
     // Keep local send admission independent of lifecycle expiry checks, which validate leaves.
     const own = state.ratchetTree[state.privatePath.leafIndex * 2]
     if (own?.nodeType !== nodeTypes.leaf) throw new Error('Missing own leaf')
-    own.leaf.credential = makeMLSCredential(setup.identity)
+    own.leaf.credential = makeMLSCredential({ identity: setup.identity })
     const leafIndex = group.listMembers().find((member) => member.id === target.id)?.leafIndex
     if (leafIndex == null) throw new Error('Missing target leaf')
     const node = state.ratchetTree[leafIndex * 2]

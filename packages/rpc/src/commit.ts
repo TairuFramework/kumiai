@@ -91,6 +91,11 @@ export type JournalEntry = {
   journal: Uint8Array
 }
 
+export type CommitJournalMarkAcceptedParams = {
+  publishID: string
+  sequenceID: string
+}
+
 /**
  * Durable single-slot journal, host-provided (the host already persists handle state; the peer
  * has no storage). Holds at most one pending commit — the peer's commit mutex written down: one
@@ -114,7 +119,7 @@ export type CommitJournal = {
    * Record that the hub accepted this commit as `sequenceID`. Must be durable before it
    * resolves, and must land before the host adopts.
    */
-  markAccepted(publishID: string, sequenceID: string): Promise<void>
+  markAccepted({ publishID, sequenceID }: CommitJournalMarkAcceptedParams): Promise<void>
   get(): Promise<JournalEntry | null>
   clear(publishID: string): Promise<void>
 }

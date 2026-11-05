@@ -45,10 +45,10 @@ describe('a returning peer reads the retained app frames of every epoch it walks
     // Alice posts at epoch 1, commits (nothing touches a leaf, so the anchor stays put), posts at
     // epoch 2, commits, posts at epoch 3. Three frames, three different sealing epochs, one topic.
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at one' } })
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at two' } })
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at three' } })
     await flush()
@@ -99,7 +99,7 @@ describe('a returning peer reads the retained app frames of every epoch it walks
     await alice.peer
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'first segment, epoch 1' } })
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     await alice.peer
       .protocol('chat')
@@ -125,7 +125,7 @@ describe('a returning peer reads the retained app frames of every epoch it walks
     await alice.peer
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'second segment, epoch 3' } })
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     await alice.peer
       .protocol('chat')

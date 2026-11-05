@@ -35,8 +35,8 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
   const finished = Symbol('proof needs no commit')
   let outcome: PublishRevokeResult | undefined
   try {
-    await peer.commit(
-      async () => {
+    await peer.commit({
+      build: async () => {
         const built = await access.read(async (group) => {
           const result = await revokeWithProof(group, input)
           return { result, priorTokens: new Set(group.ledgerTokens) }
@@ -54,13 +54,13 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
           kind: 'ledger',
           journal,
           onAccepted: async () => {
-            await guardedReplace(access, newGroup)
+            await guardedReplace({ access, next: newGroup })
             outcome = { status: 'committed', epoch: Number(epoch), effects }
           },
         }
       },
-      { holdLogSends: true },
-    )
+      holdLogSends: true,
+    })
   } catch (error) {
     if (error !== finished) throw error
   }

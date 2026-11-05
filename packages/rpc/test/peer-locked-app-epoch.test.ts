@@ -19,10 +19,10 @@ function lie(crypto: FakeCrypto, offset: number): FakeCrypto {
 }
 
 async function sealAt(epoch: number, topicID: string, text: string, intent: 'log' | 'ephemeral') {
-  return await createFakeCrypto({ epoch, localDID: 'alice' }).wrap(
-    encodeEventFrame('chat/posted', { text }),
-    { aad: encodeAppAAD({ topicID, intent }) },
-  )
+  return await createFakeCrypto({ epoch, localDID: 'alice' }).wrap({
+    bytes: encodeEventFrame({ prc: 'chat/posted', data: { text } }),
+    aad: encodeAppAAD({ topicID, intent }),
+  })
 }
 
 describe('app delivery, anchors and sealing ignore the epoch hint', () => {
@@ -31,7 +31,11 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
     async (offset) => {
       const hub = new DurableFakeHub()
       const secret = new Uint8Array(32).fill(0xc1)
-      const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+      const topicID = protocolTopic({
+        secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+        epoch: 1,
+        protocol: 'chat',
+      })
       for (const [epoch, text] of [
         [1, 'now'],
         [2, 'later'],
@@ -64,7 +68,11 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
     async (offset) => {
       const hub = new DurableFakeHub()
       const secret = new Uint8Array(32).fill(0xc2)
-      const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+      const topicID = protocolTopic({
+        secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+        epoch: 1,
+        protocol: 'chat',
+      })
       const seen: Array<unknown> = []
       const bob = makeMLSPeer(hub, 'bob', secret, {
         epoch: 1,
@@ -109,12 +117,14 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
 
       const build = buildLedgerCommit(alice, ['token'])
       await expect(
-        alice.peer.commit(async () => ({
-          ...(await build()),
-          onAccepted: async () => {
-            throw new Error('the process died here')
-          },
-        })),
+        alice.peer.commit({
+          build: async () => ({
+            ...(await build()),
+            onAccepted: async () => {
+              throw new Error('the process died here')
+            },
+          }),
+        }),
       ).rejects.toThrow('the process died here')
 
       expect(journal.slot()?.epoch).toBe(1)

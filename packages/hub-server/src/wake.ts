@@ -62,13 +62,13 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
       try {
         const registration = await params.registry.get(did)
         if (registration == null) return
-        const body = sealWakeHint(
-          { topicID, sequenceID, count },
-          {
+        const body = sealWakeHint({
+          hint: { topicID, sequenceID, count },
+          recipient: {
             publicKey: fromB64U(registration.publicKey),
             authSecret: fromB64U(registration.authSecret),
           },
-        )
+        })
         const verdict = await params.sender.send({ registration, body })
         switch (verdict) {
           case 'delivered':

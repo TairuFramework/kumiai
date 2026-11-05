@@ -36,16 +36,18 @@ test('dispose releases seal waiters while drained still waits for an accepted ho
     await alice.peer.replay()
     const build = buildLedgerCommit(alice, ['role:alice=admin'])
     const committing = alice.peer
-      .commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            accepting.release()
-            await accepted.promise
-            await pending.onAccepted()
-          },
-        }
+      .commit({
+        build: async () => {
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              accepting.release()
+              await accepted.promise
+              await pending.onAccepted()
+            },
+          }
+        },
       })
       .catch((error: unknown) => error)
     await accepting.promise
@@ -96,16 +98,18 @@ test('dispose waits for a transport write already inside host crypto', async () 
     await sealing.promise
     const build = buildLedgerCommit(alice, ['role:alice=admin'])
     const committing = alice.peer
-      .commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            accepting.release()
-            await accepted.promise
-            throw new Error('host acceptance failed')
-          },
-        }
+      .commit({
+        build: async () => {
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              accepting.release()
+              await accepted.promise
+              throw new Error('host acceptance failed')
+            },
+          }
+        },
       })
       .catch((error: unknown) => error)
     await accepting.promise

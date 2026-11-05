@@ -121,7 +121,7 @@ async function recordFirst() {
     proof: asControllerLog(log.slice(1)),
     revoked: [{ did: otherTarget }],
   })
-  const token = await signLedgerEntry(setup.identity, verified.entry)
+  const token = await signLedgerEntry({ identity: setup.identity, entry: verified.entry })
   const { group } = await enact(setup.group, [token])
   return { ...setup, group, log }
 }
@@ -442,43 +442,43 @@ describe('recorded log replay', () => {
         const initial = await lifecycleGroup()
         const second = agent(51)
         const members = await addMember(initial.group, second, await bindingFor(second))
-        const firstToken = await signLedgerEntry(
-          initial.identity,
-          proofEntry(initial.identity.id, otherTarget, {
+        const firstToken = await signLedgerEntry({
+          identity: initial.identity,
+          entry: proofEntry(initial.identity.id, otherTarget, {
             effects: denyEffects(firstLog.slice(1), otherTarget),
             removed: [],
             op: 'revoke',
             proof: asControllerLog(firstLog.slice(1)),
             revoked: [{ did: otherTarget }],
           }).entry,
-        )
+        })
         const first = await enact(members.group, [firstToken])
         publish(initial.tokens, [firstToken])
-        await members.joined.processMessage(first.message)
+        await members.joined.processMessage({ message: first.message })
         const proofSuffix = log.slice(2)
         expect(proofSuffix).toHaveLength(51)
-        const secondToken = await signLedgerEntry(
-          initial.identity,
-          proofEntry(initial.identity.id, target, {
+        const secondToken = await signLedgerEntry({
+          identity: initial.identity,
+          entry: proofEntry(initial.identity.id, target, {
             effects: denyEffects(proofSuffix, target),
             removed: [],
             op: 'revoke',
             proof: asControllerLog(proofSuffix),
             revoked: [{ did: target }],
           }).entry,
-        )
+        })
         const live = await enact(first.group, [secondToken])
         publish(initial.tokens, [secondToken])
         expect(live.group.registry.controllers.get(controllerID)?.recordedLog).toEqual({
           chain: log,
           events: [],
         })
-        expect(revocationOf(live.group, target)).toEqual({
+        expect(revocationOf({ group: live.group, did: target })).toEqual({
           controller: controllerID,
           proofRef: { chainIndex: 52 },
         })
         if (path === 'receive') {
-          await members.joined.processMessage(live.message)
+          await members.joined.processMessage({ message: live.message })
           expect(members.joined.registry).toEqual(live.group.registry)
         } else if (path === 'derivation') {
           expect((await deriveGroup(live.group, live.group.state)).registry).toEqual(
@@ -506,16 +506,16 @@ describe('recorded log replay', () => {
     const { group, identity } = await lifecycleGroup()
     const log = [inception, await revoke([inception], otherTarget)]
     log.push(await revoke(log, target))
-    const token = await signLedgerEntry(
+    const token = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, otherTarget, {
+      entry: proofEntry(identity.id, otherTarget, {
         effects: denyEffects(log.slice(1, 2), otherTarget),
         removed: [],
         op: 'revoke',
         proof: asControllerLog(log.slice(1, 2)),
         revoked: [{ did: otherTarget }],
       }).entry,
-    )
+    })
     const recorded = await enact(group, [token])
     const effects = await verifyLifecycleProof(
       recorded.group,
@@ -544,20 +544,20 @@ describe('recorded log replay', () => {
     })
     const nextLog = [...log, rotation]
     nextLog.push(await revoke(nextLog, target))
-    const token = await signLedgerEntry(
+    const token = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, target, {
+      entry: proofEntry(identity.id, target, {
         effects: denyEffects(nextLog.slice(2), target),
         removed: [],
         op: 'revoke',
         proof: asControllerLog(nextLog.slice(2)),
         revoked: [{ did: target }],
       }).entry,
-    )
+    })
     const next = await enact(group, [token])
     expect(next.group.registry.devices.get(otherTarget)?.status).toBe('revoked')
     expect(next.group.currentDenySet().has(normalizeDID(otherTarget))).toBe(true)
-    expect(revocationOf(next.group, otherTarget)).toEqual({
+    expect(revocationOf({ group: next.group, did: otherTarget })).toEqual({
       controller: controllerID,
       proofRef: { chainIndex: 1 },
     })
@@ -614,7 +614,7 @@ describe('live effect derivation', () => {
     const effects = await verifyLifecycleProof(group, verified)
     expect(effects.removeLeafIndices).toEqual([0])
     expect(effects.genFloor).toBe(1)
-    const token = await signLedgerEntry(identity, verified.entry)
+    const token = await signLedgerEntry({ identity, entry: verified.entry })
     // Replay intentionally uses a later tree; acceptance used the pre-commit tree above.
     const replay = await deriveGroup(group, group.state)
     await replay.applyLedgerEntries([token])
@@ -623,12 +623,12 @@ describe('live effect derivation', () => {
       genFloor: 1,
       timeFloor: 0,
     })
-    expect(revocationOf(replay, identity.id)).toEqual({
+    expect(revocationOf({ group: replay, did: identity.id })).toEqual({
       controller: controllerID,
       proofRef: { snapshot: 1 },
       reason: 'reset',
     })
-    expect(revocationOf(replay, otherTarget)).toEqual({
+    expect(revocationOf({ group: replay, did: otherTarget })).toEqual({
       controller: controllerID,
       proofRef: { chainIndex: 1 },
     })
@@ -678,10 +678,10 @@ describe('proof boundary cases', () => {
     if (seed == null) throw new Error('Missing seed')
     expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
     expect(group.ledgerTokens).toEqual([seed.token])
-    const clock = await signLedgerEntry(
+    const clock = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, controllerID, { op: 'clock', time: 100 }).entry,
-    )
+      entry: proofEntry(identity.id, controllerID, { op: 'clock', time: 100 }).entry,
+    })
     const registry = group.registry
     const roster = group.roster
     const failure = new Error('Control fold failed')
@@ -709,9 +709,12 @@ describe('proof boundary cases', () => {
       const identity = agent(41)
       const binding = await bindingFor(identity)
       const verifying = verifyLeafCredential(
-        makeMLSCredential(identity, {
-          ...binding,
-          prefix: [inception, { ...chainRevoke(crit), sigs: [] }],
+        makeMLSCredential({
+          identity,
+          controller: {
+            ...binding,
+            prefix: [inception, { ...chainRevoke(crit), sigs: [] }],
+          },
         }),
         identity.publicKey,
       )
@@ -745,7 +748,10 @@ describe('proof boundary cases', () => {
       ),
     ]
     const verifying = verifyLeafCredential(
-      makeMLSCredential(identity, { ...binding, prefix: [inception, { event, sigs }] }),
+      makeMLSCredential({
+        identity,
+        controller: { ...binding, prefix: [inception, { event, sigs }] },
+      }),
       identity.publicKey,
     )
     await expect(verifying).rejects.toBeInstanceOf(LeafBindingError)
@@ -795,7 +801,7 @@ describe('proof boundary cases', () => {
       proof: asControllerLog([inception, reset]),
       revoked: [],
     })
-    const token = await signLedgerEntry(identity, entry.entry)
+    const token = await signLedgerEntry({ identity, entry: entry.entry })
     const recorded = await enact(group, [token])
     await expect(verifyLifecycleProof(recorded.group, entry)).rejects.toMatchObject({
       reason: 'generation-floor',
@@ -854,9 +860,12 @@ describe('proof boundary cases', () => {
     })
     await expect(
       verifyLeafCredential(
-        makeMLSCredential(identity, {
-          ...binding,
-          prefix: [inception, rotation],
+        makeMLSCredential({
+          identity,
+          controller: {
+            ...binding,
+            prefix: [inception, rotation],
+          },
         }),
         identity.publicKey,
       ),
@@ -895,19 +904,19 @@ describe('proof boundary cases', () => {
       { did: child.id, cascadedFrom: trusted.id },
     ])
     expect(effects.removeLeafIndices).toEqual([1, 2])
-    const token = await signLedgerEntry(
+    const token = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, controllerID, {
+      entry: proofEntry(identity.id, controllerID, {
         effects: [],
         removed: [],
         op: 'reset',
         proof: asControllerLog(current),
         revoked: effects.revoked,
       }).entry,
-    )
+    })
     const replay = await deriveGroup(withChild.group, withChild.group.state)
     await replay.applyLedgerEntries([token])
-    expect(revocationOf(replay, child.id)).toEqual({
+    expect(revocationOf({ group: replay, did: child.id })).toEqual({
       controller: controllerID,
       proofRef: { snapshot: 1 },
       reason: 'reset',
@@ -919,24 +928,24 @@ describe('proof boundary cases', () => {
     const reset = await createReset({ seed: controllerSeed, profile: 0, gen: 1 })
     const prefix = [inception, reset]
     const { group, identity } = await lifecycleGroup(prefix)
-    const resetToken = await signLedgerEntry(
+    const resetToken = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, controllerID, {
+      entry: proofEntry(identity.id, controllerID, {
         effects: [],
         removed: [],
         op: 'reset',
         proof: asControllerLog(prefix),
         revoked: [],
       }).entry,
-    )
+    })
     const resetGroup = await enact(group, [resetToken])
     const binding = resetGroup.group.bindingOfDID(identity.id)
     if (binding?.capability == null) throw new Error('Missing leaf capability')
     const time = readCapability(binding.capability).payload.iat
-    const clock = await signLedgerEntry(
+    const clock = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, controllerID, { op: 'clock', time }).entry,
-    )
+      entry: proofEntry(identity.id, controllerID, { op: 'clock', time }).entry,
+    })
     const live = await enact(resetGroup.group, [clock])
     const restored = await restoreGroup({
       state: live.group.state,
@@ -960,22 +969,28 @@ describe('lifecycle ledger pipeline', () => {
     const { group, identity, tokens } = await lifecycleGroup()
     const recipient = agent(51)
     const members = await addMember(group, recipient, await bindingFor(recipient))
-    const token = await signLedgerEntry(identity, {
-      type: 'consumer.event',
-      groupID: group.groupID,
-      subject: target,
-      value: 'accepted',
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        type: 'consumer.event',
+        groupID: group.groupID,
+        subject: target,
+        value: 'accepted',
+      },
     })
     const result = await enact(members.group, [token])
     publish(tokens, [token])
-    await members.joined.processMessage(result.message)
+    await members.joined.processMessage({ message: result.message })
     expect(members.joined.ledgerTokens).toEqual([...group.ledgerTokens, token])
     expect(members.joined.registry).toEqual(result.group.registry)
-    const absentToken = await signLedgerEntry(agent(61), {
-      type: 'consumer.event',
-      groupID: group.groupID,
-      subject: target,
-      value: 'absent issuer',
+    const absentToken = await signLedgerEntry({
+      identity: agent(61),
+      entry: {
+        type: 'consumer.event',
+        groupID: group.groupID,
+        subject: target,
+        value: 'absent issuer',
+      },
     })
     await expect(enact(result.group, [absentToken])).rejects.toThrow(/no pre-commit/)
   })
@@ -988,16 +1003,16 @@ describe('lifecycle ledger pipeline', () => {
     if (seed == null) throw new Error('Missing seed')
     expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
     expect(members.joined.ledgerTokens).toEqual([seed.token])
-    const token = await signLedgerEntry(
+    const token = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, target, {
+      entry: proofEntry(identity.id, target, {
         effects: denyEffects([await revoke([inception], target)], target),
         removed: [],
         op: 'revoke',
         proof: asControllerLog([await revoke([inception], target)]),
         revoked: [{ did: otherTarget }],
       }).entry,
-    )
+    })
     await expect(enact(members.group, [token])).rejects.toMatchObject({
       reason: 'effects-mismatch',
     })
@@ -1005,7 +1020,7 @@ describe('lifecycle ledger pipeline', () => {
     const message = await rawEnact(members.group, [token])
     const epoch = members.joined.epoch
     const before = members.joined.registry
-    await expect(members.joined.processMessage(message)).rejects.toThrow()
+    await expect(members.joined.processMessage({ message })).rejects.toThrow()
     expect(members.joined.epoch).toBe(epoch)
     expect(members.joined.registry).toBe(before)
     expect(members.joined.ledgerTokens).toEqual([seed.token])
@@ -1016,16 +1031,16 @@ describe('lifecycle ledger pipeline', () => {
     const { group, identity, tokens } = await lifecycleGroup()
     const recipient = agent(51)
     const members = await addMember(group, recipient, await bindingFor(recipient))
-    const token = await signLedgerEntry(
+    const token = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, identity.id, {
+      entry: proofEntry(identity.id, identity.id, {
         op: 'register',
         controller: controllerID,
       }).entry,
-    )
+    })
     publish(tokens, [token])
     const message = await rawEnact(members.group, [token])
-    await expect(members.joined.processMessage(message)).rejects.toThrow()
+    await expect(members.joined.processMessage({ message })).rejects.toThrow()
     expect(members.joined.registry.devices.size).toBe(0)
   })
 
@@ -1040,16 +1055,16 @@ describe('lifecycle ledger pipeline', () => {
       seal: 'a'.repeat(389120),
     })
     const log = [inception, rotation, await revoke([inception, rotation], otherTarget)]
-    const token = await signLedgerEntry(
+    const token = await signLedgerEntry({
       identity,
-      proofEntry(identity.id, otherTarget, {
+      entry: proofEntry(identity.id, otherTarget, {
         effects: denyEffects(log.slice(1), otherTarget),
         removed: [],
         op: 'revoke',
         proof: asControllerLog(log.slice(1)),
         revoked: [{ did: otherTarget }],
       }).entry,
-    )
+    })
     const recorded = await enact(group, [token])
     const prior = log.at(-1)
     if (prior == null) throw new Error('Missing controller head')
@@ -1299,9 +1314,12 @@ describe('controller-log deny proofs', () => {
       signer: { member: f.other },
       add: f.author.add,
     })
-    const registry = await registryModule.registryForLog(f.did, {
-      chain: f.log.chain,
-      events: [...f.log.events, rmv],
+    const registry = await registryModule.registryForLog({
+      controller: f.did,
+      log: {
+        chain: f.log.chain,
+        events: [...f.log.events, rmv],
+      },
     })
     await expect(
       async () => await authenticateLifecycleProof(f.did, f.entry, registry),
@@ -1310,7 +1328,10 @@ describe('controller-log deny proofs', () => {
 
   test('partial closure refused', async () => {
     const f = await fixture()
-    const registry = await registryModule.registryForLog(f.did, asControllerLog(f.log.chain))
+    const registry = await registryModule.registryForLog({
+      controller: f.did,
+      log: asControllerLog(f.log.chain),
+    })
     await expect(
       async () => await authenticateLifecycleProof(f.did, f.entry, registry),
     ).rejects.toThrow(
@@ -1372,7 +1393,10 @@ describe('controller-log deny proofs', () => {
     const registry = await registryModule.registryApply(entry, before, f.did)
     vi.spyOn(f.group, 'registry', 'get').mockReturnValue(registry)
     const group = f.group
-    expect(revocationOf(group, target)).toEqual({ controller: f.did, proofRef: { chainIndex: 1 } })
+    expect(revocationOf({ group, did: target })).toEqual({
+      controller: f.did,
+      proofRef: { chainIndex: 1 },
+    })
   })
 })
 
@@ -1466,11 +1490,11 @@ test('a denial after reset gives its current-generation cascade the denial refer
     revoked: [{ did: child.id, cascadedFrom: issuer.id }],
     removeLeafIndices: [1, 2],
   })
-  const token = await signLedgerEntry(identity, entry.entry)
+  const token = await signLedgerEntry({ identity, entry: entry.entry })
   const replay = await deriveGroup(added.group, added.group.state)
   await replay.applyLedgerEntries([token])
   expect(replay.registry.devices.get(child.id)?.proofRef).toEqual({ chainIndex: 2 })
-  const revocation = revocationOf(replay, child.id)
+  const revocation = revocationOf({ group: replay, did: child.id })
   expect(revocation).toEqual({
     controller: controllerID,
     proofRef: { chainIndex: 2 },
@@ -1480,7 +1504,12 @@ test('a denial after reset gives its current-generation cascade the denial refer
   if (revocation?.cascadedFrom == null) throw new Error('Missing cascade revocation')
   const { cascadedFrom, proofRef } = revocation
   await expect(
-    effectOf(controllerID, log, { kind: 'deny', did: cascadedFrom, ref: proofRef }, 1),
+    effectOf({
+      controller: controllerID,
+      log,
+      claim: { kind: 'deny', did: cascadedFrom, ref: proofRef },
+      genFloor: 1,
+    }),
   ).resolves.not.toThrow()
 })
 
@@ -1534,7 +1563,7 @@ test.each(['duplicates', 'wrong-target', 'valid'] as const)(
       .sort((a, b) => (a.did < b.did ? -1 : a.did > b.did ? 1 : 0))
     const correct = effects[0]
     if (correct == null) throw new Error('Missing effect')
-    const registry = await registryModule.registryForLog(f.did, f.log)
+    const registry = await registryModule.registryForLog({ controller: f.did, log: f.log })
     const folds = vi.spyOn(controllerLogModule, 'foldControllerLog')
     try {
       const authenticate = async () =>

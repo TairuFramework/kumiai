@@ -31,15 +31,35 @@ export type ConformancePublishParams = {
   publishID?: string
 }
 
+export type ConformanceMailboxHubSubscribeParams = {
+  subscriberDID: string
+  topicID: string
+} & { retention?: number }
+
+export type ConformanceMailboxHubUnsubscribeParams = {
+  subscriberDID: string
+  topicID: string
+}
+
+export type ConformanceMailboxHubReceiveParams = {
+  subscriberDID: string
+} & { topicID?: string }
+
 /** The subset of `MailboxHub` (`@kumiai/hub-tunnel`) this suite exercises. */
 export type ConformanceMailboxHub = {
-  subscribe: (
-    subscriberDID: string,
-    topicID: string,
-    options?: { retention?: number },
-  ) => Promise<void> | void
-  unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
-  receive: (subscriberDID: string, options?: { topicID?: string }) => ConformanceReceiveSubscription
+  subscribe: ({
+    subscriberDID,
+    topicID,
+    ...options
+  }: ConformanceMailboxHubSubscribeParams) => Promise<void> | void
+  unsubscribe?: ({
+    subscriberDID,
+    topicID,
+  }: ConformanceMailboxHubUnsubscribeParams) => Promise<void> | void
+  receive: ({
+    subscriberDID,
+    ...options
+  }: ConformanceMailboxHubReceiveParams) => ConformanceReceiveSubscription
   publish: (params: ConformancePublishParams) => Promise<{ sequenceID: string }>
 }
 
@@ -109,7 +129,7 @@ function subscribing(
   topicID: string,
   options?: { retention?: number },
 ): Promise<void> {
-  return Promise.resolve().then(() => hub.subscribe(subscriberDID, topicID, options))
+  return Promise.resolve().then(() => hub.subscribe({ subscriberDID, topicID, ...options }))
 }
 
 /**
@@ -158,8 +178,8 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
       const hub = await createHub({ maxRetention, maxDepth })
       await subscribing(hub, ALICE, TOPIC)
       await subscribing(hub, BOB, TOPIC)
-      const toAlice = hub.receive(ALICE)
-      const toBob = hub.receive(BOB)
+      const toAlice = hub.receive({ subscriberDID: ALICE })
+      const toBob = hub.receive({ subscriberDID: BOB })
 
       await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
 
@@ -222,7 +242,7 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
       // and is told nothing — the same silent downgrade the clause above forbids for clamping.
       // Proved through the subscription's own consequence rather than through a registry read:
       // a frame published to the topic has to reach the subscriber it was accepted for.
-      const toBob = hub.receive(BOB)
+      const toBob = hub.receive({ subscriberDID: BOB })
       await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
       expect((await drain(toBob, 1)).map((message) => message.topicID)).toEqual([TOPIC])
     })
@@ -433,7 +453,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
       const hub = await createHub({ maxRetention, maxDepth })
       await subscribing(hub, ALICE, TOPIC)
       await subscribing(hub, BOB, TOPIC)
-      const toBob = hub.receive(BOB)
+      const toBob = hub.receive({ subscriberDID: BOB })
 
       const { sequenceID: first } = await hub.publish({
         senderDID: ALICE,
@@ -500,6 +520,11 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
   })
 }
 
+export type MailboxAckConformanceParamsRedeliverParams<Hub extends ConformanceMailboxHub> = {
+  hub: Hub
+  subscriberDID: string
+}
+
 /** Params for {@link testMailboxAckConformance}: the base params plus the required redelivery hook. */
 export type MailboxAckConformanceParams<Hub extends ConformanceMailboxHub> =
   MailboxHubConformanceParams<Hub> & {
@@ -508,7 +533,10 @@ export type MailboxAckConformanceParams<Hub extends ConformanceMailboxHub> =
      * unacked frames as a real reconnect would. Required: without a hub that actually redelivers,
      * "not redelivered" passes vacuously against one that never redelivers anything.
      */
-    redeliver: (hub: Hub, subscriberDID: string) => void | Promise<void>
+    redeliver: ({
+      hub,
+      subscriberDID,
+    }: MailboxAckConformanceParamsRedeliverParams<Hub>) => void | Promise<void>
   }
 
 /** Params for {@link testAckConformance}: the base params plus the required redelivery hook. */
@@ -530,7 +558,7 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
     test('an acked mailbox frame is not redelivered to a fresh receive', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       await subscribing(hub, BOB, TOPIC)
-      const subscription = hub.receive(BOB, { topicID: TOPIC })
+      const subscription = hub.receive({ subscriberDID: BOB, topicID: TOPIC })
       await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
       // Unacked control, published alongside the acked frame: without it, a redeliver that does
       // nothing at all would also make this clause pass.
@@ -544,7 +572,7 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
 
       // The mailbox class is delivery-derived: the last ack frees it. A hub that redelivers an
       // acked frame hands a peer the same message on every reconnect for the retention window.
-      const replayed = hub.receive(BOB, { topicID: TOPIC })
+      const replayed = hub.receive({ subscriberDID: BOB, topicID: TOPIC })
       await redeliver(hub, BOB)
       const backlog = await drain(replayed, 1)
       expect(backlog.map((message) => message.sequenceID)).toEqual([delivered[1]?.sequenceID])
@@ -565,7 +593,7 @@ export function testLogAckConformance<Hub extends ConformanceLogHub>(
     test('a log frame survives every ack', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       await subscribing(hub, BOB, TOPIC)
-      const subscription = hub.receive(BOB, { topicID: TOPIC })
+      const subscription = hub.receive({ subscriberDID: BOB, topicID: TOPIC })
       const { sequenceID: logged } = await hub.publish({
         senderDID: ALICE,
         topicID: TOPIC,

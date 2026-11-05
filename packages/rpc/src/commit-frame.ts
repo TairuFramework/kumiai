@@ -47,8 +47,13 @@ export type CommitFrame = {
   sealedEntries: Uint8Array
 }
 
+export type EncodeCommitFrameParams = {
+  commit: Uint8Array
+  sealedEntries: Uint8Array
+}
+
 /** Frame a Commit with the sealed blob of the entry bodies it enacts. */
-export function encodeCommitFrame(commit: Uint8Array, sealedEntries: Uint8Array): Uint8Array {
+export function encodeCommitFrame({ commit, sealedEntries }: EncodeCommitFrameParams): Uint8Array {
   const frame = new Uint8Array(HEADER_BYTES + commit.length + sealedEntries.length)
   frame[0] = COMMIT_FRAME_VERSION
   new DataView(frame.buffer).setUint32(VERSION_BYTES, commit.length, true)

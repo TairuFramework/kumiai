@@ -70,17 +70,16 @@ describe('BroadcastClient.gather streaming', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
     const seen: Array<GatheredReply> = []
-    const replies = await client.gather(
-      'census',
-      {},
-      {
-        quorum: 2,
-        timeoutMs: 1000,
-        onReply: (reply) => {
-          seen.push(reply)
-        },
+    const replies = await client.gather({
+      prc: 'census',
+      prm: {},
+
+      quorum: 2,
+      timeoutMs: 1000,
+      onReply: (reply) => {
+        seen.push(reply)
       },
-    )
+    })
     expect(seen.map((reply) => reply.senderDID)).toEqual(['did:a', 'did:b'])
     expect(seen[0]).toBe(replies[0])
     expect(seen[1]).toBe(replies[1])
@@ -98,7 +97,13 @@ describe('BroadcastClient.gather streaming', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
     const onReply = vi.fn()
-    const replies = await client.gather('census', {}, { quorum: 3, timeoutMs: 40, onReply })
+    const replies = await client.gather({
+      prc: 'census',
+      prm: {},
+      quorum: 3,
+      timeoutMs: 40,
+      onReply,
+    })
     expect(replies).toHaveLength(1)
     expect(onReply).toHaveBeenCalledExactlyOnceWith(replies[0])
     await Promise.all([client.dispose(), ...responders.map((responder) => responder.dispose())])
@@ -112,16 +117,15 @@ describe('BroadcastClient.gather streaming', () => {
     })
     const order: Array<string> = []
     await client
-      .gather(
-        'census',
-        {},
-        {
-          quorum: 1,
-          onReply: () => {
-            order.push('reply')
-          },
+      .gather({
+        prc: 'census',
+        prm: {},
+
+        quorum: 1,
+        onReply: () => {
+          order.push('reply')
         },
-      )
+      })
       .then(() => {
         order.push('resolved')
       })
@@ -137,7 +141,7 @@ describe('BroadcastClient.gather streaming', () => {
     controller.abort()
     const listeners = countAbortListeners(controller.signal)
     const client = new BroadcastClient({ transport })
-    expect(await client.gather('census', {}, { signal: controller.signal })).toEqual([])
+    expect(await client.gather({ prc: 'census', prm: {}, signal: controller.signal })).toEqual([])
     expect(write).not.toHaveBeenCalled()
     expect(listeners.added()).toBe(0)
     await client.dispose()
@@ -157,7 +161,12 @@ describe('BroadcastClient.gather streaming', () => {
         },
       }),
     })
-    const gathered = client.gather('census', {}, { signal: controller.signal, timeoutMs: 1000 })
+    const gathered = client.gather({
+      prc: 'census',
+      prm: {},
+      signal: controller.signal,
+      timeoutMs: 1000,
+    })
     try {
       expect(
         await Promise.race([
@@ -185,19 +194,18 @@ describe('BroadcastClient.gather streaming', () => {
     })
     const controller = new AbortController()
     const seen: Array<GatheredReply> = []
-    const replies = await client.gather(
-      'census',
-      {},
-      {
-        quorum: 3,
-        timeoutMs: 1000,
-        signal: controller.signal,
-        onReply(reply) {
-          seen.push(reply)
-          controller.abort()
-        },
+    const replies = await client.gather({
+      prc: 'census',
+      prm: {},
+
+      quorum: 3,
+      timeoutMs: 1000,
+      signal: controller.signal,
+      onReply(reply) {
+        seen.push(reply)
+        controller.abort()
       },
-    )
+    })
     expect(replies).toEqual([{ senderDID: 'did:fast', value: 1 }])
     await new Promise((resolve) => setTimeout(resolve, 80))
     expect(seen).toHaveLength(1)
@@ -223,19 +231,18 @@ describe('BroadcastClient.gather streaming', () => {
     const seen = new Set<string>()
     const results = await Promise.all(
       clients.map((client) =>
-        client.gather(
-          'census',
-          {},
-          {
-            quorum: 99,
-            timeoutMs: 1000,
-            signal: controller.signal,
-            onReply(reply) {
-              seen.add(reply.senderDID.toLowerCase())
-              if (seen.size === 2) controller.abort()
-            },
+        client.gather({
+          prc: 'census',
+          prm: {},
+
+          quorum: 99,
+          timeoutMs: 1000,
+          signal: controller.signal,
+          onReply(reply) {
+            seen.add(reply.senderDID.toLowerCase())
+            if (seen.size === 2) controller.abort()
           },
-        ),
+        }),
       ),
     )
     expect(seen).toEqual(new Set(['did:a', 'did:b']))
@@ -255,15 +262,14 @@ describe('BroadcastClient.gather streaming', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
     expect(
-      await client.gather(
-        'census',
-        {},
-        {
-          quorum: 2,
-          timeoutMs: 40,
-          signal: controller.signal,
-        },
-      ),
+      await client.gather({
+        prc: 'census',
+        prm: {},
+
+        quorum: 2,
+        timeoutMs: 40,
+        signal: controller.signal,
+      }),
     ).toEqual([{ senderDID: 'did:a', value: 1 }])
     expect(listeners.added()).toBe(listeners.removed())
     await Promise.all([client.dispose(), responder.dispose()])
@@ -287,15 +293,14 @@ describe('BroadcastClient.gather streaming', () => {
       const clear = vi.spyOn(globalThis, 'clearTimeout')
       const client = new BroadcastClient({ transport })
       await expect(
-        client.gather(
-          'census',
-          {},
-          {
-            timeoutMs: 1000,
-            signal: controller.signal,
-            onReply,
-          },
-        ),
+        client.gather({
+          prc: 'census',
+          prm: {},
+
+          timeoutMs: 1000,
+          signal: controller.signal,
+          onReply,
+        }),
       ).rejects.toBe(error)
       expect(clear).toHaveBeenCalled()
       expect(listeners.added()).toBe(listeners.removed())
@@ -321,15 +326,14 @@ describe('BroadcastClient.gather streaming', () => {
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
-    const gathered = client.gather(
-      'census',
-      {},
-      {
-        quorum: 2,
-        timeoutMs: 1000,
-        signal: controller.signal,
-      },
-    )
+    const gathered = client.gather({
+      prc: 'census',
+      prm: {},
+
+      quorum: 2,
+      timeoutMs: 1000,
+      signal: controller.signal,
+    })
     await new Promise((resolve) => setTimeout(resolve, 20))
     await client.dispose()
     expect(await gathered).toEqual([{ senderDID: 'did:a', value: 1 }])
@@ -349,7 +353,7 @@ describe('BroadcastClient.gather streaming', () => {
     const onReply = vi.fn(() => {
       throw new Error('observer failed')
     })
-    const replies = await client.gather('census', {}, { quorum: 2, onReply })
+    const replies = await client.gather({ prc: 'census', prm: {}, quorum: 2, onReply })
     expect(replies).toHaveLength(2)
     expect(onReply).toHaveBeenCalledTimes(2)
     await Promise.all([client.dispose(), ...responders.map((r) => r.dispose())])
@@ -364,7 +368,7 @@ describe('BroadcastClient.gather streaming', () => {
     const onReply = vi.fn(() => {
       void client.dispose()
     })
-    const replies = await client.gather('census', {}, { quorum: 1, onReply })
+    const replies = await client.gather({ prc: 'census', prm: {}, quorum: 1, onReply })
     expect(replies).toEqual([{ senderDID: 'did:a', value: 1 }])
     expect(onReply).toHaveBeenCalledTimes(1)
     await responder.dispose()
@@ -380,17 +384,16 @@ describe('BroadcastClient.gather streaming', () => {
     })
     const resolved = vi.fn()
     const replies = await client
-      .gather(
-        'census',
-        {},
-        {
-          quorum: 1,
-          signal: controller.signal,
-          onReply() {
-            controller.abort()
-          },
+      .gather({
+        prc: 'census',
+        prm: {},
+
+        quorum: 1,
+        signal: controller.signal,
+        onReply() {
+          controller.abort()
         },
-      )
+      })
       .then((result) => {
         resolved(result)
         return result
@@ -410,15 +413,14 @@ describe('BroadcastClient.gather streaming', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
     for (let index = 0; index < 50; index += 1) {
-      await client.gather(
-        'census',
-        {},
-        {
-          quorum: index % 2 === 0 ? 1 : 2,
-          timeoutMs: 5,
-          signal: controller.signal,
-        },
-      )
+      await client.gather({
+        prc: 'census',
+        prm: {},
+
+        quorum: index % 2 === 0 ? 1 : 2,
+        timeoutMs: 5,
+        signal: controller.signal,
+      })
     }
     expect(listeners.added()).toBe(50)
     expect(listeners.removed()).toBe(50)

@@ -98,7 +98,7 @@ describe('createBroadcastTransport', () => {
     const receiver = createBroadcastTransport({ topicID: 'topic-x', bus })
 
     // Inject raw bytes that cannot be decoded as JSON.
-    bus.publish('topic-x', fromUTF('this-is-not-valid-json{{{{'))
+    bus.publish({ topicID: 'topic-x', payload: fromUTF('this-is-not-valid-json{{{{') })
 
     // Let the microtask queue settle so the failing decode runs and is discarded.
     await new Promise<void>((resolve) => setTimeout(resolve, 0))

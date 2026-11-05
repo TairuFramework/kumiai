@@ -67,10 +67,10 @@ async function resetRemoved() {
   const old = await timedBinding({ identity: target, iat: 100, exp: 200 })
   const fixture = await lowLevelWelcome(setup.group, target, old)
   const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
-  const renewed = await renewLeaf(
-    fixture.author,
-    await timedBinding({ identity: setup.identity, iat: 150, exp: 250, prefix: log }),
-  )
+  const renewed = await renewLeaf({
+    group: fixture.author,
+    binding: await timedBinding({ identity: setup.identity, iat: 150, exp: 250, prefix: log }),
+  })
   const reset = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
   expect(reset.status).toBe('built')
   if (reset.status !== 'built') throw new Error('Missing reset')
@@ -79,7 +79,7 @@ async function resetRemoved() {
     status: 'revoked',
     reason: 'reset',
   })
-  expect(authority(group.registry, target.id)).toBe(target.id)
+  expect(authority({ registry: group.registry, issuer: target.id })).toBe(target.id)
   return { ...setup, group, target, old, log }
 }
 
@@ -88,9 +88,9 @@ test('reset keeps reset-only readmission', async () => {
   const binding = await timedBinding({ identity: target, iat: 150, exp: 250, prefix: log })
   const bundle = await rawBundle(group, target, binding)
   const { invite } = await createInvite({ group, identity, recipientDID: target.id })
-  const added = await commitInvite(group, bundle.publicPackage, invite)
+  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   const receiver = await deriveGroup(group, structuredClone(group.state))
-  await receiver.processMessage(added.commitMessage)
+  await receiver.processMessage({ message: added.commitMessage })
   const { group: joined } = await processWelcome({
     identity: target,
     invite,
@@ -102,7 +102,7 @@ test('reset keeps reset-only readmission', async () => {
       controller: controllerID,
       status: 'active',
     })
-    expect(authority(member.registry, target.id)).toBe(controllerID)
+    expect(authority({ registry: member.registry, issuer: target.id })).toBe(controllerID)
   }
   const commit = await commitWithEntries({
     group: joined,
@@ -110,7 +110,7 @@ test('reset keeps reset-only readmission', async () => {
     enacted: [],
     requireAdmin: false,
   })
-  await added.newGroup.processMessage(encode(mlsMessageEncoder, commit.commit))
+  await added.newGroup.processMessage({ message: encode(mlsMessageEncoder, commit.commit) })
   expect(added.newGroup.epoch).toBe(joined.epoch + 1n)
 })
 
@@ -144,7 +144,7 @@ test('authentication validateCredential agrees with checkBinding for reset evide
     const bundle = await rawBundle(group, target, binding)
     expect(
       await group.context.authService.validateCredential(
-        makeMLSCredential(target, binding),
+        makeMLSCredential({ identity: target, controller: binding }),
         target.publicKey,
       ),
     ).toBe(accepted)
@@ -239,7 +239,10 @@ test('cascadeRevokedDeviceStillRefused', async () => {
   expect(
     await createDIDAuthenticationService({
       judging: () => ({ registry: resetCascade, stage: 'full', mode: 'admit' }),
-    }).validateCredential(makeMLSCredential(target, fresh), target.publicKey),
+    }).validateCredential(
+      makeMLSCredential({ identity: target, controller: fresh }),
+      target.publicKey,
+    ),
   ).toBe(false)
   const registry = await registryApply(
     {
@@ -319,7 +322,7 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
     [fresh, true],
     [withoutHolderEvidence(fresh), false],
   ] as const) {
-    const credential = makeMLSCredential(target, binding)
+    const credential = makeMLSCredential({ identity: target, controller: binding })
     expect(await group.context.authService.validateCredential(credential, target.publicKey)).toBe(
       accepted,
     )
@@ -330,7 +333,7 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
   }
   const bundle = await rawBundle(group, target, fresh)
   const { invite } = await createInvite({ group, identity, recipientDID: target.id })
-  const added = await commitInvite(group, bundle.publicPackage, invite)
+  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   const { group: joined } = await processWelcome({
     identity: target,
     invite,
@@ -412,7 +415,11 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       identity,
       recipientDID: observer.id,
     })
-    const observerAdd = await commitInvite(group, observerBundle.publicPackage, observerInvite)
+    const observerAdd = await commitInvite({
+      group,
+      keyPackage: observerBundle.publicPackage,
+      invite: observerInvite,
+    })
     const { group: receiver } = await processWelcome({
       identity: observer,
       invite: observerInvite,
@@ -426,8 +433,12 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       identity,
       recipientDID: target.id,
     })
-    const added = await commitInvite(observerAdd.newGroup, bundle.publicPackage, invite)
-    await receiver.processMessage(added.commitMessage)
+    const added = await commitInvite({
+      group: observerAdd.newGroup,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
+    await receiver.processMessage({ message: added.commitMessage })
     const { group: joined } = await processWelcome({
       identity: target,
       invite,
@@ -437,18 +448,18 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
     let author = added.newGroup
     if (removal === 'ordinary Remove') {
       vi.spyOn(Date, 'now').mockReturnValue(210_000)
-      const renewal = await renewLeaf(
-        author,
-        await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
-      )
+      const renewal = await renewLeaf({
+        group: author,
+        binding: await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
+      })
       for (const held of renewal.newGroup.ledger) tokens.set(held.entryID, held.token)
-      await receiver.processMessage(renewal.commitMessage)
+      await receiver.processMessage({ message: renewal.commitMessage })
       author = renewal.newGroup
     }
     if (removal === 'self-removal') {
       const proposal = await proposeSelfRemoval(joined)
-      await author.processMessage(proposal.frame)
-      await receiver.processMessage(proposal.frame)
+      await author.processMessage({ message: proposal.frame })
+      await receiver.processMessage({ message: proposal.frame })
     }
     const removed =
       removal === 'ordinary Remove'
@@ -456,7 +467,7 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
         : await commitSelfRemovals(author)
     if (removed == null) throw new Error('Missing removal')
     for (const held of removed.newGroup.ledger) tokens.set(held.entryID, held.token)
-    await receiver.processMessage(removed.commitMessage)
+    await receiver.processMessage({ message: removed.commitMessage })
     author = removed.newGroup
     const reconstructed = await deriveGroup(author, structuredClone(author.state))
     const later = agent(71)
@@ -472,7 +483,11 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       identity,
       recipientDID: later.id,
     })
-    const laterAdd = await commitInvite(author, laterBundle.publicPackage, laterInvite)
+    const laterAdd = await commitInvite({
+      group: author,
+      keyPackage: laterBundle.publicPackage,
+      invite: laterInvite,
+    })
     const { group: laterJoiner } = await processWelcome({
       identity: later,
       invite: laterInvite,
@@ -484,10 +499,10 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
     for (const member of [author, receiver, reconstructed, laterJoiner]) {
       expect(member.registry.devices.get(target.id)).toEqual(expected)
       expect(denySetOf(member.registry)).toEqual(denySetOf(author.registry))
-      expect(authority(member.registry, target.id)).toBe(target.id)
+      expect(authority({ registry: member.registry, issuer: target.id })).toBe(target.id)
       expect(
         await member.context.authService.validateCredential(
-          makeMLSCredential(target),
+          makeMLSCredential({ identity: target }),
           target.publicKey,
         ),
       ).toBe(false)
@@ -498,10 +513,10 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
 test('ordinary Add refuses expired post-reset evidence', async () => {
   const { group, identity, target, log } = await resetRemoved()
   vi.spyOn(Date, 'now').mockReturnValue(210_000)
-  const renewed = await renewLeaf(
+  const renewed = await renewLeaf({
     group,
-    await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
-  )
+    binding: await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
+  })
   const binding = await timedBinding({ identity: target, iat: 150, exp: 200, prefix: log })
   const bundle = await rawBundle(renewed.newGroup, target, binding)
   await expect(
@@ -540,7 +555,7 @@ test('authentication refuses reset readmission under a different genuine control
       }),
     ),
   }
-  const credential = makeMLSCredential(target, binding)
+  const credential = makeMLSCredential({ identity: target, controller: binding })
   expect(
     await createDIDAuthenticationService().validateCredential(credential, target.publicKey),
   ).toBe(true)

@@ -76,7 +76,7 @@ describe('makeMLSCredential', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'key',
     })
-    const credential = makeMLSCredential(identity)
+    const credential = makeMLSCredential({ identity })
     expect(credential.credentialType).toBe(defaultCredentialTypes.basic)
     const parsed = parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity)
     expect(parsed.id).toBe(identity.id)
@@ -93,7 +93,7 @@ describe('makeMLSCredential', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'peer:4',
     })
-    const credential = makeMLSCredential(identity)
+    const credential = makeMLSCredential({ identity })
     expect(credential.credentialType).toBe(defaultCredentialTypes.basic)
     const parsed = parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity)
     expect(parsed.id).toBe(identity.id)
@@ -109,7 +109,7 @@ describe('makeMLSCredential', () => {
         throw new Error('not used')
       },
     } as unknown as Parameters<typeof makeMLSCredential>[0]
-    expect(() => makeMLSCredential(fake)).toThrow(/longForm/i)
+    expect(() => makeMLSCredential({ identity: fake })).toThrow(/longForm/i)
   })
 })
 
