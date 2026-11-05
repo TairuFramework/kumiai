@@ -2499,7 +2499,6 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
           const revision = (await device.load()).revision
           const completed = localDeferred<void>()
           let synchronous!: ConformanceAccountedGroupObservation
-          let token: object | undefined
           let failure: unknown
           const unsubscribe = fixture.entry().observe(
             groupID,
@@ -2507,11 +2506,9 @@ function testCommitObservation<TTx extends ConformanceGroupTransaction>(
               synchronous = value
             },
             (value) => {
-              token = context?.get()
               unsubscribe()
               void (async () => {
                 expect(value).toBe(synchronous)
-                expect(token, 'afterRelease clears callback context').toBeUndefined()
                 expect(await groups.load(groupID)).toEqual(value.lifetime)
                 expect((await device.load()).revision).toBe(revision + (combined ? 1 : 0))
                 await groups.transition(

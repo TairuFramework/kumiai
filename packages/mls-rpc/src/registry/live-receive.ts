@@ -11,6 +11,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 
 import { assertOpenableEpoch } from '../crypto.js'
 import { sameStoredValue } from '../memory-incarnation-stores.js'
+import type { OwnerQueues } from '../owner-queue.js'
 import { ReentrantOwnershipError } from '../persistence-errors.js'
 import { type ColdEnvironment, copyRecord } from './cold.js'
 import type { LiveSlot } from './live-send.js'
@@ -23,29 +24,6 @@ import type {
   ReceiveResult,
   RegistryHandleAccess,
 } from './types.js'
-
-// Register outside owner callbacks. Timers alone retain the provider's async context.
-const refreshJobs: Array<() => void> = []
-let wakeRefresh!: () => void
-function awaitRefresh(): void {
-  void new Promise<void>((resolve) => {
-    wakeRefresh = resolve
-  }).then(() => {
-    const jobs = refreshJobs.splice(0)
-    awaitRefresh()
-    for (const job of jobs) job()
-  })
-}
-awaitRefresh()
-
-function dispatchRefresh(run: () => Promise<void>): Promise<void> {
-  return new Promise((resolve, reject) => {
-    refreshJobs.push(() => {
-      void run().then(resolve, reject)
-    })
-    wakeRefresh()
-  })
-}
 
 export const registryReceiveSlots = new WeakMap<RegistryHandleAccess, LiveSlot>()
 export const receiveInstrumentation = new WeakMap<LiveSlot, { rebuilt?(): void; cap?: number }>()
@@ -78,6 +56,7 @@ export function setReceiveBase(slot: LiveSlot, record: ReadableGroupState): void
 }
 
 export function createLiveReceive(params: {
+  owners: OwnerQueues
   slot: LiveSlot
   environment: ColdEnvironment
   assertAvailable(): void
@@ -107,7 +86,7 @@ export function createLiveReceive(params: {
     if (slot.base !== null) return null
     const signal = slot.cancellation.signal
     const pending = track(
-      dispatchRefresh(async () => {
+      params.owners.detached(async () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 0))
         try {
           if (signal.aborted) return

@@ -133,6 +133,78 @@ function listenerCount(signal: AbortSignal): () => number {
 }
 
 describe('runtime-neutral owner operations', { timeout: 2000 }, () => {
+  test.each(['none', 'initial', 'late'] as const)(
+    'queues constructed inside an active owner detach release hooks (port=%s)',
+    async (binding) => {
+      const ownershipContext = binding === 'none' ? undefined : contextPort()
+      const outer = createOwnerQueues({ ownershipContext })
+      const entered = deferred<{ inner: OwnerQueues; owner: OwnerEntry }>()
+      const release = deferred<void>()
+      const holder = outer.run('read', group, async (owner) => {
+        const inner = createOwnerQueues({
+          ownershipContext: binding === 'initial' ? ownershipContext : undefined,
+        })
+        inner.bindOwnershipContext(ownershipContext)
+        entered.resolve({ inner, owner })
+        await release.promise
+      })
+      try {
+        const { inner, owner } = await entered.promise
+        const result = deferred<PromiseSettledResult<string>>()
+        await owner.callback(async () => {
+          await Promise.resolve()
+          await inner.run('transition', group, async (entry) => {
+            entry.afterRelease(() => {
+              void Promise.allSettled([read(outer, 'independent hook', [], 'group-B')]).then(
+                ([settled]) => result.resolve(settled),
+              )
+            })
+            await finish(entry)
+          })
+        })
+        expect(await result.promise).toEqual({ status: 'fulfilled', value: 'independent hook' })
+      } finally {
+        release.resolve()
+        await holder
+      }
+    },
+  )
+
+  test.each([false, true])(
+    'detached work outside a synchronous owner section has no active marker (port=%s)',
+    async (withPort) => {
+      const port = withPort ? contextPort() : undefined
+      const queues = createOwnerQueues({ ownershipContext: port })
+      const tokens: Array<object | undefined> = []
+      await queues.run('read', group, async (entry) => {
+        await Promise.resolve()
+        if (withPort) expect(queues.current()).toBe(entry)
+        const ownerToken = port?.get()
+        const value = await queues.detached(async () => {
+          expect(queues.current()).toBeUndefined()
+          tokens.push(port?.get())
+          await Promise.resolve()
+          expect(queues.current()).toBeUndefined()
+          if (withPort) expect(port?.get()).not.toBe(ownerToken)
+          return read(queues, 'detached root', [], 'group-B')
+        })
+        expect(value).toBe('detached root')
+        if (withPort) expect(queues.current()).toBe(entry)
+        expect(() =>
+          queues.detached(() => {
+            throw new Error('detached failure')
+          }),
+        ).toThrow('detached failure')
+        if (withPort) expect(queues.current()).toBe(entry)
+        queues.detached(() => tokens.push(port?.get()))
+      })
+      if (withPort) {
+        expect(tokens.every((token) => token !== undefined)).toBe(true)
+        expect(tokens[0]).not.toBe(tokens[1])
+      }
+    },
+  )
+
   test('registration freezes queued work before the lock and effects reopens admission', async () => {
     const queues = createOwnerQueues()
     const suspended = deferred<void>()

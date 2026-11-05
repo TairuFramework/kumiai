@@ -68,6 +68,7 @@ export type OwnerQueues = {
     options?: { mutationID?: string; signal?: AbortSignal },
   ): Promise<T>
   current(): OwnerEntry | undefined
+  detached<T>(fn: () => T): T
   bindOwnershipContext(port: OwnershipContextPort | undefined): void
   joinProof(
     owner: { groupID: string } | { ownerDID: string },
@@ -107,25 +108,22 @@ function scopeKey(kind: 'device' | 'group', id: string): string {
 export function createOwnerQueues(options?: {
   ownershipContext?: OwnershipContextPort
 }): OwnerQueues {
-  // Register the dispatcher outside callback context, including provider async context.
+  // Use the currently bound port, even when queues were constructed inside an owner.
   const releasedHooks: Array<() => void> = []
-  let wake!: () => void
-  function awaitRelease(): void {
-    void new Promise<void>((resolve) => {
-      wake = resolve
-    }).then(() => {
-      const hooks = releasedHooks.splice(0)
-      awaitRelease()
-      for (const hook of hooks) {
-        try {
-          hook()
-        } catch {
-          /* Listener exceptions cannot change settlement. */
+  function dispatchRelease(): void {
+    queues.detached(() => {
+      void Promise.resolve().then(() => {
+        const hooks = releasedHooks.splice(0)
+        for (const hook of hooks) {
+          try {
+            hook()
+          } catch {
+            /* Listener exceptions cannot change settlement. */
+          }
         }
-      }
+      })
     })
   }
-  awaitRelease()
   const slots = new Map<string, Slot>()
   const entries = new Set<Owned>()
   const activityGenerations = new Map<string, number>()
@@ -220,6 +218,10 @@ export function createOwnerQueues(options?: {
         if (token !== undefined) entry = contextEntries.get(token)
       }
       return entry?.phase === 'released' ? undefined : entry
+    },
+    detached(fn) {
+      // Unregistered tokens carry no owner identity or authority.
+      return port === undefined ? fn() : port.run({}, fn)
     },
     bindOwnershipContext(next) {
       if (next === undefined || next === port) return
@@ -335,7 +337,7 @@ export function createOwnerQueues(options?: {
         releases.length = 0
         if (outcome === 'committed' && failure === null) {
           releasedHooks.push(...afterRelease)
-          if (afterRelease.length !== 0) wake()
+          if (afterRelease.length !== 0) dispatchRelease()
         }
         afterRelease.length = 0
       }

@@ -6,7 +6,7 @@ import type {
   GroupCondition,
 } from '@kumiai/rpc'
 
-import type { OwnerAttempt } from './owner-queue.js'
+import type { OwnerAttempt, OwnerQueues } from './owner-queue.js'
 import { PersistencePhaseError } from './persistence-errors.js'
 import type {
   AppOutboxEntry,
@@ -131,12 +131,16 @@ export function entryReadsAttempt(reads: EntryReads): OwnerAttempt {
   attempt.assertLive()
   return attempt
 }
-const bindings = new WeakMap<object, { capability: unknown; coordinatorBinding: object }>()
+type CoordinatorBinding = { readonly owners: OwnerQueues }
+const bindings = new WeakMap<
+  object,
+  { capability: unknown; coordinatorBinding: CoordinatorBinding }
+>()
 
 export function bindEntryCapability<TTx extends GroupTransaction>(params: {
   persistence: GroupPersistence<TTx>
   capability: EntryCapability<TTx>
-  coordinatorBinding: object
+  coordinatorBinding: CoordinatorBinding
 }): void {
   bindings.set(params.persistence, {
     capability: params.capability,
@@ -152,6 +156,6 @@ export function entryCapability<TTx extends GroupTransaction>(
 
 export function coordinatorBinding<TTx extends GroupTransaction>(
   persistence: GroupPersistence<TTx>,
-): object | null {
+): CoordinatorBinding | null {
   return bindings.get(persistence)?.coordinatorBinding ?? null
 }

@@ -42,6 +42,7 @@ import { type EntryCapability, type EntryReads, entryReadsAttempt } from '../ent
 import { groupBatchFor } from '../group-batch-binding.js'
 import { consumesInboundCommit } from '../inbound-commit.js'
 import { copyStoredValue, sameStoredValue } from '../memory-incarnation-stores.js'
+import type { OwnerQueues } from '../owner-queue.js'
 import { decodeStoredValue, encodeStoredValue } from '../persistence-codec.js'
 import {
   DisplacedGroupHandleError,
@@ -134,7 +135,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   live: LiveSlot
   dropOwner(): void
   waitForMaintenanceGate(signal: AbortSignal): Promise<void> | undefined
-  binding: object
+  binding: { readonly owners: OwnerQueues }
   capability: EntryCapability<TTx>
   environment: ColdEnvironment
   restoreCandidate(candidate: Uint8Array): Promise<GroupHandle>
@@ -898,6 +899,7 @@ export function createRegistryAccess<TTx extends GroupTransaction>(params: {
   })
   const receive = createLiveReceive({
     ...params,
+    owners: params.binding.owners,
     slot: params.live,
     accounting: live.accounting,
     assertAvailable: assertReceiveAvailable,

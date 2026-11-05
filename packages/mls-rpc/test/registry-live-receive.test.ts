@@ -828,6 +828,7 @@ for (const mode of ['real-mls', 'double'] as const) {
       await fixture.dropOwner()
       expect(fixture.access().admission()).toMatchObject({ admissible: false, reason: 'lapsed' })
       await fixture.writeElsewhere('receive')
+      expect(slot(fixture).base).toBeNull()
       await fixture.waitForReceiveRefresh()
       expect(await fixture.openEphemeral([input])).toMatchObject([{ kind: 'opened' }])
     })
