@@ -117,7 +117,7 @@ export async function createGroup(
   const registry =
     anchor.controller == null || options?.controllerLog == null
       ? undefined
-      : await registryForLog(anchor.controller, options.controllerLog)
+      : await registryForLog(anchor.controller, options.controllerLog, { crypto: options.crypto })
   const tokens: Array<string> = []
   if (anchor.controller != null && options?.controllerLog != null) {
     tokens.push(
@@ -127,7 +127,11 @@ export async function createGroup(
         subject: anchor.controller,
         value: {
           op: 'seed',
-          proof: await pruneLog({ did: anchor.controller, input: options.controllerLog }),
+          proof: await pruneLog({
+            crypto: options.crypto,
+            did: anchor.controller,
+            input: options.controllerLog,
+          }),
         },
       }),
     )
@@ -136,6 +140,7 @@ export async function createGroup(
   const mlsCredential = makeMLSCredential(identity, options?.controller)
   if (options?.controller != null) {
     await verifyLeafCredential(mlsCredential, identity.publicKey, {
+      crypto: options.crypto,
       judging: () => ({ registry, stage: 'full', mode: 'admit' }),
       leafLifetime: () => anchor.leafLifetime ?? 86_400,
       trustedGrantLifetime: () => anchor.trustedGrantLifetime ?? 2_592_000,
@@ -172,6 +177,7 @@ export async function createGroup(
     groupID,
   }
   const group = await GroupHandle.create({
+    crypto: options?.crypto,
     state,
     credential,
     context,
@@ -196,6 +202,7 @@ export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHan
   // Construction reseeds control authority from the anchor in the restored state;
   // an anchorless state throws (the same fail-closed guard).
   const group = await GroupHandle.create({
+    crypto: params.options?.crypto,
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),

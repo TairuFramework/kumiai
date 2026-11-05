@@ -1,4 +1,4 @@
-import { normalizeDID } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
@@ -46,7 +46,7 @@ export type FoldEnvelopeContext = {
   memberController: (did: string) => string | undefined
 }
 
-export type FoldEnvelopeParams = {
+export type FoldEnvelopeParams = CryptoOptions & {
   baseRoster: RosterState
   baseRegistry: DeviceRegistry
   entries: Array<FoldInput>
@@ -75,7 +75,7 @@ function isRoleValue(value: unknown): value is GroupPermission {
  * snapshot, so an envelope of `[promote Bob, entry-issued-by-Bob]` is accepted.
  */
 export async function foldEnvelope(params: FoldEnvelopeParams): Promise<EnvelopeFoldResult> {
-  const { baseRoster, baseRegistry, entries, groupID, context } = params
+  const { baseRoster, baseRegistry, entries, groupID, context, crypto } = params
   let workingRoster: RosterState = { roles: new Map(baseRoster.roles) }
   let workingRegistry: DeviceRegistry = {
     devices: new Map(baseRegistry.devices),
@@ -111,6 +111,7 @@ export async function foldEnvelope(params: FoldEnvelopeParams): Promise<Envelope
           { issuer, entry: { ...entry, value } },
           workingRegistry,
           context?.controllerID,
+          { crypto },
         )
       } catch (error) {
         return {

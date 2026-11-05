@@ -1,5 +1,5 @@
 import { decodeKey } from '@kokuin/controller'
-import { normalizeDID, type OwnIdentity } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   type ClientState,
   defaultCredentialTypes,
@@ -84,13 +84,14 @@ export async function attestedTreeTime(
   tree: ClientState['ratchetTree'],
   registry: DeviceRegistry,
   controllerID: string,
+  options?: CryptoOptions,
 ): Promise<number> {
   const controller = normalizeDID(controllerID)
   const projection = registry.controllers.get(controller)
   const folded =
     projection?.recordedLog == null
       ? undefined
-      : await foldControllerLog(controller, projection.recordedLog)
+      : await foldControllerLog(controller, projection.recordedLog, options)
   const head = folded?.ok && !folded.head.saturated ? folded.head : undefined
   const effective = new Map(effectiveAttestingMembers(head, projection))
   const attestations = new Map<string, number>()
@@ -128,7 +129,7 @@ export async function attestedTreeTime(
 }
 
 export async function treeTime(
-  group: Pick<GroupHandle, 'state' | 'anchor' | 'registry'>,
+  group: Pick<GroupHandle, 'state' | 'anchor' | 'registry'> & CryptoOptions,
   controllerID: string,
   registry: DeviceRegistry = group.registry,
 ): Promise<number> {
@@ -136,18 +137,22 @@ export async function treeTime(
     group.state.ratchetTree,
     group.anchor.controller == null ? { ...registry, controllers: new Map() } : registry,
     controllerID,
+    { crypto: group.crypto },
   )
 }
 
 export async function isLapsed(
-  group: Pick<GroupHandle, 'state' | 'anchor' | 'registry'>,
+  group: Pick<GroupHandle, 'state' | 'anchor' | 'registry'> & CryptoOptions,
   leaf: LeafNode,
   registry: DeviceRegistry = group.registry,
 ): Promise<boolean> {
   const controller = group.anchor.controller
   if (controller == null) return false
   const binding = identity(leaf).controller
-  const expiry = binding == null ? undefined : await leafExpiry(binding, registry, controller)
+  const expiry =
+    binding == null
+      ? undefined
+      : await leafExpiry(binding, registry, controller, { crypto: group.crypto })
   return expiry != null && expiry < (await treeTime(group, controller, registry))
 }
 
@@ -155,6 +160,7 @@ export async function leafExpiry(
   binding: ControllerBinding,
   registry: DeviceRegistry,
   controller: string,
+  options?: CryptoOptions,
 ): Promise<number | undefined> {
   const did = normalizeDID(controller)
   const projection = registry.controllers.get(did)
@@ -165,6 +171,7 @@ export async function leafExpiry(
       { did: payload.aud, binding, leafKey: capabilityKey(payload).publicKey },
       registry,
       controller,
+      options,
     )
     return 'root' in authority && authority.expiry != null
       ? Math.min(payload.exp, authority.expiry)
@@ -173,7 +180,7 @@ export async function leafExpiry(
   if (normalizeDID(binding.id) !== did) return undefined
   const log = projection?.recordedLog
   if (log == null || prefixRelation(log, binding.prefix) !== 'contained') return undefined
-  const folded = await foldControllerLog(did, log)
+  const folded = await foldControllerLog(did, log, options)
   if (!folded.ok) return undefined
   const member = folded.head.members.get(binding.member.add)
   const memberDID = member?.did ?? projection?.removedMembers.get(binding.member.add)?.did
@@ -190,15 +197,21 @@ export async function leafExpiry(
       { did: memberDID, binding, leafKey },
       registry,
       controller,
+      options,
     )
     if ('root' in authority && authority.expiry != null) return authority.expiry
   }
-  const status = await memberRootStatus(registry, did, {
-    kind: 'member',
-    did: memberDID,
-    add: binding.member.add,
-    gen: binding.member.g,
-  })
+  const status = await memberRootStatus(
+    registry,
+    did,
+    {
+      kind: 'member',
+      did: memberDID,
+      add: binding.member.add,
+      gen: binding.member.g,
+    },
+    options,
+  )
   return status.status === 'effective' ? status.lease : undefined
 }
 
@@ -270,7 +283,7 @@ async function checkBinding(
   const denied = full && registry != null ? denySetOf(registry) : new Set<string>()
   if (
     denied.has(normalizeDID(parsed.id)) &&
-    !(await mayReadmitResetDevice(registry ?? group.registry, parsed))
+    !(await mayReadmitResetDevice(registry ?? group.registry, parsed, { crypto: group.crypto }))
   )
     throw new LeafBindingError('denied-id')
   const record = full ? registry?.devices.get(normalizeDID(parsed.id)) : undefined
@@ -323,7 +336,7 @@ async function checkBinding(
     )
       throw new LeafBindingError('denied-issuer')
   }
-  const folded = await foldChain(binding.id, binding.prefix)
+  const folded = await foldChain(binding.id, binding.prefix, { crypto: group.crypto })
   if (!folded.ok) throw new LeafBindingError('controller-mismatch')
   if (
     full &&
@@ -341,7 +354,7 @@ async function checkAdmissionExpiry(
 ): Promise<void> {
   const binding = identity(leaf).controller
   if (binding == null) return
-  const expiry = await leafExpiry(binding, registry, binding.id)
+  const expiry = await leafExpiry(binding, registry, binding.id, { crypto: group.crypto })
   if (expiry == null) throw new LeafBindingError('member-unavailable')
   if (expiry <= (await treeTime(group, binding.id, registry))) throw new LeafLapsedError('lapsed')
 }
@@ -365,6 +378,7 @@ async function validateBoundLeaf(
 ): Promise<void> {
   await checkBinding(group, leaf, previous, welcome, judging)
   await verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
+    crypto: group.crypto,
     judging: () => ({
       ...judging,
       registry: group.anchor.controller == null ? undefined : judging.registry,
@@ -420,10 +434,14 @@ async function checkSurvivors(
 ): Promise<void> {
   const denied = denySetOf(registry)
   const controller = group.anchor.controller
+  const options = { crypto: group.crypto }
   for (const [position, node] of tree.entries()) {
     if (node?.nodeType !== nodeTypes.leaf) continue
     const parsed = identity(node.leaf)
-    if (denied.has(normalizeDID(parsed.id)) && !(await mayReadmitResetDevice(registry, parsed)))
+    if (
+      denied.has(normalizeDID(parsed.id)) &&
+      !(await mayReadmitResetDevice(registry, parsed, options))
+    )
       throw new LeafBindingError('denied-id')
     if (parsed.controller == null) {
       if (controller != null) throw new LeafBindingError('floating-refused')
@@ -445,7 +463,7 @@ async function checkSurvivors(
     )
       throw new LeafBindingError('denied-issuer')
     if (controller != null) {
-      const folded = await foldChain(binding.id, binding.prefix)
+      const folded = await foldChain(binding.id, binding.prefix, options)
       if (normalizeDID(binding.id) !== normalizeDID(controller) || !folded.ok)
         throw new LeafBindingError('controller-mismatch')
       if (
@@ -457,6 +475,7 @@ async function checkSurvivors(
         { did: parsed.id, binding, leafKey: node.leaf.signaturePublicKey },
         registry,
         controller,
+        options,
       )
       if ('status' in authority && authority.status === 'removed')
         throw new LeafBindingError('member-removed')
@@ -501,6 +520,7 @@ export async function prepareLifecycleGate(
 ): Promise<LifecycleGate> {
   const { group, entries, candidateRegistry, context, externalLeaf } = params
   const controller = group.anchor.controller
+  const options = { crypto: group.crypto }
   if (controller == null) {
     for (const { entry, issuer } of entries) {
       if (entry.type !== DEVICE_ENTRY_TYPE) continue
@@ -526,7 +546,7 @@ export async function prepareLifecycleGate(
       const leaf = leafAt(before, index)
       const binding = leaf == null ? undefined : identity(leaf).controller
       const expiry =
-        binding == null ? undefined : await leafExpiry(binding, group.registry, controller)
+        binding == null ? undefined : await leafExpiry(binding, group.registry, controller, options)
       if (expiry != null && expiry < beforeTime) lapsed.add(index)
     }
   }
@@ -559,7 +579,7 @@ export async function prepareLifecycleGate(
     for (const entry of lifecycleEntries) {
       const verified = entry as VerifiedLedgerEntry<DeviceValue>
       const effects = await verifyLifecycleProof(group, verified, registry)
-      registry = await registryApply(verified, registry, controller)
+      registry = await registryApply(verified, registry, controller, options)
       if (['revoke', 'reset'].includes(opOf(entry)))
         for (const index of effects.removeLeafIndices) expectedRemoves.add(index)
     }
@@ -580,7 +600,7 @@ export async function prepareLifecycleGate(
   }
   async function checkTime(tree: ClientState['ratchetTree']): Promise<void> {
     if (controller == null) return
-    if ((await attestedTreeTime(tree, candidateRegistry, controller)) < beforeTime)
+    if ((await attestedTreeTime(tree, candidateRegistry, controller, options)) < beforeTime)
       throw new RevokeProofError('time-regression')
   }
   function checkRegistryAdds(proposals: Array<ProposalWithSender>): void {
@@ -804,7 +824,9 @@ export async function prepareLifecycleGate(
       const next = leafAt(state.ratchetTree, senderIndex)
       const binding = next == null ? undefined : identity(next).controller
       const expiry =
-        binding == null ? undefined : await leafExpiry(binding, candidateRegistry, controller)
+        binding == null
+          ? undefined
+          : await leafExpiry(binding, candidateRegistry, controller, options)
       if (
         old != null &&
         lapsed.has(senderIndex) &&
@@ -842,9 +864,11 @@ export async function assertSenderNotLapsed(params: AssertSenderNotLapsedParams)
   const expected = data instanceof Uint8Array ? decodeLedgerHead(data) : null
   if (expected == null) throw new Error('Missing epoch ledger head')
   const registry = await registryAt(group, expected.head)
+  const options = { crypto: group.crypto }
   const binding = identity(leaf).controller
-  const expiry = binding == null ? undefined : await leafExpiry(binding, registry, controller)
-  if (expiry != null && expiry < (await attestedTreeTime(tree, registry, controller)))
+  const expiry =
+    binding == null ? undefined : await leafExpiry(binding, registry, controller, options)
+  if (expiry != null && expiry < (await attestedTreeTime(tree, registry, controller, options)))
     throw new LeafLapsedError('lapsed')
 }
 
@@ -872,7 +896,7 @@ export async function assertRecoveryBinding(params: AssertRecoveryBindingParams)
   const controllerID = group.anchor.controller
   if (controllerID == null) return
   if (
-    (await attestedTreeTime(tree, group.registry, controllerID)) <
+    (await attestedTreeTime(tree, group.registry, controllerID, { crypto: group.crypto })) <
     (await treeTime(group, controllerID))
   )
     throw new RevokeProofError('effects-mismatch')

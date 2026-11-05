@@ -1,5 +1,5 @@
 import { type ControllerLog, digestOf, isControllerLog, resolveBranches } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
 import { readCapability } from './capability.js'
@@ -270,6 +270,7 @@ export async function registryApply(
   verified: VerifiedLedgerEntry<DeviceValue>,
   state: DeviceRegistry,
   controllerID?: string,
+  options?: CryptoOptions,
 ): Promise<DeviceRegistry> {
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
@@ -291,7 +292,7 @@ export async function registryApply(
         const folded =
           previous.recordedLog == null
             ? undefined
-            : await foldControllerLog(controller, previous.recordedLog)
+            : await foldControllerLog(controller, previous.recordedLog, options)
         // Only an effective incarnation attests; the head also holds removed and denied ones.
         const member = folded?.ok
           ? [...folded.head.members.values()].find(
@@ -313,13 +314,14 @@ export async function registryApply(
         })
       }
     } else {
-      const effect = await authenticateLifecycleProof(controller, verified, state)
+      const effect = await authenticateLifecycleProof(controller, verified, state, options)
       let projection = {
         ...previous,
         recordedLog: effect.recordedLog,
         genFloor: effect.genFloor,
       }
-      if (value.op === 'seed') projection = await seedEffects(controller, devices, projection)
+      if (value.op === 'seed')
+        projection = await seedEffects(controller, devices, projection, options)
       controllers.set(controller, projection)
       const resetRef = effect.resetRef
       const denials = new Map(
@@ -361,8 +363,8 @@ export async function registryApply(
         if (!('event' in member.proofRef)) continue
         const chain = effect.recordedLog.chain
         const index =
-          (await memberDropIndices(controller, chain, add)).at(-1) ??
-          (await memberTombstoneIndices(controller, chain, add, member.did)).at(-1)
+          (await memberDropIndices(controller, chain, add, options)).at(-1) ??
+          (await memberTombstoneIndices(controller, chain, add, member.did, options)).at(-1)
         if (index != null) removedMembers.set(add, { ...member, proofRef: { chainIndex: index } })
       }
       const survivorGrants = new Map(projection.survivorGrants)
@@ -374,7 +376,12 @@ export async function registryApply(
         if (held.controller !== controller || held.proofRef == null || !('event' in held.proofRef))
           continue
         const index = (
-          await revokeIndices(controller, effect.recordedLog.chain, held.cascadedFrom ?? did)
+          await revokeIndices(
+            controller,
+            effect.recordedLog.chain,
+            held.cascadedFrom ?? did,
+            options,
+          )
         ).at(-1)
         if (index != null) devices.set(did, { ...held, proofRef: { chainIndex: index } })
       }
@@ -442,6 +449,7 @@ export function isResetOnly(record: DeviceRecord): boolean {
 export async function mayReadmitResetDevice(
   registry: DeviceRegistry,
   parsed: MLSCredentialIdentity,
+  options?: CryptoOptions,
 ): Promise<boolean> {
   const record = registry.devices.get(normalizeDID(parsed.id))
   const binding = parsed.controller
@@ -452,7 +460,7 @@ export async function mayReadmitResetDevice(
     normalizeDID(binding.id) !== record.controller
   )
     return false
-  const folded = await foldChain(binding.id, binding.prefix)
+  const folded = await foldChain(binding.id, binding.prefix, options)
   return (
     folded.ok &&
     (folded.states.at(-1)?.gen ?? 0) >= (registry.controllers.get(record.controller)?.genFloor ?? 0)
@@ -483,22 +491,26 @@ export async function assertRetainsKnownEffects(
   controller: string,
   known: DeviceRegistry,
   candidate: DeviceRegistry,
+  options?: CryptoOptions,
 ): Promise<void> {
   const did = normalizeDID(controller)
   const held = known.controllers.get(did)
   const offered = candidate.controllers.get(did)
   const before =
-    held?.recordedLog == null ? undefined : await foldControllerLog(did, held.recordedLog)
+    held?.recordedLog == null ? undefined : await foldControllerLog(did, held.recordedLog, options)
   const after =
-    offered?.recordedLog == null ? undefined : await foldControllerLog(did, offered.recordedLog)
+    offered?.recordedLog == null
+      ? undefined
+      : await foldControllerLog(did, offered.recordedLog, options)
   if (before?.ok && (!after?.ok || after.head.saturated))
     throw new RecoveryKnowledgeError('epoch-event')
   if (held?.recordedLog != null && offered?.recordedLog != null) {
     const branches = await resolveBranches({
+      ...options,
       did: did,
       chains: [held.recordedLog.chain, offered.recordedLog.chain],
     })
-    const winner = branches.ok ? await foldChain(did, branches.winner) : undefined
+    const winner = branches.ok ? await foldChain(did, branches.winner, options) : undefined
     if (!winner?.ok || (after?.ok && after.head.epoch !== winner.head.epoch))
       throw new RecoveryKnowledgeError('forked')
   }
@@ -544,14 +556,26 @@ export async function assertRetainsKnownEffects(
 export async function registryForLog(
   controller: string,
   log: ControllerLog,
+  options?: CryptoOptions,
 ): Promise<DeviceRegistry> {
-  const { log: recordedLog, after } = await ingestControllerLog(controller, undefined, log)
+  const { log: recordedLog, after } = await ingestControllerLog(
+    controller,
+    undefined,
+    log,
+    undefined,
+    options,
+  )
   const devices = new Map<string, DeviceRecord>()
-  const projection = await seedEffects(normalizeDID(controller), devices, {
-    ...controllerProjection(),
-    recordedLog,
-    genFloor: after.head.gen,
-  })
+  const projection = await seedEffects(
+    normalizeDID(controller),
+    devices,
+    {
+      ...controllerProjection(),
+      recordedLog,
+      genFloor: after.head.gen,
+    },
+    options,
+  )
   return {
     devices,
     controllers: new Map([[normalizeDID(controller), projection]]),
@@ -562,12 +586,13 @@ async function seedEffects(
   controller: string,
   devices: Map<string, DeviceRecord>,
   projection: ControllerProjection & { recordedLog: ControllerLog },
+  options?: CryptoOptions,
 ): Promise<ControllerProjection & { recordedLog: ControllerLog }> {
   const log = projection.recordedLog
-  const folded = await foldControllerLog(controller, log)
+  const folded = await foldControllerLog(controller, log, options)
   if (!folded.ok) throw new RevokeProofError('effects-mismatch')
   const removedMembers = new Map(projection.removedMembers)
-  for (const claim of await claimsFor(controller, undefined, log, 0)) {
+  for (const claim of await claimsFor(controller, undefined, log, 0, options)) {
     if (claim.kind === 'deny') {
       devices.set(normalizeDID(claim.did), { controller, status: 'revoked', proofRef: claim.ref })
     } else {
@@ -631,6 +656,7 @@ export async function foldControl(
   anchor: GroupAnchor,
   groupID: string,
   onDrop?: (drop: FoldDrop) => void,
+  options?: CryptoOptions,
 ): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
   let roster = roleReducer.seed(anchor)
   let registry = registrySeed()
@@ -659,6 +685,7 @@ export async function foldControl(
           { issuer, entry: { ...entry, value: entry.value } },
           registry,
           anchor.controller,
+          options,
         )
       } catch {
         onDrop?.({ entryID, type: entry.type, reason: 'invalid lifecycle proof' })

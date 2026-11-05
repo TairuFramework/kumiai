@@ -213,7 +213,8 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const port: GroupMLS = {
     async verifyRecoveryRequest(request: Uint8Array) {
       try {
-        const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
+        const crypto = await access.read((group) => group.crypto)
+        const verified = await verifyRecoveryRequest(new TextDecoder().decode(request), { crypto })
         return await access.read((group) =>
           verified.groupID === group.groupID
             ? {

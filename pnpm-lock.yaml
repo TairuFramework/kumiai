@@ -203,6 +203,9 @@ catalogs:
     '@kokuin/controller':
       specifier: ^0.7.0
       version: 0.7.0
+    '@kokuin/crypto':
+      specifier: ^0.7.0
+      version: 0.7.0
     '@kokuin/expo':
       specifier: ^0.7.0
       version: 0.7.0
@@ -469,6 +472,9 @@ importers:
       '@enkaku/transport':
         specifier: 'catalog:'
         version: 0.23.0(@logtape/logtape@2.4.2)
+      '@kokuin/crypto':
+        specifier: 'catalog:'
+        version: 0.7.0
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -613,6 +619,10 @@ importers:
       ts-mls:
         specifier: 'catalog:'
         version: 2.0.0-rc.13(@noble/ciphers@2.4.0)(@noble/curves@2.4.0)
+    devDependencies:
+      '@kokuin/crypto':
+        specifier: 'catalog:'
+        version: 0.7.0
 
   packages/mls-hub:
     dependencies:

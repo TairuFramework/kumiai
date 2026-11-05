@@ -26,3 +26,6 @@ Controller log folds are asynchronous in kokuin 0.7, which changes these contrac
 
 `GroupHandle.registry` and `sendAdmission()` stay synchronous. Control state is computed first and
 published together, so readers never observe a partial update.
+
+Hosts can pass a kokuin `crypto` provider through `GroupOptions`, `GroupHandleParams` and
+`CreateHubParams`. Verification caches are kept per provider. MLS cryptography is unchanged.

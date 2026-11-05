@@ -11,7 +11,7 @@ import {
   LOG_NOT_AUTHORITATIVE,
   mergeLogs,
 } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { foldControllerLog, isDetachedFoldReason } from './controller-log.js'
 import { RevokeProofError } from './errors.js'
@@ -21,7 +21,7 @@ export type FoldOk = Extract<FoldResult, { ok: true }>
 
 const authenticatedFolds = new WeakMap<
   ControllerLog,
-  { controller: string; digest: string; folded: FoldOk }
+  { controller: string; digest: string; folded: FoldOk; crypto: CryptoOptions['crypto'] }
 >()
 
 export type IngestedControllerLog = {
@@ -36,15 +36,18 @@ export async function ingestControllerLog(
   recorded: ControllerLog | undefined,
   proof: ControllerLog,
   previous?: ControllerProjection,
+  options?: CryptoOptions,
 ): Promise<IngestedControllerLog> {
   const did = normalizeDID(controller)
   let before: FoldOk | undefined
   if (recorded != null) {
     const cached = authenticatedFolds.get(recorded)
     const folded =
-      cached?.controller === did && cached.digest === digestOf(recorded)
+      cached?.controller === did &&
+      cached.crypto === options?.crypto &&
+      cached.digest === digestOf(recorded)
         ? structuredClone(cached.folded)
-        : await foldControllerLog(did, recorded)
+        : await foldControllerLog(did, recorded, options)
     if (!folded.ok) throw new RevokeProofError('not-authority-signed')
     before = folded
   }
@@ -66,7 +69,7 @@ export async function ingestControllerLog(
       throw new RevokeProofError('not-authority-signed')
   }
   const joined = { chain, events: proof.events }
-  const folded = await foldControllerLog(did, { chain, events: [] })
+  const folded = await foldControllerLog(did, { chain, events: [] }, options)
   if (!folded.ok) {
     throw new RevokeProofError(
       isDetachedFoldReason(folded.reason) ? 'detached' : 'not-authority-signed',
@@ -82,8 +85,11 @@ export async function ingestControllerLog(
   let authoritative: AuthoritativeLog
   try {
     const loaded =
-      recorded == null ? joined : await mergeLogs({ did: did, left: recorded, right: joined })
+      recorded == null
+        ? joined
+        : await mergeLogs({ ...options, did: did, left: recorded, right: joined })
     authoritative = await authoritativeLog({
+      ...options,
       did,
       loaded,
       seen: recorded,
@@ -122,6 +128,7 @@ export async function ingestControllerLog(
     controller: did,
     digest: digestOf(log),
     folded: structuredClone(after),
+    crypto: options?.crypto,
   })
   return { log, ...(before == null ? {} : { before }), after, introduced }
 }

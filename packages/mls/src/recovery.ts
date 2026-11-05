@@ -1,4 +1,5 @@
 import {
+  type CryptoOptions,
   decodeMultibase,
   encodeMultibase,
   isVerifiedToken,
@@ -329,10 +330,13 @@ function recoveryAAD(
  * attacker-chosen. `embedLongForm` lets it verify offline — a responder needs no
  * DID resolver to answer.
  */
-export async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
+export async function verifyRecoveryRequest(
+  token: string,
+  options?: CryptoOptions,
+): Promise<VerifiedRecoveryRequest> {
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
   try {
-    verified = await verifyToken<RecoveryRequest>({ token: token })
+    verified = await verifyToken<RecoveryRequest>({ ...options, token: token })
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new RecoveryRequestError('unverified', 'recovery request signature did not verify', {
@@ -450,7 +454,7 @@ export type SealToRequestParams = {
 
 export async function sealToRequest(params: SealToRequestParams): Promise<Uint8Array> {
   const { kind, group, request, plaintext, requireMember = true } = params
-  const verified = await verifyRecoveryRequest(request)
+  const verified = await verifyRecoveryRequest(request, { crypto: group.crypto })
 
   if (verified.groupID !== group.groupID) {
     throw new RecoveryRequestError(
@@ -556,7 +560,7 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
     )
   }
 
-  const verified = await verifyRecoveryRequest(request)
+  const verified = await verifyRecoveryRequest(request, { crypto: group.crypto })
   const { groupInfo } = await exportGroupInfo({ group })
   const ledger =
     group.anchor.controller == null ? undefined : encodeLedgerTokens(await group.getLedger())
@@ -615,7 +619,10 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
   const { attestation, group, requestID, groupInfo, ledger } = params
   let verified: Awaited<ReturnType<typeof verifyToken<ResponderAttestation>>>
   try {
-    verified = await verifyToken<ResponderAttestation>({ token: attestation })
+    verified = await verifyToken<ResponderAttestation>({
+      crypto: group.crypto,
+      token: attestation,
+    })
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new SealedGroupInfoError(

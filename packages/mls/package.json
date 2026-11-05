@@ -49,5 +49,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "@kokuin/crypto": "catalog:"
   }
 }

@@ -136,6 +136,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
               group.anchor.controller,
               group.registry,
               source.registry,
+              { crypto: group.crypto },
             )
             if (
               !(await recoverySignerEligible({
@@ -151,6 +152,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
               throw new LeafBindingError('floating-refused')
           },
           options: {
+            crypto: group.crypto,
             commitPolicy: group.commitPolicy,
             resolveLedgerEntries: group.resolveLedgerEntries,
             onLedgerEntries: group.onLedgerEntries,

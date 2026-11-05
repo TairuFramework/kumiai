@@ -7,7 +7,7 @@ import {
   pruneLog,
   type SignedEvent,
 } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 export const CHAIN_REVOKE_REFUSED = 'chain revoke refused'
 
@@ -26,33 +26,40 @@ export function hasChainRevoke(chain: ReadonlyArray<unknown>): boolean {
 export async function foldChain(
   did: string,
   chain: ReadonlyArray<SignedEvent>,
+  options?: CryptoOptions,
 ): Promise<FoldResult> {
-  return foldControllerLog(did, asControllerLog(chain))
+  return foldControllerLog(did, asControllerLog(chain), options)
 }
 
-export async function foldControllerLog(did: string, log: ControllerLog): Promise<FoldResult> {
+export async function foldControllerLog(
+  did: string,
+  log: ControllerLog,
+  options?: CryptoOptions,
+): Promise<FoldResult> {
   // Kokuin 0.2 skips unsigned crit:false events, but a chain rev must never fold.
   if (hasChainRevoke(log.chain)) {
     const index = log.chain.findIndex((signed) => hasChainRevoke([signed]))
     return { ok: false, reason: CHAIN_REVOKE_REFUSED, index }
   }
-  return foldLog({ did: did, input: log })
+  return foldLog({ ...options, did: did, input: log })
 }
 
 export async function revokeIndices(
   did: string,
   chain: ReadonlyArray<SignedEvent>,
   subject: string,
+  options?: CryptoOptions,
 ): Promise<Array<number>> {
-  return deviceRevokeIndices({ did: did, chain: [...chain], subject: subject })
+  return deviceRevokeIndices({ ...options, did: did, chain: [...chain], subject: subject })
 }
 
 export async function memberDropIndices(
   did: string,
   chain: ReadonlyArray<SignedEvent>,
   add: string,
+  options?: CryptoOptions,
 ): Promise<Array<number>> {
-  const folded = await foldChain(did, chain)
+  const folded = await foldChain(did, chain, options)
   if (!folded.ok) return []
   const indices: Array<number> = []
   for (let index = 1; index < chain.length; index++) {
@@ -78,8 +85,9 @@ export async function memberTombstoneIndices(
   chain: ReadonlyArray<SignedEvent>,
   add: string,
   member: string,
+  options?: CryptoOptions,
 ): Promise<Array<number>> {
-  const folded = await foldChain(did, chain)
+  const folded = await foldChain(did, chain, options)
   if (!folded.ok) return []
   const indices: Array<number> = []
   for (let index = 1; index < chain.length; index++) {
@@ -102,8 +110,9 @@ export async function closureOf(
   did: string,
   log: ControllerLog,
   targets: ReadonlyArray<string>,
+  options?: CryptoOptions,
 ): Promise<ControllerLog | undefined> {
-  const folded = await foldControllerLog(did, log)
+  const folded = await foldControllerLog(did, log, options)
   if (!folded.ok || folded.head.saturated) return undefined
   const applied = new Set(folded.applied)
   if (targets.some((digest) => !applied.has(digest))) return undefined
@@ -111,7 +120,7 @@ export async function closureOf(
   const needed = new Set(targets)
   const events: ControllerLog['events'] = []
   // Applied copies are topologically ordered and closed under ancestry in an unsaturated epoch.
-  const pruned = await pruneLog({ did: did, input: log })
+  const pruned = await pruneLog({ ...options, did: did, input: log })
   for (const signed of pruned.events.toReversed()) {
     if (!needed.has(digestOf(signed.event))) continue
     events.push(signed)

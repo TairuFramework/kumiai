@@ -84,9 +84,12 @@ async function buildBundle(
       throw new LeafBindingError('member-unavailable')
     const registry =
       memberRooted && options.controllerLog != null
-        ? await registryForLog(options.controller.id, options.controllerLog)
+        ? await registryForLog(options.controller.id, options.controllerLog, {
+            crypto: options.crypto,
+          })
         : undefined
     await verifyLeafCredential(credential, identity.publicKey, {
+      crypto: options.crypto,
       judging: () => ({ registry, stage: 'full', mode: 'admit' }),
     })
   }

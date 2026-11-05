@@ -1,4 +1,5 @@
 import {
+  type CryptoOptions,
   encodeMultibase,
   isVerifiedToken,
   multihashSHA256,
@@ -80,10 +81,11 @@ export async function signLedgerEntry(
  */
 export async function verifyLedgerEntry<TValue = unknown>(
   token: string,
+  options?: CryptoOptions,
 ): Promise<VerifiedLedgerEntry<TValue> | null> {
   let verified: Awaited<ReturnType<typeof verifyToken<LedgerEntry<TValue>>>>
   try {
-    verified = await verifyToken<LedgerEntry<TValue>>({ token: token })
+    verified = await verifyToken<LedgerEntry<TValue>>({ ...options, token: token })
   } catch {
     return null
   }

@@ -25,7 +25,9 @@ export function retainsKnownEffects(next: GroupHandle): (live: GroupHandle) => P
   return async (live) => {
     const controller = live.anchor.controller
     if (controller != null)
-      await assertRetainsKnownEffects(controller, live.registry, next.registry)
+      await assertRetainsKnownEffects(controller, live.registry, next.registry, {
+        crypto: live.crypto,
+      })
   }
 }
 

@@ -103,7 +103,7 @@ export type SealRecoveryVerdictParams = {
 
 export async function sealRecoveryVerdict(params: SealRecoveryVerdictParams): Promise<Uint8Array> {
   const { group, identity, request, verdict } = params
-  const verified = await verifyRecoveryRequest(request)
+  const verified = await verifyRecoveryRequest(request, { crypto: group.crypto })
   if (
     normalizeDID(identity.id) !== normalizeDID(group.credential.id) ||
     !isRecoveryVerdict(verdict) ||
@@ -137,7 +137,10 @@ export async function openRecoveryVerdict(
     requestID,
     ephemeralPrivateKey,
   })
-  const token = await verifyToken({ token: new TextDecoder().decode(plaintext) })
+  const token = await verifyToken({
+    crypto: group.crypto,
+    token: new TextDecoder().decode(plaintext),
+  })
   if (
     !isVerifiedToken(token) ||
     token.payload.type !== VERDICT_TYPE ||
@@ -171,6 +174,7 @@ export async function recoverySignerEligible(
   const { group, registry, signer, now = Date.now() / 1000 } = params
   const controller = group.anchor.controller
   if (controller == null) return false
+  const options = { crypto: group.crypto }
   try {
     const binding = group.bindingOfDID(signer)
     if (binding?.controller !== controller || binding.prefix == null) return false
@@ -184,7 +188,7 @@ export async function recoverySignerEligible(
         registry.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
     )
       return false
-    const folded = await foldChain(controller, binding.prefix)
+    const folded = await foldChain(controller, binding.prefix, options)
     const projection = registry.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
     const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
@@ -192,15 +196,21 @@ export async function recoverySignerEligible(
       { did: signer, binding: bound, leafKey: binding.leafKey },
       registry,
       controller,
+      options,
     )
     if ('status' in authority) return false
     if (binding.member != null && authority.slot === 'membership') {
-      const status = await memberRootStatus(registry, controller, {
-        kind: 'member',
-        did: signer,
-        add: binding.member.add,
-        gen: binding.member.g,
-      })
+      const status = await memberRootStatus(
+        registry,
+        controller,
+        {
+          kind: 'member',
+          did: signer,
+          add: binding.member.add,
+          gen: binding.member.g,
+        },
+        options,
+      )
       if (
         status.status !== 'effective' ||
         status.key.length !== binding.leafKey.length ||
@@ -208,9 +218,9 @@ export async function recoverySignerEligible(
       )
         return false
     }
-    const expiry = await leafExpiry(bound, registry, controller)
+    const expiry = await leafExpiry(bound, registry, controller, options)
     if (expiry == null) return false
-    const time = await attestedTreeTime(group.state.ratchetTree, registry, controller)
+    const time = await attestedTreeTime(group.state.ratchetTree, registry, controller, options)
     return expiry >= Math.max(time, now - 300)
   } catch {
     return false

@@ -118,7 +118,7 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     }
     appended = [...(params.entries ?? [])]
     for (const token of appended) {
-      const verified = await verifyLedgerEntry(token)
+      const verified = await verifyLedgerEntry(token, { crypto: group.crypto })
       if (
         verified == null ||
         verified.entry.groupID !== group.groupID ||
@@ -270,7 +270,7 @@ export async function commitWithEntries(
   // dead paper no matter who commits it.
   const inputs: Array<FoldInput> = []
   for (const token of enacted) {
-    const verified = await verifyLedgerEntry(token)
+    const verified = await verifyLedgerEntry(token, { crypto: group.crypto })
     if (verified == null) {
       throw new Error('cannot enact a ledger entry whose signature does not verify')
     }
@@ -278,6 +278,7 @@ export async function commitWithEntries(
   }
   const foldEntries = async () =>
     await foldEnvelope({
+      crypto: group.crypto,
       baseRoster: group.roster,
       baseRegistry: group.registry,
       entries: inputs,
@@ -306,7 +307,7 @@ export async function commitWithEntries(
   ])
   const clocks = await preservationClock(group, tree, fold.registry)
   for (const clock of clocks) {
-    const verified = await verifyLedgerEntry(clock)
+    const verified = await verifyLedgerEntry(clock, { crypto: group.crypto })
     if (verified == null) throw new Error('Invalid preservation clock')
     enacted.push(clock)
     inputs.push({ verified, entryID: ledgerEntryDigest(clock) })
@@ -328,7 +329,13 @@ export async function commitWithEntries(
     ) {
       continue
     }
-    const ok = await verifyDeviceEntry(input.verified as VerifiedLedgerEntry<DeviceValue>, proofCtx)
+    const ok = await verifyDeviceEntry(
+      input.verified as VerifiedLedgerEntry<DeviceValue>,
+      proofCtx,
+      {
+        crypto: group.crypto,
+      },
+    )
     if (!ok) {
       throw new Error(`cannot enact device entry ${input.entryID}: proof verification failed`)
     }
@@ -578,7 +585,7 @@ export async function commitInvite(
     if (group.anchor.controller == null) {
       let grantedTo: string | null = null
       for (const token of enacted) {
-        const verified = await verifyLedgerEntry(token)
+        const verified = await verifyLedgerEntry(token, { crypto: group.crypto })
         if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
           grantedTo = verified.entry.subject
         }

@@ -87,6 +87,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
       authService: {
         async validateCredential(credential: Credential, signaturePublicKey: Uint8Array) {
           await verifyLeafCredential(credential, signaturePublicKey, {
+            crypto: options?.crypto,
             judging: () => ({ stage: 'structural', mode: 'rejudge' }),
           })
           return true
@@ -118,6 +119,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   }
 
   const group = await GroupHandle.create({
+    crypto: options?.crypto,
     state,
     credential,
     context,
@@ -144,7 +146,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   if (group.anchor.controller == null) {
     let namesSelf = false
     for (const token of invite.ledgerEntries) {
-      const verified = await verifyLedgerEntry(token)
+      const verified = await verifyLedgerEntry(token, { crypto: options?.crypto })
       if (
         verified?.entry.type === ROLE_ENTRY_TYPE &&
         verified.entry.groupID === invite.groupID &&
@@ -310,6 +312,7 @@ export async function joinGroupExternal(
         )
           throw new LeafBindingError('controller-mismatch')
         await verifyLeafCredential(leafCredential, signaturePublicKey, {
+          crypto: options?.crypto,
           judging: () => ({ stage: 'structural', mode: 'rejudge' }),
           leafLifetime: () =>
             anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400),
@@ -349,6 +352,7 @@ export async function joinGroupExternal(
   const commitMessage = encode(mlsMessageEncoder, framedCommit)
 
   const group = await GroupHandle.create({
+    crypto: options?.crypto,
     state: newState,
     credential,
     context,
@@ -389,6 +393,7 @@ export async function joinGroupExternal(
   beforeTree[ownIndex * 2] = undefined
   beforeTree[removed.remove.removed * 2] = { ...own, leaf: { ...own.leaf, ...previous } }
   const before = await GroupHandle.create({
+    crypto: options?.crypto,
     state: { ...newState, ratchetTree: beforeTree, groupContext: groupInfo.groupContext },
     credential,
     context: await resolveMlsContext(options, anchor),

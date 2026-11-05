@@ -1,4 +1,9 @@
-import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
+import {
+  assertTimeClaimsValid,
+  type CryptoOptions,
+  decodeSignedToken,
+  normalizeDID,
+} from '@kokuin/token'
 import { maybeYield } from '@sozai/async'
 import { toB64 } from '@sozai/codec'
 import { EventEmitter, type EventsSource } from '@sozai/event'
@@ -127,7 +132,7 @@ type FoldedControl = {
 type FoldedGroupHandleParams = GroupHandleParams & { [FOLDED_CONTROL]: FoldedControl }
 
 async function computeAdmission(
-  view: Pick<GroupHandle, 'state' | 'anchor' | 'registry'>,
+  view: Pick<GroupHandle, 'state' | 'anchor' | 'registry'> & CryptoOptions,
 ): Promise<SendAdmission> {
   const leaf = leafAt(view.state.ratchetTree, view.state.privatePath.leafIndex)
   const epoch = Number(view.state.groupContext.epoch)
@@ -158,7 +163,9 @@ export async function registryAt(group: GroupHandle, head: Uint8Array): Promise<
   }
   if (!headsMatch(held, head)) throw new Error('Unknown epoch ledger head')
   const registry = (
-    await foldLedgerControl(group.ledger.slice(0, length), group.anchor, group.groupID)
+    await foldLedgerControl(group.ledger.slice(0, length), group.anchor, group.groupID, {
+      crypto: group.crypto,
+    })
   ).registry
   cache.set(key, registry)
   if (cache.size > 8) {
@@ -450,15 +457,39 @@ export type HeldLedgerEntry = {
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 const VERIFIED_LEDGER_ENTRIES = new WeakMap<VerifiedLedgerEntry, HeldLedgerEntry>()
-const VERIFIED_LEDGER_TOKENS = new WeakMap<Array<string>, Array<HeldLedgerEntry | undefined>>()
+const VERIFIED_LEDGER_TOKENS = new WeakMap<
+  Array<string>,
+  { crypto: CryptoOptions['crypto']; held: Array<HeldLedgerEntry | undefined> }
+>()
 export const VERIFIED_LEDGER_TOKEN_CACHE_SIZE = 4096
-const VERIFIED_LEDGER_TOKEN_CACHE = new Map<string, VerifiedLedgerEntry>()
+type LedgerTokenCache = Map<string, VerifiedLedgerEntry>
+const DEFAULT_LEDGER_TOKEN_CACHE: LedgerTokenCache = new Map()
+const PROVIDER_LEDGER_TOKEN_CACHES = new WeakMap<
+  NonNullable<CryptoOptions['crypto']>,
+  LedgerTokenCache
+>()
 
-function cachedLedgerEntry(token: string): VerifiedLedgerEntry | null | undefined {
-  const verified = VERIFIED_LEDGER_TOKEN_CACHE.get(token)
+// A token one provider accepted says nothing about another.
+function ledgerTokenCache(options?: CryptoOptions): LedgerTokenCache {
+  const crypto = options?.crypto
+  if (crypto == null) return DEFAULT_LEDGER_TOKEN_CACHE
+  let cache = PROVIDER_LEDGER_TOKEN_CACHES.get(crypto)
+  if (cache == null) {
+    cache = new Map()
+    PROVIDER_LEDGER_TOKEN_CACHES.set(crypto, cache)
+  }
+  return cache
+}
+
+function cachedLedgerEntry(
+  token: string,
+  options?: CryptoOptions,
+): VerifiedLedgerEntry | null | undefined {
+  const cache = ledgerTokenCache(options)
+  const verified = cache.get(token)
   if (verified == null) return undefined
-  VERIFIED_LEDGER_TOKEN_CACHE.delete(token)
-  VERIFIED_LEDGER_TOKEN_CACHE.set(token, verified)
+  cache.delete(token)
+  cache.set(token, verified)
   try {
     assertTimeClaimsValid({ payload: decodeSignedToken(token).payload })
     return structuredClone(verified)
@@ -467,20 +498,28 @@ function cachedLedgerEntry(token: string): VerifiedLedgerEntry | null | undefine
   }
 }
 
-function cacheLedgerEntry(token: string, verified: VerifiedLedgerEntry): void {
-  VERIFIED_LEDGER_TOKEN_CACHE.delete(token)
-  VERIFIED_LEDGER_TOKEN_CACHE.set(token, structuredClone(verified))
-  if (VERIFIED_LEDGER_TOKEN_CACHE.size > VERIFIED_LEDGER_TOKEN_CACHE_SIZE) {
-    const oldest = VERIFIED_LEDGER_TOKEN_CACHE.keys().next().value
-    if (oldest != null) VERIFIED_LEDGER_TOKEN_CACHE.delete(oldest)
+function cacheLedgerEntry(
+  token: string,
+  verified: VerifiedLedgerEntry,
+  options?: CryptoOptions,
+): void {
+  const cache = ledgerTokenCache(options)
+  cache.delete(token)
+  cache.set(token, structuredClone(verified))
+  if (cache.size > VERIFIED_LEDGER_TOKEN_CACHE_SIZE) {
+    const oldest = cache.keys().next().value
+    if (oldest != null) cache.delete(oldest)
   }
 }
 
-async function verifyCachedLedgerEntry(token: string): Promise<VerifiedLedgerEntry | null> {
-  const cached = cachedLedgerEntry(token)
+async function verifyCachedLedgerEntry(
+  token: string,
+  options?: CryptoOptions,
+): Promise<VerifiedLedgerEntry | null> {
+  const cached = cachedLedgerEntry(token, options)
   if (cached !== undefined) return cached
-  const verified = await verifyLedgerEntry(token)
-  if (verified != null) cacheLedgerEntry(token, verified)
+  const verified = await verifyLedgerEntry(token, options)
+  if (verified != null) cacheLedgerEntry(token, verified, options)
   return verified
 }
 
@@ -505,6 +544,7 @@ async function registryWithTreeBindings(
   registry: DeviceRegistry,
   tree: ClientState['ratchetTree'],
   anchor: GroupAnchor,
+  options?: CryptoOptions,
 ): Promise<DeviceRegistry> {
   if (anchor.controller == null) return registry
   const devices = new Map(registry.devices)
@@ -522,7 +562,7 @@ async function registryWithTreeBindings(
       // An unparseable leaf cannot supply reset re-admission evidence.
       continue
     }
-    if (!(await mayReadmitResetDevice(registry, parsed))) continue
+    if (!(await mayReadmitResetDevice(registry, parsed, options))) continue
     const did = normalizeDID(parsed.id)
     const record = devices.get(did)
     if (record == null) continue
@@ -544,12 +584,13 @@ async function foldLedgerControl(
   ledger: ReadonlyArray<LedgerLogEntry>,
   anchor: GroupAnchor,
   groupID: string,
+  options?: CryptoOptions,
 ): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
   const entries = ledger.map(({ verified, entryID }) => ({ verified, entryID }) as FoldInput)
-  return await foldControl(entries, anchor, groupID)
+  return await foldControl(entries, anchor, groupID, undefined, options)
 }
 
-export type GroupHandleParams = {
+export type GroupHandleParams = CryptoOptions & {
   state: ClientState
   credential: MemberCredential
   context: MlsContext
@@ -574,6 +615,7 @@ export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
   #context: MlsContext
+  #crypto: CryptoOptions['crypto']
   #commitPolicy?: IncomingMessageCallback
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
@@ -600,19 +642,23 @@ export class GroupHandle {
     if (anchor == null) {
       throw new Error('group has no anchor extension; cannot seed a control roster')
     }
+    const crypto = params.crypto ?? deviceDenyHolderFor(params.context)?.crypto
     const folded = await foldLedgerControl(
       [...(params.ledger ?? [])],
       anchor,
       params.credential.groupID,
+      { crypto },
     )
     const registry = await registryWithTreeBindings(
       folded.registry,
       params.state.ratchetTree,
       anchor,
+      { crypto },
     )
-    const admission = await computeAdmission({ state: params.state, anchor, registry })
+    const admission = await computeAdmission({ state: params.state, anchor, registry, crypto })
     const seeded: FoldedGroupHandleParams = {
       ...params,
+      crypto,
       [FOLDED_CONTROL]: { anchor, roster: folded.roster, registry, admission },
     }
     return new GroupHandle(seeded)
@@ -625,6 +671,7 @@ export class GroupHandle {
     // A caller-built context without a client config gets kumiai's, as the context a commit
     // rebuilds would: in place, since the context is the key of its deny holder.
     this.#context.clientConfig ??= kumiaiClientConfig()
+    this.#crypto = params.crypto
     this.#commitPolicy = params.commitPolicy
     this.#resolveLedgerEntries = params.resolveLedgerEntries
     this.#onLedgerEntries = params.onLedgerEntries
@@ -667,6 +714,7 @@ export class GroupHandle {
     // Authentication reads only this handle's registry and lifetime limits.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
+      denyHolder.crypto = this.#crypto
       denyHolder.provider = () => this.currentDenySet()
       denyHolder.judging = () => ({
         registry: anchor.controller == null ? undefined : this.registry,
@@ -699,12 +747,15 @@ export class GroupHandle {
               ),
             },
           }
-        : createMlsContext(this.#context.cipherSuite, this.#anchor)
+        : createMlsContext(this.#context.cipherSuite, this.#anchor, undefined, {
+            crypto: this.#crypto,
+          })
     const config = this.#context.clientConfig
     if (config != null) context.clientConfig = copyClientConfig(config)
     context.externalPsks = structuredClone(this.#context.externalPsks)
     const params: CloneGroupHandleParams = {
       [CLONE_SOURCE]: this,
+      crypto: this.#crypto,
       state: structuredClone(this.#state),
       credential: structuredClone(this.#credential),
       context,
@@ -749,6 +800,11 @@ export class GroupHandle {
     return this.#context
   }
 
+  /** The kokuin provider this handle verifies with; carried onto clones and derived handles. */
+  get crypto(): CryptoOptions['crypto'] {
+    return this.#crypto
+  }
+
   /** The commit policy enforced by processMessage, if any. Carried onto
    *  handles derived from this one (commitInvite/removeMember). */
   get commitPolicy(): IncomingMessageCallback | undefined {
@@ -782,10 +838,10 @@ export class GroupHandle {
    *  verification through the returned array; serialised tokens must verify afresh. */
   get ledgerTokens(): Array<string> {
     const tokens = this.#ledger.map(({ token }) => token)
-    VERIFIED_LEDGER_TOKENS.set(
-      tokens,
-      this.#ledger.map(({ verified }) => VERIFIED_LEDGER_ENTRIES.get(verified)),
-    )
+    VERIFIED_LEDGER_TOKENS.set(tokens, {
+      crypto: this.#crypto,
+      held: this.#ledger.map(({ verified }) => VERIFIED_LEDGER_ENTRIES.get(verified)),
+    })
     return tokens
   }
 
@@ -802,7 +858,7 @@ export class GroupHandle {
   async settleAdvisory(): Promise<'ok' | 'prompt' | 'blocked'> {
     const controller = this.#anchor.controller
     const log = controller == null ? undefined : recordedLogOf(this.#registry, controller)
-    return log == null ? 'ok' : await settleAdvisory(log)
+    return log == null ? 'ok' : await settleAdvisory(log, { crypto: this.#crypto })
   }
 
   /**
@@ -935,7 +991,9 @@ export class GroupHandle {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
       const candidates: Array<LedgerLogEntry> = []
-      const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
+      const remembered = VERIFIED_LEDGER_TOKENS.get(tokens)
+      const memo =
+        remembered != null && remembered.crypto === this.#crypto ? remembered.held : undefined
       const nextMemo: Array<HeldLedgerEntry | undefined> = []
       for (const [index, token] of tokens.entries()) {
         await maybeYield()
@@ -949,7 +1007,7 @@ export class GroupHandle {
           }
           verified = structuredClone(held.verified)
         } else {
-          verified = await verifyCachedLedgerEntry(token)
+          verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
         }
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
@@ -959,22 +1017,26 @@ export class GroupHandle {
         appended.push(verified)
       }
       const ledger = [...this.#ledger, ...candidates]
-      const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID)
+      const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID, {
+        crypto: this.#crypto,
+      })
       const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
+        { crypto: this.#crypto },
       )
       const admission = await computeAdmission({
         state: this.#state,
         anchor: this.#anchor,
         registry,
+        crypto: this.#crypto,
       })
       this.#ledger = ledger
       for (const { entryID, token, verified } of candidates) {
         this.#entryBodies.set(entryID, { token, verified })
       }
-      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
+      VERIFIED_LEDGER_TOKENS.set(tokens, { crypto: this.#crypto, held: nextMemo })
       this.#roster = folded.roster
       this.#registry = registry
       this.#admission = admission
@@ -1069,7 +1131,7 @@ export class GroupHandle {
       for (let index = 0; index < tokens.length; index++) {
         await maybeYield()
         const token = tokens[index] as string
-        const verified = await verifyCachedLedgerEntry(token)
+        const verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
         if (verified == null || verified.entry.groupID !== this.groupID) {
           // Unreachable past the gate — the chain digests the token bytes, so an
           // unverifiable or cross-group token cannot sit at a position the head
@@ -1107,16 +1169,20 @@ export class GroupHandle {
         registry: this.#registry,
         admission: this.#admission,
       }
-      const folded = await foldLedgerControl(log, this.#anchor, this.groupID)
+      const folded = await foldLedgerControl(log, this.#anchor, this.groupID, {
+        crypto: this.#crypto,
+      })
       const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
+        { crypto: this.#crypto },
       )
       const admission = await computeAdmission({
         state: this.#state,
         anchor: this.#anchor,
         registry,
+        crypto: this.#crypto,
       })
       this.#ledger = log
       this.#entryBodies = new Map(
@@ -1723,7 +1789,7 @@ export class GroupHandle {
               const id = ledgerEntryDigest(token)
               // Content-addressing binds the untrusted body to the requested id.
               if (resolved.has(id) || !missing.includes(id)) continue
-              const verified = await verifyCachedLedgerEntry(token)
+              const verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
               if (verified == null) continue
               resolved.set(id, ledgerLogEntry(id, token, verified))
             }
@@ -1739,6 +1805,7 @@ export class GroupHandle {
           })
 
           const foldResult = await foldEnvelope({
+            crypto: this.#crypto,
             baseRoster: this.#roster,
             baseRegistry: this.#registry,
             entries: ordered,
@@ -1775,6 +1842,7 @@ export class GroupHandle {
               const ok = await verifyDeviceEntry(
                 verified as VerifiedLedgerEntry<DeviceValue>,
                 proofCtx,
+                { crypto: this.#crypto },
               )
               if (!ok) {
                 precomputedReject = true
@@ -1865,16 +1933,20 @@ export class GroupHandle {
       for (const { token, verified, entryID } of acceptedEntries) {
         ledger.push({ entryID, token, verified })
       }
-      const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID)
+      const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID, {
+        crypto: this.#crypto,
+      })
       const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
+        { crypto: this.#crypto },
       )
       const admission = await computeAdmission({
         state: this.#state,
         anchor: this.#anchor,
         registry,
+        crypto: this.#crypto,
       })
       // Published together: readers between the folds still see the previous epoch's control state.
       this.#ledger = ledger
@@ -2194,6 +2266,7 @@ export class GroupHandle {
                         signaturePublicKey: key,
                       })
                     await verifyLeafCredential(credential, key, {
+                      crypto: this.#crypto,
                       deviceDenySet: () => denySetOf(candidateRegistry),
                       judging: () => ({
                         registry: this.#anchor.controller == null ? undefined : candidateRegistry,
@@ -2359,7 +2432,10 @@ export async function deriveGroup(group: GroupHandle, state: ClientState): Promi
     state,
     credential: group.credential,
     // The post-commit handle keeps the source's receive retention, not ts-mls's defaults.
-    context: createMlsContext(group.context.cipherSuite, group.anchor, group.context.clientConfig),
+    context: createMlsContext(group.context.cipherSuite, group.anchor, group.context.clientConfig, {
+      crypto: group.crypto,
+    }),
+    crypto: group.crypto,
     ledger: group.ledger,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,

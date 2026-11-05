@@ -50,9 +50,10 @@ export async function createHubServer(
     )
   if (params.access?.revocation != null)
     plugins.push(
-      accessRevocationPlugin(
-        params.access.revocation === true ? undefined : params.access.revocation,
-      ),
+      accessRevocationPlugin({
+        crypto: params.crypto,
+        ...(params.access.revocation === true ? {} : params.access.revocation),
+      }),
     )
   if (rateLimit !== false) plugins.push(rateLimitPlugin(rateLimit))
   plugins.push(hub)

@@ -1,6 +1,6 @@
 import { assertCapabilityToken, checkCapability } from '@kokuin/capability'
 import { type ControllerLog, isControllerLog, LOG_TOO_LARGE, mergeLogs } from '@kokuin/controller'
-import { normalizeDID, verifyToken } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID, verifyToken } from '@kokuin/token'
 import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes } from 'ts-mls'
 
 import { hasHolderEvidence } from './authentication.js'
@@ -65,9 +65,10 @@ export async function mergeLifecycleProofLogs(
   controller: string,
   first: ControllerLog,
   second: ControllerLog,
+  options?: CryptoOptions,
 ): Promise<ControllerLog> {
   try {
-    return await mergeLogs({ did: controller, left: first, right: second })
+    return await mergeLogs({ ...options, did: controller, left: first, right: second })
   } catch (cause) {
     if (!(cause instanceof Error) || !cause.message.startsWith(LOG_TOO_LARGE)) throw cause
     const error = new RevokeProofError('too-large')
@@ -81,11 +82,17 @@ export async function lifecycleProofLog(
   controller: string,
   ingested: IngestedControllerLog,
   proof: ControllerLog,
+  options?: CryptoOptions,
 ): Promise<ControllerLog> {
-  return await mergeLifecycleProofLogs(controller, ingested.log, {
-    chain: ingested.log.chain,
-    events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
-  })
+  return await mergeLifecycleProofLogs(
+    controller,
+    ingested.log,
+    {
+      chain: ingested.log.chain,
+      events: proof.events.filter(({ event }) => event.e !== ingested.after.head.epoch),
+    },
+    options,
+  )
 }
 
 /** Authenticate replayable log data without reading any membership state. */
@@ -93,6 +100,7 @@ export async function authenticateLifecycleProof(
   controllerID: string,
   verified: VerifiedLedgerEntry<DeviceValue>,
   registry: DeviceRegistry,
+  options?: CryptoOptions,
 ): Promise<AuthenticatedProof> {
   const controller = normalizeDID(controllerID)
   const subject = normalizeDID(verified.entry.subject)
@@ -109,7 +117,13 @@ export async function authenticateLifecycleProof(
     if (!isControllerLog(proof)) throw new RevokeProofError('not-authority-signed')
     if (value.op === 'seed' ? previous?.recordedLog != null : previous?.recordedLog == null)
       throw new RevokeProofError('detached')
-    const ingested = await ingestControllerLog(controller, previous?.recordedLog, proof, previous)
+    const ingested = await ingestControllerLog(
+      controller,
+      previous?.recordedLog,
+      proof,
+      previous,
+      options,
+    )
     if (value.op === 'log') {
       if (
         ingested.introduced.length === 0 &&
@@ -134,15 +148,21 @@ export async function authenticateLifecycleProof(
     throw new RevokeProofError('generation-floor')
   if (value.op === 'revoke' && proof.chain.some(({ event }) => event.g > (previous?.genFloor ?? 0)))
     throw new RevokeProofError('needs-reset')
-  const ingested = await ingestControllerLog(controller, previous?.recordedLog, proof, previous)
+  const ingested = await ingestControllerLog(
+    controller,
+    previous?.recordedLog,
+    proof,
+    previous,
+    options,
+  )
   if (ingested.after.head.saturated) throw new RevokeProofError('too-large')
   const delta = effectDelta(ingested.before?.head, ingested.after.head)
   if (value.op === 'reset') {
     if (!delta.generation || ingested.after.head.gen <= floor)
       throw new RevokeProofError('generation-floor')
   } else if (delta.generation) throw new RevokeProofError('needs-reset')
-  const proofLog = await lifecycleProofLog(controller, ingested, proof)
-  const context = await effectProofContext(controller, proofLog)
+  const proofLog = await lifecycleProofLog(controller, ingested, proof, options)
+  const context = await effectProofContext(controller, proofLog, options)
   const expected = await context.claimsFor(previous?.recordedLog, floor)
   if (value.effects == null || (value.effects.length === 0 && value.op !== 'reset'))
     throw new RevokeProofError('no-rev')
@@ -237,6 +257,7 @@ export async function lifecycleProofEffects(
   const controllerID = group.anchor.controller
   if (controllerID == null) throw new RevokeProofError('wrong-controller')
   const controller = normalizeDID(controllerID)
+  const options = { crypto: group.crypto }
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
   const issuerController = group.bindingOfDID(verified.issuer)?.controller
@@ -252,7 +273,7 @@ export async function lifecycleProofEffects(
     group.listMembers().map(async (member) => {
       const binding = group.bindingOfDID(member.id)
       const folded =
-        binding?.prefix == null ? undefined : await foldChain(controller, binding.prefix)
+        binding?.prefix == null ? undefined : await foldChain(controller, binding.prefix, options)
       return {
         did: normalizeDID(member.id),
         leafIndex: member.leafIndex,
@@ -270,7 +291,7 @@ export async function lifecycleProofEffects(
       const folded =
         previous?.recordedLog == null
           ? undefined
-          : await foldControllerLog(controller, previous.recordedLog)
+          : await foldControllerLog(controller, previous.recordedLog, options)
       const eligible = effectiveAttestingMembers(
         folded?.ok ? folded.head : undefined,
         previous,
@@ -285,8 +306,8 @@ export async function lifecycleProofEffects(
       value.time <= timeFloor ||
       value.time >
         Math.max(
-          await attestedTreeTime(group.state.ratchetTree, group.registry, controller),
-          await attestedTreeTime(group.state.ratchetTree, registry, controller),
+          await attestedTreeTime(group.state.ratchetTree, group.registry, controller, options),
+          await attestedTreeTime(group.state.ratchetTree, registry, controller, options),
         )
     ) {
       throw new RevokeProofError('effects-mismatch')
@@ -301,7 +322,7 @@ export async function lifecycleProofEffects(
       removeLeafIndices: [],
     }
   }
-  const authenticated = await authenticateLifecycleProof(controller, verified, registry)
+  const authenticated = await authenticateLifecycleProof(controller, verified, registry, options)
   if (value.op === 'log') {
     const index = group.findMemberLeafIndex(verified.issuer)
     const leaf = index == null ? undefined : leafAt(group.state.ratchetTree, index)
@@ -328,6 +349,7 @@ export async function lifecycleProofEffects(
     { ...verified, entry: { ...verified.entry, value: { ...value, revoked: [] } } },
     registry,
     controller,
+    options,
   )
   for (const raw of value.survivors ?? []) {
     const { payload } = readCapability(raw)
@@ -342,12 +364,17 @@ export async function lifecycleProofEffects(
       key.some((byte, index) => byte !== leaf.leafKey[index])
     )
       throw new LeafBindingError('confirmation-invalid')
-    const status = await memberRootStatus(candidate, controller, {
-      kind: 'member',
-      did: payload.iss,
-      add: payload.mbr.add,
-      gen: payload.mbr.g,
-    })
+    const status = await memberRootStatus(
+      candidate,
+      controller,
+      {
+        kind: 'member',
+        did: payload.iss,
+        add: payload.mbr.add,
+        gen: payload.mbr.g,
+      },
+      options,
+    )
     if (status.status !== 'effective')
       throw new LeafBindingError(
         status.status === 'removed' ? 'member-removed' : 'member-unavailable',
@@ -356,8 +383,10 @@ export async function lifecycleProofEffects(
       controllerID: controller,
       prefix: candidate.controllers.get(controller)?.recordedLog?.chain ?? [],
       registry: candidate,
+      crypto: group.crypto,
     }).frozen()
     const token = await verifyToken({
+      ...options,
       token: raw,
       methods: [resolver],
       historic: true,
@@ -366,6 +395,7 @@ export async function lifecycleProofEffects(
     })
     assertCapabilityToken(token)
     await checkCapability({
+      ...options,
       permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
       payload: payload,
       atTime: payload.iat,
@@ -409,6 +439,7 @@ export async function lifecycleProofEffects(
     registry,
     candidate,
     controller,
+    options,
   )
   if (value.op === 'reset')
     cascade.revoked = cascade.revoked.filter(

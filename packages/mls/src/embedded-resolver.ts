@@ -6,9 +6,9 @@ import {
   type SignedEvent,
 } from '@kokuin/controller'
 import {
+  type CryptoOptions,
   type DIDMethodResolver,
   type DIDMethodResolverResolveMemberParams,
-  type MemberQuery,
   normalizeDID,
 } from '@kokuin/token'
 
@@ -31,17 +31,20 @@ export function prefixRelation(
 }
 
 /** Root keys come from the leaf prefix; member authority comes from the recorded epoch. */
-export function createRegistryControllerResolver(params: {
-  controllerID: string
-  prefix: ReadonlyArray<SignedEvent>
-  registry?: DeviceRegistry
-}): ControllerResolver {
+export function createRegistryControllerResolver(
+  params: CryptoOptions & {
+    controllerID: string
+    prefix: ReadonlyArray<SignedEvent>
+    registry?: DeviceRegistry
+  },
+): ControllerResolver {
   const controller = normalizeDID(params.controllerID)
   const recorded = params.registry == null ? undefined : recordedLogOf(params.registry, controller)
   const denied = params.registry == null ? EMPTY : denySetOf(params.registry)
   const prefix = asControllerLog(params.prefix)
   const resolverFor = (log: ControllerLog) => {
     return createControllerResolver({
+      crypto: params.crypto,
       loadLog: async (did) =>
         normalizeDID(did) === controller && !hasChainRevoke(log.chain) ? log : undefined,
     })

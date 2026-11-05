@@ -5,7 +5,12 @@ import {
   type InceptionEvent,
   pruneLog,
 } from '@kokuin/controller'
-import { createSigningIdentityForDID, type DIDString, normalizeDID } from '@kokuin/token'
+import {
+  type CryptoOptions,
+  createSigningIdentityForDID,
+  type DIDString,
+  normalizeDID,
+} from '@kokuin/token'
 import {
   type ClientState,
   type DefaultProposal,
@@ -62,6 +67,7 @@ export async function controllerLogDelta(
 ): Promise<ControllerLog | null> {
   const controller = group.anchor.controller
   if (controller == null) throw new RevokeProofError('wrong-controller')
+  const options = { crypto: group.crypto }
   const recorded = recordedLogOf(group.registry, controller)
   if (recorded == null) throw new RevokeProofError('detached')
   const first = log.chain[0]?.event
@@ -76,14 +82,14 @@ export async function controllerLogDelta(
     )
   )
     throw new RevokeProofError('wrong-controller')
-  const folded = await foldControllerLog(controller, log)
+  const folded = await foldControllerLog(controller, log, options)
   if (!folded.ok)
     throw new RevokeProofError(
       isDetachedFoldReason(folded.reason) ? 'detached' : 'not-authority-signed',
     )
-  const pruned = await pruneLog({ did: controller, input: log })
-  const incoming = await ingestControllerLog(controller, undefined, pruned)
-  const previous = await ingestControllerLog(controller, undefined, recorded)
+  const pruned = await pruneLog({ ...options, did: controller, input: log })
+  const incoming = await ingestControllerLog(controller, undefined, pruned, undefined, options)
+  const previous = await ingestControllerLog(controller, undefined, recorded, undefined, options)
   const reset = incoming.after.head.gen > previous.after.head.gen
   const merged = incoming.log
   const common = reset ? 1 : Math.min(recorded.chain.length, merged.chain.length)
@@ -99,7 +105,7 @@ export async function controllerLogDelta(
     events: merged.events.filter(({ event }) => !seen.has(digestOf(event))),
   }
   if (delta.chain.length === 0 && delta.events.length === 0) return null
-  await ingestControllerLog(controller, recorded, delta)
+  await ingestControllerLog(controller, recorded, delta, undefined, options)
   return delta
 }
 
@@ -117,6 +123,7 @@ export async function publishControllerLog(
       recordedLogOf(group.registry, controller),
       delta,
       group.registry.controllers.get(normalizeDID(controller)),
+      { crypto: group.crypto },
     )
     const effects = effectDelta(ingested.before?.head, ingested.after.head)
     if (effects.generation || effects.denied.length > 0 || effects.removed.length > 0)
@@ -192,6 +199,7 @@ function ownIdentity(group: GroupHandle) {
   return createSigningIdentityForDID({
     id: (parsed.longForm ?? parsed.id) as DIDString,
     privateKey: group.state.signaturePrivateKey,
+    crypto: group.crypto,
   })
 }
 
@@ -203,7 +211,12 @@ export async function preservationClock(
   const controller = group.anchor.controller
   if (controller == null) return []
   const before = await treeTime(group, controller)
-  if ((await attestedTreeTime(candidateTree, candidateRegistry, controller)) >= before) return []
+  if (
+    (await attestedTreeTime(candidateTree, candidateRegistry, controller, {
+      crypto: group.crypto,
+    })) >= before
+  )
+    return []
   return [
     await signLedgerEntry(ownIdentity(group), {
       type: DEVICE_ENTRY_TYPE,
@@ -223,7 +236,9 @@ export async function attestTreeTime(
     if (controller == null) return null
     const projection = group.registry.controllers.get(normalizeDID(controller))
     if (projection?.recordedLog == null) return null
-    const folded = await foldControllerLog(controller, projection.recordedLog)
+    const folded = await foldControllerLog(controller, projection.recordedLog, {
+      crypto: group.crypto,
+    })
     if (!folded.ok || folded.head.saturated) return null
     const members = effectiveAttestingMembers(folded.head, projection, time).filter(
       ([, member]) => normalizeDID(member.did) === normalizeDID(group.credential.id),
@@ -300,9 +315,10 @@ export async function renewLeaf(
           subject: binding.id,
           value: { op: 'log', proof: delta },
         })
-        const verified = await verifyLedgerEntry(token)
+        const verified = await verifyLedgerEntry(token, { crypto: group.crypto })
         if (verified == null) throw new Error('Invalid authored log entry')
         const folded = await foldEnvelope({
+          crypto: group.crypto,
           baseRoster: group.roster,
           baseRegistry: group.registry,
           entries: [{ verified, entryID: ledgerEntryDigest(token) }],
@@ -392,10 +408,11 @@ export async function removalEvidence(
   controller: string,
   log: ControllerLog,
   rmv: string,
+  options?: CryptoOptions,
 ): Promise<RemovalEvidence | undefined> {
   const signed = log.events.find(({ event }) => digestOf(event) === rmv)
   if (signed?.event.t !== 'rmv') return undefined
-  const closure = await closureOf(controller, log, [rmv])
+  const closure = await closureOf(controller, log, [rmv], options)
   if (closure == null) return undefined
   return { controller: normalizeDID(controller), epoch: signed.event.e, closure }
 }
@@ -418,6 +435,7 @@ export async function survivorTargets(
       },
       group.registry,
       controller,
+      { crypto: group.crypto },
     )
     if ('root' in authority && authority.root.kind === 'member' && authority.root.add === add)
       descendants.push({ did: id, leafKey: binding.leafKey.slice() })
@@ -443,6 +461,7 @@ export async function revokeWithProof(
     try {
       const controller = group.anchor.controller
       if (controller == null) throw new RevokeProofError('wrong-controller')
+      const options = { crypto: group.crypto }
       const reset = 'reset' in params
       const requested = reset ? [] : (params.deny ?? []).map(normalizeDID)
       const removals = reset
@@ -470,13 +489,20 @@ export async function revokeWithProof(
           controller,
           { chain: params.log.chain, events: proof.events },
           { chain: params.log.chain, events: evidence.flatMap(({ closure }) => closure.events) },
+          options,
         )
         proof = { ...proof, events: supplied.events }
       }
       const ingested =
         proof == null
           ? null
-          : await ingestControllerLog(controller, projection?.recordedLog, proof, projection)
+          : await ingestControllerLog(
+              controller,
+              projection?.recordedLog,
+              proof,
+              projection,
+              options,
+            )
       if (!reset && ingested != null && ingested.after.head.gen !== ingested.before?.head.gen)
         throw new RevokeProofError('needs-reset')
       if (!reset) {
@@ -484,7 +510,13 @@ export async function revokeWithProof(
           ...(requested.length === 0 || projection?.recordedLog == null
             ? []
             : (
-                await claimsFor(controller, undefined, projection.recordedLog, projection.genFloor)
+                await claimsFor(
+                  controller,
+                  undefined,
+                  projection.recordedLog,
+                  projection.genFloor,
+                  options,
+                )
               ).filter(
                 (claim) => claim.kind === 'deny' && requested.includes(normalizeDID(claim.did)),
               )),
@@ -506,8 +538,9 @@ export async function revokeWithProof(
       const effects = await claimsFor(
         controller,
         projection?.recordedLog,
-        await lifecycleProofLog(controller, ingested, proof),
+        await lifecycleProofLog(controller, ingested, proof, options),
         projection?.genFloor ?? 0,
+        options,
       )
       if (
         !reset &&
@@ -538,7 +571,7 @@ export async function revokeWithProof(
         issuer: group.credential.id,
         entry: { type: DEVICE_ENTRY_TYPE, groupID: group.groupID, subject: controller, value },
       }
-      await authenticateLifecycleProof(controller, verified, group.registry)
+      await authenticateLifecycleProof(controller, verified, group.registry, options)
       const derived = await lifecycleProofEffects(group, verified)
       value.revoked = derived.revoked
       value.removed = derived.removed

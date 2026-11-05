@@ -8,7 +8,7 @@ import {
   type MemberState,
   type SignedEvent,
 } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { capabilityKey, readCapability } from './capability.js'
 import type { FoldOk } from './controller-ingest.js'
@@ -72,8 +72,8 @@ export function memberRootsOf(
   return roots
 }
 
-async function foldedLog(controller: string, log: ControllerLog) {
-  const folded = await foldControllerLog(controller, log)
+async function foldedLog(controller: string, log: ControllerLog, options?: CryptoOptions) {
+  const folded = await foldControllerLog(controller, log, options)
   if (!folded.ok) throw new RevokeProofError('effects-mismatch')
   return folded
 }
@@ -94,8 +94,12 @@ type EffectProofs = {
   snapshots: Map<string, Array<number>>
 }
 
-async function effectProofs(did: string, log: ControllerLog): Promise<EffectProofs> {
-  const folded = await foldedLog(did, log)
+async function effectProofs(
+  did: string,
+  log: ControllerLog,
+  options?: CryptoOptions,
+): Promise<EffectProofs> {
+  const folded = await foldedLog(did, log, options)
   const events = new Map(log.events.map((signed) => [digestOf(signed.event), signed]))
   const anchors = new Map(folded.states.map((state, index) => [state.digest, index]))
   const views = new Map<string, { folded: FoldResult; applied: Set<string> }>([
@@ -136,10 +140,14 @@ async function effectProofs(did: string, log: ControllerLog): Promise<EffectProo
     if (held != null) return held
     const anchor = anchors.get(epoch)
     if (anchor == null) return undefined
-    const historical = await foldControllerLog(did, {
-      chain: log.chain.slice(0, anchor + 1),
-      events: log.events,
-    })
+    const historical = await foldControllerLog(
+      did,
+      {
+        chain: log.chain.slice(0, anchor + 1),
+        events: log.events,
+      },
+      options,
+    )
     const view = {
       folded: historical,
       applied: new Set(historical.ok ? historical.applied : []),
@@ -214,18 +222,28 @@ export async function effectOf(
   log: ControllerLog,
   claim: EffectClaim,
   genFloor: number,
+  options?: CryptoOptions,
 ): Promise<void> {
-  await checkEffect(log, claim, genFloor, await effectProofs(normalizeDID(controller), log))
+  await checkEffect(
+    log,
+    claim,
+    genFloor,
+    await effectProofs(normalizeDID(controller), log, options),
+  )
 }
 
-export async function effectProofContext(controller: string, log: ControllerLog) {
+export async function effectProofContext(
+  controller: string,
+  log: ControllerLog,
+  options?: CryptoOptions,
+) {
   const did = normalizeDID(controller)
-  const proofs = await effectProofs(did, log)
+  const proofs = await effectProofs(did, log, options)
   return {
     effectOf: async (claim: EffectClaim, genFloor: number) =>
       await checkEffect(log, claim, genFloor, proofs),
     claimsFor: async (recorded: ControllerLog | undefined, genFloor: number) =>
-      await claimsWithProofs(did, recorded, log, genFloor, proofs),
+      await claimsWithProofs(did, recorded, log, genFloor, proofs, options),
   }
 }
 
@@ -234,8 +252,9 @@ export async function claimsFor(
   recorded: ControllerLog | undefined,
   merged: ControllerLog,
   genFloor: number,
+  options?: CryptoOptions,
 ): Promise<Array<EffectClaim>> {
-  return (await effectProofContext(controller, merged)).claimsFor(recorded, genFloor)
+  return (await effectProofContext(controller, merged, options)).claimsFor(recorded, genFloor)
 }
 
 async function claimsWithProofs(
@@ -244,8 +263,9 @@ async function claimsWithProofs(
   merged: ControllerLog,
   genFloor: number,
   proofs: EffectProofs,
+  options?: CryptoOptions,
 ): Promise<Array<EffectClaim>> {
-  const before = recorded == null ? undefined : await foldedLog(did, recorded)
+  const before = recorded == null ? undefined : await foldedLog(did, recorded, options)
   const after = proofs.folded
   const delta = effectDelta(before?.head, after.head)
   const eventClaims = new Map<string, Array<{ claim: EffectClaim; gen: number }>>()
@@ -346,15 +366,21 @@ export type MemberRootStatus =
   | { status: 'removed' }
   | { status: 'unavailable'; why: 'no-log' | 'saturated' | 'unknown-incarnation' | 'prefix' }
 
-const projectionFolds = new WeakMap<ControllerProjection, FoldResult>()
+const projectionFolds = new WeakMap<
+  ControllerProjection,
+  { folded: FoldResult; crypto: CryptoOptions['crypto'] }
+>()
 
-async function projectionFold(controller: string, projection: ControllerProjection | undefined) {
+async function projectionFold(
+  controller: string,
+  projection: ControllerProjection | undefined,
+  options?: CryptoOptions,
+) {
   if (projection?.recordedLog == null) return undefined
-  let folded = projectionFolds.get(projection)
-  if (folded == null) {
-    folded = await foldControllerLog(controller, projection.recordedLog)
-    projectionFolds.set(projection, folded)
-  }
+  const cached = projectionFolds.get(projection)
+  if (cached != null && cached.crypto === options?.crypto) return cached.folded
+  const folded = await foldControllerLog(controller, projection.recordedLog, options)
+  projectionFolds.set(projection, { folded, crypto: options?.crypto })
   return folded
 }
 
@@ -377,12 +403,13 @@ export async function memberRootStatus(
   registry: DeviceRegistry,
   controller: string,
   root: MemberRoot,
+  options?: CryptoOptions,
 ): Promise<MemberRootStatus> {
   if (root.kind === 'root') return { status: 'root' }
   const did = normalizeDID(controller)
   const projection = registry.controllers.get(did)
   if (projection?.removedMembers.has(root.add)) return { status: 'removed' }
-  const folded = await projectionFold(did, projection)
+  const folded = await projectionFold(did, projection, options)
   if (folded == null) return { status: 'unavailable', why: 'no-log' }
   if (!folded.ok) return { status: 'unavailable', why: 'prefix' }
   if (root.gen !== folded.head.gen || root.gen < (projection?.genFloor ?? 0))
@@ -419,6 +446,7 @@ export async function effectiveAuthorityOf(
   leaf: LeafRef,
   registry: DeviceRegistry,
   controller: string,
+  options?: CryptoOptions,
 ): Promise<
   | { root: MemberRoot; slot: EvidenceSlot; expiry?: number }
   | { status: 'removed' }
@@ -429,7 +457,7 @@ export async function effectiveAuthorityOf(
   const roots = memberRootsOf(leaf.binding, leaf.did)
   const primary = roots[0]
   if (primary == null) return { status: 'unavailable' }
-  const status = await memberRootStatus(registry, did, primary.root)
+  const status = await memberRootStatus(registry, did, primary.root, options)
   const projection = registry.controllers.get(did)
   const chain = projection?.recordedLog?.chain
   if (
@@ -443,7 +471,7 @@ export async function effectiveAuthorityOf(
   if (status.status === 'root' || status.status === 'effective') {
     const holder = roots.find(({ slot }) => slot === 'holder')
     if (holder != null) {
-      const held = await memberRootStatus(registry, did, holder.root)
+      const held = await memberRootStatus(registry, did, holder.root, options)
       if (held.status === 'removed' || held.status === 'unavailable') return { status: held.status }
     }
     return primary
@@ -457,7 +485,7 @@ export async function effectiveAuthorityOf(
     if (raw == null) continue
     const root = substituteRoot(raw, leaf)
     if (root == null) continue
-    const status = await memberRootStatus(registry, did, root)
+    const status = await memberRootStatus(registry, did, root, options)
     if (status.status === 'root' || status.status === 'effective')
       return { root, slot, expiry: readCapability(raw).payload.exp }
   }
@@ -470,6 +498,7 @@ export async function cascadeOf(
   before: DeviceRegistry,
   after: DeviceRegistry,
   controller: string,
+  options?: CryptoOptions,
 ): Promise<{
   revoked: Array<RevokedEffect>
   removed: Array<RemovedEffect>
@@ -491,8 +520,10 @@ export async function cascadeOf(
     const holderRoot =
       leaf.binding.holderGrant == null ? undefined : substituteRoot(leaf.binding.holderGrant, leaf)
     const holderStatus =
-      holderRoot == null ? undefined : await memberRootStatus(after, controller, holderRoot)
-    const authority = await effectiveAuthorityOf(leaf, after, controller)
+      holderRoot == null
+        ? undefined
+        : await memberRootStatus(after, controller, holderRoot, options)
+    const authority = await effectiveAuthorityOf(leaf, after, controller, options)
     const evidenced =
       !direct.has(did) &&
       after.devices.get(did)?.status !== 'revoked' &&
@@ -508,14 +539,14 @@ export async function cascadeOf(
       continue
     }
     if (!('status' in authority) || authority.status !== 'removed') continue
-    const prior = await effectiveAuthorityOf(leaf, before, controller)
+    const prior = await effectiveAuthorityOf(leaf, before, controller, options)
     const roots = memberRootsOf(leaf.binding, leaf.did).map(({ root }) => root)
     if ('root' in prior) roots.unshift(prior.root)
     let root: (typeof roots)[number] | undefined
     for (const candidate of roots) {
       if (
         candidate.kind === 'member' &&
-        (await memberRootStatus(after, controller, candidate)).status === 'removed'
+        (await memberRootStatus(after, controller, candidate, options)).status === 'removed'
       ) {
         root = candidate
         break
