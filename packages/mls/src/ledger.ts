@@ -1,3 +1,4 @@
+import { nobleCrypto } from '@kokuin/crypto'
 import {
   type CryptoOptions,
   encodeMultibase,
@@ -69,15 +70,49 @@ export async function signLedgerEntry(
   return stringifyToken(signed)
 }
 
+type CryptoProvider = NonNullable<CryptoOptions['crypto']>
+
+class ProviderFailure extends Error {}
+
+const OBSERVED_PROVIDERS = new WeakMap<CryptoProvider, CryptoProvider>()
+
+// `verifyToken` throws for a bad token and a failed provider alike, so mark the second. Stable per
+// provider: Kokuin keys its verifier memo and call coalescing on this object.
+function observedProvider(crypto: CryptoProvider): CryptoProvider {
+  let observed = OBSERVED_PROVIDERS.get(crypto)
+  if (observed == null) {
+    observed = {
+      ...crypto,
+      verify: async (item) => {
+        try {
+          return await crypto.verify(item)
+        } catch (cause) {
+          throw new ProviderFailure('Crypto provider failed', { cause })
+        }
+      },
+      verifyBatch: async (items) => {
+        try {
+          return await crypto.verifyBatch(items)
+        } catch (cause) {
+          throw new ProviderFailure('Crypto provider failed', { cause })
+        }
+      },
+    }
+    OBSERVED_PROVIDERS.set(crypto, observed)
+  }
+  return observed
+}
+
 /**
- * Verify a signed ledger token and extract its claim. Returns `null` (never
- * throws) when the token is unparseable, unsigned (`alg: 'none'` — `verifyToken`
+ * Verify a signed ledger token and extract its claim. Returns `null` when the
+ * token is unparseable, unsigned (`alg: 'none'` — `verifyToken`
  * returns those without checking a signature, so an attacker could forge an
  * arbitrary `iss`; `isVerifiedToken` rejects them), or structurally malformed.
  * A missing or non-string `groupID` is malformed, as is a missing or non-string
  * `type` or `subject`, or an `ord` present but not a string. The claim fields
  * come from the verified payload only; the issuer is the normalized verified
- * `iss`.
+ * `iss`. A provider failure rejects with the provider's error: it says nothing
+ * about the token, and a caller reading it as invalid would drop an authentic entry.
  */
 export async function verifyLedgerEntry<TValue = unknown>(
   token: string,
@@ -85,8 +120,13 @@ export async function verifyLedgerEntry<TValue = unknown>(
 ): Promise<VerifiedLedgerEntry<TValue> | null> {
   let verified: Awaited<ReturnType<typeof verifyToken<LedgerEntry<TValue>>>>
   try {
-    verified = await verifyToken<LedgerEntry<TValue>>({ ...options, token: token })
-  } catch {
+    verified = await verifyToken<LedgerEntry<TValue>>({
+      ...options,
+      crypto: observedProvider(options?.crypto ?? nobleCrypto),
+      token: token,
+    })
+  } catch (error) {
+    if (error instanceof ProviderFailure) throw error.cause
     return null
   }
   if (!isVerifiedToken<SignedPayload & LedgerEntry<TValue>>(verified)) {

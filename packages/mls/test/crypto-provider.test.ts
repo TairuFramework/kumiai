@@ -131,6 +131,62 @@ describe('ledger entry verification', () => {
     expect(await verifyLedgerEntry(token, { crypto: refusing() })).toBeNull()
   })
 
+  describe('when the provider fails', () => {
+    const failure = new Error('Native crypto request failed: 4')
+
+    function flakyProvider() {
+      const state = { failing: true }
+      const { provider } = counting()
+      const flaky: Provider = {
+        ...provider,
+        verify: async (item) => {
+          if (state.failing) throw failure
+          return await provider.verify(item)
+        },
+        verifyBatch: async (items) => {
+          if (state.failing) throw failure
+          return await provider.verifyBatch(items)
+        },
+      }
+      return { provider: flaky, state }
+    }
+
+    test('verifyLedgerEntry rejects instead of calling the token invalid', async () => {
+      const identity = randomIdentity()
+      const tokens = await Promise.all(
+        ['one', 'two'].map((groupID) => signLedgerEntry(identity, entry(groupID))),
+      )
+      const { provider, state } = flakyProvider()
+      await expect(verifyLedgerEntry(tokens[0] as string, { crypto: provider })).rejects.toBe(
+        failure,
+      )
+      // Concurrent misses share one provider call.
+      const settled = await Promise.allSettled(
+        tokens.map((token) => verifyLedgerEntry(token, { crypto: provider })),
+      )
+      expect(settled).toEqual(tokens.map(() => ({ status: 'rejected', reason: failure })))
+      state.failing = false
+      expect(await verifyLedgerEntry(tokens[0] as string, { crypto: provider })).not.toBeNull()
+    })
+
+    test('applyLedgerEntries keeps an authentic entry through the failure', async () => {
+      const identity = randomIdentity()
+      const { group, credential } = await createGroup(identity, 'ledger-provider-failure')
+      const token = await signLedgerEntry(identity, entry(group.groupID))
+      const { provider, state } = flakyProvider()
+      const restored = await restoreGroup({
+        state: structuredClone(group.state),
+        credential,
+        options: { crypto: provider },
+      })
+      await expect(restored.applyLedgerEntries([token])).rejects.toBe(failure)
+      expect(restored.ledger).toEqual([])
+      state.failing = false
+      expect(await restored.applyLedgerEntries([token])).toHaveLength(1)
+      expect(restored.ledgerTokens).toEqual([token])
+    })
+  })
+
   test('a token another provider accepted is not reused from either ledger cache', async () => {
     const identity = randomIdentity()
     const { group, credential } = await createGroup(identity, 'ledger-cache')

@@ -29,3 +29,5 @@ published together, so readers never observe a partial update.
 
 Hosts can pass a kokuin `crypto` provider through `GroupOptions`, `GroupHandleParams` and
 `CreateHubParams`. Verification caches are kept per provider. MLS cryptography is unchanged.
+
+A crypto provider failure now rejects from `verifyLedgerEntry`, and from the ledger paths that call it, with the provider's own error. It used to read as an invalid token, so `applyLedgerEntries` silently dropped an authentic entry.
