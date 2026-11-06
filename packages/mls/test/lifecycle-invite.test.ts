@@ -1,6 +1,7 @@
 import { audienceConfirmation } from '@kokuin/capability'
 import { createRenew, createRotate, epochHeads } from '@kokuin/controller'
-import { stringifyToken } from '@kokuin/token'
+import { nobleCrypto } from '@kokuin/crypto'
+import { type CryptoOptions, normalizeDID, stringifyToken } from '@kokuin/token'
 import { defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -22,6 +23,7 @@ import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { leafExpiry } from '../src/index.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import {
+  attestedTreeTime,
   isLapsed,
   leafAt,
   prepareLifecycleGate,
@@ -587,6 +589,54 @@ async function membershipLeaf(lease = 1000) {
   }
   return { ...epoch, group, identity, member, binding, leaf, floor }
 }
+
+test('judging the same projection again does not re-verify its controller log', async () => {
+  const f = await membershipLeaf()
+  let verified = 0
+  const crypto: NonNullable<CryptoOptions['crypto']> = {
+    ...nobleCrypto,
+    verify: (item) => {
+      verified++
+      return nobleCrypto.verify(item)
+    },
+    verifyBatch: (items) => {
+      verified += items.length
+      return nobleCrypto.verifyBatch(items)
+    },
+  }
+  const judge = async () => {
+    const { registry } = f.group
+    await attestedTreeTime({
+      tree: f.group.state.ratchetTree,
+      registry,
+      controllerID: f.did,
+      crypto,
+    })
+    return await leafExpiry({ binding: f.binding, registry, controller: f.did, crypto })
+  }
+  expect(await judge()).toBe(1000)
+  const first = verified
+  expect(first).toBeGreaterThan(0)
+  expect(await judge()).toBe(1000)
+  expect(verified).toBe(first)
+
+  const projection = f.group.registry.controllers.get(normalizeDID(f.did))
+  const log = projection?.recordedLog
+  if (projection == null || log == null) throw new Error('Missing recorded log')
+  // A replaced log is another log, even at the same length.
+  Object.assign(projection, { recordedLog: { ...log, chain: [...log.chain] } })
+  expect(await judge()).toBe(1000)
+  const replaced = verified
+  expect(replaced).toBeGreaterThan(first)
+  // Held logs are reachable through recordedLogOf, so growth in place must refold too.
+  const appended = log.chain.at(-1)
+  if (appended == null) throw new Error('Missing chain event')
+  const held = projection.recordedLog
+  if (held == null) throw new Error('Missing recorded log')
+  ;(held.chain as Array<typeof appended>).push(appended)
+  await judge()
+  expect(verified).toBeGreaterThan(replaced)
+})
 
 test('membership leaf lapses at its lease end by tree time', async () => {
   const f = await membershipLeaf()
