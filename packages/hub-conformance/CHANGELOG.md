@@ -1,5 +1,16 @@
 # @kumiai/hub-conformance
 
+## 0.13.0
+
+### Minor Changes
+
+- Exported functions, constructors, methods and contract members with two or more parameters now take one flat params object, with options folded into it. `AppFrameStorageError` keeps the `Error` shape of `(message, options)`, and `precedesSequenceID` stays positional as a comparator.
+
+### Patch Changes
+
+- Updated dependencies:
+  - @kumiai/hub-protocol@0.13.0
+
 ## 0.12.0
 
 ### Minor Changes

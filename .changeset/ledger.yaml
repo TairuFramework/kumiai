@@ -11,6 +11,11 @@
   dir: packages/broadcast
   intents:
     - management-tier-0-12
+"@kumiai/broadcast@0.13.0":
+  dir: packages/broadcast
+  intents:
+    - kokuin-0-7
+    - params-object
 "@kumiai/broadcast@0.5.0":
   dir: packages/broadcast
   intents:
@@ -49,6 +54,10 @@
   dir: packages/hub-client
   intents:
     - management-tier-0-12
+"@kumiai/hub-client@0.13.0":
+  dir: packages/hub-client
+  intents:
+    - kokuin-0-7
 "@kumiai/hub-client@0.5.0":
   dir: packages/hub-client
   intents:
@@ -87,6 +96,10 @@
   intents:
     - hub-adoption-host-seams
     - management-tier-0-12
+"@kumiai/hub-conformance@0.13.0":
+  dir: packages/hub-conformance
+  intents:
+    - params-object
 "@kumiai/hub-conformance@0.5.0":
   dir: packages/hub-conformance
   intents:
@@ -122,6 +135,11 @@
   intents:
     - hub-adoption-host-seams
     - management-tier-0-12
+"@kumiai/hub-http@0.13.0":
+  dir: packages/hub-http
+  intents:
+    - kokuin-0-7
+    - stack-align
 "@kumiai/hub-protocol@0.10.0":
   dir: packages/hub-protocol
   intents:
@@ -142,6 +160,11 @@
   dir: packages/hub-protocol
   intents:
     - management-tier-0-12
+"@kumiai/hub-protocol@0.13.0":
+  dir: packages/hub-protocol
+  intents:
+    - kokuin-0-7
+    - params-object
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -201,6 +224,10 @@
   dir: packages/hub-server
   intents:
     - hub-server-receive-window-logging
+"@kumiai/hub-server@0.13.0":
+  dir: packages/hub-server
+  intents:
+    - kokuin-0-7
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -236,6 +263,11 @@
   intents:
     - hub-adoption-host-seams
     - management-tier-0-12
+"@kumiai/hub-store@0.13.0":
+  dir: packages/hub-store
+  intents:
+    - kokuin-0-7
+    - stack-align
 "@kumiai/hub-tunnel@0.10.0":
   dir: packages/hub-tunnel
   intents:
@@ -268,6 +300,11 @@
   dir: packages/hub-tunnel
   intents:
     - hub-tunnel-expired-frame
+"@kumiai/hub-tunnel@0.13.0":
+  dir: packages/hub-tunnel
+  intents:
+    - kokuin-0-7
+    - params-object
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -329,6 +366,11 @@
   dir: packages/mls-hub
   intents:
     - management-tier-0-12
+"@kumiai/mls-hub@0.13.0":
+  dir: packages/mls-hub
+  intents:
+    - kokuin-0-7
+    - params-object
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
@@ -374,6 +416,11 @@
   dir: packages/mls-rpc
   intents:
     - management-tier-0-12
+"@kumiai/mls-rpc@0.13.0":
+  dir: packages/mls-rpc
+  intents:
+    - kokuin-0-7
+    - params-object
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -441,6 +488,12 @@
   dir: packages/mls
   intents:
     - mls-key-retention
+"@kumiai/mls@0.13.0":
+  dir: packages/mls
+  intents:
+    - controller-fold-memo
+    - kokuin-0-7
+    - params-object
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -481,6 +534,11 @@
   dir: packages/rpc-conformance
   intents:
     - management-tier-0-12
+"@kumiai/rpc-conformance@0.13.0":
+  dir: packages/rpc-conformance
+  intents:
+    - kokuin-0-7
+    - params-object
 "@kumiai/rpc-conformance@0.5.0":
   dir: packages/rpc-conformance
   intents:
@@ -553,6 +611,11 @@
   dir: packages/rpc
   intents:
     - rpc-retained-open-order
+"@kumiai/rpc@0.13.0":
+  dir: packages/rpc
+  intents:
+    - kokuin-0-7
+    - params-object
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

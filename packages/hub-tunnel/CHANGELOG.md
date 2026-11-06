@@ -1,5 +1,35 @@
 # @kumiai/hub-tunnel
 
+## 0.13.0
+
+### Minor Changes
+
+- Adopt kokuin 0.7, enkaku 0.23 and teikyo 0.5.
+
+  Controller log folds are asynchronous in kokuin 0.7, which changes these contracts:
+
+  - `GroupHandle` is built with `await GroupHandle.create(params)`, and `deriveGroup` returns a promise.
+  - `foldChain`, `foldControllerLog`, the registry and member-root helpers, `treeTime`, `isLapsed` and
+    `recoverySignerEligible` return promises.
+  - `HandleAccess.replace` takes a guard returning a promise, and implementations must await it.
+  - `PendingRecovery.judgeVerdict` returns a promise.
+  - `DIDMethodResolver.resolveMember` takes `{ subject, member }`.
+
+  `GroupHandle.registry` and `sendAdmission()` stay synchronous. Control state is computed first and
+  published together, so readers never observe a partial update.
+
+  Hosts can pass a kokuin `crypto` provider through `GroupOptions`, `GroupHandleParams` and
+  `CreateHubParams`. Verification caches are kept per provider. MLS cryptography is unchanged.
+
+  A crypto provider failure now rejects from `verifyLedgerEntry`, and from the ledger paths that call it, with the provider's own error. It used to read as an invalid token, so `applyLedgerEntries` silently dropped an authentic entry.
+
+- Exported functions, constructors, methods and contract members with two or more parameters now take one flat params object, with options folded into it. `AppFrameStorageError` keeps the `Error` shape of `(message, options)`, and `precedesSequenceID` stays positional as a comparator.
+
+### Patch Changes
+
+- Updated dependencies:
+  - @kumiai/hub-protocol@0.13.0
+
 ## 0.12.2
 
 ### Patch Changes

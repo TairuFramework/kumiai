@@ -19,5 +19,5 @@
   "devDependencies": {
     "@kigu/dev": "^0.3.5"
   },
-  "packageManager": "pnpm@12.16.1"
+  "packageManager": "pnpm@12.18.0"
 }
