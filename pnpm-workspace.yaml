@@ -36,7 +36,7 @@ catalog:
   '@sozai/result': ^0.2.2
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.6
-  '@sozai/stream': ^0.2.0
+  '@sozai/stream': ^0.2.2
   '@kokuin/expo': ^0.7.0
   '@sozai/runtime-expo': ^0.3.0
   'expo': ^58.0.16
@@ -45,11 +45,11 @@ catalog:
   'react-native': ^0.88.0
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
-  '@hozon/adapter': ^0.2.1
-  '@hozon/db': ^0.5.0
-  '@hozon/node-sqlite': ^0.2.0
-  '@hozon/postgres': ^0.2.0
-  '@hozon/provider': ^0.3.0
+  '@hozon/adapter': ^0.3.0
+  '@hozon/db': ^0.5.1
+  '@hozon/node-sqlite': ^0.3.0
+  '@hozon/postgres': ^0.2.1
+  '@hozon/provider': ^0.3.1
   '@teikyo/access': ^0.5.0
   '@teikyo/enkaku': ^0.5.0
   '@teikyo/hozon': ^0.4.0
