@@ -15,7 +15,7 @@ import {
 
 import type { GroupAnchor } from './anchor.js'
 import { createDIDAuthenticationService, type JudgingContext } from './authentication.js'
-import { nobleCryptoProvider } from './crypto.js'
+import { createNobleCryptoProvider } from './crypto.js'
 import { denySetOf } from './registry.js'
 import type { GroupOptions } from './types.js'
 
@@ -133,7 +133,10 @@ export async function resolveMlsContext(
   anchor?: GroupAnchor,
 ): Promise<MlsContext> {
   const name = (options?.ciphersuiteName ?? DEFAULT_CIPHERSUITE) as CiphersuiteName
-  const cipherSuite = await getCiphersuiteImpl(name, options?.cryptoProvider ?? nobleCryptoProvider)
+  const cipherSuite = await getCiphersuiteImpl(
+    name,
+    options?.cryptoProvider ?? createNobleCryptoProvider({ crypto: options?.crypto }),
+  )
   return createMlsContext(cipherSuite, anchor, undefined, options)
 }
 

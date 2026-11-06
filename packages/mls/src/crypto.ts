@@ -2,13 +2,15 @@
  * Pure @noble/* CryptoProvider for ts-mls.
  *
  * Replaces @hpke/core (which requires crypto.subtle) with direct use of:
- * - @noble/curves for X25519 ECDH and Ed25519 signatures
+ * - @noble/curves for X25519 ECDH and Ed25519 key generation
+ * - a kokuin provider for Ed25519 signing and verification
  * - @noble/hashes for SHA-256/384/512 and HKDF
  * - @noble/ciphers for AES-GCM and ChaCha20-Poly1305
  *
  * This enables ts-mls to run on Hermes (React Native) where crypto.subtle is unavailable.
  */
 
+import { type CryptoProvider as KokuinCryptoProvider, nobleCrypto } from '@kokuin/crypto'
 import { gcm } from '@noble/ciphers/aes.js'
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { ed25519, x25519 } from '@noble/curves/ed25519.js'
@@ -101,20 +103,25 @@ function makeKdf(kdfName: string): Kdf {
 // Signature (Ed25519)
 // ---------------------------------------------------------------------------
 
-function makeSignature(sigName: string): Signature {
-  if (sigName !== 'Ed25519') {
-    throw new Error(`Unsupported signature algorithm: ${sigName}. Only Ed25519 is supported.`)
+type MakeSignatureParams = {
+  name: string
+  crypto: KokuinCryptoProvider
+}
+
+function makeSignature({ name, crypto }: MakeSignatureParams): Signature {
+  if (name !== 'Ed25519') {
+    throw new Error(`Unsupported signature algorithm: ${name}. Only Ed25519 is supported.`)
   }
   return {
     async sign(signKey: Uint8Array, message: Uint8Array): Promise<Uint8Array> {
-      return ed25519.sign(message, signKey)
+      return await crypto.sign({ alg: 'EdDSA', privateKey: signKey, message })
     },
     async verify(
       publicKey: Uint8Array,
       message: Uint8Array,
       signature: Uint8Array,
     ): Promise<boolean> {
-      return ed25519.verify(signature, message, publicKey)
+      return await crypto.verify({ alg: 'EdDSA', signature, message, publicKey })
     },
     async keygen(): Promise<{ publicKey: Uint8Array; signKey: Uint8Array }> {
       const signKey = ed25519.utils.randomSecretKey()
@@ -508,11 +515,17 @@ export type NobleCryptoProviderOptions = {
   randomBytes?: (n: number) => Uint8Array
   /** Runtime providing platform primitives. Defaults to createRuntime(). */
   runtime?: Runtime
+  /**
+   * Signs and verifies Ed25519. Defaults to kokuin's strict noble provider, so every backend
+   * accepts the same signatures and members cannot split on a non-canonical one.
+   */
+  crypto?: KokuinCryptoProvider
 }
 
 export function createNobleCryptoProvider(options?: NobleCryptoProviderOptions): CryptoProvider {
   const runtime = options?.runtime ?? createRuntime()
   const rng = makeRng(runtime, options?.randomBytes)
+  const crypto = options?.crypto ?? nobleCrypto
   return {
     async getCiphersuiteImpl(id: number): Promise<CiphersuiteImpl> {
       const config = CIPHERSUITE_CONFIGS[id]
@@ -524,7 +537,7 @@ export function createNobleCryptoProvider(options?: NobleCryptoProviderOptions):
       return {
         hash: makeHash(config.hash),
         kdf: makeKdf(config.hpke.kdf),
-        signature: makeSignature(config.signature),
+        signature: makeSignature({ name: config.signature, crypto }),
         hpke: makeHpke(config.hpke),
         rng,
         id,
