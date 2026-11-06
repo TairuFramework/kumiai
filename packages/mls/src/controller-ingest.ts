@@ -11,6 +11,7 @@ import {
   LOG_NOT_AUTHORITATIVE,
   mergeLogs,
 } from '@kokuin/controller'
+import type { CryptoProvider } from '@kokuin/crypto'
 import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { foldControllerLog, isDetachedFoldReason } from './controller-log.js'
@@ -21,7 +22,7 @@ export type FoldOk = Extract<FoldResult, { ok: true }>
 
 const authenticatedFolds = new WeakMap<
   ControllerLog,
-  { controller: string; digest: string; folded: FoldOk; crypto: CryptoOptions['crypto'] }
+  { controller: string; digest: string; folded: FoldOk; crypto: CryptoProvider | undefined }
 >()
 
 export type IngestedControllerLog = {

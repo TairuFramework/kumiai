@@ -1,5 +1,5 @@
 import type { ControllerLog } from '@kokuin/controller'
-import type { CryptoOptions } from '@kokuin/token'
+import type { CryptoProvider as KokuinCryptoProvider } from '@kokuin/crypto'
 import type {
   Capabilities,
   CryptoProvider,
@@ -24,7 +24,7 @@ export type GroupOptions = {
   /** Custom CryptoProvider for ts-mls. Defaults to nobleCryptoProvider. */
   cryptoProvider?: CryptoProvider
   /** Kokuin provider for token, capability and controller verification; unrelated to cryptoProvider. */
-  crypto?: CryptoOptions['crypto']
+  crypto?: KokuinCryptoProvider
   /** Ciphersuite name. Defaults to MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519. */
   ciphersuiteName?: string
   /** Group extensions. */

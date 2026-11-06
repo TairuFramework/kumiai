@@ -1,3 +1,4 @@
+import type { CryptoProvider } from '@kokuin/crypto'
 import {
   assertTimeClaimsValid,
   type CryptoOptions,
@@ -459,15 +460,12 @@ export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 const VERIFIED_LEDGER_ENTRIES = new WeakMap<VerifiedLedgerEntry, HeldLedgerEntry>()
 const VERIFIED_LEDGER_TOKENS = new WeakMap<
   Array<string>,
-  { crypto: CryptoOptions['crypto']; held: Array<HeldLedgerEntry | undefined> }
+  { crypto: CryptoProvider | undefined; held: Array<HeldLedgerEntry | undefined> }
 >()
 export const VERIFIED_LEDGER_TOKEN_CACHE_SIZE = 4096
 type LedgerTokenCache = Map<string, VerifiedLedgerEntry>
 const DEFAULT_LEDGER_TOKEN_CACHE: LedgerTokenCache = new Map()
-const PROVIDER_LEDGER_TOKEN_CACHES = new WeakMap<
-  NonNullable<CryptoOptions['crypto']>,
-  LedgerTokenCache
->()
+const PROVIDER_LEDGER_TOKEN_CACHES = new WeakMap<CryptoProvider, LedgerTokenCache>()
 
 // A token one provider accepted says nothing about another.
 function ledgerTokenCache(options?: CryptoOptions): LedgerTokenCache {
@@ -615,7 +613,7 @@ export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
   #context: MlsContext
-  #crypto: CryptoOptions['crypto']
+  #crypto: CryptoProvider | undefined
   #commitPolicy?: IncomingMessageCallback
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
@@ -801,7 +799,7 @@ export class GroupHandle {
   }
 
   /** The kokuin provider this handle verifies with; carried onto clones and derived handles. */
-  get crypto(): CryptoOptions['crypto'] {
+  get crypto(): CryptoProvider | undefined {
     return this.#crypto
   }
 

@@ -7,10 +7,10 @@ import {
   type SignedEvent,
   snapshotOf,
 } from '@kokuin/controller'
-import { nobleCrypto } from '@kokuin/crypto'
-import type { CryptoOptions } from '@kokuin/token'
-import { randomIdentity } from '@kokuin/token'
+import { type CryptoProvider, nobleCrypto, type VerifyItem } from '@kokuin/crypto'
+import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import { fromUTF } from '@sozai/codec'
+import type { AuthenticationService } from 'ts-mls'
 import { describe, expect, test, vi } from 'vitest'
 
 import {
@@ -50,19 +50,17 @@ import {
 } from './fixtures/lifecycle-ledger.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
-type Provider = NonNullable<CryptoOptions['crypto']>
-
 // Captured so a provider's own delegation is not counted by the spy on the default provider.
 const nobleVerify = nobleCrypto.verify.bind(nobleCrypto)
 
 /** Delegates to the default; `refuse` decides per signed message. Every instance has its own memo. */
 function providerWith(refuse: (message: Uint8Array) => boolean) {
   const calls = { verify: 0 }
-  const verdict = async (item: Parameters<Provider['verify']>[0]) => {
+  const verdict = async (item: VerifyItem) => {
     calls.verify++
     return refuse(item.message) ? false : await nobleVerify(item)
   }
-  const provider: Provider = {
+  const provider: CryptoProvider = {
     sign: (params) => nobleCrypto.sign(params),
     signBatch: (params) => nobleCrypto.signBatch(params),
     blake3: (params) => nobleCrypto.blake3(params),
@@ -77,7 +75,7 @@ const counting = () => providerWith(() => false)
 const refusing = () => providerWith(() => true).provider
 
 /** Refuses only the signature over one token, so everything else around it still verifies. */
-function refusingToken(raw: string): Provider {
+function refusingToken(raw: string): CryptoProvider {
   const expected = fromUTF(readCapability(raw).data)
   return providerWith(
     (message) =>
@@ -137,7 +135,7 @@ describe('ledger entry verification', () => {
     function flakyProvider() {
       const state = { failing: true }
       const { provider } = counting()
-      const flaky: Provider = {
+      const flaky: CryptoProvider = {
         ...provider,
         verify: async (item) => {
           if (state.failing) throw failure
@@ -195,7 +193,7 @@ describe('ledger entry verification', () => {
     const exported = group.ledgerTokens
     expect(exported).toEqual([token])
 
-    const restore = async (crypto?: Provider) =>
+    const restore = async (crypto?: CryptoProvider) =>
       await restoreGroup({
         state: structuredClone(group.state),
         credential,
@@ -288,7 +286,7 @@ describe('leaf authentication', () => {
   test('the authentication services of a context and of deps use the provider', async () => {
     const credential = makeMLSCredential(leaf, await bindingFor(leaf))
     const validate = async (service: {
-      validateCredential: ReturnType<typeof createDIDAuthenticationService>['validateCredential']
+      validateCredential: AuthenticationService['validateCredential']
     }) => await service.validateCredential(credential, leaf.publicKey)
     expect(await validate(createDIDAuthenticationService())).toBe(true)
     expect(await validate(createDIDAuthenticationService({ crypto: refusing() }))).toBe(false)
@@ -456,7 +454,7 @@ describe('default provider', () => {
     seed: Uint8Array,
     did: string,
     chain: Array<SignedEvent>,
-    crypto: Provider,
+    crypto: CryptoProvider,
     deny: Array<string> = [],
   ) {
     const folded = await foldChain(did, chain, { crypto })
@@ -490,7 +488,7 @@ describe('default provider', () => {
         profile: 0,
         log: asControllerLog([first]),
       })
-      const grant = async (identity: ReturnType<typeof randomIdentity>) =>
+      const grant = async (identity: OwnIdentity) =>
         await mintTrustedGrant({
           signer,
           controllerID: did,

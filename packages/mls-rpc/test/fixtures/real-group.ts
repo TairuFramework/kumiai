@@ -1,3 +1,4 @@
+import type { ControllerLog } from '@kokuin/controller'
 import { type OwnIdentity, randomIdentity, stringifyToken } from '@kokuin/token'
 import {
   type ControllerBinding,
@@ -52,16 +53,14 @@ export async function createRealBoundRecovery(
     managementFixture: (kind: 'root' | 'mbr' | 'membership') => Promise<{
       alice: OwnIdentity
       bob: OwnIdentity
-      log: Parameters<typeof publishControllerLog>[1]
+      log: ControllerLog
       creatorBinding: ControllerBinding
       binding: (iat: number) => Promise<ControllerBinding>
       member: { did: string; add: string }
       newcomer: OwnIdentity
       deniedDID: string
       denialAliases: { long: string; short: string }
-      nextLog: (
-        op: 'log' | 'deny' | 'deny-alias' | 'remove',
-      ) => Promise<Parameters<typeof publishControllerLog>[1]>
+      nextLog: (op: 'log' | 'deny' | 'deny-alias' | 'remove') => Promise<ControllerLog>
       admissionBinding: (
         authority: 'effective' | 'removed' | 'unavailable' | 'foreign',
       ) => Promise<ControllerBinding>

@@ -1,8 +1,8 @@
 import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
-import { nobleCrypto } from '@kokuin/crypto'
-import { type CryptoOptions, randomIdentity } from '@kokuin/token'
+import { type CryptoProvider, nobleCrypto } from '@kokuin/crypto'
+import { randomIdentity } from '@kokuin/token'
 import type { HubProtocol } from '@kumiai/hub-protocol'
 import { fromUTF, toB64U } from '@sozai/codec'
 import { expect, test } from 'vitest'
@@ -14,15 +14,13 @@ type HubTransports = DirectTransports<
   AnyServerMessageOf<HubProtocol>,
   AnyClientMessageOf<HubProtocol>
 >
-type Provider = NonNullable<CryptoOptions['crypto']>
-
 const TOPIC = (() => {
   const bytes = new Uint8Array(32)
   bytes.set(fromUTF('crypto-topic'))
   return toB64U(bytes)
 })()
 
-async function subscribeWith(crypto?: Provider) {
+async function subscribeWith(crypto?: CryptoProvider) {
   const transports: HubTransports = new DirectTransports()
   const hubIdentity = randomIdentity()
   const hub = createHub({
@@ -49,7 +47,7 @@ test('createHub verifies client tokens with the given provider', async () => {
   await expect(subscribeWith()).resolves.toBeDefined()
 
   const calls = { verify: 0 }
-  const counted: Provider = {
+  const counted: CryptoProvider = {
     ...nobleCrypto,
     verify: async (item) => {
       calls.verify++
@@ -63,7 +61,7 @@ test('createHub verifies client tokens with the given provider', async () => {
   await expect(subscribeWith(counted)).resolves.toBeDefined()
   expect(calls.verify).toBeGreaterThan(0)
 
-  const refusing: Provider = {
+  const refusing: CryptoProvider = {
     ...nobleCrypto,
     verify: async () => false,
     verifyBatch: async (items) => items.map(() => false),

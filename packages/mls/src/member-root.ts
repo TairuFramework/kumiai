@@ -8,6 +8,7 @@ import {
   type MemberState,
   type SignedEvent,
 } from '@kokuin/controller'
+import type { CryptoProvider } from '@kokuin/crypto'
 import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { capabilityKey, readCapability } from './capability.js'
@@ -368,7 +369,7 @@ export type MemberRootStatus =
 
 const projectionFolds = new WeakMap<
   ControllerProjection,
-  { folded: FoldResult; crypto: CryptoOptions['crypto'] }
+  { folded: FoldResult; crypto: CryptoProvider | undefined }
 >()
 
 async function projectionFold(

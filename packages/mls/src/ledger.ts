@@ -1,4 +1,4 @@
-import { nobleCrypto } from '@kokuin/crypto'
+import { type CryptoProvider, nobleCrypto } from '@kokuin/crypto'
 import {
   type CryptoOptions,
   encodeMultibase,
@@ -69,8 +69,6 @@ export async function signLedgerEntry(
   })
   return stringifyToken(signed)
 }
-
-type CryptoProvider = NonNullable<CryptoOptions['crypto']>
 
 class ProviderFailure extends Error {}
 

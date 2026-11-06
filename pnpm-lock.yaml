@@ -595,6 +595,9 @@ importers:
       '@kokuin/controller':
         specifier: 'catalog:'
         version: 0.7.0(@logtape/logtape@2.4.2)
+      '@kokuin/crypto':
+        specifier: 'catalog:'
+        version: 0.7.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.7.0(@logtape/logtape@2.4.2)
@@ -623,9 +626,6 @@ importers:
         specifier: 'catalog:'
         version: 2.0.0-rc.13(@noble/ciphers@2.4.0)(@noble/curves@2.4.0)
     devDependencies:
-      '@kokuin/crypto':
-        specifier: 'catalog:'
-        version: 0.7.0
       '@kokuin/crypto-napi':
         specifier: 'catalog:'
         version: 0.7.3

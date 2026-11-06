@@ -37,6 +37,7 @@
   "dependencies": {
     "@kokuin/capability": "catalog:",
     "@kokuin/controller": "catalog:",
+    "@kokuin/crypto": "catalog:",
     "@kokuin/token": "catalog:",
     "@noble/ciphers": "catalog:",
     "@noble/curves": "catalog:",
@@ -48,7 +49,6 @@
     "ts-mls": "catalog:"
   },
   "devDependencies": {
-    "@kokuin/crypto": "catalog:",
     "@kokuin/crypto-napi": "catalog:"
   },
   "publishConfig": {

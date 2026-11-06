@@ -11,6 +11,7 @@ import {
   type LeafNode,
   nodeTypes,
   type ProposalWithSender,
+  type RatchetTree,
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
@@ -598,7 +599,7 @@ export async function prepareLifecycleGate(
     const size = historySize(tree, afterLedger)
     if (size > HISTORY_HORIZON && size > beforeSize) throw new LeafBindingError('history-horizon')
   }
-  async function checkTime(tree: ClientState['ratchetTree']): Promise<void> {
+  async function checkTime(tree: RatchetTree): Promise<void> {
     if (controller == null) return
     if ((await attestedTreeTime(tree, candidateRegistry, controller, options)) < beforeTime)
       throw new RevokeProofError('time-regression')
