@@ -21,9 +21,9 @@ export type GroupOptions = {
   leafLifetime?: number
   /** Lifecycle trusted grant lifetime in seconds. Defaults to 2,592,000; maximum 31,536,000. */
   trustedGrantLifetime?: number
-  /** Custom CryptoProvider for ts-mls. Defaults to nobleCryptoProvider. */
+  /** Custom CryptoProvider for ts-mls. Defaults to a noble one that signs through `crypto`. */
   cryptoProvider?: CryptoProvider
-  /** Kokuin provider for token, capability and controller verification; unrelated to cryptoProvider. */
+  /** Kokuin provider for tokens, capabilities, controllers and, without `cryptoProvider`, MLS signatures. */
   crypto?: KokuinCryptoProvider
   /** Ciphersuite name. Defaults to MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519. */
   ciphersuiteName?: string

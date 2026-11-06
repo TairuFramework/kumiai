@@ -1,5 +1,7 @@
+import { nobleCrypto } from '@kokuin/crypto'
 import { gcm } from '@noble/ciphers/aes.js'
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js'
+import { ed25519 } from '@noble/curves/ed25519.js'
 import {
   type ClientState,
   type Credential,
@@ -19,9 +21,13 @@ import {
   processMessage,
   unsafeTestingAuthenticationService,
 } from 'ts-mls'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
-import { nobleCryptoProvider } from '../src/crypto.js'
+import {
+  createNobleCryptoProvider,
+  type NobleCryptoProviderOptions,
+  nobleCryptoProvider,
+} from '../src/crypto.js'
 
 const CIPHERSUITE_NAME = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
 const CHACHA_SUITE_NAME = 'MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519' as const
@@ -553,5 +559,45 @@ describe('nobleCryptoProvider ChaCha20-Poly1305 suite (ID 3)', () => {
     if (result.kind === 'applicationMessage') {
       expect(new TextDecoder().decode(result.message)).toBe('hello over chacha')
     }
+  })
+})
+
+describe('MLS signatures through a kokuin provider', () => {
+  const message = new TextEncoder().encode('message')
+
+  async function signatureOf(options?: NobleCryptoProviderOptions) {
+    const impl = await createNobleCryptoProvider(options).getCiphersuiteImpl(1)
+    return impl.signature
+  }
+
+  test('signs and verifies through the given provider', async () => {
+    const sign = vi.fn(nobleCrypto.sign)
+    const verify = vi.fn(nobleCrypto.verify)
+    const signature = await signatureOf({ crypto: { ...nobleCrypto, sign, verify } })
+
+    const { signKey, publicKey } = await signature.keygen()
+    const signed = await signature.sign(signKey, message)
+
+    expect(await signature.verify(publicKey, message, signed)).toBe(true)
+    expect(sign).toHaveBeenCalledWith({ alg: 'EdDSA', privateKey: signKey, message })
+    expect(verify).toHaveBeenCalledWith({ alg: 'EdDSA', signature: signed, message, publicKey })
+  })
+
+  test('refuses a small-order signature that lenient verification accepts for any message', async () => {
+    const identityPoint = new Uint8Array(32)
+    identityPoint[0] = 1
+    const forged = new Uint8Array(64)
+    forged[0] = 1
+    const signature = await signatureOf()
+
+    expect(ed25519.verify(forged, message, identityPoint)).toBe(true)
+    expect(await signature.verify(identityPoint, message, forged)).toBe(false)
+  })
+
+  test('refuses a malformed signature without throwing', async () => {
+    const signature = await signatureOf()
+    const { publicKey } = await signature.keygen()
+
+    expect(await signature.verify(publicKey, message, new Uint8Array(63))).toBe(false)
   })
 })
