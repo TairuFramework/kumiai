@@ -494,6 +494,10 @@
     - controller-fold-memo
     - kokuin-0-7
     - params-object
+"@kumiai/mls@0.13.1":
+  dir: packages/mls
+  intents:
+    - modern-taxis-sort
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
