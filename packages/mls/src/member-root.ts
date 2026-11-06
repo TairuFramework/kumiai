@@ -388,19 +388,46 @@ export type MemberRootStatus =
 
 const projectionFolds = new WeakMap<
   ControllerProjection,
-  { folded: FoldResult; crypto: CryptoProvider | undefined }
+  {
+    folded: FoldResult
+    crypto: CryptoProvider | undefined
+    log: ControllerLog
+    chainLength: number
+    eventsLength: number
+  }
 >()
 
-async function projectionFold(
+/**
+ * The fold of a projection's recorded log, once per log. Lifecycle checks run on every frame, and
+ * a fold verifies every signature in the log. Callers must only read the result.
+ */
+export async function projectionFold(
   controller: string,
   projection: ControllerProjection | undefined,
   options?: CryptoOptions,
 ) {
-  if (projection?.recordedLog == null) return undefined
+  const log = projection?.recordedLog
+  if (projection == null || log == null) return undefined
   const cached = projectionFolds.get(projection)
-  if (cached != null && cached.crypto === options?.crypto) return cached.folded
-  const folded = await foldControllerLog(controller, projection.recordedLog, options)
-  projectionFolds.set(projection, { folded, crypto: options?.crypto })
+  // `recordedLogOf` hands out the live log, so growth in place must miss too.
+  if (
+    cached != null &&
+    cached.crypto === options?.crypto &&
+    cached.log === log &&
+    cached.chainLength === log.chain.length &&
+    cached.eventsLength === log.events.length
+  )
+    return cached.folded
+  const chainLength = log.chain.length
+  const eventsLength = log.events.length
+  const folded = await foldControllerLog(controller, log, options)
+  projectionFolds.set(projection, {
+    folded,
+    crypto: options?.crypto,
+    log,
+    chainLength,
+    eventsLength,
+  })
   return folded
 }
 

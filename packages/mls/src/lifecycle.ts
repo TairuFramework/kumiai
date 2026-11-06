@@ -23,7 +23,7 @@ import {
   MAX_TRUSTED_GRANT_LIFETIME,
   readCapability,
 } from './capability.js'
-import { foldChain, foldControllerLog } from './controller-log.js'
+import { foldChain } from './controller-log.js'
 import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { prefixRelation } from './embedded-resolver.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
@@ -38,6 +38,7 @@ import {
   effectiveAuthorityOf,
   memberRootStatus,
   memberRootsOf,
+  projectionFold,
 } from './member-root.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
 import {
@@ -95,10 +96,7 @@ export async function attestedTreeTime({
 }: AttestedTreeTimeParams): Promise<number> {
   const controller = normalizeDID(controllerID)
   const projection = registry.controllers.get(controller)
-  const folded =
-    projection?.recordedLog == null
-      ? undefined
-      : await foldControllerLog(controller, projection.recordedLog, options)
+  const folded = await projectionFold(controller, projection, options)
   const head = folded?.ok && !folded.head.saturated ? folded.head : undefined
   const effective = new Map(effectiveAttestingMembers(head, projection))
   const attestations = new Map<string, number>()
@@ -194,8 +192,8 @@ export async function leafExpiry({
   const log = projection?.recordedLog
   if (log == null || prefixRelation({ recorded: log, prefix: binding.prefix }) !== 'contained')
     return undefined
-  const folded = await foldControllerLog(did, log, options)
-  if (!folded.ok) return undefined
+  const folded = await projectionFold(did, projection, options)
+  if (!folded?.ok) return undefined
   const member = folded.head.members.get(binding.member.add)
   const memberDID = member?.did ?? projection?.removedMembers.get(binding.member.add)?.did
   if (memberDID == null) return undefined
