@@ -5,11 +5,14 @@ export type GroupCryptoExportSecretParams = {
 
 export type GroupCryptoWrapParams = {
   bytes: Uint8Array
-} & { aad?: Uint8Array }
+  aad?: Uint8Array
+}
 
 export type GroupCryptoUnwrapParams = {
   bytes: Uint8Array
-} & { expectedAAD?: Uint8Array; frame?: AppFrameRef }
+  expectedAAD?: Uint8Array
+  frame?: AppFrameRef
+}
 
 /**
  * Consumer-supplied MLS crypto port: epoch number, epoch-bound domain-separated exported secrets

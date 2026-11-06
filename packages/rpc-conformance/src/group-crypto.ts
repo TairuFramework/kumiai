@@ -33,11 +33,13 @@ export type ConformanceGroupCryptoExportSecretParams = {
 
 export type ConformanceGroupCryptoWrapParams = {
   bytes: Uint8Array
-} & { aad?: Uint8Array }
+  aad?: Uint8Array
+}
 
 export type ConformanceGroupCryptoUnwrapParams = {
   bytes: Uint8Array
-} & { expectedAAD?: Uint8Array }
+  expectedAAD?: Uint8Array
+}
 
 /** The `GroupCrypto` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceGroupCrypto = {

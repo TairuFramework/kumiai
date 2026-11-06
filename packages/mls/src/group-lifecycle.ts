@@ -331,7 +331,8 @@ async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult
 export type RenewLeafParams = {
   group: GroupHandle
   binding: ControllerBinding
-} & { controllerLog?: ControllerLog }
+  controllerLog?: ControllerLog
+}
 
 export async function renewLeaf({
   group,

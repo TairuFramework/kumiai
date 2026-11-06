@@ -34,7 +34,8 @@ export type ConformancePublishParams = {
 export type ConformanceMailboxHubSubscribeParams = {
   subscriberDID: string
   topicID: string
-} & { retention?: number }
+  retention?: number
+}
 
 export type ConformanceMailboxHubUnsubscribeParams = {
   subscriberDID: string
@@ -43,7 +44,8 @@ export type ConformanceMailboxHubUnsubscribeParams = {
 
 export type ConformanceMailboxHubReceiveParams = {
   subscriberDID: string
-} & { topicID?: string }
+  topicID?: string
+}
 
 /** The subset of `MailboxHub` (`@kumiai/hub-tunnel`) this suite exercises. */
 export type ConformanceMailboxHub = {

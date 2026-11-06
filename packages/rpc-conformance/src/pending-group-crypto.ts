@@ -18,7 +18,9 @@ export type ConformancePendingAppFrame = {
 
 export type PendingCryptoUnwrapParams = {
   bytes: Uint8Array
-} & { expectedAAD?: Uint8Array; frame?: ConformanceAppFrameRef }
+  expectedAAD?: Uint8Array
+  frame?: ConformanceAppFrameRef
+}
 
 export type PendingCrypto = Omit<ConformanceGroupCrypto, 'unwrap'> & {
   unwrap(

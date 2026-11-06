@@ -23,10 +23,16 @@ export type DeviceWriteResult = {
   epoch: bigint
 }
 
-export type RegisterDeviceParams = {
+type GroupSigner = {
   group: GroupHandle
   identity: SigningIdentity
-} & { device: string; controller: string; capability?: string }
+}
+
+export type RegisterDeviceParams = GroupSigner & {
+  device: string
+  controller: string
+  capability?: string
+}
 
 /**
  * Record a `device -> controller` binding: self-attested (leaf) when `device` is the caller's own,
@@ -69,10 +75,11 @@ export async function registerDevice({
   })
 }
 
-export type LabelDeviceParams = {
-  group: GroupHandle
-  identity: SigningIdentity
-} & { device: string; label: string; capability: string }
+export type LabelDeviceParams = GroupSigner & {
+  device: string
+  label: string
+  capability: string
+}
 
 /**
  * Rename a device already bound in the registry. A manage op — authorized by the profile's
@@ -109,10 +116,12 @@ export async function labelDevice({
   })
 }
 
-export type AddDeviceParams = {
-  group: GroupHandle
-  identity: SigningIdentity
-} & { keyPackage: KeyPackage; device: string; controller: string; capability: string }
+export type AddDeviceParams = GroupSigner & {
+  keyPackage: KeyPackage
+  device: string
+  controller: string
+  capability: string
+}
 
 /**
  * Bring a co-device into the group WITHOUT a group admin: an MLS Add of the new device's key
@@ -177,10 +186,10 @@ export async function addDevice({
   })
 }
 
-export type RevokeDeviceParams = {
-  group: GroupHandle
-  identity: SigningIdentity
-} & { device: string; capability: string }
+export type RevokeDeviceParams = GroupSigner & {
+  device: string
+  capability: string
+}
 
 /**
  * Revoke a device: ONE commit, TWO effects, matching the two surfaces the kokuin security doc
@@ -226,10 +235,11 @@ export async function revokeDevice({
   })
 }
 
-export type AnnounceControllerBeaconParams = {
-  group: GroupHandle
-  identity: SigningIdentity
-} & { controller: string; logLength: number; headDigest: string }
+export type AnnounceControllerBeaconParams = GroupSigner & {
+  controller: string
+  logLength: number
+  headDigest: string
+}
 
 /**
  * Announce the controller's FULL log head into the group as folded, cross-peer-consistent state.

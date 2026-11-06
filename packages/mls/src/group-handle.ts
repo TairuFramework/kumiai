@@ -617,7 +617,8 @@ export type GroupHandleParams = CryptoOptions & {
 
 export type GroupHandleBootstrapLedgerParams = {
   tokens: Array<string>
-} & { persist?: (handle: GroupHandle) => Promise<void> | void }
+  persist?: (handle: GroupHandle) => Promise<void> | void
+}
 
 export type GroupHandleExportSecretParams = {
   label: string
@@ -627,15 +628,18 @@ export type GroupHandleExportSecretParams = {
 
 export type GroupHandleEncryptParams = {
   plaintext: Uint8Array
-} & { aad?: Uint8Array }
+  aad?: Uint8Array
+}
 
 export type GroupHandleAdvanceSenderGenerationParams = {
   target: number
-} & { maxSteps?: number }
+  maxSteps?: number
+}
 
 export type GroupHandleDecryptParams = {
   message: Uint8Array
-} & { expectedAAD?: Uint8Array }
+  expectedAAD?: Uint8Array
+}
 
 export type GroupHandleDecryptStagedParams = {
   message: Uint8Array
@@ -648,7 +652,6 @@ export type GroupHandleDecryptStagedParams = {
 
 export type GroupHandleProcessMessageParams = {
   message: Uint8Array | MlsFramedMessage
-} & {
   commitPolicy?: IncomingMessageCallback
   persist?: (handle: GroupHandle) => Promise<void> | void
 }

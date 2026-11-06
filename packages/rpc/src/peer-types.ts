@@ -309,7 +309,8 @@ export type GroupPeerDropAppFrameParams = {
 
 export type GroupPeerCommitParams = {
   build: () => Promise<PendingCommit>
-} & { holdLogSends?: true }
+  holdLogSends?: true
+}
 
 export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
