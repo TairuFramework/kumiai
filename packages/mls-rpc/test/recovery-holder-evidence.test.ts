@@ -63,16 +63,18 @@ async function chainedRecovery() {
     holderGrant,
   }
   let source = (
-    await createGroup(alice, 'recovery-holder-evidence', {
+    await createGroup({
+      identity: alice,
+      groupID: 'recovery-holder-evidence',
       controller: await fixture.bindingFor(alice),
       controllerLog: { chain: binding.prefix, events: [] },
       leafLifetime: 604_800,
       trustedGrantLifetime: 31_536_000,
     })
   ).group
-  const bundle = await createKeyPackageBundle(bob, { controller: binding })
+  const bundle = await createKeyPackageBundle({ identity: bob, controller: binding })
   const { invite } = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
-  const added = await commitInvite(source, bundle.publicPackage, invite)
+  const added = await commitInvite({ group: source, keyPackage: bundle.publicPackage, invite })
   source = added.newGroup
   let member = (
     await processWelcome({
@@ -83,7 +85,8 @@ async function chainedRecovery() {
     })
   ).group
   const newcomer = fixture.agent(81)
-  const nextBundle = await createKeyPackageBundle(newcomer, {
+  const nextBundle = await createKeyPackageBundle({
+    identity: newcomer,
     controller: await fixture.bindingFor(newcomer),
   })
   const nextInvite = await createInvite({
@@ -91,7 +94,13 @@ async function chainedRecovery() {
     identity: alice,
     recipientDID: newcomer.id,
   })
-  source = (await commitInvite(source, nextBundle.publicPackage, nextInvite.invite)).newGroup
+  source = (
+    await commitInvite({
+      group: source,
+      keyPackage: nextBundle.publicPackage,
+      invite: nextInvite.invite,
+    })
+  ).newGroup
   const requester = (recoveryBinding?: RecoveryBinding) =>
     createGroupMLS({
       identity: bob,
@@ -159,9 +168,9 @@ async function recover(
   requester: ReturnType<typeof createGroupMLS>,
   requestID: string,
 ) {
-  const request = await requester.createRecoveryRequest(requestID)
+  const request = await requester.createRecoveryRequest({ requestID })
   const reply = await fixture.responder.sealGroupInfo(request)
-  const pending = await requester.applyRecovery(reply, requestID)
+  const pending = await requester.applyRecovery({ sealed: reply, requestID })
   expect(pending).not.toBeNull()
   expect(pending).not.toHaveProperty('renewalRequired')
   if (pending == null || 'renewalRequired' in pending)
@@ -177,7 +186,10 @@ async function acceptRecovery(
 ) {
   const pending = await recover(fixture, requester, 'chained-recovery')
   await expect(
-    fixture.responder.processCommit(pending.commit, { senderDID: fixture.bob.id }),
+    fixture.responder.processCommit({
+      commit: pending.commit,
+      context: { senderDID: fixture.bob.id },
+    }),
   ).resolves.toMatchObject({ advanced: true })
   await pending.onAccepted()
   expect(fixture.member().bindingOfDID(fixture.bob.id)?.holderGrant).toBe(
@@ -187,8 +199,8 @@ async function acceptRecovery(
     fixture.binding.holderGrant,
   )
   const plaintext = new TextEncoder().encode('recovered chained member')
-  const sealed = await fixture.member().encrypt(plaintext)
-  await expect(fixture.source().decrypt(sealed)).resolves.toMatchObject({
+  const sealed = await fixture.member().encrypt({ plaintext })
+  await expect(fixture.source().decrypt({ message: sealed })).resolves.toMatchObject({
     payload: plaintext,
     senderDID: fixture.bob.id,
   })
@@ -218,7 +230,10 @@ test('evidenceRefreshMakesNewBindingID', async () => {
   await expect(requester.prepareRecovery()).resolves.toBe('ready')
   const refreshed = await recover(fixture, requester, 'refreshed-evidence')
   await expect(
-    fixture.responder.processCommit(refreshed.commit, { senderDID: fixture.bob.id }),
+    fixture.responder.processCommit({
+      commit: refreshed.commit,
+      context: { senderDID: fixture.bob.id },
+    }),
   ).resolves.toMatchObject({ advanced: true })
   await refreshed.onAccepted()
   expect(fixture.member().bindingOfDID(fixture.bob.id)?.holderGrant).toBe(offered.holderGrant)
@@ -254,7 +269,9 @@ test('recoveryAfterRestartKeepsEvidence', async () => {
 test('recovery binding state carries a membership binding', async () => {
   const identity = fixture.agent(41)
   const capability = await fixture.bindingFor(identity)
-  const { group } = await createGroup(identity, 'membership-binding-state', {
+  const { group } = await createGroup({
+    identity,
+    groupID: 'membership-binding-state',
     controller: capability,
     controllerLog: { chain: capability.prefix, events: [] },
   })

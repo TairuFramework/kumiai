@@ -85,7 +85,8 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
     try {
       return await call
     } catch (error) {
-      if (error instanceof RequestError) throw hubErrorFromCode(error.code, error.message) ?? error
+      if (error instanceof RequestError)
+        throw hubErrorFromCode({ code: error.code, message: error.message }) ?? error
       throw error
     }
   }
@@ -94,10 +95,10 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
     await Promise.all(transports.map((connection) => connection.dispose()))
   })
   return {
-    subscribe: async (did, label, subscription) => {
+    subscribe: async ({ subscriberDID: did, topicID: label, ...subscription }) => {
       await request(client(did).subscribe({ topicID: topic(label), ...subscription }))
     },
-    unsubscribe: async (did, label) => {
+    unsubscribe: async ({ subscriberDID: did, topicID: label }) => {
       await request(client(did).unsubscribe({ topicID: topic(label) }))
     },
     publish: (params) =>
@@ -108,7 +109,7 @@ function createWireLogHub(options: { maxRetention: number; maxDepth: number }): 
       )
       return { ...result, messages: result.messages.map(message) }
     },
-    receive: (did) => {
+    receive: ({ subscriberDID: did }) => {
       let stopped = false
       let channel: ReturnType<HubClient['receive']> | undefined
       return {

@@ -5,7 +5,9 @@ import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls
 describe('GroupMLS port', () => {
   test('processCommit advances the epoch and reports it', async () => {
     const mls = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1) })
-    expect(await mls.processCommit(mls.buildCommit(), { senderDID: 'did:key:zA' })).toMatchObject({
+    expect(
+      await mls.processCommit({ commit: mls.buildCommit(), context: { senderDID: 'did:key:zA' } }),
+    ).toMatchObject({
       advanced: true,
     })
     expect(mls.epoch()).toBe(1)
@@ -14,7 +16,9 @@ describe('GroupMLS port', () => {
 
   test('a no-op commit does not advance', async () => {
     const mls = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1) })
-    expect(await mls.processCommit(new Uint8Array(), {})).toMatchObject({ advanced: false })
+    expect(await mls.processCommit({ commit: new Uint8Array(), context: {} })).toMatchObject({
+      advanced: false,
+    })
     expect(mls.epoch()).toBe(0)
   })
 
@@ -23,7 +27,9 @@ describe('GroupMLS port', () => {
     const older = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1), epoch: 1 })
     // A commit framed at an epoch this member is not at is not one it can apply — real MLS
     // cannot even decrypt it. It is history, not a failure.
-    expect(await mls.processCommit(older.buildCommit(), {})).toMatchObject({ advanced: false })
+    expect(await mls.processCommit({ commit: older.buildCommit(), context: {} })).toMatchObject({
+      advanced: false,
+    })
     expect(mls.epoch()).toBe(2)
     expect(mls.seen()).toBe(1)
   })
@@ -53,7 +59,9 @@ describe('GroupMLS port', () => {
     // MLS merges a pending commit; it does not process one. The state that could have
     // carried it is the pending state, and a member meeting its own commit in the log has
     // lost it. It is refused, and not with a throw: there is nothing here to retry.
-    expect(await mls.processCommit(mls.buildCommit(), { senderDID: 'self' })).toMatchObject({
+    expect(
+      await mls.processCommit({ commit: mls.buildCommit(), context: { senderDID: 'self' } }),
+    ).toMatchObject({
       advanced: false,
     })
     expect(mls.epoch()).toBe(1)
@@ -74,7 +82,9 @@ describe('GroupMLS port', () => {
     // A refusal is a `{ advanced: false }`, never a throw: the lane's rule is that a throw
     // leaves the cursor put and the frame is read again, and a commit deliberately refused
     // is a commit that will be refused every time.
-    expect(await bob.processCommit(removed.buildCommit(), { senderDID: 'mallory' })).toMatchObject({
+    expect(
+      await bob.processCommit({ commit: removed.buildCommit(), context: { senderDID: 'mallory' } }),
+    ).toMatchObject({
       advanced: false,
     })
     expect(bob.epoch()).toBe(1)
@@ -88,10 +98,13 @@ describe('GroupMLS port', () => {
     const commit = admin.buildCommit([token]) // the admin holds the body; this member never saw it
 
     const asked: Array<Array<string>> = []
-    const result = await mls.processCommit(commit, {
-      resolveLedgerEntries: async (ids) => {
-        asked.push(ids)
-        return [token]
+    const result = await mls.processCommit({
+      commit,
+      context: {
+        resolveLedgerEntries: async (ids) => {
+          asked.push(ids)
+          return [token]
+        },
       },
     })
 
@@ -107,7 +120,10 @@ describe('GroupMLS port', () => {
 
     // A responder can fail to answer, never inject: the body is bound to the id by its digest.
     await expect(
-      mls.processCommit(commit, { resolveLedgerEntries: async () => ['a different token'] }),
+      mls.processCommit({
+        commit,
+        context: { resolveLedgerEntries: async () => ['a different token'] },
+      }),
     ).rejects.toThrow(/missing ledger entries/)
     expect(mls.epoch()).toBe(1)
     expect(mls.ledgerIDs()).toEqual([])
@@ -128,9 +144,9 @@ describe('GroupMLS port', () => {
       localDID: 'stranded',
     })
 
-    const request = await stranded.createRecoveryRequest('req-1')
+    const request = await stranded.createRecoveryRequest({ requestID: 'req-1' })
     const sealed = await live.sealGroupInfo(request)
-    const pending = await stranded.applyRecovery(sealed, 'req-1')
+    const pending = await stranded.applyRecovery({ sealed, requestID: 'req-1' })
 
     // BUILT, not adopted: the commit still has to win a compare-and-set at the head, and a
     // peer that adopted first would be alone on a branch the moment it lost.
@@ -182,8 +198,11 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'stranded',
     })
-    const request = await stranded.createRecoveryRequest('req-1')
-    const pending = await stranded.applyRecovery(await live.sealGroupInfo(request), 'req-1')
+    const request = await stranded.createRecoveryRequest({ requestID: 'req-1' })
+    const pending = await stranded.applyRecovery({
+      sealed: await live.sealGroupInfo(request),
+      requestID: 'req-1',
+    })
     if (pending == null || 'renewalRequired' in pending)
       throw new Error('Expected pending recovery')
     await pending.onAccepted()
@@ -217,14 +236,16 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'stranded',
     })
-    const sealed = await live.sealGroupInfo(await stranded.createRecoveryRequest('req-1'))
+    const sealed = await live.sealGroupInfo(
+      await stranded.createRecoveryRequest({ requestID: 'req-1' }),
+    )
 
     // Eve has a leaf and could have asked for herself; this reply is not hers to open.
-    await eve.createRecoveryRequest('req-1')
-    expect(await eve.applyRecovery(sealed, 'req-1')).toBeNull()
+    await eve.createRecoveryRequest({ requestID: 'req-1' })
+    expect(await eve.applyRecovery({ sealed, requestID: 'req-1' })).toBeNull()
     // And the requester cannot open it under another request id: the key is minted per request.
-    await stranded.createRecoveryRequest('req-2')
-    expect(await stranded.applyRecovery(sealed, 'req-2')).toBeNull()
+    await stranded.createRecoveryRequest({ requestID: 'req-2' })
+    expect(await stranded.applyRecovery({ sealed, requestID: 'req-2' })).toBeNull()
   })
 
   test('a sealed ledger answers one question, and the key survives a reply that is dropped', async () => {
@@ -242,15 +263,19 @@ describe('GroupMLS port', () => {
     // ONE request, so the two replies differ in nothing but the question they answer: same
     // member, same request id, same ephemeral key. A GroupInfo is not a ledger and a ledger is
     // not a GroupInfo, and neither opens as the other.
-    const request = await stranded.createRecoveryRequest('req-1')
+    const request = await stranded.createRecoveryRequest({ requestID: 'req-1' })
     const sealedGroupInfo = await live.sealGroupInfo(request)
     const sealedLedger = await live.sealLedger(request)
-    expect(await stranded.openSealedLedger(sealedGroupInfo, 'req-1')).toBeNull()
-    expect(await stranded.applyRecovery(sealedLedger, 'req-1')).toBeNull()
+    expect(
+      await stranded.openSealedLedger({ sealed: sealedGroupInfo, requestID: 'req-1' }),
+    ).toBeNull()
+    expect(await stranded.applyRecovery({ sealed: sealedLedger, requestID: 'req-1' })).toBeNull()
 
     // And a reply the requester drops does not cost it the key: every responder answers a
     // gather, and the next one's reply is sealed to the same ephemeral key.
-    expect(await stranded.openSealedLedger(sealedLedger, 'req-1')).toEqual(['role:live=admin'])
+    expect(await stranded.openSealedLedger({ sealed: sealedLedger, requestID: 'req-1' })).toEqual([
+      'role:live=admin',
+    ])
   })
 
   test('a member with no leaf in the responder tree is refused the ledger, as well as the group', async () => {
@@ -267,9 +292,9 @@ describe('GroupMLS port', () => {
     // The ledger is the group's whole authority state, and the topic it is asked for on is
     // public. Sealing without authorizing would answer this — and encrypt every role neatly to
     // the stranger's own key.
-    await expect(live.sealLedger(await mallory.createRecoveryRequest('req-1'))).rejects.toThrow(
-      /no leaf/,
-    )
+    await expect(
+      live.sealLedger(await mallory.createRecoveryRequest({ requestID: 'req-1' })),
+    ).rejects.toThrow(/no leaf/)
   })
 
   test('a member with no leaf in the responder tree is refused', async () => {
@@ -284,16 +309,16 @@ describe('GroupMLS port', () => {
     })
     // Authorization is roster-intrinsic: the responder can only answer DIDs its own tree still
     // carries a leaf for, so a removed member gets nothing from anyone who applied its removal.
-    await expect(live.sealGroupInfo(await removed.createRecoveryRequest('req-1'))).rejects.toThrow(
-      /no leaf/,
-    )
+    await expect(
+      live.sealGroupInfo(await removed.createRecoveryRequest({ requestID: 'req-1' })),
+    ).rejects.toThrow(/no leaf/)
   })
 
   test('exportRecoverySecret is stable and epoch-independent', async () => {
     const secret = new Uint8Array(32).fill(7)
     const mls = createMemoryGroupMLS({ recoverySecret: secret })
     const before = await mls.exportRecoverySecret()
-    await mls.processCommit(mls.buildCommit(), {})
+    await mls.processCommit({ commit: mls.buildCommit(), context: {} })
     const after = await mls.exportRecoverySecret()
     expect(Array.from(after)).toEqual(Array.from(before))
     expect(Array.from(after)).toEqual(Array.from(secret))

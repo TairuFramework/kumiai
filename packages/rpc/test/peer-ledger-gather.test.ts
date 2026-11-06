@@ -69,10 +69,10 @@ async function askForTheLedger(
   await hub.publish({
     senderDID,
     topicID: rendezvousTopic(rs),
-    payload: encodeHandshakeFrame(
-      HANDSHAKE_KIND.ledgerRequest,
-      encodeLedgerRequest(requestID, request),
-    ),
+    payload: encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.ledgerRequest,
+      payload: encodeLedgerRequest({ requestID, request }),
+    }),
   })
 }
 
@@ -82,7 +82,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const rs = new Uint8Array(32).fill(0x65)
     const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: timing })
     let releaseOpen: () => void = () => {}
     const openGate = new Promise<void>((resolve) => {
@@ -142,7 +142,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const rs = new Uint8Array(32).fill(0x66)
     const timing = { timeoutMs: 80, getDelayMs: () => 0, deadlineMs: 250 }
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
     const owed = 'circle:x=Alice'
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const aliceMLS = createMemoryGroupMLS({
@@ -202,7 +202,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const rs = new Uint8Array(32).fill(0x6a)
     const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
     const events: Array<RecoveryEvent> = []
     const alice = makeMLSPeer(hub, 'alice', rs, {
       epoch: 1,
@@ -246,7 +246,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const rs = new Uint8Array(32).fill(0x67)
     const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
     const events: Array<RecoveryEvent> = []
     const alice = makeMLSPeer(hub, 'alice', rs, {
       epoch: 1,
@@ -300,7 +300,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x68)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
     const add = Set.prototype.add
     let gatherFinishes: Set<unknown> | undefined
@@ -327,7 +327,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     const role = 'role:carol=admin'
-    await bob.peer.commit(buildLedgerCommit(bob, [role]))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, [role]) })
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
 
@@ -355,7 +355,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
     await carol.peer.replay()
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
 
     // A request from nobody: no signed blob at all, which is what the lane used to send and
     // what anyone reading the topic could have replayed.
@@ -372,7 +372,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       rs,
       'mallory',
       'anon-2',
-      await mallory.createRecoveryRequest('anon-2'),
+      await mallory.createRecoveryRequest({ requestID: 'anon-2' }),
     )
     await flush(120)
     expect(ledgerReplies(hub, rs, 'anon-2')).toHaveLength(0)
@@ -385,7 +385,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       rs,
       'alice',
       'member-1',
-      await aliceMLS.createRecoveryRequest('member-1'),
+      await aliceMLS.createRecoveryRequest({ requestID: 'member-1' }),
     )
     await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'member-1')).toHaveLength(2), {
       timeout: 10_000,
@@ -401,11 +401,17 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const rs = new Uint8Array(32).fill(0x63)
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
 
     // Carol is still in bob's tree, so bob answers her.
     const carol = createMemoryGroupMLS({ recoverySecret: rs, localDID: 'carol' })
-    await askForTheLedger(hub, rs, 'carol', 'carol-1', await carol.createRecoveryRequest('carol-1'))
+    await askForTheLedger(
+      hub,
+      rs,
+      'carol',
+      'carol-1',
+      await carol.createRecoveryRequest({ requestID: 'carol-1' }),
+    )
     await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'carol-1')).toHaveLength(1), {
       timeout: 10_000,
       interval: 10,
@@ -414,10 +420,16 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     // Bob commits her removal and adopts the post-commit handle: her leaf is gone from the
     // tree he authorizes against. Authorization is roster-intrinsic — nothing was configured,
     // and there is no policy for a host to forget.
-    await bob.peer.commit(buildRemoveCommit(bob, 'carol'))
+    await bob.peer.commit({ build: buildRemoveCommit(bob, 'carol') })
     expect(bob.mls.leaves()).not.toContain('carol')
 
-    await askForTheLedger(hub, rs, 'carol', 'carol-2', await carol.createRecoveryRequest('carol-2'))
+    await askForTheLedger(
+      hub,
+      rs,
+      'carol',
+      'carol-2',
+      await carol.createRecoveryRequest({ requestID: 'carol-2' }),
+    )
     await flush(120)
     expect(ledgerReplies(hub, rs, 'carol-2')).toHaveLength(0)
 
@@ -448,7 +460,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     })
     const bob = makeMLSPeer(hub, 'bob', rs, { mls: bobMLS, crypto: bobCrypto, recovery })
     const role = 'role:carol=admin'
-    await bob.peer.commit(buildLedgerCommit(bob, [role]))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, [role]) })
 
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const aliceMLS = createMemoryGroupMLS({
@@ -473,8 +485,8 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     // alice's rejoined handle authenticates still stands; the epoch she authenticates it at
     // does not.
     serving = true
-    await bob.peer.commit(buildLedgerCommit(bob, []))
-    await bob.peer.commit(buildLedgerCommit(bob, []))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
+    await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     expect(bobMLS.epoch()).toBeGreaterThan(strandedAt)
 
     // She restarts over the same handle. The lane gathers BEFORE it pulls — so she asks while
@@ -541,7 +553,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     await carol.peer.replay()
 
     const entries = ['role:carol=admin', 'role:dave=member', 'role:carol=member']
-    await bob.peer.commit(buildLedgerCommit(bob, entries))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, entries) })
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
     controlRecoveryClock(60)

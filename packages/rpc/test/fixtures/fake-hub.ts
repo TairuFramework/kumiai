@@ -5,11 +5,13 @@ import {
   type StoredMessage,
 } from '@kumiai/hub-protocol'
 import type {
+  HubBaseReceiveParams,
+  HubBaseSubscribeParams,
+  HubBaseUnsubscribeParams,
   HubFetchTopicParams,
   HubFetchTopicResult,
   HubPublishParams,
   HubReceiveSubscription,
-  HubSubscribeOptions,
   LogHub,
 } from '@kumiai/hub-tunnel'
 
@@ -210,7 +212,7 @@ export class FakeHub implements LogHub {
    * only catches a rejection is as broken as one that catches nothing, and the fixture should be
    * able to show that.
    */
-  subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
+  subscribe({ subscriberDID, topicID, ...options }: HubBaseSubscribeParams): void {
     this.#subscribeAttempts.set(topicID, (this.#subscribeAttempts.get(topicID) ?? 0) + 1)
     const pending = this.#transientFailures.get(topicID) ?? 0
     if (pending > 0) {
@@ -236,7 +238,7 @@ export class FakeHub implements LogHub {
     this.#retention.set(topicID, options?.retention)
   }
 
-  unsubscribe(subscriberDID: string, topicID: string): void {
+  unsubscribe({ subscriberDID, topicID }: HubBaseUnsubscribeParams): void {
     const set = this.#topics.get(topicID)
     if (set == null) return
     set.delete(subscriberDID)
@@ -365,7 +367,7 @@ export class FakeHub implements LogHub {
     }
   }
 
-  receive(subscriberDID: string): HubReceiveSubscription {
+  receive({ subscriberDID }: HubBaseReceiveParams): HubReceiveSubscription {
     const queue: Array<StoredMessage> = []
     let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
     let closed = false

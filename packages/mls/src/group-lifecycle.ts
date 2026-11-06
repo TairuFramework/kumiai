@@ -5,7 +5,12 @@ import {
   type InceptionEvent,
   pruneLog,
 } from '@kokuin/controller'
-import { createSigningIdentityForDID, type DIDString, normalizeDID } from '@kokuin/token'
+import {
+  type CryptoOptions,
+  createSigningIdentityForDID,
+  type DIDString,
+  normalizeDID,
+} from '@kokuin/token'
 import {
   type ClientState,
   type DefaultProposal,
@@ -56,10 +61,19 @@ import {
 
 export type CommitResult = DeviceWriteResult
 
-export function controllerLogDelta(group: GroupHandle, log: ControllerLog): ControllerLog | null {
+export type ControllerLogDeltaParams = {
+  group: GroupHandle
+  log: ControllerLog
+}
+
+export async function controllerLogDelta({
+  group,
+  log,
+}: ControllerLogDeltaParams): Promise<ControllerLog | null> {
   const controller = group.anchor.controller
   if (controller == null) throw new RevokeProofError('wrong-controller')
-  const recorded = recordedLogOf(group.registry, controller)
+  const options = { crypto: group.crypto }
+  const recorded = recordedLogOf({ registry: group.registry, controller })
   if (recorded == null) throw new RevokeProofError('detached')
   const first = log.chain[0]?.event
   if (first == null) throw new RevokeProofError('no-rev')
@@ -73,14 +87,24 @@ export function controllerLogDelta(group: GroupHandle, log: ControllerLog): Cont
     )
   )
     throw new RevokeProofError('wrong-controller')
-  const folded = foldControllerLog(controller, log)
+  const folded = await foldControllerLog(controller, log, options)
   if (!folded.ok)
     throw new RevokeProofError(
       isDetachedFoldReason(folded.reason) ? 'detached' : 'not-authority-signed',
     )
-  const pruned = pruneLog(controller, log)
-  const incoming = ingestControllerLog(controller, undefined, pruned)
-  const previous = ingestControllerLog(controller, undefined, recorded)
+  const pruned = await pruneLog({ ...options, did: controller, input: log })
+  const incoming = await ingestControllerLog({
+    controller,
+    recorded: undefined,
+    proof: pruned,
+    ...options,
+  })
+  const previous = await ingestControllerLog({
+    controller,
+    recorded: undefined,
+    proof: recorded,
+    ...options,
+  })
   const reset = incoming.after.head.gen > previous.after.head.gen
   const merged = incoming.log
   const common = reset ? 1 : Math.min(recorded.chain.length, merged.chain.length)
@@ -96,33 +120,42 @@ export function controllerLogDelta(group: GroupHandle, log: ControllerLog): Cont
     events: merged.events.filter(({ event }) => !seen.has(digestOf(event))),
   }
   if (delta.chain.length === 0 && delta.events.length === 0) return null
-  ingestControllerLog(controller, recorded, delta)
+  await ingestControllerLog({ controller, recorded, proof: delta, ...options })
   return delta
 }
 
-export async function publishControllerLog(
-  group: GroupHandle,
-  log: ControllerLog,
-): Promise<DeviceWriteResult | null> {
+export type PublishControllerLogParams = {
+  group: GroupHandle
+  log: ControllerLog
+}
+
+export async function publishControllerLog({
+  group,
+  log,
+}: PublishControllerLogParams): Promise<DeviceWriteResult | null> {
   return mutexFor(group).run(async () => {
-    const delta = controllerLogDelta(group, log)
+    const delta = await controllerLogDelta({ group, log })
     if (delta == null) return null
     const controller = group.anchor.controller
     if (controller == null) throw new RevokeProofError('wrong-controller')
-    const ingested = ingestControllerLog(
+    const ingested = await ingestControllerLog({
       controller,
-      recordedLogOf(group.registry, controller),
-      delta,
-      group.registry.controllers.get(normalizeDID(controller)),
-    )
-    const effects = effectDelta(ingested.before?.head, ingested.after.head)
+      recorded: recordedLogOf({ registry: group.registry, controller }),
+      proof: delta,
+      previous: group.registry.controllers.get(normalizeDID(controller)),
+      crypto: group.crypto,
+    })
+    const effects = effectDelta({ before: ingested.before?.head, after: ingested.after.head })
     if (effects.generation || effects.denied.length > 0 || effects.removed.length > 0)
       throw new RevokeProofError('effects-mismatch')
-    const token = await signLedgerEntry(ownIdentity(group), {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: controller,
-      value: { op: 'log', proof: delta },
+    const token = await signLedgerEntry({
+      identity: ownIdentity(group),
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: controller,
+        value: { op: 'log', proof: delta },
+      },
     })
     return buildResult({ group, proposals: [], tokens: [token] })
   })
@@ -165,7 +198,7 @@ export async function commitSelfRemovals(group: GroupHandle): Promise<CommitResu
       enacted: tokens,
       requireAdmin: false,
     })
-    const newGroup = deriveGroup(group, result.newState)
+    const newGroup = await deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
@@ -186,41 +219,66 @@ function ownIdentity(group: GroupHandle) {
   if (leaf == null || !('identity' in leaf.credential))
     throw new LeafBindingError('identity-change')
   const parsed = parseMLSCredentialIdentity(leaf.credential.identity)
-  return createSigningIdentityForDID(
-    (parsed.longForm ?? parsed.id) as DIDString,
-    group.state.signaturePrivateKey,
-  )
+  return createSigningIdentityForDID({
+    id: (parsed.longForm ?? parsed.id) as DIDString,
+    privateKey: group.state.signaturePrivateKey,
+    crypto: group.crypto,
+  })
 }
 
-export async function preservationClock(
-  group: GroupHandle,
-  candidateTree: ClientState['ratchetTree'],
-  candidateRegistry: DeviceRegistry,
-): Promise<Array<string>> {
+export type PreservationClockParams = {
+  group: GroupHandle
+  candidateTree: ClientState['ratchetTree']
+  candidateRegistry: DeviceRegistry
+}
+
+export async function preservationClock({
+  group,
+  candidateTree,
+  candidateRegistry,
+}: PreservationClockParams): Promise<Array<string>> {
   const controller = group.anchor.controller
   if (controller == null) return []
-  const before = treeTime(group, controller)
-  if (attestedTreeTime(candidateTree, candidateRegistry, controller) >= before) return []
+  const before = await treeTime(group, controller)
+  if (
+    (await attestedTreeTime({
+      tree: candidateTree,
+      registry: candidateRegistry,
+      controllerID: controller,
+      crypto: group.crypto,
+    })) >= before
+  )
+    return []
   return [
-    await signLedgerEntry(ownIdentity(group), {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: controller,
-      value: { op: 'clock', time: before },
+    await signLedgerEntry({
+      identity: ownIdentity(group),
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: controller,
+        value: { op: 'clock', time: before },
+      },
     }),
   ]
 }
 
-export async function attestTreeTime(
-  group: GroupHandle,
-  time: number = Date.now() / 1000,
-): Promise<DeviceWriteResult | null> {
+export type AttestTreeTimeParams = {
+  group: GroupHandle
+  time?: number
+}
+
+export async function attestTreeTime({
+  group,
+  time = Date.now() / 1000,
+}: AttestTreeTimeParams): Promise<DeviceWriteResult | null> {
   return mutexFor(group).run(async () => {
     const controller = group.anchor.controller
     if (controller == null) return null
     const projection = group.registry.controllers.get(normalizeDID(controller))
     if (projection?.recordedLog == null) return null
-    const folded = foldControllerLog(controller, projection.recordedLog)
+    const folded = await foldControllerLog(controller, projection.recordedLog, {
+      crypto: group.crypto,
+    })
     if (!folded.ok || folded.head.saturated) return null
     const members = effectiveAttestingMembers(folded.head, projection, time).filter(
       ([, member]) => normalizeDID(member.did) === normalizeDID(group.credential.id),
@@ -228,11 +286,14 @@ export async function attestTreeTime(
     if (members.length === 0) return null
     if (members.every(([, member]) => time <= (projection.attestations.get(member.key) ?? 0)))
       return null
-    const token = await signLedgerEntry(ownIdentity(group), {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: controller,
-      value: { op: 'clock', time, attest: true },
+    const token = await signLedgerEntry({
+      identity: ownIdentity(group),
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: controller,
+        value: { op: 'clock', time, attest: true },
+      },
     })
     return buildResult({ group, proposals: [], tokens: [token] })
   })
@@ -258,7 +319,7 @@ async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult
   // MLS captured the replacement tree as historical data when building a renewal.
   const historical = result.newState.historicalReceiverData.get(group.epoch)
   if (historical != null && commitState != null) historical.ratchetTree = group.state.ratchetTree
-  const newGroup = deriveGroup(group, result.newState)
+  const newGroup = await deriveGroup(group, result.newState)
   await newGroup.applyLedgerEntries(result.enacted)
   return {
     commitMessage: encode(mlsMessageEncoder, result.commit),
@@ -267,11 +328,17 @@ async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult
   }
 }
 
-export async function renewLeaf(
-  group: GroupHandle,
-  binding: ControllerBinding,
-  options?: { controllerLog?: ControllerLog },
-): Promise<DeviceWriteResult> {
+export type RenewLeafParams = {
+  group: GroupHandle
+  binding: ControllerBinding
+  controllerLog?: ControllerLog
+}
+
+export async function renewLeaf({
+  group,
+  binding,
+  ...options
+}: RenewLeafParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
     assertBindingAuthorTime(binding)
     const index = group.state.privatePath.leafIndex * 2
@@ -289,17 +356,21 @@ export async function renewLeaf(
     const tokens: Array<string> = []
     let candidate = group.registry
     if (options?.controllerLog != null) {
-      const delta = controllerLogDelta(group, options.controllerLog)
+      const delta = await controllerLogDelta({ group, log: options.controllerLog })
       if (delta != null) {
-        const token = await signLedgerEntry(ownIdentity(group), {
-          type: DEVICE_ENTRY_TYPE,
-          groupID: group.groupID,
-          subject: binding.id,
-          value: { op: 'log', proof: delta },
+        const token = await signLedgerEntry({
+          identity: ownIdentity(group),
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: binding.id,
+            value: { op: 'log', proof: delta },
+          },
         })
-        const verified = await verifyLedgerEntry(token)
+        const verified = await verifyLedgerEntry({ token, crypto: group.crypto })
         if (verified == null) throw new Error('Invalid authored log entry')
-        const folded = foldEnvelope({
+        const folded = await foldEnvelope({
+          crypto: group.crypto,
           baseRoster: group.roster,
           baseRegistry: group.registry,
           entries: [{ verified, entryID: ledgerEntryDigest(token) }],
@@ -324,8 +395,8 @@ export async function renewLeaf(
     })
     if (group.anchor.controller != null) {
       const entries = group.ledger.map(({ verified }) => verified)
-      const before = historySize(group.state.ratchetTree, entries)
-      const after = historySize(tree, entries)
+      const before = historySize({ tree: group.state.ratchetTree, entries })
+      const after = historySize({ tree, entries })
       if (after > HISTORY_HORIZON && after > before) throw new LeafBindingError('history-horizon')
     }
     return buildResult({
@@ -349,7 +420,7 @@ export async function removeLapsedLeaves(group: GroupHandle): Promise<RemoveLaps
     const proposals: Array<DefaultProposal> = []
     for (const member of group.listMembers()) {
       const leaf = leafAt(group.state.ratchetTree, member.leafIndex)
-      if (leaf == null || !isLapsed(group, leaf)) continue
+      if (leaf == null || !(await isLapsed(group, leaf))) continue
       removed.push(member.id)
       proposals.push({
         proposalType: defaultProposalTypes.remove,
@@ -385,43 +456,57 @@ function alreadyApplied(group: GroupHandle, claims: ReadonlyArray<EffectClaim>):
 
 export type RemovalEvidence = { controller: string; epoch: string; closure: ControllerLog }
 
-export function removalEvidence(
-  controller: string,
-  log: ControllerLog,
-  rmv: string,
-): RemovalEvidence | undefined {
+export type RemovalEvidenceParams = {
+  controller: string
+  log: ControllerLog
+  rmv: string
+} & CryptoOptions
+
+export async function removalEvidence({
+  controller,
+  log,
+  rmv,
+  ...options
+}: RemovalEvidenceParams): Promise<RemovalEvidence | undefined> {
   const signed = log.events.find(({ event }) => digestOf(event) === rmv)
   if (signed?.event.t !== 'rmv') return undefined
-  const closure = closureOf(controller, log, [rmv])
+  const closure = await closureOf(controller, log, [rmv], options)
   if (closure == null) return undefined
   return { controller: normalizeDID(controller), epoch: signed.event.e, closure }
 }
 
-export function survivorTargets(
-  group: GroupHandle,
-  add: string,
-): Array<{ did: string; leafKey: Uint8Array }> {
+export type SurvivorTargetsParams = {
+  group: GroupHandle
+  add: string
+}
+
+export async function survivorTargets({
+  group,
+  add,
+}: SurvivorTargetsParams): Promise<Array<{ did: string; leafKey: Uint8Array }>> {
   const controller = group.anchor.controller
   if (controller == null) return []
-  return group.listMembers().flatMap(({ id }) => {
+  const descendants: Array<{ did: string; leafKey: Uint8Array }> = []
+  for (const { id } of group.listMembers()) {
     const binding = group.bindingOfDID(id)
-    if (binding?.controller !== normalizeDID(controller) || binding.prefix == null) return []
-    const authority = effectiveAuthorityOf(
-      {
+    if (binding?.controller !== normalizeDID(controller) || binding.prefix == null) continue
+    const authority = await effectiveAuthorityOf({
+      leaf: {
         did: id,
         binding: { ...binding, id: binding.controller, prefix: binding.prefix },
         leafKey: binding.leafKey,
       },
-      group.registry,
+      registry: group.registry,
       controller,
-    )
-    return 'root' in authority && authority.root.kind === 'member' && authority.root.add === add
-      ? [{ did: id, leafKey: binding.leafKey.slice() }]
-      : []
-  })
+      crypto: group.crypto,
+    })
+    if ('root' in authority && authority.root.kind === 'member' && authority.root.add === add)
+      descendants.push({ did: id, leafKey: binding.leafKey.slice() })
+  }
+  return descendants
 }
 
-export type RevokeWithProofParams =
+export type RevokeProofInput =
   | {
       log: ControllerLog
       deny?: Array<string>
@@ -431,14 +516,17 @@ export type RevokeWithProofParams =
     }
   | { reset: true; log: ControllerLog }
 
-export async function revokeWithProof(
-  group: GroupHandle,
-  params: RevokeWithProofParams,
-): Promise<RevokeBuildResult> {
+export type RevokeWithProofParams = { group: GroupHandle } & RevokeProofInput
+
+export async function revokeWithProof({
+  group,
+  ...params
+}: RevokeWithProofParams): Promise<RevokeBuildResult> {
   return mutexFor(group).run(async () => {
     try {
       const controller = group.anchor.controller
       if (controller == null) throw new RevokeProofError('wrong-controller')
+      const options = { crypto: group.crypto }
       const reset = 'reset' in params
       const requested = reset ? [] : (params.deny ?? []).map(normalizeDID)
       const removals = reset
@@ -450,7 +538,7 @@ export async function revokeWithProof(
       const projection = group.registry.controllers.get(normalizeDID(controller))
       if (params.log.chain.every(({ event }) => event.g < (projection?.genFloor ?? 0)))
         throw new RevokeProofError('generation-floor')
-      let proof = controllerLogDelta(group, params.log)
+      let proof = await controllerLogDelta({ group, log: params.log })
       if (!reset && params.evidence != null && proof != null) {
         const evidence = params.evidence.filter(
           (held) =>
@@ -462,24 +550,39 @@ export async function revokeWithProof(
                 removals.some(({ add }) => event.add === add),
             ),
         )
-        const supplied = mergeLifecycleProofLogs(
+        const supplied = await mergeLifecycleProofLogs(
           controller,
           { chain: params.log.chain, events: proof.events },
           { chain: params.log.chain, events: evidence.flatMap(({ closure }) => closure.events) },
+          options,
         )
         proof = { ...proof, events: supplied.events }
       }
       const ingested =
         proof == null
           ? null
-          : ingestControllerLog(controller, projection?.recordedLog, proof, projection)
+          : await ingestControllerLog({
+              controller,
+              recorded: projection?.recordedLog,
+              proof,
+              previous: projection,
+              ...options,
+            })
       if (!reset && ingested != null && ingested.after.head.gen !== ingested.before?.head.gen)
         throw new RevokeProofError('needs-reset')
       if (!reset) {
         const requestedClaims: Array<EffectClaim> = [
           ...(requested.length === 0 || projection?.recordedLog == null
             ? []
-            : claimsFor(controller, undefined, projection.recordedLog, projection.genFloor).filter(
+            : (
+                await claimsFor({
+                  controller,
+                  recorded: undefined,
+                  merged: projection.recordedLog,
+                  genFloor: projection.genFloor,
+                  ...options,
+                })
+              ).filter(
                 (claim) => claim.kind === 'deny' && requested.includes(normalizeDID(claim.did)),
               )),
           ...removals.flatMap((member): Array<EffectClaim> => {
@@ -497,12 +600,13 @@ export async function revokeWithProof(
           return { status: 'already-revoked' }
       }
       if (proof == null || ingested == null) throw new RevokeProofError('no-rev')
-      const effects = claimsFor(
+      const effects = await claimsFor({
         controller,
-        projection?.recordedLog,
-        lifecycleProofLog(controller, ingested, proof),
-        projection?.genFloor ?? 0,
-      )
+        recorded: projection?.recordedLog,
+        merged: await lifecycleProofLog(controller, ingested, proof, options),
+        genFloor: projection?.genFloor ?? 0,
+        ...options,
+      })
       if (
         !reset &&
         (requested.some(
@@ -532,7 +636,7 @@ export async function revokeWithProof(
         issuer: group.credential.id,
         entry: { type: DEVICE_ENTRY_TYPE, groupID: group.groupID, subject: controller, value },
       }
-      authenticateLifecycleProof(controller, verified, group.registry)
+      await authenticateLifecycleProof(controller, verified, group.registry, options)
       const derived = await lifecycleProofEffects(group, verified)
       value.revoked = derived.revoked
       value.removed = derived.removed
@@ -543,7 +647,9 @@ export async function revokeWithProof(
         proposalType: defaultProposalTypes.remove,
         remove: { removed },
       }))
-      const tokens = [await signLedgerEntry(ownIdentity(group), verified.entry)]
+      const tokens = [
+        await signLedgerEntry({ identity: ownIdentity(group), entry: verified.entry }),
+      ]
       return { status: 'built', effects, result: await buildResult({ group, proposals, tokens }) }
     } catch (error) {
       if (error instanceof RevokeProofError) return { status: 'not-provable', reason: error.reason }

@@ -43,39 +43,46 @@ async function enactDeviceHistoryThenAuthorLeaves(): Promise<{ live: GroupHandle
   let deviceGroup = managerGroup
 
   // D self-registers: its OWN registry record, distinct from the leaf-embedded binding.
-  const selfReg = await registerDevice(deviceGroup, managerIdentity, {
+  const selfReg = await registerDevice({
+    group: deviceGroup,
+    identity: managerIdentity,
     device: managerIdentity.id,
     controller: controllerID,
   })
   deviceGroup = selfReg.newGroup
   publishTokens(tokens, deviceGroup)
-  await creatorGroup.processMessage(selfReg.commitMessage)
+  await creatorGroup.processMessage({ message: selfReg.commitMessage })
 
   // The creator grants the PROFILE (not the device) admin — a kumiai.role entry.
-  const roleToken = await signLedgerEntry(creatorIdentity, {
-    type: ROLE_ENTRY_TYPE,
-    groupID: creatorGroup.groupID,
-    subject: controllerID,
-    value: 'admin',
+  const roleToken = await signLedgerEntry({
+    identity: creatorIdentity,
+    entry: {
+      type: ROLE_ENTRY_TYPE,
+      groupID: creatorGroup.groupID,
+      subject: controllerID,
+      value: 'admin',
+    },
   })
-  const roleGrant = await commitLedgerEntries(creatorGroup, [roleToken])
+  const roleGrant = await commitLedgerEntries({ group: creatorGroup, tokens: [roleToken] })
   creatorGroup = roleGrant.newGroup
   publishTokens(tokens, creatorGroup)
-  await deviceGroup.processMessage(roleGrant.commitMessage)
+  await deviceGroup.processMessage({ message: roleGrant.commitMessage })
 
   // D revokes its co-device (target) — the deny set gains a real, non-author member.
-  const revoke = await revokeDevice(deviceGroup, managerIdentity, {
+  const revoke = await revokeDevice({
+    group: deviceGroup,
+    identity: managerIdentity,
     device: targetDeviceID,
     capability,
   })
   deviceGroup = revoke.newGroup
   publishTokens(tokens, deviceGroup)
-  await creatorGroup.processMessage(revoke.commitMessage)
+  await creatorGroup.processMessage({ message: revoke.commitMessage })
 
   // D — the author of every kumiai.device entry above — leaves the group outright.
   const dLeaf = creatorGroup.findMemberLeafIndex(managerIdentity.id)
   if (dLeaf === undefined) throw new Error('test setup: D has no leaf to remove')
-  const leave = await removeMember(creatorGroup, dLeaf)
+  const leave = await removeMember({ group: creatorGroup, leafIndex: dLeaf })
   creatorGroup = leave.newGroup
 
   return { live: creatorGroup }
@@ -87,12 +94,12 @@ describe('GroupHandle device registry', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'key',
     })
-    const { group } = await createGroup(creator, GROUP)
+    const { group } = await createGroup({ identity: creator, groupID: GROUP })
     expect(group.currentDenySet().size).toBe(0)
     expect(group.registry.devices.size).toBe(0)
   })
 
-  test('a folded register binding is readable through controllerOf/denySetOf', () => {
+  test('a folded register binding is readable through controllerOf/denySetOf', async () => {
     // Ruling override (2026-08-17): the brief's original version of this test committed an
     // un-owned kumiai.device register through commitLedgerEntries, authored by a leaf that is
     // not a bound device of the profile it registers. Task 5 adds an authoring device-proof
@@ -114,14 +121,14 @@ describe('GroupHandle device registry', () => {
       },
       entryID: 'e1',
     }
-    const { registry } = foldControl([input], anchor, GROUP)
+    const { registry } = await foldControl({ entries: [input], anchor, groupID: GROUP })
     // normalizeDID only folds did:peer:4 (see @kokuin/token); did:kokuin passes through
     // unchanged, so the controller reads back exactly as registered.
-    expect(controllerOf(registry, 'did:key:zDeviceX')).toBe('did:kokuin:profileP')
+    expect(controllerOf({ registry, deviceDID: 'did:key:zDeviceX' })).toBe('did:kokuin:profileP')
     expect(denySetOf(registry).size).toBe(0)
   })
 
-  test('denySetOf answers `has` correctly for both a revoked and an active device (matched, never enumerated)', () => {
+  test('denySetOf answers `has` correctly for both a revoked and an active device (matched, never enumerated)', async () => {
     const anchor: GroupAnchor = { creatorDID: 'did:key:zCreator', version: 1 }
     const entries: Array<FoldInput<DeviceValue>> = [
       {
@@ -161,7 +168,7 @@ describe('GroupHandle device registry', () => {
         entryID: 'e3',
       },
     ]
-    const { registry } = foldControl(entries, anchor, GROUP)
+    const { registry } = await foldControl({ entries, anchor, groupID: GROUP })
     const deny = denySetOf(registry)
     expect(deny.has('did:key:zDeviceY')).toBe(true)
     expect(deny.has('did:key:zDeviceX')).toBe(false)
@@ -178,7 +185,7 @@ describe('determinism: incremental fold vs bootstrap re-fold', () => {
     // bootstrapLedger over the raw tokens — the head-verified re-fold path, not a shortcut
     // through foldControl directly.
     const bootstrapped = await restoreGroup({ state: live.state, credential: live.credential })
-    await bootstrapped.bootstrapLedger(tokens)
+    await bootstrapped.bootstrapLedger({ tokens })
 
     expect([...bootstrapped.registry.devices.entries()]).toEqual([
       ...live.registry.devices.entries(),
@@ -196,11 +203,15 @@ describe('determinism: incremental fold vs bootstrap re-fold', () => {
     const { managerGroup, managerIdentity, controllerID, targetDeviceID, capability } =
       await twoDeviceProfileGroup()
 
-    const revoke = await revokeDevice(managerGroup, managerIdentity, {
+    const revoke = await revokeDevice({
+      group: managerGroup,
+      identity: managerIdentity,
       device: targetDeviceID,
       capability,
     })
-    const beacon = await announceControllerBeacon(revoke.newGroup, managerIdentity, {
+    const beacon = await announceControllerBeacon({
+      group: revoke.newGroup,
+      identity: managerIdentity,
       controller: controllerID,
       logLength: 7,
       headDigest: 'zDet7',
@@ -209,7 +220,7 @@ describe('determinism: incremental fold vs bootstrap re-fold', () => {
     const tokens = await live.getLedger()
 
     const bootstrapped = await restoreGroup({ state: live.state, credential: live.credential })
-    await bootstrapped.bootstrapLedger(tokens)
+    await bootstrapped.bootstrapLedger({ tokens })
 
     expect([...bootstrapped.registry.controllers.entries()]).toEqual([
       ...live.registry.controllers.entries(),
@@ -246,7 +257,9 @@ describe('commit-policy admin resolution honors revoked status (Fix 2 residual)'
     expect(activeCtx.controllerOf(targetDeviceID)).toBe(controllerID)
 
     // Revoke the target, then resolve again on the post-revoke handle.
-    const { newGroup: afterRevoke } = await revokeDevice(managerGroup, managerIdentity, {
+    const { newGroup: afterRevoke } = await revokeDevice({
+      group: managerGroup,
+      identity: managerIdentity,
       device: targetDeviceID,
       capability,
     })
@@ -254,6 +267,8 @@ describe('commit-policy admin resolution honors revoked status (Fix 2 residual)'
     // The policy provider drops a revoked device to undefined → not admin.
     expect(revokedCtx.controllerOf(targetDeviceID)).toBeUndefined()
     // The shared raw controllerOf still returns the controller (emission + revoke gate rely on it).
-    expect(controllerOf(afterRevoke.registry, targetDeviceID)).toBe(controllerID)
+    expect(controllerOf({ registry: afterRevoke.registry, deviceDID: targetDeviceID })).toBe(
+      controllerID,
+    )
   })
 })

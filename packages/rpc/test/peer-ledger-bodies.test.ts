@@ -50,7 +50,7 @@ describe('the bodies ride the commit', () => {
     // ahead of the commit: it rides the commit's own frame, sealed under the epoch every
     // member that can apply that commit is at.
     const token = 'signed-token: carol is an admin'
-    await alice.peer.commit(buildLedgerCommit(alice, [token]))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })
     await flush()
 
     const entryID = memoryEntryID(token)
@@ -163,7 +163,7 @@ describe('the bodies ride the commit', () => {
     await flush()
 
     const token = 'signed-token: a body'
-    await alice.peer.commit(buildLedgerCommit(alice, [token]))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })
     await flush()
 
     const published = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
@@ -193,16 +193,18 @@ describe('the bodies ride the commit', () => {
     // sealed for the members about to receive it — and a blob no member can open looks
     // exactly like a healthy commit until the first receiver fails to resolve it.
     await expect(
-      alice.peer.commit(async () => {
-        const commit = alice.mls.buildCommit([token])
-        alice.mls.adopt(commit)
-        return {
-          commit,
-          bodies: [token],
-          kind: 'ledger' as const,
-          journal: commit,
-          onAccepted: async () => {},
-        }
+      alice.peer.commit({
+        build: async () => {
+          const commit = alice.mls.buildCommit([token])
+          alice.mls.adopt(commit)
+          return {
+            commit,
+            bodies: [token],
+            kind: 'ledger' as const,
+            journal: commit,
+            onAccepted: async () => {},
+          }
+        },
       }),
     ).rejects.toThrow(/already advanced past the epoch/)
 

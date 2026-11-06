@@ -142,6 +142,11 @@ export function sealRecord(
   return concatBytes(header, gcm(cek, nonce).encrypt(record))
 }
 
+export type SealWakeHintParams = {
+  hint: WakeHint
+  recipient: WakeRecipient
+}
+
 /**
  * Seal a hint for one device, RFC 8291 `aes128gcm`.
  *
@@ -154,7 +159,7 @@ export function sealRecord(
  * which is catastrophic for GCM. Tests that need a fixed derivation call `sealRecord`, where every
  * input is already caller-supplied and nothing is defaulted.
  */
-export function sealWakeHint(hint: WakeHint, recipient: WakeRecipient): Uint8Array {
+export function sealWakeHint({ hint, recipient }: SealWakeHintParams): Uint8Array {
   // RFC 8291 section 4: `rs` MUST be GREATER than plaintext + delimiter + padding + tag. The
   // record IS plaintext + delimiter + padding, so subtracting the 16-byte tag alone would make
   // them equal; the seventeenth byte is what makes the inequality strict.
@@ -172,8 +177,13 @@ export function sealWakeHint(hint: WakeHint, recipient: WakeRecipient): Uint8Arr
   return sealRecord(record, WAKE_RECORD_SIZE, recipient)
 }
 
+export type OpenWakeHintParams = {
+  body: Uint8Array
+  opener: WakeOpener
+}
+
 /** Open a sealed wake body. Throws on a bad key, a corrupt body, or an unknown hint version. */
-export function openWakeHint(body: Uint8Array, opener: WakeOpener): WakeHint {
+export function openWakeHint({ body, opener }: OpenWakeHintParams): WakeHint {
   const salt = body.subarray(0, 16)
   const keyIDLength = body[20]
   if (keyIDLength == null) {

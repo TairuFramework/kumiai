@@ -86,13 +86,18 @@ export async function joinBoundDevice(): Promise<{
 }> {
   const tokens = new Map<string, string>()
   const creator = randomIdentity()
-  const { group: creatorGroup } = await createGroup(creator, GROUP, {
+  const { group: creatorGroup } = await createGroup({
+    identity: creator,
+    groupID: GROUP,
     resolveLedgerEntries: mapResolver(tokens),
   })
 
   const deviceSeed = new Uint8Array(32).fill(41)
   const leaf = await buildBoundLeaf({ deviceSeed })
-  const deviceIdentity: OwnIdentity = { ...createFullIdentity(deviceSeed), privateKey: deviceSeed }
+  const deviceIdentity: OwnIdentity = {
+    ...createFullIdentity({ privateKey: deviceSeed }),
+    privateKey: deviceSeed,
+  }
 
   const { invite } = await createInvite({
     group: creatorGroup,
@@ -103,11 +108,11 @@ export async function joinBoundDevice(): Promise<{
 
   const keyPackageBundle = await buildBoundKeyPackageBundle(leaf, deviceSeed)
 
-  const { welcomeMessage, newGroup: updatedCreatorGroup } = await commitInvite(
-    creatorGroup,
-    keyPackageBundle.publicPackage,
+  const { welcomeMessage, newGroup: updatedCreatorGroup } = await commitInvite({
+    group: creatorGroup,
+    keyPackage: keyPackageBundle.publicPackage,
     invite,
-  )
+  })
 
   const { group: deviceGroup } = await processWelcome({
     identity: deviceIdentity,
@@ -176,27 +181,26 @@ export async function twoDeviceProfileGroup(): Promise<{
 
   const targetSeed = new Uint8Array(32).fill(43)
   const targetIdentity: OwnIdentity = {
-    ...createFullIdentity(targetSeed),
+    ...createFullIdentity({ privateKey: targetSeed }),
     privateKey: targetSeed,
   }
   const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })
   const targetKeyPackageBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
-  const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice(
-    deviceGroup,
-    deviceIdentity,
-    {
-      keyPackage: targetKeyPackageBundle.publicPackage,
-      device: targetIdentity.id,
-      controller: controllerID,
-      capability,
-    },
-  )
+  const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice({
+    group: deviceGroup,
+    identity: deviceIdentity,
+
+    keyPackage: targetKeyPackageBundle.publicPackage,
+    device: targetIdentity.id,
+    controller: controllerID,
+    capability,
+  })
 
   // Advance the creator's own group past the add via the real receive path, so it is a member
   // in good standing ready to receive the next write's commit (e.g. revokeDevice's) too.
   publishTokens(tokens, managerGroup)
-  await creatorGroup.processMessage(addCommitMessage)
+  await creatorGroup.processMessage({ message: addCommitMessage })
   managerGroup.confirmAdopted()
 
   return {

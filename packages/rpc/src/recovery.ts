@@ -64,7 +64,15 @@ function decodeWithRequestID(
   }
 }
 
-export function encodeRecoveryRequest(requestID: string, request: Uint8Array): Uint8Array {
+export type EncodeRecoveryRequestParams = {
+  requestID: string
+  request: Uint8Array
+}
+
+export function encodeRecoveryRequest({
+  requestID,
+  request,
+}: EncodeRecoveryRequestParams): Uint8Array {
   return encodeWithRequestID({ requestID, payload: request, label: 'recovery request' })
 }
 
@@ -76,7 +84,15 @@ export function decodeRecoveryRequest(payload: Uint8Array): {
   return { requestID, request: rest }
 }
 
-export function encodeRecoveryReply(requestID: string, groupInfo: Uint8Array): Uint8Array {
+export type EncodeRecoveryReplyParams = {
+  requestID: string
+  groupInfo: Uint8Array
+}
+
+export function encodeRecoveryReply({
+  requestID,
+  groupInfo,
+}: EncodeRecoveryReplyParams): Uint8Array {
   return encodeWithRequestID({ requestID, payload: groupInfo, label: 'recovery reply' })
 }
 
@@ -88,12 +104,17 @@ export function decodeRecoveryReply(payload: Uint8Array): {
   return { requestID, groupInfo: rest }
 }
 
+export type EncodeLedgerRequestParams = {
+  requestID: string
+  request: Uint8Array
+}
+
 /**
  * A ledger gather carries the port's signed request blob, as a recovery request does: it is
  * what a responder authorizes against and the only key it will seal to. A request with no blob
  * is from nobody, and every responder refuses it.
  */
-export function encodeLedgerRequest(requestID: string, request: Uint8Array): Uint8Array {
+export function encodeLedgerRequest({ requestID, request }: EncodeLedgerRequestParams): Uint8Array {
   return encodeWithRequestID({ requestID, payload: request, label: 'ledger request' })
 }
 
@@ -105,6 +126,11 @@ export function decodeLedgerRequest(payload: Uint8Array): {
   return { requestID, request: rest }
 }
 
+export type EncodeLedgerReplyParams = {
+  requestID: string
+  sealed: Uint8Array
+}
+
 /**
  * A responder's whole ordered ledger, SEALED to the ephemeral key inside the request it
  * answers. The lane carries the bytes and reads none of them.
@@ -112,7 +138,7 @@ export function decodeLedgerRequest(payload: Uint8Array): {
  * Order is inside the seal and load-bearing: the head is a chain digest, so a permuted list of
  * the same tokens folds to a different head and the requester rejects it.
  */
-export function encodeLedgerReply(requestID: string, sealed: Uint8Array): Uint8Array {
+export function encodeLedgerReply({ requestID, sealed }: EncodeLedgerReplyParams): Uint8Array {
   return encodeWithRequestID({ requestID, payload: sealed, label: 'ledger reply' })
 }
 
@@ -169,7 +195,15 @@ export function decodeRecoveryConfirmRequest(payload: Uint8Array): RecoveryConfi
   }
 }
 
-export function encodeRecoveryVerdict(requestID: string, sealed: Uint8Array): Uint8Array {
+export type EncodeRecoveryVerdictParams = {
+  requestID: string
+  sealed: Uint8Array
+}
+
+export function encodeRecoveryVerdict({
+  requestID,
+  sealed,
+}: EncodeRecoveryVerdictParams): Uint8Array {
   return encodeWithRequestID({ requestID, payload: sealed, label: 'recovery verdict' })
 }
 

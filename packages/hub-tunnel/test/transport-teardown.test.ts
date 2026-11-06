@@ -3,12 +3,7 @@ import { TimeoutInterruption } from '@sozai/async'
 import { describe, expect, test, vi } from 'vitest'
 
 import { decodeFrame, encodeFrame, type HubFrame } from '../src/frame.js'
-import type {
-  HubPublishParams,
-  HubReceiveSubscription,
-  HubSubscribeOptions,
-  MailboxHub,
-} from '../src/transport.js'
+import type { HubPublishParams, HubReceiveSubscription, MailboxHub } from '../src/transport.js'
 import { createHubTunnelTransport } from '../src/transport.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -33,13 +28,13 @@ function recordingHub(): Recorder {
       published.push(params)
       return fake.publish(params)
     },
-    subscribe: (subscriberDID: string, topicID: string, options?: HubSubscribeOptions) =>
-      fake.subscribe(subscriberDID, topicID, options),
-    unsubscribe: (subscriberDID: string, topicID: string) => {
+    subscribe: ({ subscriberDID, topicID, ...options }) =>
+      fake.subscribe({ subscriberDID, topicID, ...options }),
+    unsubscribe: ({ subscriberDID, topicID }) => {
       unsubscribed.push([subscriberDID, topicID])
-      return fake.unsubscribe(subscriberDID, topicID)
+      return fake.unsubscribe({ subscriberDID, topicID })
     },
-    receive: (subscriberDID: string) => fake.receive(subscriberDID),
+    receive: ({ subscriberDID }) => fake.receive({ subscriberDID }),
   }
   return { hub, published, unsubscribed }
 }
@@ -82,14 +77,14 @@ function controllableHub(): ControllableRecorder {
       published.push(params)
       return fake.publish(params)
     },
-    subscribe: (subscriberDID: string, topicID: string, options?: HubSubscribeOptions) =>
-      fake.subscribe(subscriberDID, topicID, options),
-    unsubscribe: (subscriberDID: string, topicID: string) => {
+    subscribe: ({ subscriberDID, topicID, ...options }) =>
+      fake.subscribe({ subscriberDID, topicID, ...options }),
+    unsubscribe: ({ subscriberDID, topicID }) => {
       unsubscribed.push([subscriberDID, topicID])
-      return fake.unsubscribe(subscriberDID, topicID)
+      return fake.unsubscribe({ subscriberDID, topicID })
     },
-    receive: (subscriberDID: string): HubReceiveSubscription => {
-      const inner = fake.receive(subscriberDID)
+    receive: ({ subscriberDID }): HubReceiveSubscription => {
+      const inner = fake.receive({ subscriberDID })
       const innerIterator = inner[Symbol.asyncIterator]()
       const iterator: AsyncIterator<StoredMessage> = {
         next: () => {

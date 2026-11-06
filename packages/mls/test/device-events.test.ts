@@ -49,7 +49,9 @@ async function speculativeRevoke(operation: 'processMessage' | 'bootstrapLedger'
   const g = await twoDeviceProfileGroup()
   const live = g.creatorGroup
   live.confirmAdopted()
-  const result = await revokeDevice(g.managerGroup, g.managerIdentity, {
+  const result = await revokeDevice({
+    group: g.managerGroup,
+    identity: g.managerIdentity,
     device: g.targetDeviceID,
     capability: g.capability,
   })
@@ -62,15 +64,15 @@ async function speculativeRevoke(operation: 'processMessage' | 'bootstrapLedger'
       ledgerEntries: live.ledgerTokens,
       options: { resolveLedgerEntries: live.resolveLedgerEntries },
     })
-    await receiver.processMessage(result.commitMessage)
+    await receiver.processMessage({ message: result.commitMessage })
     state = receiver.state
   }
-  const candidate = deriveGroup(live, state)
+  const candidate = await deriveGroup(live, state)
   const receive = async (persist: (handle: GroupHandle) => Promise<void>) => {
     if (operation === 'processMessage') {
-      await candidate.processMessage(result.commitMessage, { persist })
+      await candidate.processMessage({ message: result.commitMessage, persist })
     } else {
-      await candidate.bootstrapLedger(result.newGroup.ledgerTokens, { persist })
+      await candidate.bootstrapLedger({ tokens: result.newGroup.ledgerTokens, persist })
     }
   }
   return { live, candidate, receive, result, target: normalizeDID(g.targetDeviceID) }
@@ -97,7 +99,7 @@ test.each(['processMessage', 'bootstrapLedger'] as const)(
     expect(live.revokedDevices().map(({ device }) => device)).not.toContain(target)
     expect(seen).toEqual([])
     if (operation === 'bootstrapLedger')
-      await candidate.bootstrapLedger(result.newGroup.ledgerTokens)
+      await candidate.bootstrapLedger({ tokens: result.newGroup.ledgerTokens })
     expect(seen).toEqual([])
     candidate.confirmAdopted()
     candidate.confirmAdopted()
@@ -116,7 +118,8 @@ test.each(['processMessage', 'bootstrapLedger'] as const)(
     await receive(async () => {})
     live.confirmAdopted()
     expect(seen).toEqual([])
-    await live.processMessage(result.commitMessage, {
+    await live.processMessage({
+      message: result.commitMessage,
       persist: async () => {
         expect(seen).toEqual([])
       },
@@ -143,7 +146,7 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
   })
   const log = [
     inception,
-    revokeChain({
+    await revokeChain({
       seed: controllerSeed,
       profile: 0,
       did: controllerID,
@@ -151,7 +154,8 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
       subject: issuer.id,
     }),
   ]
-  const built = await revokeWithProof(fixture.author, {
+  const built = await revokeWithProof({
+    group: fixture.author,
     deny: [issuer.id],
     log: asControllerLog(log),
   })
@@ -178,16 +182,16 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
   const replayed = vi.fn()
   restored.events.on('deviceRevoked', replayed)
   restored.confirmAdopted()
-  await restored.bootstrapLedger(restored.ledgerTokens)
+  await restored.bootstrapLedger({ tokens: restored.ledgerTokens })
   expect(replayed).not.toHaveBeenCalled()
   const fresh = await restoreGroup({
     state: built.result.newGroup.state,
     credential: built.result.newGroup.credential,
   })
   fresh.events.on('deviceRevoked', replayed)
-  await fresh.bootstrapLedger(built.result.newGroup.ledgerTokens)
+  await fresh.bootstrapLedger({ tokens: built.result.newGroup.ledgerTokens })
   expect(replayed).toHaveBeenCalledOnce()
-  await fresh.bootstrapLedger(built.result.newGroup.ledgerTokens)
+  await fresh.bootstrapLedger({ tokens: built.result.newGroup.ledgerTokens })
   expect(replayed).toHaveBeenCalledOnce()
   replayed.mockClear()
   const newcomer = agent(81)
@@ -214,28 +218,29 @@ test('admission is an epoch snapshot of lapse, independent of the wall clock', a
     clock.mockReturnValue(999_000)
     expect(fixture.joined.sendAdmission()).toEqual(before)
     clock.mockReturnValue(150_000)
-    const renewed = await renewLeaf(
-      fixture.author,
-      await timedBinding({ identity, iat: 150, exp: 250 }),
-    )
+    const renewed = await renewLeaf({
+      group: fixture.author,
+      binding: await timedBinding({ identity, iat: 150, exp: 250 }),
+    })
     await expect(
-      fixture.joined.processMessage(renewed.commitMessage, {
+      fixture.joined.processMessage({
+        message: renewed.commitMessage,
         persist: async () => {
           throw new Error('disk failed')
         },
       }),
     ).rejects.toThrow('disk failed')
     expect(fixture.joined.sendAdmission()).toEqual(before)
-    await fixture.joined.processMessage(renewed.commitMessage)
+    await fixture.joined.processMessage({ message: renewed.commitMessage })
     expect(fixture.joined.sendAdmission()).toEqual({
       epoch: Number(renewed.epoch),
       admissible: false,
       reason: 'lapsed',
     })
-    const own = await renewLeaf(
-      fixture.joined,
-      await timedBinding({ identity: peer, iat: 150, exp: 250 }),
-    )
+    const own = await renewLeaf({
+      group: fixture.joined,
+      binding: await timedBinding({ identity: peer, iat: 150, exp: 250 }),
+    })
     expect(own.newGroup.sendAdmission()).toEqual({ epoch: Number(own.epoch), admissible: true })
     expect(fixture.joined.sendAdmission().admissible).toBe(false)
   } finally {
@@ -247,13 +252,20 @@ test('an adopted reset reports its reason and proof reference only once', async 
   const { group, identity } = await lifecycleGroup()
   const peer = agent(51)
   const fixture = await lowLevelWelcome(group, peer, await bindingFor(peer))
-  const log = [inception, createReset(controllerSeed, 0, 1)]
-  const renewed = await renewLeaf(fixture.author, await bindingFor(identity, log))
+  const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
+  const renewed = await renewLeaf({
+    group: fixture.author,
+    binding: await bindingFor(identity, log),
+  })
   const seen: Array<unknown> = []
   renewed.newGroup.events.on('deviceRevoked', (batch) => {
     seen.push(batch)
   })
-  const built = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
+  const built = await revokeWithProof({
+    group: renewed.newGroup,
+    reset: true,
+    log: asControllerLog(log),
+  })
   if (built.status !== 'built') throw new Error('Missing reset candidate')
   expect(seen).toHaveLength(0)
   built.result.newGroup.confirmAdopted()
@@ -284,7 +296,9 @@ void (_LEAF_RES satisfies string)
 describe('device events', () => {
   test('revokedDevices() lists a revoked binding with its controller', async () => {
     const g = await twoDeviceProfileGroup()
-    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const res = await revokeDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       capability: g.capability,
     })
@@ -302,12 +316,14 @@ describe('device events', () => {
       seen.push(batch)
     })
 
-    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const res = await revokeDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       capability: g.capability,
     })
     publishTokens(g.tokens, res.newGroup)
-    await g.creatorGroup.processMessage(res.commitMessage)
+    await g.creatorGroup.processMessage({ message: res.commitMessage })
 
     expect(seen.length).toBe(1)
     expect(seen[0]?.map((r) => r.device)).toContain(normalizeDID(g.targetDeviceID))
@@ -319,14 +335,17 @@ describe('device events', () => {
     g.creatorGroup.events.on('deviceRevoked', (batch) => {
       seen.push(...batch.map((entry) => entry.device))
     })
-    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const res = await revokeDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       capability: g.capability,
     })
     publishTokens(g.tokens, res.newGroup)
     const before = g.creatorGroup.epoch
     await expect(
-      g.creatorGroup.processMessage(res.commitMessage, {
+      g.creatorGroup.processMessage({
+        message: res.commitMessage,
         persist: async () => {
           throw new Error('disk failed')
         },
@@ -334,7 +353,7 @@ describe('device events', () => {
     ).rejects.toThrow('disk failed')
     expect(g.creatorGroup.epoch).toBe(before)
     expect(seen).toEqual([])
-    await g.creatorGroup.processMessage(res.commitMessage, { persist: async () => {} })
+    await g.creatorGroup.processMessage({ message: res.commitMessage, persist: async () => {} })
     expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
   })
 
@@ -359,17 +378,22 @@ describe('device events', () => {
     receiver.events.on('deviceRevoked', (batch) => {
       seen.push(...batch.map((entry) => entry.device))
     })
-    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const res = await revokeDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       capability: g.capability,
     })
     const revokeToken = res.newGroup.ledgerTokens.at(-1)
     if (revokeToken == null) throw new Error('missing revoke token')
-    const note = await signLedgerEntry(g.creatorIdentity, {
-      type: 'note',
-      groupID: receiver.groupID,
-      subject: g.targetDeviceID,
-      value: 'notify',
+    const note = await signLedgerEntry({
+      identity: g.creatorIdentity,
+      entry: {
+        type: 'note',
+        groupID: receiver.groupID,
+        subject: g.targetDeviceID,
+        value: 'notify',
+      },
     })
     const removed = g.creatorGroup.findMemberLeafIndex(g.targetDeviceID)
     if (removed == null) throw new Error('missing target leaf')
@@ -382,7 +406,8 @@ describe('device events', () => {
     g.tokens.set(ledgerEntryDigest(note), note)
     const before = receiver.epoch
     await expect(
-      receiver.processMessage(encode(mlsMessageEncoder, combined.commit), {
+      receiver.processMessage({
+        message: encode(mlsMessageEncoder, combined.commit),
         persist: async () => {},
       }),
     ).rejects.toThrow('host callback failed')
@@ -392,7 +417,9 @@ describe('device events', () => {
 
   test('a failed bootstrap persist emits no revoke; retry emits it once', async () => {
     const g = await twoDeviceProfileGroup()
-    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const res = await revokeDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       capability: g.capability,
     })
@@ -406,7 +433,8 @@ describe('device events', () => {
       seen.push(...batch.map((entry) => entry.device))
     })
     await expect(
-      fresh.bootstrapLedger(res.newGroup.ledgerTokens, {
+      fresh.bootstrapLedger({
+        tokens: res.newGroup.ledgerTokens,
         persist: async () => {
           throw new Error('disk failed')
         },
@@ -414,9 +442,9 @@ describe('device events', () => {
     ).rejects.toThrow('disk failed')
     expect(fresh.ledgerTokens).toEqual([])
     expect(seen).toEqual([])
-    await fresh.bootstrapLedger(res.newGroup.ledgerTokens, { persist: async () => {} })
+    await fresh.bootstrapLedger({ tokens: res.newGroup.ledgerTokens, persist: async () => {} })
     expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
-    await fresh.bootstrapLedger(res.newGroup.ledgerTokens, { persist: async () => {} })
+    await fresh.bootstrapLedger({ tokens: res.newGroup.ledgerTokens, persist: async () => {} })
     fresh.confirmAdopted()
     expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
   })
@@ -428,13 +456,15 @@ describe('device events', () => {
       seen.push(batch)
     })
 
-    const res = await labelDevice(g.managerGroup, g.managerIdentity, {
+    const res = await labelDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       label: 'laptop',
       capability: g.capability,
     })
     publishTokens(g.tokens, res.newGroup)
-    await g.creatorGroup.processMessage(res.commitMessage)
+    await g.creatorGroup.processMessage({ message: res.commitMessage })
 
     expect(seen.length).toBe(0)
   })
@@ -448,12 +478,14 @@ describe('device events', () => {
       seen.push(batch)
     })
 
-    const res = await registerDevice(g.managerGroup, g.managerIdentity, {
+    const res = await registerDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.managerIdentity.id,
       controller: g.controllerID,
     })
     publishTokens(g.tokens, res.newGroup)
-    await g.creatorGroup.processMessage(res.commitMessage)
+    await g.creatorGroup.processMessage({ message: res.commitMessage })
 
     expect(seen.length).toBe(0)
   })
@@ -468,11 +500,15 @@ describe('device events', () => {
     // group's whole ledger (including a revoke and a beacon) via one applyLedgerEntries call is
     // exactly what a joiner's welcome-fold does, and is honest about exercising that path.
     const g = await twoDeviceProfileGroup()
-    const r1 = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const r1 = await revokeDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       capability: g.capability,
     })
-    const r2 = await announceControllerBeacon(r1.newGroup, g.managerIdentity, {
+    const r2 = await announceControllerBeacon({
+      group: r1.newGroup,
+      identity: g.managerIdentity,
       controller: g.controllerID,
       logLength: 5,
       headDigest: 'zH5',
@@ -498,7 +534,10 @@ describe('device events', () => {
 
     expect(fired).toBe(0)
     expect(fresh.revokedDevices().map((r) => r.device)).toContain(normalizeDID(g.targetDeviceID))
-    expect(beaconOf(fresh.registry, g.controllerID)).toEqual({ logLength: 5, headDigest: 'zH5' })
+    expect(beaconOf({ registry: fresh.registry, controllerDID: g.controllerID })).toEqual({
+      logLength: 5,
+      headDigest: 'zH5',
+    })
   })
 })
 
@@ -512,13 +551,15 @@ describe('controller beacon', () => {
       beaconEvent = e
     })
 
-    const res = await announceControllerBeacon(g.managerGroup, g.managerIdentity, {
+    const res = await announceControllerBeacon({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       controller: g.controllerID,
       logLength: 12,
       headDigest: 'zFullHead',
     })
 
-    expect(beaconOf(res.newGroup.registry, g.controllerID)).toEqual({
+    expect(beaconOf({ registry: res.newGroup.registry, controllerDID: g.controllerID })).toEqual({
       logLength: 12,
       headDigest: 'zFullHead',
     })
@@ -538,7 +579,9 @@ describe('controller beacon', () => {
   test('a receiver folds and fires controllerBeaconChanged when it processes the beacon commit', async () => {
     const g = await twoDeviceProfileGroup()
     let received: { controller: string; logLength: number; headDigest: string } | undefined
-    const res = await announceControllerBeacon(g.managerGroup, g.managerIdentity, {
+    const res = await announceControllerBeacon({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       controller: g.controllerID,
       logLength: 3,
       headDigest: 'zH3',
@@ -548,7 +591,7 @@ describe('controller beacon', () => {
     g.creatorGroup.events.on('controllerBeaconChanged', (e) => {
       received = e
     })
-    await g.creatorGroup.processMessage(res.commitMessage)
+    await g.creatorGroup.processMessage({ message: res.commitMessage })
 
     expect(received).toEqual({
       controller: normalizeDID(g.controllerID),
@@ -564,7 +607,9 @@ describe('controller beacon', () => {
       seen.push(...batch)
     })
 
-    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const res = await revokeDevice({
+      group: g.managerGroup,
+      identity: g.managerIdentity,
       device: g.targetDeviceID,
       capability: g.capability,
     })

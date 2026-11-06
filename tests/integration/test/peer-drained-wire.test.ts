@@ -17,8 +17,8 @@ describe('peer drain over the wire hub', () => {
     const crypto = createGroupCrypto({
       access: simpleHandleAccess({ handle: () => group, adopt: () => {} }),
     })
-    const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
-    const topicID = protocolTopic(secret, epoch, 'chat')
+    const { secret, epoch } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    const topicID = protocolTopic({ secret, epoch, protocol: 'chat' })
     let nextPending = false
     let returnPending = false
     let disposed = false
@@ -43,11 +43,13 @@ describe('peer drain over the wire hub', () => {
     const peer = createGroupPeer({
       hub: {
         publish: (params) => connection.publish(params),
-        subscribe: (did, topic, options) => connection.subscribe(did, topic, options),
-        unsubscribe: (did, topic) => connection.unsubscribe?.(did, topic),
+        subscribe: ({ subscriberDID: did, topicID: topic, ...options }) =>
+          connection.subscribe({ subscriberDID: did, topicID: topic, ...options }),
+        unsubscribe: ({ subscriberDID: did, topicID: topic }) =>
+          connection.unsubscribe?.({ subscriberDID: did, topicID: topic }),
         fetchTopic: (params) => connection.fetchTopic(params),
-        receive: (did) => {
-          const inner = connection.receive(did)
+        receive: ({ subscriberDID: did }) => {
+          const inner = connection.receive({ subscriberDID: did })
           const iterator = inner[Symbol.asyncIterator]()
           return {
             [Symbol.asyncIterator]: () => ({

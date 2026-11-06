@@ -32,18 +32,18 @@ export function createRecordingHub(inner: LogHub): RecordingHub {
         record(`publish:${params.topicID}`)
         return inner.publish(params)
       },
-      subscribe: (subscriberDID, topicID, options) => {
+      subscribe: ({ subscriberDID, topicID, ...options }) => {
         record(`subscribe:${topicID}`)
-        return inner.subscribe(subscriberDID, topicID, options)
+        return inner.subscribe({ subscriberDID, topicID, ...options })
       },
-      unsubscribe: (subscriberDID, topicID) => {
+      unsubscribe: ({ subscriberDID, topicID }) => {
         record(`unsubscribe:${topicID}`)
         // Optional on `HubBase` (hub-tunnel/src/transport.ts:118), so optional here too.
-        return inner.unsubscribe?.(subscriberDID, topicID)
+        return inner.unsubscribe?.({ subscriberDID, topicID })
       },
-      receive: (subscriberDID, options) => {
+      receive: ({ subscriberDID, ...options }) => {
         record('receive')
-        return inner.receive(subscriberDID, options)
+        return inner.receive({ subscriberDID, ...options })
       },
       fetchTopic: (params) => {
         record(`fetchTopic:${params.topicID}`)

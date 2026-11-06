@@ -6,7 +6,7 @@
 
 export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
-export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
+export type { AppCursorStore, AppCursorStoreSaveParams, AppWindowPruned } from './app-cursor.js'
 export type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
 export {
   type AppOutbox,
@@ -24,6 +24,7 @@ export {
   digestAppliedCommit,
   UNKNOWN_FRAME_VERSION,
 } from './classify.js'
+export type { CommitJournalMarkAcceptedParams } from './commit.js'
 export {
   CommitDeadlineError,
   type CommitJournal,
@@ -36,6 +37,7 @@ export {
   type PendingCommit,
   RecoveryRequiredError,
 } from './commit.js'
+export type { EncodeCommitFrameParams } from './commit-frame.js'
 export {
   COMMIT_FRAME_VERSION,
   type CommitFrame,
@@ -44,6 +46,20 @@ export {
   isUnsupportedCommitFrameVersion,
   UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
+export type {
+  FrameEpochErrorParams,
+  GroupCryptoExportSecretParams,
+  GroupCryptoUnwrapParams,
+  GroupCryptoWrapParams,
+  GroupMLSApplyRecoveryParams,
+  GroupMLSConfirmationKeyParams,
+  GroupMLSCreateRecoveryRequestParams,
+  GroupMLSOpenRecoveryVerdictParams,
+  GroupMLSOpenSealedLedgerParams,
+  GroupMLSProcessCommitParams,
+  GroupMLSSealRecoveryVerdictParams,
+  PendingRecoveryConfirmationKeyParams,
+} from './crypto.js'
 export {
   type AppFrameRef,
   AppFrameStorageError,
@@ -87,6 +103,7 @@ export {
 } from './errors.js'
 export { assertFrameFits, FrameTooLargeError } from './frame-size.js'
 export type { GroupProcedureHandlers } from './handlers.js'
+export type { EncodeHandshakeFrameParams } from './handshake.js'
 export {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
@@ -96,6 +113,7 @@ export {
   type HandshakeKind,
 } from './handshake.js'
 export type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
+export type { CreateLedgerEntryResolverParams } from './ledger-entries.js'
 export {
   createLedgerEntryResolver,
   decodeLedgerEntries,
@@ -117,6 +135,8 @@ export {
   type StrandKind,
   type StrandObservation,
 } from './peer.js'
+export type { GroupPeerCommitParams, GroupPeerDropAppFrameParams } from './peer-types.js'
+export type { RetentionOfParams } from './protocol.js'
 export {
   defineGroupProtocol,
   type GroupProcedureDefinition,
@@ -125,6 +145,13 @@ export {
   type Retention,
   retentionOf,
 } from './protocol.js'
+export type {
+  EncodeLedgerReplyParams,
+  EncodeLedgerRequestParams,
+  EncodeRecoveryReplyParams,
+  EncodeRecoveryRequestParams,
+  EncodeRecoveryVerdictParams,
+} from './recovery.js'
 export {
   decodeLedgerReply,
   decodeLedgerRequest,
@@ -141,7 +168,9 @@ export {
   type RecoveryConfirmRequest,
   type RecoveryVerdictFrame,
 } from './recovery.js'
+export type { DetectLeafAdmissionParams, DetectRosterChangeParams } from './roster.js'
 export { detectLeafAdmission, detectRosterChange } from './roster.js'
+export type { InboxTopicParams, ProtocolTopicParams } from './topic.js'
 export {
   APP_TOPIC_LABEL,
   COMMIT_LABEL,

@@ -50,7 +50,7 @@ const MEMBERS = ['alice', 'bob', 'carol']
 
 /** The room topic of the segment anchored at `epoch`: that epoch's secret, under that epoch. */
 const roomTopic = (epoch: number): string =>
-  protocolTopic(fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, 'room')
+  protocolTopic({ secret: fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, protocol: 'room' })
 
 /** A member of the group at `epoch`, wired with an MLS port so commits can drive its epoch. */
 function makeRoomPeer(

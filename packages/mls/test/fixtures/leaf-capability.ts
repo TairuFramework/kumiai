@@ -17,15 +17,15 @@ export type LeafCapabilityFixtureOptions = {
 
 export async function leafCapabilityFixture(options: LeafCapabilityFixtureOptions = {}) {
   const seed = new Uint8Array(32).fill(31)
-  const inception = createInception(seed, 0)
-  const controller = createControllerIdentity({
+  const inception = await createInception({ seed: seed, profile: 0 })
+  const controller = await createControllerIdentity({
     seed,
     profile: 0,
     log: asControllerLog([inception]),
   })
   const trustedSeed = new Uint8Array(32).fill(61)
-  const trusted = createSigningIdentity(trustedSeed)
-  const device = createSigningIdentity(new Uint8Array(32).fill(41))
+  const trusted = createSigningIdentity({ privateKey: trustedSeed })
+  const device = createSigningIdentity({ privateKey: new Uint8Array(32).fill(41) })
   const parentPayload = {
     sub: controller.id,
     aud: trusted.id,
@@ -38,7 +38,7 @@ export async function leafCapabilityFixture(options: LeafCapabilityFixtureOption
     ...options.parent,
     ...(options.depth ? { cap: 'extra-parent' } : {}),
   }
-  const parent = stringifyToken(await controller.signToken(parentPayload))
+  const parent = stringifyToken(await controller.signToken({ payload: parentPayload }))
   const childPayload = {
     sub: controller.id,
     aud: device.id,
@@ -52,16 +52,18 @@ export async function leafCapabilityFixture(options: LeafCapabilityFixtureOption
     ...options.child,
   }
   const signer = options.wrongSigner ? device : trusted
-  const token = stringifyToken(await signer.signToken(childPayload))
+  const token = stringifyToken(await signer.signToken({ payload: childPayload }))
   const holderGrant = stringifyToken(
     await controller.signToken({
-      sub: controller.id,
-      aud: device.id,
-      act: 'authenticate',
-      res: 'kumiai/mls-leaf',
-      cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
-      iat: childPayload.iat,
-      exp: childPayload.exp,
+      payload: {
+        sub: controller.id,
+        aud: device.id,
+        act: 'authenticate',
+        res: 'kumiai/mls-leaf',
+        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
+        iat: childPayload.iat,
+        exp: childPayload.exp,
+      },
     }),
   )
   const credential = (capability = token, id: string = device.id): Credential => ({

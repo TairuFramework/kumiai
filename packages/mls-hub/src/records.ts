@@ -18,6 +18,16 @@ export type StoredRecord<Kind extends RecordKind = RecordKind> = {
   notAfter: number
 }
 
+type MemoryRecordStorePutParams<R extends StoredRecord> = {
+  ownerDID: string
+  record: R
+}
+
+type MemoryRecordStoreDeleteParams = {
+  ownerDID: string
+  ref: string
+}
+
 /**
  * The owner-scoped, replace-by-`ref`, non-aliasing map both in-memory reference stores are.
  *
@@ -26,8 +36,8 @@ export type StoredRecord<Kind extends RecordKind = RecordKind> = {
  */
 export function createMemoryRecordStore<R extends StoredRecord>(): {
   list(ownerDID: string): Promise<Array<R>>
-  put(ownerDID: string, record: R): Promise<void>
-  delete(ownerDID: string, ref: string): Promise<void>
+  put(params: MemoryRecordStorePutParams<R>): Promise<void>
+  delete(params: MemoryRecordStoreDeleteParams): Promise<void>
 } {
   const byOwner = new Map<string, Map<string, R>>()
   return {
@@ -35,7 +45,7 @@ export function createMemoryRecordStore<R extends StoredRecord>(): {
       const records = byOwner.get(ownerDID)
       return records == null ? [] : [...records.values()].map((record) => ({ ...record }))
     },
-    async put(ownerDID: string, record: R): Promise<void> {
+    async put({ ownerDID, record }: MemoryRecordStorePutParams<R>): Promise<void> {
       let records = byOwner.get(ownerDID)
       if (records == null) {
         records = new Map()
@@ -43,7 +53,7 @@ export function createMemoryRecordStore<R extends StoredRecord>(): {
       }
       records.set(record.ref, { ...record })
     },
-    async delete(ownerDID: string, ref: string): Promise<void> {
+    async delete({ ownerDID, ref }: MemoryRecordStoreDeleteParams): Promise<void> {
       byOwner.get(ownerDID)?.delete(ref)
     },
   }

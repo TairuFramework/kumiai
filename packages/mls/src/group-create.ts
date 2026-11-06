@@ -26,12 +26,17 @@ export type CreateGroupResult = {
   credential: MemberCredential
 }
 
+export type CreateGroupParams = {
+  identity: OwnIdentity
+  groupID: string
+} & GroupOptions
+
 /** Create a new MLS group. The identity becomes the sole member and admin. */
-export async function createGroup(
-  identity: OwnIdentity,
-  groupID: string,
-  options?: GroupOptions,
-): Promise<CreateGroupResult> {
+export async function createGroup({
+  identity,
+  groupID,
+  ...options
+}: CreateGroupParams): Promise<CreateGroupResult> {
   assertBindingAuthorTime(options?.controller)
 
   // A binding enriches a supplied anchor before genesis; standard anchor bytes stay untouched.
@@ -87,7 +92,7 @@ export async function createGroup(
   if (suppliedAnchorExtension == null) {
     extensions.push(
       options?.controller == null
-        ? buildCurrentGroupAnchorExtension(identity.id)
+        ? buildCurrentGroupAnchorExtension({ creatorDID: identity.id })
         : buildGroupAnchorExtension({
             creatorDID: identity.id,
             version: 1,
@@ -117,29 +122,44 @@ export async function createGroup(
   const registry =
     anchor.controller == null || options?.controllerLog == null
       ? undefined
-      : registryForLog(anchor.controller, options.controllerLog)
+      : await registryForLog({
+          controller: anchor.controller,
+          log: options.controllerLog,
+          crypto: options.crypto,
+        })
   const tokens: Array<string> = []
   if (anchor.controller != null && options?.controllerLog != null) {
     tokens.push(
-      await signLedgerEntry(identity, {
-        type: DEVICE_ENTRY_TYPE,
-        groupID,
-        subject: anchor.controller,
-        value: { op: 'seed', proof: pruneLog(anchor.controller, options.controllerLog) },
+      await signLedgerEntry({
+        identity,
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID,
+          subject: anchor.controller,
+          value: {
+            op: 'seed',
+            proof: await pruneLog({
+              crypto: options.crypto,
+              did: anchor.controller,
+              input: options.controllerLog,
+            }),
+          },
+        },
       }),
     )
   }
   const context = await resolveMlsContext(options, anchor)
-  const mlsCredential = makeMLSCredential(identity, options?.controller)
+  const mlsCredential = makeMLSCredential({ identity, controller: options?.controller })
   if (options?.controller != null) {
     await verifyLeafCredential(mlsCredential, identity.publicKey, {
+      crypto: options.crypto,
       judging: () => ({ registry, stage: 'full', mode: 'admit' }),
       leafLifetime: () => anchor.leafLifetime ?? 86_400,
       trustedGrantLifetime: () => anchor.trustedGrantLifetime ?? 2_592_000,
     })
   }
   const head = buildLedgerHeadExtension(
-    extendHead(genesisHead(groupID), tokens.map(ledgerEntryDigest)),
+    extendHead({ head: genesisHead(groupID), entryIDs: tokens.map(ledgerEntryDigest) }),
   )
   const headIndex = extensions.findIndex((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)
   if (tokens.length > 0 && headIndex >= 0) extensions[headIndex] = head
@@ -168,7 +188,8 @@ export async function createGroup(
     id: identity.id,
     groupID,
   }
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
+    crypto: options?.crypto,
     state,
     credential,
     context,
@@ -192,7 +213,8 @@ export type RestoreGroupParams = {
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
   // Construction reseeds control authority from the anchor in the restored state;
   // an anchorless state throws (the same fail-closed guard).
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
+    crypto: params.options?.crypto,
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),

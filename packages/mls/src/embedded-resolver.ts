@@ -5,17 +5,27 @@ import {
   digestOf,
   type SignedEvent,
 } from '@kokuin/controller'
-import { type DIDMethodResolver, type MemberQuery, normalizeDID } from '@kokuin/token'
+import {
+  type CryptoOptions,
+  type DIDMethodResolver,
+  type DIDMethodResolverResolveMemberParams,
+  normalizeDID,
+} from '@kokuin/token'
 
 import { asControllerLog, hasChainRevoke } from './controller-log.js'
 import { type DeviceRegistry, denySetOf, recordedLogOf } from './registry.js'
 
 const EMPTY: ReadonlySet<string> = new Set()
 
-export function prefixRelation(
-  recorded: ControllerLog | undefined,
-  prefix: ReadonlyArray<SignedEvent>,
-): 'contained' | 'ahead' | 'forked' | 'none' {
+export type PrefixRelationParams = {
+  recorded: ControllerLog | undefined
+  prefix: ReadonlyArray<SignedEvent>
+}
+
+export function prefixRelation({
+  recorded,
+  prefix,
+}: PrefixRelationParams): 'contained' | 'ahead' | 'forked' | 'none' {
   const held = recorded?.chain.at(-1)
   const carried = prefix.at(-1)
   if (recorded == null || held == null || carried == null) return 'none'
@@ -26,17 +36,21 @@ export function prefixRelation(
 }
 
 /** Root keys come from the leaf prefix; member authority comes from the recorded epoch. */
-export function createRegistryControllerResolver(params: {
-  controllerID: string
-  prefix: ReadonlyArray<SignedEvent>
-  registry?: DeviceRegistry
-}): ControllerResolver {
+export function createRegistryControllerResolver(
+  params: CryptoOptions & {
+    controllerID: string
+    prefix: ReadonlyArray<SignedEvent>
+    registry?: DeviceRegistry
+  },
+): ControllerResolver {
   const controller = normalizeDID(params.controllerID)
-  const recorded = params.registry == null ? undefined : recordedLogOf(params.registry, controller)
+  const recorded =
+    params.registry == null ? undefined : recordedLogOf({ registry: params.registry, controller })
   const denied = params.registry == null ? EMPTY : denySetOf(params.registry)
   const prefix = asControllerLog(params.prefix)
   const resolverFor = (log: ControllerLog) => {
     return createControllerResolver({
+      crypto: params.crypto,
       loadLog: async (did) =>
         normalizeDID(did) === controller && !hasChainRevoke(log.chain) ? log : undefined,
     })
@@ -60,11 +74,11 @@ export function createRegistryControllerResolver(params: {
       ...(params.registry == null
         ? {}
         : {
-            async resolveMember(did: string, query: MemberQuery) {
-              if (normalizeDID(did) !== controller) throw new Error(`Unknown DID: ${did}`)
-              if (prefixRelation(recorded, params.prefix) !== 'contained')
+            async resolveMember({ subject, member: query }: DIDMethodResolverResolveMemberParams) {
+              if (normalizeDID(subject) !== controller) throw new Error(`Unknown DID: ${subject}`)
+              if (prefixRelation({ recorded, prefix: params.prefix }) !== 'contained')
                 throw new Error('Recorded controller log does not contain the leaf prefix')
-              const member = await members.resolveMember?.(did, query)
+              const member = await members.resolveMember?.({ subject, member: query })
               if (member == null) throw new Error('Controller member resolution is unavailable')
               return member
             },

@@ -1,4 +1,6 @@
+import { type CryptoProvider, nobleCrypto } from '@kokuin/crypto'
 import {
+  type CryptoOptions,
   encodeMultibase,
   isVerifiedToken,
   multihashSHA256,
@@ -45,50 +47,90 @@ export type VerifiedLedgerEntry<TValue = unknown> = {
   entry: LedgerEntry<TValue>
 }
 
+export type SignLedgerEntryParams = {
+  identity: SigningIdentity
+  entry: LedgerEntry
+}
+
 /**
  * Sign a ledger entry. The signer fills `iss` with its DID, so the signature
  * covers every claim field — including `groupID` and `ord` — and binds the
  * author. `ord` is signed only when present, so a claim without it never signs
  * an `ord: undefined` key. Returns the stringified token.
  */
-export async function signLedgerEntry(
-  identity: SigningIdentity,
-  entry: LedgerEntry,
-): Promise<string> {
-  const signed = await identity.signToken(
-    {
+export async function signLedgerEntry({ identity, entry }: SignLedgerEntryParams): Promise<string> {
+  const signed = await identity.signToken({
+    payload: {
       type: entry.type,
       groupID: entry.groupID,
       subject: entry.subject,
       value: entry.value,
       ...(entry.ord === undefined ? {} : { ord: entry.ord }),
     },
-    // Embed the long-form DID so each entry is self-verifying offline: the
-    // ledger is the source of truth and receivers fold it long after first
-    // contact, when the author's DID document may no longer be cached. No-op
-    // for did:key (long form === id).
-    { embedLongForm: true },
-  )
+    embedLongForm: true,
+  })
   return stringifyToken(signed)
 }
 
+class ProviderFailure extends Error {}
+
+const OBSERVED_PROVIDERS = new WeakMap<CryptoProvider, CryptoProvider>()
+
+// `verifyToken` throws for a bad token and a failed provider alike, so mark the second. Stable per
+// provider: Kokuin keys its verifier memo and call coalescing on this object.
+function observedProvider(crypto: CryptoProvider): CryptoProvider {
+  let observed = OBSERVED_PROVIDERS.get(crypto)
+  if (observed == null) {
+    observed = {
+      ...crypto,
+      verify: async (item) => {
+        try {
+          return await crypto.verify(item)
+        } catch (cause) {
+          throw new ProviderFailure('Crypto provider failed', { cause })
+        }
+      },
+      verifyBatch: async (items) => {
+        try {
+          return await crypto.verifyBatch(items)
+        } catch (cause) {
+          throw new ProviderFailure('Crypto provider failed', { cause })
+        }
+      },
+    }
+    OBSERVED_PROVIDERS.set(crypto, observed)
+  }
+  return observed
+}
+
+export type VerifyLedgerEntryParams = {
+  token: string
+} & CryptoOptions
+
 /**
- * Verify a signed ledger token and extract its claim. Returns `null` (never
- * throws) when the token is unparseable, unsigned (`alg: 'none'` — `verifyToken`
+ * Verify a signed ledger token and extract its claim. Returns `null` when the
+ * token is unparseable, unsigned (`alg: 'none'` — `verifyToken`
  * returns those without checking a signature, so an attacker could forge an
  * arbitrary `iss`; `isVerifiedToken` rejects them), or structurally malformed.
  * A missing or non-string `groupID` is malformed, as is a missing or non-string
  * `type` or `subject`, or an `ord` present but not a string. The claim fields
  * come from the verified payload only; the issuer is the normalized verified
- * `iss`.
+ * `iss`. A provider failure rejects with the provider's error: it says nothing
+ * about the token, and a caller reading it as invalid would drop an authentic entry.
  */
-export async function verifyLedgerEntry<TValue = unknown>(
-  token: string,
-): Promise<VerifiedLedgerEntry<TValue> | null> {
+export async function verifyLedgerEntry<TValue = unknown>({
+  token,
+  ...options
+}: VerifyLedgerEntryParams): Promise<VerifiedLedgerEntry<TValue> | null> {
   let verified: Awaited<ReturnType<typeof verifyToken<LedgerEntry<TValue>>>>
   try {
-    verified = await verifyToken<LedgerEntry<TValue>>(token)
-  } catch {
+    verified = await verifyToken<LedgerEntry<TValue>>({
+      ...options,
+      crypto: observedProvider(options.crypto ?? nobleCrypto),
+      token: token,
+    })
+  } catch (error) {
+    if (error instanceof ProviderFailure) throw error.cause
     return null
   }
   if (!isVerifiedToken<SignedPayload & LedgerEntry<TValue>>(verified)) {

@@ -16,7 +16,9 @@ test('a refused commit does not save unchanged state', async () => {
     rejoining: 0,
     forgeAs: 'did:key:forged',
   })
-  await expect(port.processCommit(forged, { senderDID: 'did:key:forged' })).resolves.toMatchObject({
+  await expect(
+    port.processCommit({ commit: forged, context: { senderDID: 'did:key:forged' } }),
+  ).resolves.toMatchObject({
     advanced: false,
   })
   expect(persist).not.toHaveBeenCalled()
@@ -43,13 +45,13 @@ test('processCommit keeps the handle at its old epoch on failed persist and retr
     senderDID: group.committer.identity.id,
     resolveLedgerEntries: group.resolveLedgerEntries,
   }
-  await expect(port.processCommit(commit, context)).rejects.toThrow('disk failed')
+  await expect(port.processCommit({ commit, context })).rejects.toThrow('disk failed')
   expect(member.handle.epoch).toBe(before.epoch)
   expect(access.epoch()).toBe(Number(before.epoch))
   expect(member.handle.ledgerTokens).toEqual(before.ledger)
   expect(adopt).not.toHaveBeenCalled()
   fail = false
-  await expect(port.processCommit(commit, context)).resolves.toMatchObject({ advanced: true })
+  await expect(port.processCommit({ commit, context })).resolves.toMatchObject({ advanced: true })
   expect(member.handle.epoch).toBe(before.epoch + 1n)
   expect(access.epoch()).toBe(Number(before.epoch + 1n))
   expect(persist).toHaveBeenCalledTimes(2)
@@ -76,21 +78,27 @@ test('processCommit reports an advance when a post-persist host callback throws'
     identity: member.identity,
     entrySlot: member.slot,
   })
-  const note = await signLedgerEntry(group.committer.identity, {
-    type: 'note',
-    groupID: member.handle.groupID,
-    subject: member.identity.id,
-    value: 'callback',
+  const note = await signLedgerEntry({
+    identity: group.committer.identity,
+    entry: {
+      type: 'note',
+      groupID: member.handle.groupID,
+      subject: member.identity.id,
+      value: 'callback',
+    },
   })
   group.bodies.set(ledgerEntryDigest(note), note)
-  const authored = await commitLedgerEntries(group.committer.handle, [note])
+  const authored = await commitLedgerEntries({ group: group.committer.handle, tokens: [note] })
   group.committer.handle = authored.newGroup
   const commit = authored.commitMessage
   const before = member.handle.epoch
   await expect(
-    port.processCommit(commit, {
-      senderDID: group.committer.identity.id,
-      resolveLedgerEntries: group.resolveLedgerEntries,
+    port.processCommit({
+      commit,
+      context: {
+        senderDID: group.committer.identity.id,
+        resolveLedgerEntries: group.resolveLedgerEntries,
+      },
     }),
   ).resolves.toMatchObject({ advanced: true })
   expect(persist).toHaveBeenCalledOnce()
@@ -122,9 +130,9 @@ test('recovery persists before adoption and bootstrap retries after a failed per
     entrySlot: group.committer.slot,
   })
   const requestID = 'persist-recovery-request'
-  const request = await requester.createRecoveryRequest(requestID)
+  const request = await requester.createRecoveryRequest({ requestID })
   const sealed = await responder.sealGroupInfo(request)
-  const pending = await requester.applyRecovery(sealed, requestID)
+  const pending = await requester.applyRecovery({ sealed, requestID })
   if (pending == null || 'renewalRequired' in pending) throw new Error('expected recovery')
   await expect(pending.onAccepted()).rejects.toThrow('disk failed')
   expect(adopt).not.toHaveBeenCalled()
@@ -170,10 +178,10 @@ test('a recovery key expires without another request', async () => {
   vi.useFakeTimers()
   try {
     const requestID = 'expires-without-sweep'
-    const request = await requester.createRecoveryRequest(requestID)
+    const request = await requester.createRecoveryRequest({ requestID })
     const sealed = await responder.sealGroupInfo(request)
     await vi.advanceTimersByTimeAsync(120_001)
-    expect(await requester.applyRecovery(sealed, requestID)).toBeNull()
+    expect(await requester.applyRecovery({ sealed, requestID })).toBeNull()
   } finally {
     vi.useRealTimers()
   }
@@ -199,12 +207,15 @@ test('accepting an older recovery cannot delete a replacement request key', asyn
     entrySlot: group.committer.slot,
   })
   const id = 'reused-request-id'
-  const first = await requester.createRecoveryRequest(id)
-  const firstPending = await requester.applyRecovery(await responder.sealGroupInfo(first), id)
+  const first = await requester.createRecoveryRequest({ requestID: id })
+  const firstPending = await requester.applyRecovery({
+    sealed: await responder.sealGroupInfo(first),
+    requestID: id,
+  })
   if (firstPending == null || 'renewalRequired' in firstPending)
     throw new Error('expected first recovery')
-  const replacement = await requester.createRecoveryRequest(id)
+  const replacement = await requester.createRecoveryRequest({ requestID: id })
   const replacementReply = await responder.sealGroupInfo(replacement)
   await firstPending.onAccepted()
-  expect(await requester.applyRecovery(replacementReply, id)).not.toBeNull()
+  expect(await requester.applyRecovery({ sealed: replacementReply, requestID: id })).not.toBeNull()
 })

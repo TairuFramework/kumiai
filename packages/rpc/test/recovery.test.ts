@@ -12,7 +12,7 @@ import {
 describe('rendezvous codecs', () => {
   test('a recovery request round-trips its id and the signed request it carries', () => {
     const request = new Uint8Array([1, 2, 3, 4])
-    const decoded = decodeRecoveryRequest(encodeRecoveryRequest('req-1', request))
+    const decoded = decodeRecoveryRequest(encodeRecoveryRequest({ requestID: 'req-1', request }))
     expect(decoded.requestID).toBe('req-1')
     // The requester's DID and the key its reply is sealed to live INSIDE the signed blob,
     // where its signature covers them. The lane carries the bytes and reads none of them.
@@ -20,11 +20,13 @@ describe('rendezvous codecs', () => {
   })
 
   test('rejects an over-long requestID', () => {
-    expect(() => encodeRecoveryRequest('x'.repeat(200), new Uint8Array())).toThrow(/requestID/)
+    expect(() =>
+      encodeRecoveryRequest({ requestID: 'x'.repeat(200), request: new Uint8Array() }),
+    ).toThrow(/requestID/)
   })
 
   test('rejects a truncated request buffer', () => {
-    const valid = encodeRecoveryRequest('req-1', new Uint8Array([9]))
+    const valid = encodeRecoveryRequest({ requestID: 'req-1', request: new Uint8Array([9]) })
     // Drop the bytes the declared requestID length claims, so it overruns the buffer.
     expect(() => decodeRecoveryRequest(valid.subarray(0, 3))).toThrow()
   })
@@ -35,12 +37,12 @@ describe('rendezvous codecs', () => {
     // which is what a responder authorizes against, and the only key it will seal to — and the
     // responder's sealed answer. Neither is a field this codec can look inside.
     const request = new Uint8Array([7, 7, 7])
-    const decodedRequest = decodeLedgerRequest(encodeLedgerRequest('req-2', request))
+    const decodedRequest = decodeLedgerRequest(encodeLedgerRequest({ requestID: 'req-2', request }))
     expect(decodedRequest.requestID).toBe('req-2')
     expect(Array.from(decodedRequest.request)).toEqual([7, 7, 7])
 
     const sealed = new Uint8Array([1, 2, 3, 4, 5])
-    const decodedReply = decodeLedgerReply(encodeLedgerReply('req-2', sealed))
+    const decodedReply = decodeLedgerReply(encodeLedgerReply({ requestID: 'req-2', sealed }))
     expect(decodedReply.requestID).toBe('req-2')
     expect(Array.from(decodedReply.sealed)).toEqual([1, 2, 3, 4, 5])
   })

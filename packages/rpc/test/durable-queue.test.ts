@@ -11,7 +11,11 @@ import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
-const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+const topicID = protocolTopic({
+  secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+  epoch: 1,
+  protocol: 'chat',
+})
 const payload = (text: string) =>
   fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }))
 
@@ -63,7 +67,8 @@ function fixture(
   const append = async (position: string, text: string, epoch = 1) => {
     messages.push({
       sequenceID: position,
-      payload: await (epoch === 1 ? sender1 : sender2).wrap(payload(text), {
+      payload: await (epoch === 1 ? sender1 : sender2).wrap({
+        bytes: payload(text),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
     })
@@ -72,9 +77,7 @@ function fixture(
     const sender = local ? createFakeCrypto({ epoch: 1, localDID: 'bob' }) : sender1
     messages.push({
       sequenceID: position,
-      payload: await sender.wrap(bytes, {
-        aad: encodeAppAAD({ topicID, intent: 'log' }),
-      }),
+      payload: await sender.wrap({ bytes, aad: encodeAppAAD({ topicID, intent: 'log' }) }),
     })
   }
   return { lane, reader, records, complete, cursor, append, appendRaw }
@@ -253,7 +256,7 @@ describe('durable delivery queue', () => {
     })
     let bob: ReturnType<typeof makeMLSPeer>
     const seen = vi.fn(async () => {
-      await bob.peer.commit(buildLedgerCommit(bob, []))
+      await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     })
     bob = makeMLSPeer(hub, 'bob', new Uint8Array(32).fill(0x91), {
       crypto,
@@ -264,7 +267,8 @@ describe('durable delivery queue', () => {
     await hub.publish({
       topicID,
       senderDID: 'alice',
-      payload: await alice.wrap(payload('commit'), {
+      payload: await alice.wrap({
+        bytes: payload('commit'),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
       retain: 'log',
@@ -302,7 +306,8 @@ describe('durable delivery queue', () => {
     await hub.publish({
       topicID,
       senderDID: 'alice',
-      payload: await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(payload('held'), {
+      payload: await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap({
+        bytes: payload('held'),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
       retain: 'log',
@@ -322,7 +327,7 @@ describe('durable delivery queue', () => {
       return originalRoster()
     })
     vi.useFakeTimers()
-    const committing = bob.peer.commit(buildLedgerCommit(bob, []))
+    const committing = bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     await atRoster
     await vi.advanceTimersByTimeAsync(0)
     expect(seen).not.toHaveBeenCalled()
@@ -378,7 +383,8 @@ describe('durable delivery queue', () => {
     await hub.publish({
       topicID,
       senderDID: 'alice',
-      payload: await alice.wrap(payload('retry'), {
+      payload: await alice.wrap({
+        bytes: payload('retry'),
         aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
       retain: 'log',

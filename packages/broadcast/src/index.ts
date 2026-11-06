@@ -4,7 +4,13 @@
  * @module broadcast
  */
 
+export type { BroadcastBusPublishParams, BroadcastBusSubscribeParams } from './bus.js'
 export { type BroadcastBus, createMemoryBus } from './bus.js'
+export type {
+  BroadcastClientDispatchParams,
+  BroadcastClientGatherParams,
+  BroadcastClientRequestParams,
+} from './client.js'
 export {
   BroadcastClient,
   type BroadcastClientParams,
@@ -14,8 +20,10 @@ export {
   type RequestData,
   type RequestOptions,
 } from './client.js'
+export type { BuildEventMessageParams, EncodeEventFrameParams } from './event-frame.js'
 export { buildEventMessage, encodeEventFrame } from './event-frame.js'
 export { defineGroupProtocol, type GroupProtocolDefinition } from './protocol.js'
+export type { BroadcastHandlerParams, SuppressibleParams } from './responder.js'
 export {
   type BroadcastHandler,
   type BroadcastResponderParams,
@@ -26,6 +34,7 @@ export {
   type SuppressibleHandler,
   suppressible,
 } from './responder.js'
+export type { DeriveTopicIDParams } from './topic.js'
 export { deriveTopicID } from './topic.js'
 export {
   BROADCAST_VERSION,

@@ -32,44 +32,51 @@ describe('ledger head chain', () => {
 
   test('extend is order-sensitive', () => {
     const h = genesisHead('g')
-    expect(extendHead(h, ['a', 'b'])).not.toEqual(extendHead(h, ['b', 'a']))
+    expect(extendHead({ head: h, entryIDs: ['a', 'b'] })).not.toEqual(
+      extendHead({ head: h, entryIDs: ['b', 'a'] }),
+    )
   })
 
   test('extend is length-framed so a boundary shift cannot collide', () => {
     // ["ab","c"] and ["a","bc"] carry the same concatenated characters; only the
     // per-id length framing keeps them apart.
-    expect(computeHead('g', ['ab', 'c'])).not.toEqual(computeHead('g', ['a', 'bc']))
+    expect(computeHead({ groupID: 'g', entryIDs: ['ab', 'c'] })).not.toEqual(
+      computeHead({ groupID: 'g', entryIDs: ['a', 'bc'] }),
+    )
   })
 
   test('a joiner reproduces the chain by folding batch-by-batch', () => {
     const ids = ['id-a', 'id-b', 'id-c']
     // One shot from genesis.
-    const full = computeHead('g', ids)
+    const full = computeHead({ groupID: 'g', entryIDs: ids })
     // Fold the same ids one batch at a time, starting from genesis.
     const genesis = genesisHead('g')
-    const folded = extendHead(extendHead(genesis, ['id-a', 'id-b']), ['id-c'])
+    const folded = extendHead({
+      head: extendHead({ head: genesis, entryIDs: ['id-a', 'id-b'] }),
+      entryIDs: ['id-c'],
+    })
     expect(folded).toEqual(full)
     // And extending id-by-id reaches the same head.
-    const stepwise = ids.reduce((acc, id) => extendHead(acc, [id]), genesis)
+    const stepwise = ids.reduce((acc, id) => extendHead({ head: acc, entryIDs: [id] }), genesis)
     expect(stepwise).toEqual(full)
   })
 
   test('omission breaks the recomputation at any position', () => {
     const ids = ['first', 'middle', 'last']
-    const full = computeHead('g', ids)
+    const full = computeHead({ groupID: 'g', entryIDs: ids })
     // Drop first, middle, last in turn.
-    expect(computeHead('g', ['middle', 'last'])).not.toEqual(full)
-    expect(computeHead('g', ['first', 'last'])).not.toEqual(full)
-    expect(computeHead('g', ['first', 'middle'])).not.toEqual(full)
+    expect(computeHead({ groupID: 'g', entryIDs: ['middle', 'last'] })).not.toEqual(full)
+    expect(computeHead({ groupID: 'g', entryIDs: ['first', 'last'] })).not.toEqual(full)
+    expect(computeHead({ groupID: 'g', entryIDs: ['first', 'middle'] })).not.toEqual(full)
   })
 
   test('an empty batch is a no-op', () => {
-    const h = extendHead(genesisHead('g'), ['x', 'y'])
-    expect(extendHead(h, [])).toEqual(h)
+    const h = extendHead({ head: genesisHead('g'), entryIDs: ['x', 'y'] })
+    expect(extendHead({ head: h, entryIDs: [] })).toEqual(h)
   })
 
   test('encode/decode round trips in binary form', () => {
-    const head = computeHead('g', ['a', 'b'])
+    const head = computeHead({ groupID: 'g', entryIDs: ['a', 'b'] })
     const bytes = encodeLedgerHead(head)
     // One version byte + 32 digest bytes.
     expect(bytes.length).toBe(33)
@@ -96,9 +103,11 @@ describe('ledger head chain', () => {
 
   test('readLedgerHead reads a head off a real group', async () => {
     const alice = randomIdentity()
-    const head = computeHead('scoped', ['e1', 'e2'])
+    const head = computeHead({ groupID: 'scoped', entryIDs: ['e1', 'e2'] })
 
-    const { group } = await createGroup(alice, 'scoped', {
+    const { group } = await createGroup({
+      identity: alice,
+      groupID: 'scoped',
       extensions: [buildLedgerHeadExtension(head)],
       capabilities: controlCapabilities(),
     })
@@ -116,7 +125,7 @@ describe('ledger head chain', () => {
 
   test('createGroup auto-seeds the ledger head at genesis', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup(alice, 'plain')
+    const { group } = await createGroup({ identity: alice, groupID: 'plain' })
     const read = readLedgerHead(group)
     expect(read?.head).toEqual(genesisHead('plain'))
     expect(readLedgerHeadExtension(group)).not.toBeNull()
@@ -128,7 +137,9 @@ describe('ledger head chain', () => {
       extensionType: LEDGER_HEAD_EXTENSION_TYPE,
       extensionData: new Uint8Array([0xff, 0xff]),
     })
-    const { group } = await createGroup(alice, 'corrupt', {
+    const { group } = await createGroup({
+      identity: alice,
+      groupID: 'corrupt',
       extensions: [corrupt],
       capabilities: controlCapabilities(),
     })
@@ -138,14 +149,19 @@ describe('ledger head chain', () => {
   })
 
   test('assertHeadMatches returns for equal heads and throws for unequal', () => {
-    const head = computeHead('g', ['a', 'b'])
+    const head = computeHead({ groupID: 'g', entryIDs: ['a', 'b'] })
     // A distinct 32-byte value.
-    const other = computeHead('g', ['a', 'c'])
-    expect(() => assertHeadMatches(head, computeHead('g', ['a', 'b']))).not.toThrow()
+    const other = computeHead({ groupID: 'g', entryIDs: ['a', 'c'] })
+    expect(() =>
+      assertHeadMatches({
+        expected: head,
+        actual: computeHead({ groupID: 'g', entryIDs: ['a', 'b'] }),
+      }),
+    ).not.toThrow()
 
     let caught: unknown
     try {
-      assertHeadMatches(head, other)
+      assertHeadMatches({ expected: head, actual: other })
     } catch (err) {
       caught = err
     }

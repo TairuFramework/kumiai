@@ -35,23 +35,36 @@ const SEP = '\0'
 /** Framework label namespace. Host protocols may not derive topics under it — see {@link protocolTopic}. */
 const RESERVED_LABEL_PREFIX = 'kumiai/'
 
+export type ProtocolTopicParams = {
+  secret: Uint8Array
+  epoch: number
+  protocol: string
+  scope?: string
+}
+
 /**
  * Group-scoped broadcast/multicast topic for an application protocol. Opaque to
  * the hub; derivable only by members holding the epoch secret. `scope`
  * discriminates a subgroup (e.g. an ephemeral room) sharing the protocol.
  */
-export function protocolTopic(
-  secret: Uint8Array,
-  epoch: number,
-  protocol: string,
+export function protocolTopic({
+  secret,
+  epoch,
+  protocol,
   scope = '',
-): string {
+}: ProtocolTopicParams): string {
   if (protocol.startsWith(RESERVED_LABEL_PREFIX)) {
     throw new Error(
       `protocolTopic: protocol must not use the reserved "${RESERVED_LABEL_PREFIX}" namespace`,
     )
   }
-  return deriveTopicID(secret, epoch, protocol, scope)
+  return deriveTopicID({ secret, epoch, label: protocol, scope })
+}
+
+export type InboxTopicParams = {
+  secret: Uint8Array
+  epoch: number
+  memberDID: string
 }
 
 /**
@@ -60,8 +73,8 @@ export function protocolTopic(
  * {@link protocolTopic} enforces the separation from application protocols by
  * rejecting the `kumiai/` namespace.
  */
-export function inboxTopic(secret: Uint8Array, epoch: number, memberDID: string): string {
-  return deriveTopicID(secret, epoch, INBOX_LABEL, memberDID)
+export function inboxTopic({ secret, epoch, memberDID }: InboxTopicParams): string {
+  return deriveTopicID({ secret, epoch, label: INBOX_LABEL, scope: memberDID })
 }
 
 /**
@@ -73,7 +86,7 @@ export function inboxTopic(secret: Uint8Array, epoch: number, memberDID: string)
  * moves, the rendezvous lane is a mailbox whose frames must never move a head.
  */
 export function commitTopic(recoverySecret: Uint8Array): string {
-  return deriveTopicID(recoverySecret, 0, COMMIT_LABEL)
+  return deriveTopicID({ secret: recoverySecret, epoch: 0, label: COMMIT_LABEL })
 }
 
 /**
@@ -83,7 +96,7 @@ export function commitTopic(recoverySecret: Uint8Array): string {
  * subscribes before it asks, so it cannot miss its own reply. Opaque to the hub.
  */
 export function rendezvousTopic(recoverySecret: Uint8Array): string {
-  return deriveTopicID(recoverySecret, 0, RENDEZVOUS_LABEL)
+  return deriveTopicID({ secret: recoverySecret, epoch: 0, label: RENDEZVOUS_LABEL })
 }
 
 /**

@@ -125,10 +125,10 @@ export function createLastResortProvisioner(
   }
 
   const mint = async (): Promise<LastResortRecord> => {
-    const bundle = await createLastResortKeyPackageBundle(identity, options)
+    const bundle = await createLastResortKeyPackageBundle({ identity, ...options })
     const record: LastResortRecord = {
       kind: 'last-resort',
-      ref: await keyPackageRef(bundle.publicPackage, options),
+      ref: await keyPackageRef({ keyPackage: bundle.publicPackage, ...options }),
       keyPackage: encodeKeyPackage(bundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
       notAfter: Number(bundle.publicPackage.leafNode.lifetime.notAfter),
@@ -137,7 +137,7 @@ export function createLastResortProvisioner(
     // Durable before the upload. The reverse order has a crash window where the hub serves a
     // package whose private half was never written down — the silent "unaddable forever" outage
     // this slot exists to prevent. A crash here leaves a pending record the next call finishes.
-    await store.put(ownerDID, record)
+    await store.put({ ownerDID, record })
     return record
   }
 
@@ -148,7 +148,7 @@ export function createLastResortProvisioner(
   }
 
   const markUploaded = async (record: LastResortRecord): Promise<void> => {
-    await store.put(ownerDID, { ...record, uploadedAt: Date.now() })
+    await store.put({ ownerDID, record: { ...record, uploadedAt: Date.now() } })
   }
 
   /**
@@ -162,7 +162,7 @@ export function createLastResortProvisioner(
     const cutoff = Math.floor(Date.now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
     for (const record of records) {
       if (record.ref !== keepRef && record.notAfter < cutoff) {
-        await store.delete(ownerDID, record.ref)
+        await store.delete({ ownerDID, ref: record.ref })
       }
     }
   }

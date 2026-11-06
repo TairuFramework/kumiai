@@ -96,7 +96,7 @@ describe('createHubTunnelTransport auto-sessionID', () => {
         seq: 0,
         body: { header: {}, payload: { typ: 'test', msg: 'should-be-dropped' } },
       }
-      hub.subscribe(localDID, topicA)
+      hub.subscribe({ subscriberDID: localDID, topicID: topicA })
       await hub.publish({
         senderDID: peerDID,
         topicID: topicA,
@@ -162,7 +162,7 @@ describe('createHubTunnelTransport auto-sessionID', () => {
         const first = await receiver.read()
         expect((first.value as Msg).payload.msg).toBe('lock-me')
 
-        hub.subscribe(localDID, topicA)
+        hub.subscribe({ subscriberDID: localDID, topicID: topicA })
         await hub.publish({ senderDID: peerDID, topicID: topicA, payload: encodeFrame(wrongFrame) })
 
         // The dropped frame does not end or disturb the locked session.

@@ -8,8 +8,8 @@ import { foldRoster, ROLE_ENTRY_TYPE, type RoleValue } from '../src/roster.js'
 
 const GROUP = 'group-1'
 
-function makeSigner(): Promise<OwnIdentity> {
-  return createIdentity({ keys: [{ purpose: 'sig', alg: 'EdDSA' }], didMethod: 'key' })
+async function makeSigner(): Promise<Promise<OwnIdentity>> {
+  return await createIdentity({ keys: [{ purpose: 'sig', alg: 'EdDSA' }], didMethod: 'key' })
 }
 
 /**
@@ -39,7 +39,7 @@ describe('foldRoster', () => {
     const stranger = await makeSigner()
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1 }
 
-    const roster = foldRoster([], anchor, GROUP)
+    const roster = foldRoster({ entries: [], anchor, groupID: GROUP })
 
     expect(roster.roles.get(normalizeDID(alice.id))).toBe('admin')
     expect(roster.roles.get(normalizeDID(stranger.id))).toBeUndefined()
@@ -52,17 +52,24 @@ describe('foldRoster', () => {
 
     // The one case that goes through the real sign/verify wiring: Alice signs a
     // grant, the verifier recovers it, and the fold reads Bob back as an admin.
-    const token = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: GROUP,
-      subject: bob.id,
-      value: 'admin',
+    const token = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: GROUP,
+        subject: bob.id,
+        value: 'admin',
+      },
     })
-    const verified = await verifyLedgerEntry<RoleValue>(token)
+    const verified = await verifyLedgerEntry<RoleValue>({ token })
     expect(verified).not.toBeNull()
     if (verified == null) throw new Error('expected a verified entry')
 
-    const roster = foldRoster([{ verified, entryID: ledgerEntryDigest(token) }], anchor, GROUP)
+    const roster = foldRoster({
+      entries: [{ verified, entryID: ledgerEntryDigest(token) }],
+      anchor,
+      groupID: GROUP,
+    })
 
     expect(roster.roles.get(normalizeDID(bob.id))).toBe('admin')
   })
@@ -74,15 +81,15 @@ describe('foldRoster', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1 }
 
     // Alice promotes Bob and Carol, then Bob (an admin) demotes Carol.
-    const roster = foldRoster(
-      [
+    const roster = foldRoster({
+      entries: [
         roleEntry(alice.id, GROUP, bob.id, 'admin', 'e1'),
         roleEntry(alice.id, GROUP, carol.id, 'admin', 'e2'),
         roleEntry(bob.id, GROUP, carol.id, 'member', 'e3'),
       ],
       anchor,
-      GROUP,
-    )
+      groupID: GROUP,
+    })
 
     expect(roster.roles.get(normalizeDID(carol.id))).toBe('member')
     expect(roster.roles.get(normalizeDID(bob.id))).toBe('admin')
@@ -97,15 +104,15 @@ describe('foldRoster', () => {
     // Alice promotes Bob; Bob (then an admin) promotes Carol; Alice demotes Bob.
     // Carol keeps admin — her grant was authorized when Bob made it. Evaluating
     // against the final state would drop her.
-    const roster = foldRoster(
-      [
+    const roster = foldRoster({
+      entries: [
         roleEntry(alice.id, GROUP, bob.id, 'admin', 'e1'),
         roleEntry(bob.id, GROUP, carol.id, 'admin', 'e2'),
         roleEntry(alice.id, GROUP, bob.id, 'member', 'e3'),
       ],
       anchor,
-      GROUP,
-    )
+      groupID: GROUP,
+    })
 
     expect(roster.roles.get(normalizeDID(carol.id))).toBe('admin')
     expect(roster.roles.get(normalizeDID(bob.id))).toBe('member')
@@ -119,15 +126,15 @@ describe('foldRoster', () => {
 
     // Bob is a plain member; his grant of Carol is dropped with a notice.
     const drops: Array<FoldDrop> = []
-    const roster = foldRoster(
-      [
+    const roster = foldRoster({
+      entries: [
         roleEntry(alice.id, GROUP, bob.id, 'member', 'e1'),
         roleEntry(bob.id, GROUP, carol.id, 'admin', 'e2'),
       ],
       anchor,
-      GROUP,
-      (drop) => drops.push(drop),
-    )
+      groupID: GROUP,
+      onDrop: (drop) => drops.push(drop),
+    })
 
     expect(drops).toHaveLength(1)
     expect(roster.roles.get(normalizeDID(carol.id))).toBeUndefined()
@@ -140,12 +147,12 @@ describe('foldRoster', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1 }
 
     const drops: Array<FoldDrop> = []
-    const roster = foldRoster(
-      [roleEntry(alice.id, 'other-group', bob.id, 'admin', 'e1')],
+    const roster = foldRoster({
+      entries: [roleEntry(alice.id, 'other-group', bob.id, 'admin', 'e1')],
       anchor,
-      GROUP,
-      (drop) => drops.push(drop),
-    )
+      groupID: GROUP,
+      onDrop: (drop) => drops.push(drop),
+    })
 
     expect(drops).toHaveLength(1)
     expect(roster.roles.get(normalizeDID(bob.id))).toBeUndefined()
@@ -157,7 +164,11 @@ describe('foldRoster', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1 }
 
     // Dave has no Add and no prior entry; the grant still records his role.
-    const roster = foldRoster([roleEntry(alice.id, GROUP, dave.id, 'admin', 'e1')], anchor, GROUP)
+    const roster = foldRoster({
+      entries: [roleEntry(alice.id, GROUP, dave.id, 'admin', 'e1')],
+      anchor,
+      groupID: GROUP,
+    })
 
     expect(roster.roles.get(normalizeDID(dave.id))).toBe('admin')
   })
@@ -167,12 +178,12 @@ describe('foldRoster', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1 }
 
     const drops: Array<FoldDrop> = []
-    const roster = foldRoster(
-      [roleEntry(alice.id, GROUP, alice.id, 'member', 'e1')],
+    const roster = foldRoster({
+      entries: [roleEntry(alice.id, GROUP, alice.id, 'member', 'e1')],
       anchor,
-      GROUP,
-      (drop) => drops.push(drop),
-    )
+      groupID: GROUP,
+      onDrop: (drop) => drops.push(drop),
+    })
 
     expect(drops).toHaveLength(1)
     expect(roster.roles.get(normalizeDID(alice.id))).toBe('admin')
@@ -184,14 +195,14 @@ describe('foldRoster', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1 }
 
     // Only the transition to zero admins is blocked; one admin left is fine.
-    const roster = foldRoster(
-      [
+    const roster = foldRoster({
+      entries: [
         roleEntry(alice.id, GROUP, bob.id, 'admin', 'e1'),
         roleEntry(alice.id, GROUP, bob.id, 'member', 'e2'),
       ],
       anchor,
-      GROUP,
-    )
+      groupID: GROUP,
+    })
 
     expect(roster.roles.get(normalizeDID(bob.id))).toBe('member')
     expect(roster.roles.get(normalizeDID(alice.id))).toBe('admin')

@@ -30,7 +30,7 @@ test('selfRemovalCommittedByAnotherMemberKeepsSender', async () => {
   const { author, joined, peer, tokens } = await pair(120)
   const target = joined.state.privatePath.leafIndex
   const epoch = joined.epoch
-  const withoutProposal = deriveGroup(author, structuredClone(author.state))
+  const withoutProposal = await deriveGroup(author, structuredClone(author.state))
   const proposal = await proposeSelfRemoval(joined)
   expect(proposal.epoch).toBe(epoch)
   expect(joined.epoch).toBe(epoch)
@@ -39,7 +39,7 @@ test('selfRemovalCommittedByAnotherMemberKeepsSender', async () => {
     senderLeafIndex: target,
   }
   expect(Object.values(joined.state.unappliedProposals)).toEqual([expected])
-  await author.processMessage(proposal.frame)
+  await author.processMessage({ message: proposal.frame })
   expect(Object.values(author.state.unappliedProposals)).toEqual([expected])
   const snapshot = structuredClone(author.state)
   const committing = commitSelfRemovals(author)
@@ -54,7 +54,8 @@ test('selfRemovalCommittedByAnotherMemberKeepsSender', async () => {
   for (const held of result.newGroup.ledger) tokens.set(held.entryID, held.token)
   expect(result.newGroup.registry.controllers.values().next().value?.timeFloor).toBe(120)
   let recorded: unknown
-  await joined.processMessage(result.commitMessage, {
+  await joined.processMessage({
+    message: result.commitMessage,
     commitPolicy: (incoming) => {
       recorded = incoming
       return 'accept'
@@ -69,7 +70,9 @@ test('selfRemovalCommittedByAnotherMemberKeepsSender', async () => {
     ],
   })
   expect(joined.state.groupActiveState.kind).toBe('removedFromGroup')
-  await expect(withoutProposal.processMessage(result.commitMessage)).rejects.toMatchObject({
+  await expect(
+    withoutProposal.processMessage({ message: result.commitMessage }),
+  ).rejects.toMatchObject({
     name: 'CommitRejectedError',
     reason: 'invalid',
   })
@@ -83,8 +86,8 @@ test('leaversCommitEachOthersSelfRemoval', async () => {
   const joinedLeaf = joined.state.privatePath.leafIndex
   const authorProposal = await proposeSelfRemoval(author)
   const joinedProposal = await proposeSelfRemoval(joined)
-  await author.processMessage(joinedProposal.frame)
-  await joined.processMessage(authorProposal.frame)
+  await author.processMessage({ message: joinedProposal.frame })
+  await joined.processMessage({ message: authorProposal.frame })
   expect(Object.values(author.state.unappliedProposals)).toHaveLength(2)
   expect(Object.values(joined.state.unappliedProposals)).toHaveLength(2)
 
@@ -94,7 +97,8 @@ test('leaversCommitEachOthersSelfRemoval', async () => {
   expect(result.newGroup.listMembers().map(({ id }) => id)).toEqual([author.credential.id])
   let recorded: unknown
   await expect(
-    joined.processMessage(result.commitMessage, {
+    joined.processMessage({
+      message: result.commitMessage,
       commitPolicy: (incoming) => {
         recorded = incoming
         return 'accept'
@@ -126,7 +130,7 @@ test('leaversCommitEachOthersSelfRemoval', async () => {
   await expect(commitSelfRemovals(result.newGroup)).resolves.toBeNull()
   expect(result.newGroup.state).toEqual(snapshot)
   expect(result.newGroup.state.groupActiveState.kind).toBe('active')
-  await expect(result.newGroup.encrypt(new Uint8Array([1]))).rejects.toMatchObject({
+  await expect(result.newGroup.encrypt({ plaintext: new Uint8Array([1]) })).rejects.toMatchObject({
     name: 'UsageError',
     message: 'Cannot send application message with unapplied proposals',
   })
@@ -154,7 +158,7 @@ test('forgedSelfRemovalRefused', async () => {
   const snapshot = structuredClone(author.state)
   const forgedCommit = await rawCommit({ group: joined, proposals: [proposal] })
   await expect(
-    author.processMessage(encode(mlsMessageEncoder, forgedCommit.commit)),
+    author.processMessage({ message: encode(mlsMessageEncoder, forgedCommit.commit) }),
   ).rejects.toMatchObject({
     name: 'CommitRejectedError',
     reason: 'invalid',
@@ -163,11 +167,11 @@ test('forgedSelfRemovalRefused', async () => {
   })
   expect(author.state).toEqual(snapshot)
   await expect(
-    author.processMessage(encode(mlsMessageEncoder, forgedProposal.message)),
+    author.processMessage({ message: encode(mlsMessageEncoder, forgedProposal.message) }),
   ).rejects.toMatchObject({ name: 'CommitRejectedError', reason: 'invalid' })
   expect(author.state).toEqual(snapshot)
   expect(author.findMemberLeafIndex(author.credential.id)).toBe(target)
-  const forgedPending = deriveGroup(joined, forgedProposal.newState)
+  const forgedPending = await deriveGroup(joined, forgedProposal.newState)
   const pendingSnapshot = structuredClone(forgedPending.state)
   expect(Object.values(forgedPending.state.unappliedProposals)).toEqual([
     {
@@ -191,11 +195,14 @@ test('staleEpochProposalIgnored', async () => {
       remove: { removed: joined.state.privatePath.leafIndex },
     },
   })
-  const advanced = await renewLeaf(author, await timedBinding({ identity, iat: 150, exp: 250 }))
+  const advanced = await renewLeaf({
+    group: author,
+    binding: await timedBinding({ identity, iat: 150, exp: 250 }),
+  })
   const snapshot = structuredClone(advanced.newGroup.state)
   const persist = vi.fn()
   for (const frame of [proposal.frame, encode(mlsMessageEncoder, publicProposal.message)]) {
-    await expect(advanced.newGroup.processMessage(frame, { persist })).resolves.toBeNull()
+    await expect(advanced.newGroup.processMessage({ message: frame, persist })).resolves.toBeNull()
   }
   expect(persist).not.toHaveBeenCalled()
   expect(advanced.newGroup.state).toEqual(snapshot)
@@ -213,19 +220,19 @@ test('twoSelfRemovalsOneCommit', async () => {
     third,
     await timedBinding({ identity: third, iat: 100, exp: 200 }),
   )
-  await first.joined.processMessage(second.message)
+  await first.joined.processMessage({ message: second.message })
   const epoch = second.author.epoch
   const proposals = await Promise.all([
     proposeSelfRemoval(first.joined),
     proposeSelfRemoval(second.joined),
   ])
   for (const proposal of proposals) {
-    await second.author.processMessage(proposal.frame)
+    await second.author.processMessage({ message: proposal.frame })
   }
   const [firstProposal, secondProposal] = proposals
   if (firstProposal == null || secondProposal == null) throw new Error('Missing proposal')
-  await first.joined.processMessage(secondProposal.frame)
-  await second.joined.processMessage(firstProposal.frame)
+  await first.joined.processMessage({ message: secondProposal.frame })
+  await second.joined.processMessage({ message: firstProposal.frame })
   const expected = Object.values(second.author.state.unappliedProposals)
   expect(expected.map(({ senderLeafIndex }) => senderLeafIndex).sort()).toEqual(
     [first.joined.state.privatePath.leafIndex, second.joined.state.privatePath.leafIndex].sort(),
@@ -236,7 +243,8 @@ test('twoSelfRemovalsOneCommit', async () => {
   expect(result.newGroup.listMembers().map(({ id }) => id)).toEqual([first.identity.id])
   for (const leaver of [first.joined, second.joined]) {
     let recorded: unknown
-    await leaver.processMessage(result.commitMessage, {
+    await leaver.processMessage({
+      message: result.commitMessage,
       commitPolicy: (incoming) => {
         recorded = incoming
         return 'accept'

@@ -53,7 +53,7 @@ const fixture = (await import(
   inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
-  resetPrefix: () => ControllerBinding['prefix']
+  resetPrefix: () => Promise<ControllerBinding['prefix']>
   oversizedBinding: (identity: OwnIdentity, iat: number, exp: number) => Promise<ControllerBinding>
   timedBinding: (params: {
     identity: OwnIdentity
@@ -92,7 +92,9 @@ async function setup(
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)
   let aliceGroup = (
-    await createGroup(alice, 'lifecycle-recovery', {
+    await createGroup({
+      identity: alice,
+      groupID: 'lifecycle-recovery',
       controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({
         identity: alice,
@@ -102,13 +104,13 @@ async function setup(
     })
   ).group
   const cached = await fixture.timedBinding({ identity: bob, iat: options.bobIat ?? 100, exp: 200 })
-  const bundle = await createKeyPackageBundle(bob, { controller: cached })
+  const bundle = await createKeyPackageBundle({ identity: bob, controller: cached })
   const { invite } = await createInvite({
     group: aliceGroup,
     identity: alice,
     recipientDID: bob.id,
   })
-  const added = await commitInvite(aliceGroup, bundle.publicPackage, invite)
+  const added = await commitInvite({ group: aliceGroup, keyPackage: bundle.publicPackage, invite })
   aliceGroup = added.newGroup
   const slot = createLedgerEntrySlot()
   let bobGroup = (
@@ -153,10 +155,10 @@ async function setup(
 }
 
 async function installFloor(s: Setup, time: number): Promise<GroupHandle> {
-  const elevated = await renewLeaf(
-    s.aliceGroup(),
-    await fixture.timedBinding({ identity: s.alice, iat: time, exp: time + 100 }),
-  )
+  const elevated = await renewLeaf({
+    group: s.aliceGroup(),
+    binding: await fixture.timedBinding({ identity: s.alice, iat: time, exp: time + 100 }),
+  })
   const trusted = fixture.agent(65)
   const parent = await fixture.timedBinding({ identity: trusted, iat: 90, exp: time + 200 })
   const delegated = await fixture.timedBinding({
@@ -166,7 +168,7 @@ async function installFloor(s: Setup, time: number): Promise<GroupHandle> {
     parent: parent.capability,
     issuer: trusted,
   })
-  const lowered = await renewLeaf(elevated.newGroup, delegated)
+  const lowered = await renewLeaf({ group: elevated.newGroup, binding: delegated })
   expect(lowered.newGroup.registry.controllers.get(fixture.controllerID)?.timeFloor).toBe(time)
   return lowered.newGroup
 }
@@ -201,8 +203,11 @@ function recoveryPeer(params: {
 }
 
 async function buildRecovery(s: Setup) {
-  const request = await s.mls.createRecoveryRequest('bound-recovery')
-  return s.mls.applyRecovery(await s.responder.sealGroupInfo(request), 'bound-recovery')
+  const request = await s.mls.createRecoveryRequest({ requestID: 'bound-recovery' })
+  return s.mls.applyRecovery({
+    sealed: await s.responder.sealGroupInfo(request),
+    requestID: 'bound-recovery',
+  })
 }
 
 test('recovery reuses a valid cached binding without consulting the host', async () => {
@@ -213,7 +218,7 @@ test('recovery reuses a valid cached binding without consulting the host', async
   expect(pending).not.toBeNull()
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected pending recovery')
   expect(s.bobGroup().epoch).toBe(1n)
-  await s.aliceGroup().processMessage(pending.commit)
+  await s.aliceGroup().processMessage({ message: pending.commit })
   await pending.onAccepted()
   expect(s.bobGroup().epoch).toBe(s.aliceGroup().epoch)
   expect(host).toHaveBeenCalledTimes(0)
@@ -266,14 +271,14 @@ test('recovery replaces an expired cached binding with one host call', async () 
   expect(retained.knownRegistry.controllers.get(fixture.controllerID)?.timeFloor).toBe(250)
   expect(retained.replyLedger).toEqual(s.aliceGroup().ledgerTokens)
   expect(
-    await Promise.all(retained.replyLedger.map((token) => verifyLedgerEntry(token))),
+    await Promise.all(retained.replyLedger.map((token) => verifyLedgerEntry({ token }))),
   ).toMatchObject([
     { entry: { value: { op: 'seed' } } },
     { entry: { value: { op: 'clock', time: 250 } } },
   ])
   expect(retained.replyLedger).toHaveLength(2)
   expect(retained.signer).toBe(s.alice.id)
-  await s.aliceGroup().processMessage(pending.commit)
+  await s.aliceGroup().processMessage({ message: pending.commit })
   await pending.onAccepted()
   expect(host).toHaveBeenCalledTimes(1)
   expect(host).toHaveBeenCalledWith({
@@ -311,28 +316,34 @@ test('a tree-lapsed present leaf can external-renew with a fresh binding', async
   const host = vi.fn(async () => fresh)
   const s = await setup(host)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
-  const renewed = await renewLeaf(
-    s.aliceGroup(),
-    await fixture.timedBinding({ identity: s.alice, iat: 250, exp: 350 }),
-  )
+  const renewed = await renewLeaf({
+    group: s.aliceGroup(),
+    binding: await fixture.timedBinding({ identity: s.alice, iat: 250, exp: 350 }),
+  })
   s.installAlice(renewed.newGroup)
-  await s.bobGroup().processMessage(renewed.commitMessage)
+  await s.bobGroup().processMessage({ message: renewed.commitMessage })
   expect(s.bobGroup().sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
   fresh = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
   await expect(
-    commitLedgerEntries(s.bobGroup(), [
-      await signLedgerEntry(s.bob, {
-        groupID: 'lifecycle-recovery',
-        type: 'note',
-        subject: s.bob.id,
-        value: 'lapsed',
-      }),
-    ]),
+    commitLedgerEntries({
+      group: s.bobGroup(),
+      tokens: [
+        await signLedgerEntry({
+          identity: s.bob,
+          entry: {
+            groupID: 'lifecycle-recovery',
+            type: 'note',
+            subject: s.bob.id,
+            value: 'lapsed',
+          },
+        }),
+      ],
+    }),
   ).rejects.toThrow()
   expect(await s.mls.prepareRecovery()).toBe('ready')
   const pending = await buildRecovery(s)
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected pending recovery')
-  await s.aliceGroup().processMessage(pending.commit)
+  await s.aliceGroup().processMessage({ message: pending.commit })
   await pending.onAccepted()
   expect(s.bobGroup().sendAdmission().admissible).toBe(true)
 })
@@ -445,21 +456,30 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
     identity: s.alice,
     entrySlot: createLedgerEntrySlot(),
   })
-  const firstToken = await signLedgerEntry(s.alice, {
-    groupID: 'lifecycle-recovery',
-    type: 'note',
-    subject: s.alice.id,
-    value: 'first',
-  })
-  const first = await commitLedgerEntries(s.aliceGroup(), [firstToken])
-  const second = await commitLedgerEntries(first.newGroup, [
-    await signLedgerEntry(s.alice, {
+  const firstToken = await signLedgerEntry({
+    identity: s.alice,
+    entry: {
       groupID: 'lifecycle-recovery',
       type: 'note',
       subject: s.alice.id,
-      value: 'second',
-    }),
-  ])
+      value: 'first',
+    },
+  })
+  const first = await commitLedgerEntries({ group: s.aliceGroup(), tokens: [firstToken] })
+  const second = await commitLedgerEntries({
+    group: first.newGroup,
+    tokens: [
+      await signLedgerEntry({
+        identity: s.alice,
+        entry: {
+          groupID: 'lifecycle-recovery',
+          type: 'note',
+          subject: s.alice.id,
+          value: 'second',
+        },
+      }),
+    ],
+  })
   s.installAlice(second.newGroup)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
   const alicePeer = recoveryPeer({ hub, identity: s.alice, access: aliceAccess, mls: aliceMLS })
@@ -468,10 +488,10 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
   await connection.publish({
     senderDID: fixture.agent(75).id,
     topicID,
-    payload: encodeHandshakeFrame(
-      HANDSHAKE_KIND.commit,
-      encodeCommitFrame(second.commitMessage, new Uint8Array()),
-    ),
+    payload: encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.commit,
+      payload: encodeCommitFrame({ commit: second.commitMessage, sealedEntries: new Uint8Array() }),
+    }),
     retain: 'log',
   })
   const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
@@ -497,27 +517,39 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
     expect(requests).toHaveBeenCalledTimes(0)
     expect(
       (
-        await s.mls.processCommit(first.commitMessage, {
-          resolveLedgerEntries: async () => [firstToken],
+        await s.mls.processCommit({
+          commit: first.commitMessage,
+          context: {
+            resolveLedgerEntries: async () => [firstToken],
+          },
         })
       ).advanced,
     ).toBe(true)
-    const third = await commitLedgerEntries(s.aliceGroup(), [
-      await signLedgerEntry(s.alice, {
-        groupID: 'lifecycle-recovery',
-        type: 'note',
-        subject: s.alice.id,
-        value: 'third',
-      }),
-    ])
-    await guardedReplace(aliceAccess, third.newGroup)
+    const third = await commitLedgerEntries({
+      group: s.aliceGroup(),
+      tokens: [
+        await signLedgerEntry({
+          identity: s.alice,
+          entry: {
+            groupID: 'lifecycle-recovery',
+            type: 'note',
+            subject: s.alice.id,
+            value: 'third',
+          },
+        }),
+      ],
+    })
+    await guardedReplace({ access: aliceAccess, next: third.newGroup })
     await connection.publish({
       senderDID: fixture.agent(75).id,
       topicID,
-      payload: encodeHandshakeFrame(
-        HANDSHAKE_KIND.commit,
-        encodeCommitFrame(third.commitMessage, new Uint8Array()),
-      ),
+      payload: encodeHandshakeFrame({
+        kind: HANDSHAKE_KIND.commit,
+        payload: encodeCommitFrame({
+          commit: third.commitMessage,
+          sealedEntries: new Uint8Array(),
+        }),
+      }),
       retain: 'log',
     })
     await bobPeer.resync()
@@ -544,13 +576,16 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
 
 test('a correctly signed reply with a ledger that misses the GroupInfo head returns null', async () => {
   const s = await setup()
-  const entry = await signLedgerEntry(s.alice, {
-    groupID: 'lifecycle-recovery',
-    type: 'note',
-    subject: s.alice.id,
-    value: 'authenticated-ledger',
+  const entry = await signLedgerEntry({
+    identity: s.alice,
+    entry: {
+      groupID: 'lifecycle-recovery',
+      type: 'note',
+      subject: s.alice.id,
+      value: 'authenticated-ledger',
+    },
   })
-  s.installAlice((await commitLedgerEntries(s.aliceGroup(), [entry])).newGroup)
+  s.installAlice((await commitLedgerEntries({ group: s.aliceGroup(), tokens: [entry] })).newGroup)
   expect(await s.mls.prepareRecovery()).toBe('ready')
   vi.spyOn(s.aliceGroup(), 'getLedger').mockResolvedValue([])
   expect(await buildRecovery(s)).toBeNull()
@@ -559,7 +594,7 @@ test('a correctly signed reply with a ledger that misses the GroupInfo head retu
 
 test('standard group preparation never calls the lifecycle binding host', async () => {
   const identity = fixture.agent(44)
-  const group = (await createGroup(identity, 'standard-recovery')).group
+  const group = (await createGroup({ identity, groupID: 'standard-recovery' })).group
   const host = vi.fn(async () => null)
   const mls = createGroupMLS({
     access: simpleHandleAccess({ handle: () => group, adopt: () => {} }),
@@ -620,7 +655,7 @@ test('a delegated replacement that lowers tree time requires renewal before requ
 test('a generation floor in the reply ledger prevents publication of a cached pre-reset binding', async () => {
   const host = vi.fn(async () => null)
   const s = await setup(host)
-  const prefix = fixture.resetPrefix()
+  const prefix = await fixture.resetPrefix()
   const replacement = await joinGroupExternal({
     identity: s.bob,
     groupInfo: (await exportGroupInfo({ group: s.aliceGroup() })).groupInfo,
@@ -628,16 +663,17 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
     resync: true,
     controller: await fixture.timedBinding({ identity: s.bob, iat: 100, exp: 200, prefix }),
   })
-  await s.aliceGroup().processMessage(replacement.commitMessage)
+  await s.aliceGroup().processMessage({ message: replacement.commitMessage })
   s.installAlice(
     (
-      await renewLeaf(
-        s.aliceGroup(),
-        await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
-      )
+      await renewLeaf({
+        group: s.aliceGroup(),
+        binding: await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
+      })
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), {
+  const reset = await revokeWithProof({
+    group: s.aliceGroup(),
     reset: true,
     log: { chain: prefix, events: [] },
   })
@@ -674,7 +710,9 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
   const s = await setup()
   const outsider = fixture.agent(66)
   const group = (
-    await createGroup(outsider, 'lifecycle-recovery', {
+    await createGroup({
+      identity: outsider,
+      groupID: 'lifecycle-recovery',
       controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({ identity: outsider, iat: 100, exp: 200 }),
     })
@@ -684,7 +722,7 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
     identity: outsider,
     entrySlot: createLedgerEntrySlot(),
   })
-  const request = await mls.createRecoveryRequest('outsider-request')
+  const request = await mls.createRecoveryRequest({ requestID: 'outsider-request' })
   await expect(s.responder.sealGroupInfo(request)).rejects.toMatchObject({ reason: 'not-a-member' })
 })
 
@@ -694,14 +732,20 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
   const s = await setup(host)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
   s.installAlice(await installFloor(s, 250))
-  const ahead = await commitLedgerEntries(s.aliceGroup(), [
-    await signLedgerEntry(s.alice, {
-      groupID: 'lifecycle-recovery',
-      type: 'note',
-      subject: s.alice.id,
-      value: 'ahead',
-    }),
-  ])
+  const ahead = await commitLedgerEntries({
+    group: s.aliceGroup(),
+    tokens: [
+      await signLedgerEntry({
+        identity: s.alice,
+        entry: {
+          groupID: 'lifecycle-recovery',
+          type: 'note',
+          subject: s.alice.id,
+          value: 'ahead',
+        },
+      }),
+    ],
+  })
   s.installAlice(ahead.newGroup)
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
   const hub = createWireHub()
@@ -727,7 +771,7 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
   const identity = fixture.agent(75)
   const connection = hub.connect(identity)
   const topicID = commitTopic(await s.mls.exportRecoverySecret())
-  await connection.subscribe(identity.id, topicID)
+  await connection.subscribe({ subscriberDID: identity.id, topicID })
   const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
   try {
     await alicePeer.resync()
@@ -744,10 +788,13 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
     await connection.publish({
       senderDID: identity.id,
       topicID,
-      payload: encodeHandshakeFrame(
-        HANDSHAKE_KIND.commit,
-        encodeCommitFrame(ahead.commitMessage, new Uint8Array()),
-      ),
+      payload: encodeHandshakeFrame({
+        kind: HANDSHAKE_KIND.commit,
+        payload: encodeCommitFrame({
+          commit: ahead.commitMessage,
+          sealedEntries: new Uint8Array(),
+        }),
+      }),
       retain: 'log',
     })
     for (let i = 0; i < 3; i++) await bobPeer.resync()
@@ -779,12 +826,12 @@ async function ineligibleReply(s: Setup, kind: 'leafless' | 'revoked' | 'issuer'
       status: 'revoked',
     })
   }
-  const handle = new GroupHandle({
+  const handle = await GroupHandle.create({
     state: s.aliceGroup().state,
     context: s.aliceGroup().context,
     credential: { id: identity.id, groupID: s.aliceGroup().groupID },
   })
-  await handle.bootstrapLedger(s.aliceGroup().ledgerTokens)
+  await handle.bootstrapLedger({ tokens: s.aliceGroup().ledgerTokens })
   return createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
@@ -804,11 +851,11 @@ test.each(['leafless', 'revoked', 'issuer'] as const)(
     const s = await setup(host)
     expect(await s.mls.prepareRecovery()).toBe('ready')
     const responder = await ineligibleReply(s, kind)
-    const request = await s.mls.createRecoveryRequest('ineligible-binding')
-    const result = await s.mls.applyRecovery(
-      await responder.sealGroupInfo(request),
-      'ineligible-binding',
-    )
+    const request = await s.mls.createRecoveryRequest({ requestID: 'ineligible-binding' })
+    const result = await s.mls.applyRecovery({
+      sealed: await responder.sealGroupInfo(request),
+      requestID: 'ineligible-binding',
+    })
     expect({ result, hostCalls: host.mock.calls.length }).toEqual({ result: null, hostCalls: 0 })
     expect(s.bobGroup().epoch).toBe(1n)
   },
@@ -819,14 +866,20 @@ test('an ineligible attestation cannot impose a renewal-required peer hold', asy
   const host = vi.fn(async () => null)
   const s = await setup(host)
   const responder = await ineligibleReply(s, 'leafless')
-  const ahead = await commitLedgerEntries(s.aliceGroup(), [
-    await signLedgerEntry(s.alice, {
-      groupID: s.aliceGroup().groupID,
-      type: 'note',
-      subject: s.alice.id,
-      value: 'ahead',
-    }),
-  ])
+  const ahead = await commitLedgerEntries({
+    group: s.aliceGroup(),
+    tokens: [
+      await signLedgerEntry({
+        identity: s.alice,
+        entry: {
+          groupID: s.aliceGroup().groupID,
+          type: 'note',
+          subject: s.alice.id,
+          value: 'ahead',
+        },
+      }),
+    ],
+  })
   s.installAlice(ahead.newGroup)
   const started = wallClock()
   vi.spyOn(Date, 'now').mockImplementation(() => 150_000 + wallClock() - started)
@@ -861,10 +914,13 @@ test('an ineligible attestation cannot impose a renewal-required peer hold', asy
     await connection.publish({
       senderDID: fixture.agent(75).id,
       topicID: commitTopic(await s.mls.exportRecoverySecret()),
-      payload: encodeHandshakeFrame(
-        HANDSHAKE_KIND.commit,
-        encodeCommitFrame(ahead.commitMessage, new Uint8Array()),
-      ),
+      payload: encodeHandshakeFrame({
+        kind: HANDSHAKE_KIND.commit,
+        payload: encodeCommitFrame({
+          commit: ahead.commitMessage,
+          sealedEntries: new Uint8Array(),
+        }),
+      }),
       retain: 'log',
     })
     await bobPeer.resync()

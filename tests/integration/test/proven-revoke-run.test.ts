@@ -50,23 +50,33 @@ async function setup() {
   const subject = subjectIdentity.id
   const entrySlot = createLedgerEntrySlot()
   let group = (
-    await createGroup(identity, 'proven-revoke', {
+    await createGroup({
+      identity,
+      groupID: 'proven-revoke',
       controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }),
       resolveLedgerEntries: entrySlot.resolve,
     })
   ).group
-  const subjectBundle = await createKeyPackageBundle(subjectIdentity, {
+  const subjectBundle = await createKeyPackageBundle({
+    identity: subjectIdentity,
     controller: await fixture.timedBinding({ identity: subjectIdentity, iat: 100, exp: 200 }),
   })
   const subjectInvite = await createInvite({ group, identity, recipientDID: subject })
-  group = (await commitInvite(group, subjectBundle.publicPackage, subjectInvite.invite)).newGroup
+  group = (
+    await commitInvite({
+      group,
+      keyPackage: subjectBundle.publicPackage,
+      invite: subjectInvite.invite,
+    })
+  ).newGroup
   const carol = fixture.agent(81)
-  const bundle = await createKeyPackageBundle(carol, {
+  const bundle = await createKeyPackageBundle({
+    identity: carol,
     controller: await fixture.timedBinding({ identity: carol, iat: 100, exp: 200 }),
   })
   const { invite } = await createInvite({ group, identity, recipientDID: carol.id })
-  const added = await commitInvite(group, bundle.publicPackage, invite)
+  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   group = added.newGroup
   const carolSlot = createLedgerEntrySlot()
   const joined = await processWelcome({
@@ -77,7 +87,7 @@ async function setup() {
     ratchetTree: group.state.ratchetTree,
     options: { resolveLedgerEntries: carolSlot.resolve },
   })
-  const revoke = revokeChain({
+  const revoke = await revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
@@ -195,7 +205,7 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
   const target = fixture.agent(71).id
   const prior = s.log[1]
   if (prior == null) throw new Error('Missing revoke event')
-  const nextRev = revokeChain({
+  const nextRev = await revokeChain({
     seed: controller.controllerSeed,
     profile: 0,
     did: controller.controllerID,
@@ -304,7 +314,7 @@ test('non-building outcomes do not serialize or advance', async () => {
         options: options,
       }),
     ).toMatchObject({ status: 'not-provable', reason: 'no-rev' })
-    const selfRev = revokeChain({
+    const selfRev = await revokeChain({
       seed: controller.controllerSeed,
       profile: 0,
       did: controller.controllerID,

@@ -649,7 +649,7 @@ describe('wake on publish', () => {
     // wake.test.ts, never through this fan-out hook.
     const sentFirst = sent[0]
     if (sentFirst === undefined) throw new Error('expected a sent wake ping')
-    expect(openWakeHint(sentFirst.body, recipientOpener)).toEqual({
+    expect(openWakeHint({ body: sentFirst.body, opener: recipientOpener })).toEqual({
       topicID: PAIR_TOPIC,
       sequenceID,
       count: 1,
@@ -780,7 +780,7 @@ describe('wake on publish', () => {
     // The summary, not a second leading edge: it names the LATEST frame and counts the window.
     const sentSecond = sent[1]
     if (sentSecond === undefined) throw new Error('expected a second sent wake ping')
-    expect(openWakeHint(sentSecond.body, recipientOpener)).toEqual({
+    expect(openWakeHint({ body: sentSecond.body, opener: recipientOpener })).toEqual({
       topicID: PAIR_TOPIC,
       sequenceID,
       count: 1,
@@ -868,11 +868,11 @@ describe('a throwing wake dispatcher', () => {
 
     const delivered: Array<unknown> = []
     registry.register(onlineDID)
-    registry.bindReceiveWriter(
-      onlineDID,
-      (message) => delivered.push(message),
-      () => {},
-    )
+    registry.bindReceiveWriter({
+      did: onlineDID,
+      writer: (message) => delivered.push(message),
+      endReceive: () => {},
+    })
 
     let notifyCalls = 0
     const throwingDispatcher: WakeDispatcher = {

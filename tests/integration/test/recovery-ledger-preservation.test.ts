@@ -44,7 +44,7 @@ const fixture = (await import(
   inception: ControllerBinding['prefix'][number]
   agent: (byte: number) => OwnIdentity
   controllerID: string
-  resetPrefix: () => ControllerBinding['prefix']
+  resetPrefix: () => Promise<ControllerBinding['prefix']>
   oversizedBinding: (identity: OwnIdentity, iat: number, exp: number) => Promise<ControllerBinding>
   timedBinding: (params: {
     identity: OwnIdentity
@@ -71,7 +71,9 @@ async function setup(
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)
   let aliceGroup = (
-    await createGroup(alice, 'lifecycle-recovery', {
+    await createGroup({
+      identity: alice,
+      groupID: 'lifecycle-recovery',
       controllerLog: { chain: [fixture.inception], events: [] },
       controller: await fixture.timedBinding({
         identity: alice,
@@ -81,13 +83,13 @@ async function setup(
     })
   ).group
   const cached = await fixture.timedBinding({ identity: bob, iat: options.bobIat ?? 100, exp: 200 })
-  const bundle = await createKeyPackageBundle(bob, { controller: cached })
+  const bundle = await createKeyPackageBundle({ identity: bob, controller: cached })
   const { invite } = await createInvite({
     group: aliceGroup,
     identity: alice,
     recipientDID: bob.id,
   })
-  const added = await commitInvite(aliceGroup, bundle.publicPackage, invite)
+  const added = await commitInvite({ group: aliceGroup, keyPackage: bundle.publicPackage, invite })
   aliceGroup = added.newGroup
   const slot = createLedgerEntrySlot()
   let bobGroup = (
@@ -174,20 +176,21 @@ test('peer recovery and restore retain authenticated revocations, reset history 
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
   const revoked = fixture.agent(81)
-  const rev = revokeChain({
+  const rev = await revokeChain({
     seed: ledger.controllerSeed,
     profile: 0,
     did: fixture.controllerID,
     chain: [ledger.inception],
     subject: revoked.id,
   })
-  const revoke = await revokeWithProof(s.aliceGroup(), {
+  const revoke = await revokeWithProof({
+    group: s.aliceGroup(),
     deny: [revoked.id],
     log: { chain: [ledger.inception, rev], events: [] },
   })
   if (revoke.status !== 'built') throw new Error('Expected revoke')
   s.installAlice(revoke.result.newGroup)
-  const prefix = fixture.resetPrefix()
+  const prefix = await fixture.resetPrefix()
   const replacement = await joinGroupExternal({
     identity: s.bob,
     groupInfo: (await exportGroupInfo({ group: s.aliceGroup() })).groupInfo,
@@ -196,16 +199,17 @@ test('peer recovery and restore retain authenticated revocations, reset history 
     controller: await fixture.timedBinding({ identity: s.bob, iat: 100, exp: 200, prefix }),
     ledgerEntries: s.aliceGroup().ledgerTokens,
   })
-  await s.aliceGroup().processMessage(replacement.commitMessage)
+  await s.aliceGroup().processMessage({ message: replacement.commitMessage })
   s.installAlice(
     (
-      await renewLeaf(
-        s.aliceGroup(),
-        await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
-      )
+      await renewLeaf({
+        group: s.aliceGroup(),
+        binding: await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
+      })
     ).newGroup,
   )
-  const reset = await revokeWithProof(s.aliceGroup(), {
+  const reset = await revokeWithProof({
+    group: s.aliceGroup(),
     reset: true,
     log: { chain: prefix, events: [] },
   })
@@ -214,19 +218,19 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   vi.spyOn(Date, 'now').mockReturnValue(180_000)
   s.installAlice(
     (
-      await renewLeaf(
-        s.aliceGroup(),
-        await fixture.timedBinding({ identity: s.alice, iat: 180, exp: 280, prefix }),
-      )
+      await renewLeaf({
+        group: s.aliceGroup(),
+        binding: await fixture.timedBinding({ identity: s.alice, iat: 180, exp: 280, prefix }),
+      })
     ).newGroup,
   )
   const trusted = fixture.agent(65)
   const parent = await fixture.timedBinding({ identity: trusted, iat: 100, exp: 300, prefix })
   s.installAlice(
     (
-      await renewLeaf(
-        s.aliceGroup(),
-        await fixture.timedBinding({
+      await renewLeaf({
+        group: s.aliceGroup(),
+        binding: await fixture.timedBinding({
           identity: s.alice,
           iat: 180,
           exp: 280,
@@ -234,12 +238,12 @@ test('peer recovery and restore retain authenticated revocations, reset history 
           issuer: trusted,
           parent: parent.capability,
         }),
-      )
+      })
     ).newGroup,
   )
   fresh = await fixture.timedBinding({ identity: s.bob, iat: 180, exp: 280, prefix })
   const expected = s.aliceGroup().ledgerTokens
-  expect(await Promise.all(expected.map((token) => verifyLedgerEntry(token)))).toMatchObject([
+  expect(await Promise.all(expected.map((token) => verifyLedgerEntry({ token })))).toMatchObject([
     { entry: { value: { op: 'seed' } } },
     { entry: { value: { op: 'revoke' } } },
     { entry: { value: { op: 'reset' } } },
@@ -288,7 +292,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
         ],
       ] as const) {
         const hostile = await pipeline.rawAdd(s.aliceGroup(), identity, binding)
-        await expect(handle.processMessage(hostile.message)).rejects.toMatchObject({
+        await expect(handle.processMessage({ message: hostile.message })).rejects.toMatchObject({
           name: 'CommitRejectedError',
         })
       }
@@ -299,7 +303,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
       binding: await fixture.timedBinding({ identity: s.alice, iat: 180, exp: 280 }),
     })
     for (const handle of [adopted, restored]) {
-      await expect(handle.processMessage(preResetUpdate)).rejects.toMatchObject({
+      await expect(handle.processMessage({ message: preResetUpdate })).rejects.toMatchObject({
         name: 'CommitRejectedError',
       })
     }
@@ -309,7 +313,8 @@ test('peer recovery and restore retain authenticated revocations, reset history 
       admitted,
       await fixture.timedBinding({ identity: admitted, iat: 180, exp: 280, prefix }),
     )
-    for (const handle of [adopted, restored]) await handle.processMessage(valid.message)
+    for (const handle of [adopted, restored])
+      await handle.processMessage({ message: valid.message })
     expect(await recovery).toMatchObject({ advanced: true })
     expect(sealLedger).not.toHaveBeenCalled()
   } finally {

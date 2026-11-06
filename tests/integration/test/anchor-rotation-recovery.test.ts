@@ -31,7 +31,7 @@ import { createWireHub } from './log-hub-over-wire.js'
 
 const { encodeEventFrame } = (await import(
   new URL('../../../packages/broadcast/src/event-frame.ts', import.meta.url).href
-)) as { encodeEventFrame(prc: string, data: Record<string, unknown>): Uint8Array }
+)) as { encodeEventFrame(params: { prc: string; data: Record<string, unknown> }): Uint8Array }
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -72,7 +72,11 @@ async function setup({
     invitee: bobID,
     bodies,
   })
-  const added = await commitInvite(group, bobInvite.bundle.publicPackage, bobInvite.invite)
+  const added = await commitInvite({
+    group,
+    keyPackage: bobInvite.bundle.publicPackage,
+    invite: bobInvite.invite,
+  })
   group = added.newGroup
   const bobGroup = await joinFromWelcome({
     identity: bobID,
@@ -88,9 +92,13 @@ async function setup({
     invitee: carolID,
     bodies,
   })
-  const third = await commitInvite(group, carolInvite.bundle.publicPackage, carolInvite.invite)
+  const third = await commitInvite({
+    group,
+    keyPackage: carolInvite.bundle.publicPackage,
+    invite: carolInvite.invite,
+  })
   group = third.newGroup
-  await bobGroup.processMessage(third.commitMessage)
+  await bobGroup.processMessage({ message: third.commitMessage })
   const received: Array<unknown> = []
   const bobReceived: Array<unknown> = []
   const events: Array<RecoveryEvent> = []
@@ -122,7 +130,9 @@ async function setup({
   })
   await Promise.all([alice.peer.resync(), bob.peer.resync()])
   if (adminBob) {
-    await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'admin'))
+    await alice.peer.commit({
+      build: buildLedgerCommit(alice, alice.identity, bob.identity.id, 'admin'),
+    })
     await expect.poll(() => Number(bob.handle().epoch)).toBe(Number(alice.handle().epoch))
   }
   const restart = async (member = bob) => {
@@ -155,7 +165,7 @@ async function setup({
 function topic(member: Member): string {
   const anchor = member.anchorStore.stored()
   if (anchor == null) throw new Error('Missing anchor')
-  return protocolTopic(anchor.secret, anchor.epoch, 'chat')
+  return protocolTopic({ secret: anchor.secret, epoch: anchor.epoch, protocol: 'chat' })
 }
 
 test.each([false, true])(
@@ -166,21 +176,25 @@ test.each([false, true])(
     const epochBefore = Number(alice.handle().epoch)
     const build = buildRemoveCommit(alice, carolID.id)
     await expect(
-      alice.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            await pending.onAccepted()
-            throw new Error('notification failed')
-          },
-        }
+      alice.peer.commit({
+        build: async () => {
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              await pending.onAccepted()
+              throw new Error('notification failed')
+            },
+          }
+        },
       }),
     ).rejects.toThrow('notification failed')
     const anchorAfterThrow = alice.anchorStore.stored()
     expect(anchorAfterThrow?.epoch).toBe(epochBefore + 1)
     const sender = restart ? await state.restart(alice) : alice
-    await sender.peer.commit(buildLedgerCommit(sender, alice.identity, bob.identity.id, 'member'))
+    await sender.peer.commit({
+      build: buildLedgerCommit(sender, alice.identity, bob.identity.id, 'member'),
+    })
     await expect.poll(() => Number(bob.handle().epoch)).toBe(epochBefore + 2)
     expect(sender.peer.anchorEpoch()).toBe(epochBefore + 1)
     const repairedTopic = topic(sender)
@@ -201,19 +215,24 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
     .listMembers()
     .map((entry) => entry.id)
   const epochBefore = Number(bob.handle().epoch)
-  const deferredBody = await signLedgerEntry(bob.identity, {
-    type: 'app.note',
-    groupID: bob.handle().groupID,
-    subject: bob.identity.id,
-    value: 'deferred',
+  const deferredBody = await signLedgerEntry({
+    identity: bob.identity,
+    entry: {
+      type: 'app.note',
+      groupID: bob.handle().groupID,
+      subject: bob.identity.id,
+      value: 'deferred',
+    },
   })
-  const abandoned = await commitLedgerEntries(bob.handle(), [deferredBody])
+  const abandoned = await commitLedgerEntries({ group: bob.handle(), tokens: [deferredBody] })
   let removedCommit: Uint8Array = new Uint8Array()
   const build = buildRemoveCommit(alice, carolID.id)
-  await alice.peer.commit(async () => {
-    const pending = await build()
-    removedCommit = pending.commit
-    return pending
+  await alice.peer.commit({
+    build: async () => {
+      const pending = await build()
+      removedCommit = pending.commit
+      return pending
+    },
   })
   await bob.peer.resync()
   await bob.peer.dispose()
@@ -222,7 +241,7 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
   const next = await buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')()
   await next.onAccepted()
   bob.entrySlot.install(async () => next.bodies)
-  await bob.handle().processMessage(next.commit)
+  await bob.handle().processMessage({ message: next.commit })
   await bob.adopt(bob.handle())
   await bob.anchorStore.save({
     anchor: original,
@@ -247,7 +266,7 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
     seq: 0,
     protocol: 'chat',
     prc: 'chat/posted',
-    data: encodeEventFrame('chat/posted', { text: 'held' }),
+    data: encodeEventFrame({ prc: 'chat/posted', data: { text: 'held' } }),
     lastAttempt: null,
   })
   let release = () => {}
@@ -279,7 +298,9 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
   const buildForbidden = async () => {
     throw new Error('must not build')
   }
-  await expect(restarted.peer.commit(buildForbidden)).rejects.toBeInstanceOf(RecoveryRequiredError)
+  await expect(restarted.peer.commit({ build: buildForbidden })).rejects.toBeInstanceOf(
+    RecoveryRequiredError,
+  )
   expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
   expect(published).toEqual([])
   expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
@@ -314,7 +335,7 @@ test('persisted but not adopted repairs from the durable handle before a queued 
   const { alice, bob, carolID, bobReceived } = state
   const epochBefore = Number(alice.handle().epoch)
   refused = true
-  await expect(alice.peer.commit(buildRemoveCommit(alice, carolID.id))).rejects.toThrow(
+  await expect(alice.peer.commit({ build: buildRemoveCommit(alice, carolID.id) })).rejects.toThrow(
     'adoption unavailable',
   )
   expect(Number(alice.handle().epoch)).toBe(epochBefore)
@@ -328,7 +349,7 @@ test('persisted but not adopted repairs from the durable handle before a queued 
     seq: 0,
     protocol: 'chat',
     prc: 'chat/posted',
-    data: encodeEventFrame('chat/posted', { text: 'from durable replacement' }),
+    data: encodeEventFrame({ prc: 'chat/posted', data: { text: 'from durable replacement' } }),
     lastAttempt: null,
   })
   const restarted = await state.restart(alice)
@@ -350,7 +371,7 @@ test('a failed anchor save repairs before the restarted worker seals and reaches
     if (refused && slot.pending == null) throw new Error('anchor save unavailable')
     await save(slot)
   }
-  await expect(alice.peer.commit(buildRemoveCommit(alice, carolID.id))).rejects.toThrow(
+  await expect(alice.peer.commit({ build: buildRemoveCommit(alice, carolID.id) })).rejects.toThrow(
     'anchor save unavailable',
   )
   expect(Number(alice.handle().epoch)).toBe(epochBefore + 1)
@@ -362,7 +383,7 @@ test('a failed anchor save repairs before the restarted worker seals and reaches
     seq: 0,
     protocol: 'chat',
     prc: 'chat/posted',
-    data: encodeEventFrame('chat/posted', { text: 'after failed save' }),
+    data: encodeEventFrame({ prc: 'chat/posted', data: { text: 'after failed save' } }),
     lastAttempt: null,
   })
   refused = false
@@ -391,14 +412,14 @@ test('losing the rotation secret in process forces automatic confirmed recovery 
   const handle = bob.handle()
   const exportSecret = handle.exportSecret.bind(handle)
   const exported: Array<number> = []
-  handle.exportSecret = async (label, context, length) => {
+  handle.exportSecret = async ({ label, context, length }) => {
     if (label === APP_TOPIC_LABEL) {
       exported.push(Number(handle.epoch))
       if (Number(handle.epoch) === epochBefore + 1) throw new Error('anchor export interrupted')
     }
-    return exportSecret(label, context, length)
+    return exportSecret({ label, context, length })
   }
-  await alice.peer.commit(buildRemoveCommit(alice, carolID.id))
+  await alice.peer.commit({ build: buildRemoveCommit(alice, carolID.id) })
   await drainUntil(
     async () => (await bob.anchorStore.load())?.pending?.epochAfter === epochBefore + 1,
     'pending anchor rotation',
@@ -410,10 +431,12 @@ test('losing the rotation secret in process forces automatic confirmed recovery 
   const next = await buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')()
   await next.onAccepted()
   bob.entrySlot.install(async () => next.bodies)
-  await bob.handle().processMessage(next.commit)
+  await bob.handle().processMessage({ message: next.commit })
   await bob.adopt(bob.handle())
   await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'in process repair' } })
-  await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
+  await alice.peer.commit({
+    build: buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'),
+  })
   await drainUntil(
     () => events.some((event) => event.phase === 'succeeded'),
     'recovery success event',

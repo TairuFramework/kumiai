@@ -69,6 +69,7 @@ import {
   DEFAULT_RECOVERY_JITTER_MS,
   DEFAULT_RECOVERY_TIMEOUT_MS,
   type GroupPeer,
+  type GroupPeerCommitParams,
   type GroupPeerParams,
   type ProtocolSurface,
   type RecoveryEvent,
@@ -251,7 +252,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             await hostJournal.put(entry)
             heldJournalID = entry.holdsLogSends === true ? entry.publishID : undefined
           },
-          markAccepted: (publishID, sequenceID) => hostJournal.markAccepted(publishID, sequenceID),
+          markAccepted: ({ publishID, sequenceID }) =>
+            hostJournal.markAccepted({ publishID, sequenceID }),
           clear: async (publishID) => {
             await hostJournal.clear(publishID)
             if (heldJournalID === publishID) heldJournalID = undefined
@@ -390,12 +392,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   /** The advance whose anchor rotation was last captured, so a retry never captures it twice. */
   let capturedAdvance: string | undefined
   const captureAnchor = async (advance?: string): Promise<void> => {
-    const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret, epoch } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
     if (disposed) return
     for (const name of Object.keys(protocols)) {
-      mux.retainTopic(protocolTopic(secret, epoch, name), { retention: appLogRetentionSeconds })
+      mux.retainTopic(protocolTopic({ secret, epoch, protocol: name }), {
+        retention: appLogRetentionSeconds,
+      })
     }
-    mux.retainTopic(inboxTopic(secret, epoch, localDID), { retention: appLogRetentionSeconds })
+    mux.retainTopic(inboxTopic({ secret, epoch, memberDID: localDID }), {
+      retention: appLogRetentionSeconds,
+    })
     anchor = { secret, epoch }
     // Marked with the anchor, before persistence can fail, so a retry never captures it twice.
     if (advance != null) capturedAdvance = advance
@@ -451,8 +457,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // Welcome joiner seeds at this epoch all the same: the fresh leaf is what says so.
     const admitted =
       record.admissionsBefore != null &&
-      detectLeafAdmission(record.admissionsBefore, admissionsOf(entries))
-    if (record.forced || admitted || detectRosterChange(record.rosterBefore, roster)) {
+      detectLeafAdmission({ before: record.admissionsBefore, after: admissionsOf(entries) })
+    if (
+      record.forced ||
+      admitted ||
+      detectRosterChange({ before: record.rosterBefore, after: roster })
+    ) {
       await captureAnchor(record.advance)
     } else {
       await keepAnchor()
@@ -1026,7 +1036,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           record.value,
         )
         const sealed = port
-          .sealRecoveryVerdict(request.request, verdict)
+          .sealRecoveryVerdict({ request: request.request, verdict })
           .catch((error: unknown) => {
             if (verdictCache.get(cacheKey)?.value === sealed) verdictCache.delete(cacheKey)
             throw error
@@ -1044,10 +1054,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           void mux
             .publish({
               topicID,
-              payload: encodeHandshakeFrame(
-                HANDSHAKE_KIND.recoveryVerdict,
-                encodeRecoveryVerdict(request.requestID, sealed),
-              ),
+              payload: encodeHandshakeFrame({
+                kind: HANDSHAKE_KIND.recoveryVerdict,
+                payload: encodeRecoveryVerdict({ requestID: request.requestID, sealed }),
+              }),
             })
             .catch(() => {})
         },
@@ -1082,10 +1092,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // head, and its reader — the requester — subscribed before it asked.
           await mux.publish({
             topicID,
-            payload: encodeHandshakeFrame(
-              HANDSHAKE_KIND.recoveryReply,
-              encodeRecoveryReply(requestID, groupInfo),
-            ),
+            payload: encodeHandshakeFrame({
+              kind: HANDSHAKE_KIND.recoveryReply,
+              payload: encodeRecoveryReply({ requestID, groupInfo }),
+            }),
           })
         } catch {
           // a refused or failed reply just means another responder (or a retry) covers it
@@ -1156,10 +1166,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposed) return
           await mux.publish({
             topicID,
-            payload: encodeHandshakeFrame(
-              HANDSHAKE_KIND.ledgerReply,
-              encodeLedgerReply(request.requestID, sealed),
-            ),
+            payload: encodeHandshakeFrame({
+              kind: HANDSHAKE_KIND.ledgerReply,
+              payload: encodeLedgerReply({ requestID: request.requestID, sealed }),
+            }),
           })
         } catch {
           // a refused or failed reply just means another responder (or a retry) covers it
@@ -1528,20 +1538,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                 if (disposed) {
                   return { advanced: false, epochBefore: framedEpoch, epochAfter: framedEpoch }
                 }
-                const result = await port.processCommit(commitFrame.commit, {
-                  senderDID: message.senderDID,
-                  // The resolver, not the bodies: the blob opens only if the port asks for entries
-                  // this commit names, and only for a commit it applies — framed at this peer's
-                  // epoch, the epoch the blob is sealed under, making body delivery atomic with the
-                  // commit. Called from INSIDE the apply, so the open must not touch the handle's
-                  // ratchet: `openEntries` reads only the epoch's exporter secret and is pure.
-                  resolveLedgerEntries: createLedgerEntryResolver(
-                    commitFrame.sealedEntries,
-                    crypto.openEntries,
-                  ),
+                const result = await port.processCommit({
+                  commit: commitFrame.commit,
+                  context: {
+                    senderDID: message.senderDID,
+                    // The resolver, not the bodies: the blob opens only if the port asks for entries
+                    // this commit names, and only for a commit it applies — framed at this peer's
+                    // epoch, the epoch the blob is sealed under, making body delivery atomic with the
+                    // commit. Called from INSIDE the apply, so the open must not touch the handle's
+                    // ratchet: `openEntries` reads only the epoch's exporter secret and is pure.
+                    resolveLedgerEntries: createLedgerEntryResolver({
+                      sealedEntries: commitFrame.sealedEntries,
+                      openEntries: crypto.openEntries,
+                    }),
+                  },
                 })
                 if (header?.external && result.advanced && !stranded) {
-                  const derived = await port.confirmationKey(position, commitDigest)
+                  const derived = await port.confirmationKey({ position, commitDigest })
                   recordCommitOutcome(position, { kind: 'applied', commitDigest, ...derived })
                 }
                 return result
@@ -1815,10 +1828,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         'commit: the local group has already advanced past the epoch this commit was framed at. A commit is adopted in onAccepted, never before.',
       )
     }
-    const payload = encodeHandshakeFrame(
-      HANDSHAKE_KIND.commit,
-      encodeCommitFrame(commit, sealedEntries),
-    )
+    const payload = encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.commit,
+      payload: encodeCommitFrame({ commit, sealedEntries }),
+    })
     assertFrameFits(payload)
     return { payload, epoch }
   }
@@ -1926,7 +1939,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // Record acceptance BEFORE adopting, as `commit()` does: adopting moves the handle past the
     // framed epoch, and a crash between the two would leave a journalled commit indistinguishable
     // from a host that adopted out of band. Written first, replay is idempotent.
-    await journal.markAccepted(entry.publishID, sequenceID)
+    await journal.markAccepted({ publishID: entry.publishID, sequenceID })
     if (disposed) return false
     // This peer's own accepted frame is BOTH the last thing it processed and the log's tip —
     // otherwise a `commit()` right after a `replay()` would anchor on a stale tip.
@@ -2039,10 +2052,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // responder seals to) — without the first any stranger gets the group's whole authority state
     // for one publish; without the second, so does the hub.
     const requestID = newPublishID()
-    const request = await port.createRecoveryRequest(
+    const request = await port.createRecoveryRequest({
       requestID,
-      Math.max(recoveryTimeoutMs, recoveryDeadlineMs),
-    )
+      deadlineMs: Math.max(recoveryTimeoutMs, recoveryDeadlineMs),
+    })
     if (disposed) return false
     return await new Promise<boolean>((resolve) => {
       let settled = false
@@ -2072,7 +2085,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             // Bytes this peer cannot open: another member's reply to another request, or a
             // hub-injected forgery. Dropped, gather waits — the per-request key is NOT consumed
             // here, since the next responder's reply is sealed to the same key.
-            const tokens = await port.openSealedLedger(sealed, requestID)
+            const tokens = await port.openSealedLedger({ sealed, requestID })
             if (tokens == null) return
             // Timeout or disposal can settle the gather while opening the reply.
             if (settled || disposed) return
@@ -2095,10 +2108,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       void mux
         .publish({
           topicID,
-          payload: encodeHandshakeFrame(
-            HANDSHAKE_KIND.ledgerRequest,
-            encodeLedgerRequest(requestID, request),
-          ),
+          payload: encodeHandshakeFrame({
+            kind: HANDSHAKE_KIND.ledgerRequest,
+            payload: encodeLedgerRequest({ requestID, request }),
+          }),
         })
         .catch(() => {})
     })
@@ -2108,10 +2121,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * Commit to the group, rebasing until it lands or the deadline passes. Runs under the commit
    * mutex for its whole life, so `build()` never races another `build()` on this device.
    */
-  const commit = async (
-    buildInput: () => Promise<PendingCommit>,
-    options?: { holdLogSends?: true },
-  ): Promise<LaneResult> => {
+  const commit = async ({
+    build: buildInput,
+    ...options
+  }: GroupPeerCommitParams): Promise<LaneResult> => {
     if (options?.holdLogSends === true) revokeHolds++
     try {
       return await commitHeld(buildInput, options)
@@ -2250,7 +2263,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    the framed epoch — an entry carrying its acceptance can be adopted on restart; one
         //    carrying none at a later epoch is a host that adopted outside `onAccepted`. Recorded
         //    after the adopt, the two would be indistinguishable.
-        await slot.markAccepted(publishID, sequenceID)
+        await slot.markAccepted({ publishID, sequenceID })
         assertLive()
 
         // The commit is the group's now — this frame is both the last position processed and the
@@ -2335,10 +2348,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       void Promise.resolve(
         mux.publish({
           topicID,
-          payload: encodeHandshakeFrame(
-            HANDSHAKE_KIND.recoveryRequest,
-            encodeRecoveryRequest(requestID, request),
-          ),
+          payload: encodeHandshakeFrame({
+            kind: HANDSHAKE_KIND.recoveryRequest,
+            payload: encodeRecoveryRequest({ requestID, request }),
+          }),
         }),
       ).catch((error: unknown) => {
         if (!recoveryWaiters.delete(requestID)) return
@@ -2444,10 +2457,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             assertLive()
           }
           const requestID = newPublishID()
-          const request = await port.createRecoveryRequest(
+          const request = await port.createRecoveryRequest({
             requestID,
-            Math.max(0, deadline - Date.now()),
-          )
+            deadlineMs: Math.max(0, deadline - Date.now()),
+          })
           assertLive()
           const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
           if (outcome.kind === 'disposed' || disposed)
@@ -2466,7 +2479,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           assertLive()
           let pending: AppliedRecovery
           try {
-            pending = await port.applyRecovery(outcome.sealed, requestID)
+            pending = await port.applyRecovery({ sealed: outcome.sealed, requestID })
             if (pending != null && !('renewalRequired' in pending)) {
               pending = wrapPendingRecovery(boundary, pending)
             }
@@ -2519,7 +2532,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           assertLive()
           const commitDigest = digestAppliedCommit(pending.commit)
           pendingRecovery = { position: sequenceID, commitDigest, pending }
-          const key = await pending.confirmationKey(sequenceID, commitDigest)
+          const key = await pending.confirmationKey({ position: sequenceID, commitDigest })
           const verified = await port.verifyRecoveryRequest(request)
           if (verified == null) throw new Error('The recovery request did not verify')
           return {
@@ -2563,15 +2576,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           send: () =>
             mux.publish({
               topicID: rendezvous,
-              payload: encodeHandshakeFrame(
-                HANDSHAKE_KIND.recoveryConfirmRequest,
-                encodeRecoveryConfirmRequest({
+              payload: encodeHandshakeFrame({
+                kind: HANDSHAKE_KIND.recoveryConfirmRequest,
+                payload: encodeRecoveryConfirmRequest({
                   requestID,
                   request,
                   position: sequenceID,
                   commitDigest,
                 }),
-              ),
+              }),
             }),
         })
         assertLive()
@@ -2909,11 +2922,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         assertLive()
         const protocol = protocols[key]
         if (protocol == null) throw new Error(`Unknown protocol: ${key}`)
-        if (appOutboxAcceptance != null && retentionOf(protocol, prc) === 'log') {
+        if (
+          appOutboxAcceptance != null &&
+          retentionOf({ protocol, procedureName: prc }) === 'log'
+        ) {
           await appOutboxAcceptance.accept({
             protocol: key,
             prc,
-            data: encodeEventFrame(prc, config?.data ?? {}),
+            data: encodeEventFrame({ prc, data: config?.data ?? {} }),
           })
           logDelivery?.trigger()
           return
@@ -2938,7 +2954,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       appLane.retryDelivery(topicID)
       retryAppPull()
     },
-    dropAppFrame: async (topicID, position) => {
+    dropAppFrame: async ({ topicID, position }) => {
       await ready
       assertLive()
       await runSerial(async () => {

@@ -161,10 +161,10 @@ for (const winner of ['policy-refused', 'historical', 'malformed', 'applied'] as
               senderDID: observer.identity.id,
               topicID: commitTopic(secret),
               retain: 'log',
-              payload: encodeHandshakeFrame(
-                HANDSHAKE_KIND.commit,
-                encodeCommitFrame(competitor, sealed),
-              ),
+              payload: encodeHandshakeFrame({
+                kind: HANDSHAKE_KIND.commit,
+                payload: encodeCommitFrame({ commit: competitor, sealedEntries: sealed }),
+              }),
             })
           }
           return await hub.publish(params)
@@ -192,16 +192,19 @@ for (const winner of ['policy-refused', 'historical', 'malformed', 'applied'] as
           adoptJournalled: async () => {},
           ...(restart && first ? { commitDeadlineMs: 0 } : {}),
         })
-      const token = await signLedgerEntry(author.identity, {
-        type: 'test.value',
-        groupID: author.handle.groupID,
-        subject: author.identity.id,
-        value: 'landed',
+      const token = await signLedgerEntry({
+        identity: author.identity,
+        entry: {
+          type: 'test.value',
+          groupID: author.handle.groupID,
+          subject: author.identity.id,
+          value: 'landed',
+        },
       })
       const frames: Array<{ epoch: bigint; generation: number; commit: Uint8Array }> = []
       const build = async () => {
         const source = author.handle
-        const built = await commitLedgerEntries(source, [token])
+        const built = await commitLedgerEntries({ group: source, tokens: [token] })
         frames.push({
           epoch: source.epoch,
           generation: await generation(source, built.commitMessage),
@@ -213,14 +216,14 @@ for (const winner of ['policy-refused', 'historical', 'malformed', 'applied'] as
           kind: 'ledger' as const,
           journal: encodeClientState(built.newGroup.state),
           onAccepted: async () => {
-            await guardedReplace(access, built.newGroup)
+            await guardedReplace({ access, next: built.newGroup })
           },
         }
       }
       let peer = makePeer(true)
       try {
         if (restart) {
-          await expect(peer.commit(build)).rejects.toThrow(CommitDeadlineError)
+          await expect(peer.commit({ build })).rejects.toThrow(CommitDeadlineError)
           expect(await journal.get()).toBeNull()
           await peer.dispose()
           const state = decodeClientState(saved)
@@ -239,7 +242,7 @@ for (const winner of ['policy-refused', 'historical', 'malformed', 'applied'] as
           mls = makeMLS()
           peer = makePeer(false)
         }
-        await expect(peer.commit(build)).resolves.toEqual({})
+        await expect(peer.commit({ build })).resolves.toEqual({})
         expect(frames.map((frame) => frame.epoch)).toEqual(
           winner === 'applied' ? [epoch, epoch + 1n] : [epoch, epoch],
         )
@@ -260,12 +263,12 @@ for (const winner of ['policy-refused', 'historical', 'malformed', 'applied'] as
         group.bodies.set(ledgerEntryDigest(token), token)
         const landed = frames[1]?.commit
         if (landed == null) throw new Error('missing retry')
-        await observer.handle.processMessage(landed)
+        await observer.handle.processMessage({ message: landed })
         expect(observer.handle.ledgerTokens).toContain(token)
         expect(observer.handle.epoch).toBe(author.handle.epoch)
         // Persistence failure prevents the caller from framing any new ciphertext.
         failSave = true
-        await expect(peer.commit(build)).rejects.toThrow('disk failed')
+        await expect(peer.commit({ build })).rejects.toThrow('disk failed')
         expect(frames).toHaveLength(2)
       } finally {
         await peer.dispose()
@@ -328,10 +331,10 @@ async function reservationPeer(name: string, loseCAS: boolean) {
               senderDID: receiver.identity.id,
               topicID: params.topicID,
               retain: 'log',
-              payload: encodeHandshakeFrame(
-                HANDSHAKE_KIND.commit,
-                encodeCommitFrame(new Uint8Array(), sealed),
-              ),
+              payload: encodeHandshakeFrame({
+                kind: HANDSHAKE_KIND.commit,
+                payload: encodeCommitFrame({ commit: new Uint8Array(), sealedEntries: sealed }),
+              }),
             })
           }
         }
@@ -371,10 +374,10 @@ async function reservationPeer(name: string, loseCAS: boolean) {
       kind: 'ledger' as const,
       journal: encodeClientState(built.newState),
       onAccepted: async () => {
-        await guardedReplace(
+        await guardedReplace({
           access,
-          await restoreGroup({ state: built.newState, credential, ledgerEntries }),
-        )
+          next: await restoreGroup({ state: built.newState, credential, ledgerEntries }),
+        })
       },
     }
   }
@@ -406,17 +409,19 @@ test('non-framing builder failures reuse the durable reservation after restart',
   try {
     for (let i = 0; i < 202; i++) {
       await expect(
-        f.peer.commit(async () => {
-          throw new Error('builder refused')
+        f.peer.commit({
+          build: async () => {
+            throw new Error('builder refused')
+          },
         }),
       ).rejects.toThrow('builder refused')
       expect(f.saves()).toBeGreaterThan(0)
       await f.restartHandle()
     }
     expect(f.publishes()).toBe(0)
-    await f.peer.commit(f.build)
+    await f.peer.commit({ build: f.build })
     expect(f.generations).toEqual([1])
-    await f.receiver.handle.processMessage(f.frames[0] as Uint8Array)
+    await f.receiver.handle.processMessage({ message: f.frames[0] as Uint8Array })
   } finally {
     await f.peer.dispose()
   }
@@ -425,7 +430,7 @@ test('non-framing builder failures reuse the durable reservation after restart',
 test('lost CAS stops with a typed window operation failure before an unreceivable frame', async () => {
   const f = await reservationPeer('window-peer', true)
   try {
-    await expect(f.peer.commit(f.build)).rejects.toThrow(HandshakeWindowError)
+    await expect(f.peer.commit({ build: f.build })).rejects.toThrow(HandshakeWindowError)
     const limit = Math.floor(defaultKeyRetentionConfig.maximumForwardRatchetSteps / 2)
     expect(f.generations).toEqual(Array.from({ length: limit }, (_, i) => i + 1))
     expect(f.publishes()).toBe(limit)
@@ -433,9 +438,9 @@ test('lost CAS stops with a typed window operation failure before an unreceivabl
     expect(await f.journal.get()).toBeNull()
     const last = f.frames.at(-1)
     if (last == null) throw new Error('missing last frame')
-    await f.receiver.handle.processMessage(last)
+    await f.receiver.handle.processMessage({ message: last })
     await f.restartHandle()
-    await expect(f.peer.commit(f.build)).rejects.toThrow(HandshakeWindowError)
+    await expect(f.peer.commit({ build: f.build })).rejects.toThrow(HandshakeWindowError)
     expect(f.frames).toHaveLength(limit)
   } finally {
     await f.peer.dispose()
@@ -450,7 +455,7 @@ test('a journalled frame consumes its durable reservation across restart', async
     throw new Error('crash after journal')
   }
   try {
-    await expect(f.peer.commit(f.build)).rejects.toThrow('crash after journal')
+    await expect(f.peer.commit({ build: f.build })).rejects.toThrow('crash after journal')
     expect(await f.journal.get()).not.toBeNull()
     expect(f.publishes()).toBe(0)
     await f.peer.dispose()
@@ -474,22 +479,22 @@ test('consumption persistence failure blocks journalling and publication', async
   }
   try {
     f.failConsumption(true)
-    await expect(f.peer.commit(f.build)).rejects.toThrow('consumption disk failed')
+    await expect(f.peer.commit({ build: f.build })).rejects.toThrow('consumption disk failed')
     expect(journalWrites).toBe(0)
     expect(f.publishes()).toBe(0)
     expect(await f.journal.get()).toBeNull()
-    await expect(f.peer.commit(f.build)).rejects.toThrow('consumption disk failed')
+    await expect(f.peer.commit({ build: f.build })).rejects.toThrow('consumption disk failed')
     expect(f.generations).toEqual([1, 2])
     // The durable checkpoint still proves that generation 2 never permitted publication.
     await f.restartHandle()
     f.failConsumption(false)
-    await f.peer.commit(f.build)
+    await f.peer.commit({ build: f.build })
     expect(f.generations).toEqual([1, 2, 2])
     expect(journalWrites).toBe(1)
     expect(f.publishes()).toBe(1)
     const frame = f.frames.at(-1)
     if (frame == null) throw new Error('missing accepted frame')
-    await f.receiver.handle.processMessage(frame)
+    await f.receiver.handle.processMessage({ message: frame })
     expect(f.author.handle.epoch).toBe(f.receiver.handle.epoch)
   } finally {
     await f.peer.dispose()

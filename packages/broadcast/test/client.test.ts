@@ -51,7 +51,7 @@ describe('BroadcastClient.request', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const result = await client.request('catchup', { since: 0 }, { timeoutMs: 1000 })
+    const result = await client.request({ prc: 'catchup', prm: { since: 0 }, timeoutMs: 1000 })
     expect(result).toEqual({ value: 'from-1' })
 
     await client.dispose()
@@ -67,7 +67,7 @@ describe('BroadcastClient.request', () => {
     })
 
     await expect(
-      client.request('catchup', {}, { errorThreshold: 2, timeoutMs: 1000 }),
+      client.request({ prc: 'catchup', prm: {}, errorThreshold: 2, timeoutMs: 1000 }),
     ).rejects.toThrow(/error/i)
 
     await client.dispose()
@@ -81,7 +81,9 @@ describe('BroadcastClient.request', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    await expect(client.request('catchup', {}, { timeoutMs: 50 })).rejects.toThrow(/timed out/i)
+    await expect(client.request({ prc: 'catchup', prm: {}, timeoutMs: 50 })).rejects.toThrow(
+      /timed out/i,
+    )
 
     await client.dispose()
   })
@@ -93,7 +95,7 @@ describe('BroadcastClient.request', () => {
     })
 
     // Long timeout rules out natural expiry.
-    const req = client.request('noop', {}, { timeoutMs: 30_000 })
+    const req = client.request({ prc: 'noop', prm: {}, timeoutMs: 30_000 })
     await client.dispose()
 
     // Race: a 500 ms guard fires and fails the test if req doesn't settle promptly.
@@ -118,7 +120,7 @@ describe('BroadcastClient.gather', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const replies = await client.gather('census', {}, { quorum: 2, timeoutMs: 1000 })
+    const replies = await client.gather({ prc: 'census', prm: {}, quorum: 2, timeoutMs: 1000 })
     expect(replies).toHaveLength(2)
     expect(replies.every((r) => typeof r.senderDID === 'string')).toBe(true)
 
@@ -135,7 +137,7 @@ describe('BroadcastClient.gather', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const replies = await client.gather('census', {}, { quorum: 5, timeoutMs: 100 })
+    const replies = await client.gather({ prc: 'census', prm: {}, quorum: 5, timeoutMs: 100 })
     expect(replies).toEqual([{ senderDID: 'peer-1', value: 'a' }])
 
     await client.dispose()
@@ -150,7 +152,7 @@ describe('BroadcastClient.gather', () => {
     })
 
     // Quorum of 99 and long timeout so neither natural condition fires.
-    const gatherPromise = client.gather('census', {}, { quorum: 99, timeoutMs: 30_000 })
+    const gatherPromise = client.gather({ prc: 'census', prm: {}, quorum: 99, timeoutMs: 30_000 })
 
     // Allow peer-1 to reply before we dispose.
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -187,7 +189,7 @@ describe('BroadcastClient.dispatch', () => {
       }
     })()
 
-    await client.dispatch('test-event', { hello: 'world' })
+    await client.dispatch({ prc: 'test-event', data: { hello: 'world' } })
     const received = await receivedPromise
 
     expect(received).toEqual({ hello: 'world' })

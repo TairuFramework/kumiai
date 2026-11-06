@@ -71,7 +71,7 @@ describe('broadcast sender surfacing', () => {
       }),
       from: 'bob',
       requestHandlers: {
-        ask: (_prm, context) => {
+        ask: ({ context }) => {
           seenSender = context?.senderDID
           return { ok: true }
         },
@@ -86,7 +86,7 @@ describe('broadcast sender surfacing', () => {
       }),
     })
 
-    const result = await client.request('ask', {}, { timeoutMs: 500 })
+    const result = await client.request({ prc: 'ask', prm: {}, timeoutMs: 500 })
     expect(result).toEqual({ ok: true })
     expect(seenSender).toBe('did:key:alice')
 

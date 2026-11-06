@@ -4,6 +4,7 @@ import {
   type InceptionEvent,
   isControllerLog,
 } from '@kokuin/controller'
+import type { CryptoOptions } from '@kokuin/token'
 import { type ClientState, defaultCredentialTypes, isDefaultCredential, nodeTypes } from 'ts-mls'
 
 import { foldControllerLog } from './controller-log.js'
@@ -15,16 +16,31 @@ export const HISTORY_HORIZON = 393_216
 export const MAX_EPOCH_EVENTS_FOR_LEAVES = 32
 export const SETTLE_PROMPT_EPOCH_EVENTS = 24
 
-export function epochEventCount(log: ControllerLog): number {
+export type EpochEventCountParams = {
+  log: ControllerLog
+} & CryptoOptions
+
+export async function epochEventCount({ log, ...options }: EpochEventCountParams): Promise<number> {
   const inception = log.chain[0]?.event
   if (inception?.t !== 'icp') throw new Error('Missing controller inception')
-  const folded = foldControllerLog(didFromInception(inception as InceptionEvent), log)
+  const folded = await foldControllerLog(
+    didFromInception(inception as InceptionEvent),
+    log,
+    options,
+  )
   if (!folded.ok) throw new Error(folded.reason)
   return folded.applied.length
 }
 
-export function settleAdvisory(log: ControllerLog): 'ok' | 'prompt' | 'blocked' {
-  const count = epochEventCount(log)
+export type SettleAdvisoryParams = {
+  log: ControllerLog
+} & CryptoOptions
+
+export async function settleAdvisory({
+  log,
+  ...options
+}: SettleAdvisoryParams): Promise<'ok' | 'prompt' | 'blocked'> {
+  const count = await epochEventCount({ log, ...options })
   if (count > MAX_EPOCH_EVENTS_FOR_LEAVES) return 'blocked'
   return count >= SETTLE_PROMPT_EPOCH_EVENTS ? 'prompt' : 'ok'
 }
@@ -44,11 +60,13 @@ export function proofSize(value: unknown): number {
     : 0
 }
 
+export type HistorySizeParams = {
+  tree: ClientState['ratchetTree']
+  entries: ReadonlyArray<VerifiedLedgerEntry>
+}
+
 /** Count validated controller history. Callers apply the horizon only to lifecycle groups. */
-export function historySize(
-  tree: ClientState['ratchetTree'],
-  entries: ReadonlyArray<VerifiedLedgerEntry>,
-): number {
+export function historySize({ tree, entries }: HistorySizeParams): number {
   let size = 0
   for (const node of tree) {
     if (node == null || node.nodeType !== nodeTypes.leaf) continue

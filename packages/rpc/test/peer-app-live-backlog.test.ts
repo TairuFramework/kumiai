@@ -34,7 +34,7 @@ describe('the live lane replays a reconnecting member its mailbox backlog', () =
 
     await alice.peer.protocol('chat').dispatch('chat/changed', { data: { text: 'before lunch' } })
     for (let i = 0; i < 10; i++) {
-      await alice.peer.commit(buildLedgerCommit(alice, []))
+      await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     }
     await flush()
     expect(alice.mls.epoch()).toBe(11)

@@ -64,7 +64,7 @@ describe('a foreign record is refused at the store boundary', () => {
    * out by `toBundles`' decode check instead, and the test would pass without the guard existing.
    */
   async function foreignRecord(kind: string, ref: string) {
-    const bundle = await createLastResortKeyPackageBundle(identity)
+    const bundle = await createLastResortKeyPackageBundle({ identity })
     return {
       kind,
       ref,
@@ -84,7 +84,10 @@ describe('a foreign record is refused at the store boundary', () => {
 
   test('the provisioner refuses an ordinary record', async () => {
     const store = createMemoryLastResortStore()
-    await store.put(identity.id, await foreignRecord('ordinary', 'from-the-pool'))
+    await store.put({
+      ownerDID: identity.id,
+      record: await foreignRecord('ordinary', 'from-the-pool'),
+    })
     const provisioner = createLastResortProvisioner({ identity, client, store })
 
     await expect(provisioner.ensureProvisioned()).rejects.toThrow(
@@ -94,7 +97,10 @@ describe('a foreign record is refused at the store boundary', () => {
 
   test('the pool refuses a last-resort record', async () => {
     const store = createMemoryKeyPackagePoolStore()
-    await store.put(identity.id, await foreignRecord('last-resort', 'from-the-slot'))
+    await store.put({
+      ownerDID: identity.id,
+      record: await foreignRecord('last-resort', 'from-the-slot'),
+    })
     const pool = createKeyPackagePool({ identity, client, store })
 
     await expect(pool.ensureStocked()).rejects.toThrow(/from-the-slot.*ordinary.*last-resort/)
@@ -102,7 +108,10 @@ describe('a foreign record is refused at the store boundary', () => {
 
   test('bundles() refuses one too, so a join cannot read across the ports', async () => {
     const store = createMemoryKeyPackagePoolStore()
-    await store.put(identity.id, await foreignRecord('last-resort', 'from-the-slot'))
+    await store.put({
+      ownerDID: identity.id,
+      record: await foreignRecord('last-resort', 'from-the-slot'),
+    })
     const pool = createKeyPackagePool({ identity, client, store })
 
     await expect(pool.bundles()).rejects.toThrow(/from-the-slot.*ordinary.*last-resort/)

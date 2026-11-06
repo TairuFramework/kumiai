@@ -24,8 +24,8 @@ describe('FakeHub fixture', () => {
     const b = 'did:key:bob'
     const topic = 'topic:t'
 
-    hub.subscribe(b, topic)
-    const subscription = hub.receive(b)
+    hub.subscribe({ subscriberDID: b, topicID: topic })
+    const subscription = hub.receive({ subscriberDID: b })
     const received = collect(subscription, 5)
 
     for (let i = 0; i < 5; i++) {
@@ -50,8 +50,8 @@ describe('FakeHub fixture', () => {
     const b = 'did:key:bob'
     const topic = 'topic:t'
 
-    hub.subscribe(b, topic)
-    const subscription = hub.receive(b)
+    hub.subscribe({ subscriberDID: b, topicID: topic })
+    const subscription = hub.receive({ subscriberDID: b })
     const received = collect(subscription, 4)
 
     hub.dropNext(1)
@@ -73,7 +73,7 @@ describe('FakeHub fixture', () => {
   test('disconnect closes the receive iterator for the device', async () => {
     const hub = new FakeHub()
     const b = 'did:key:bob'
-    const subscription = hub.receive(b)
+    const subscription = hub.receive({ subscriberDID: b })
     const iterator = subscription[Symbol.asyncIterator]()
 
     const next = iterator.next()

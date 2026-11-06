@@ -1,4 +1,4 @@
-import { normalizeDID } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
@@ -46,7 +46,7 @@ export type FoldEnvelopeContext = {
   memberController: (did: string) => string | undefined
 }
 
-export type FoldEnvelopeParams = {
+export type FoldEnvelopeParams = CryptoOptions & {
   baseRoster: RosterState
   baseRegistry: DeviceRegistry
   entries: Array<FoldInput>
@@ -74,8 +74,8 @@ function isRoleValue(value: unknown): value is GroupPermission {
  * subsumes `kumiai.role`'s own authority rule. State-so-far, not a pre-commit
  * snapshot, so an envelope of `[promote Bob, entry-issued-by-Bob]` is accepted.
  */
-export function foldEnvelope(params: FoldEnvelopeParams): EnvelopeFoldResult {
-  const { baseRoster, baseRegistry, entries, groupID, context } = params
+export async function foldEnvelope(params: FoldEnvelopeParams): Promise<EnvelopeFoldResult> {
+  const { baseRoster, baseRegistry, entries, groupID, context, crypto } = params
   let workingRoster: RosterState = { roles: new Map(baseRoster.roles) }
   let workingRegistry: DeviceRegistry = {
     devices: new Map(baseRegistry.devices),
@@ -107,10 +107,11 @@ export function foldEnvelope(params: FoldEnvelopeParams): EnvelopeFoldResult {
         return { ok: false, reason: 'device operation is not allowed in this group', entryID }
       }
       try {
-        workingRegistry = registryApply(
+        workingRegistry = await registryApply(
           { issuer, entry: { ...entry, value } },
           workingRegistry,
           context?.controllerID,
+          { crypto },
         )
       } catch (error) {
         return {
@@ -137,7 +138,7 @@ export function foldEnvelope(params: FoldEnvelopeParams): EnvelopeFoldResult {
 
     // The universal invariant, now authority-aware: the issuer's AUTHORITY (controller ?? id,
     // read off the registry-so-far) must be an admin in state-so-far.
-    if (workingRoster.roles.get(authority(workingRegistry, issuer)) !== 'admin') {
+    if (workingRoster.roles.get(authority({ registry: workingRegistry, issuer })) !== 'admin') {
       return { ok: false, reason: `non-admin issuer '${issuer}'`, entryID }
     }
 
@@ -149,7 +150,7 @@ export function foldEnvelope(params: FoldEnvelopeParams): EnvelopeFoldResult {
         issuer,
         entry: { ...entry, value: entry.value },
       }
-      workingRoster = roleReducer.apply(roleEntry, workingRoster)
+      workingRoster = roleReducer.apply({ verified: roleEntry, stateSoFar: workingRoster })
       // A group with zero admins can never again add, remove, promote, or demote.
       if (adminCount(workingRoster) === 0) {
         return { ok: false, reason: 'would empty the admin set', entryID }

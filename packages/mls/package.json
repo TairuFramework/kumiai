@@ -37,6 +37,7 @@
   "dependencies": {
     "@kokuin/capability": "catalog:",
     "@kokuin/controller": "catalog:",
+    "@kokuin/crypto": "catalog:",
     "@kokuin/token": "catalog:",
     "@noble/ciphers": "catalog:",
     "@noble/curves": "catalog:",
@@ -46,6 +47,9 @@
     "@sozai/event": "catalog:",
     "@sozai/runtime": "catalog:",
     "ts-mls": "catalog:"
+  },
+  "devDependencies": {
+    "@kokuin/crypto-napi": "catalog:"
   },
   "publishConfig": {
     "access": "public"

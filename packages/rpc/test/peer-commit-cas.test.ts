@@ -1,9 +1,4 @@
-import type {
-  HubFetchTopicParams,
-  HubPublishParams,
-  HubSubscribeOptions,
-  LogHub,
-} from '@kumiai/hub-tunnel'
+import type { HubFetchTopicParams, HubPublishParams, LogHub } from '@kumiai/hub-tunnel'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
@@ -40,10 +35,11 @@ function gatedHub(
       await onPublish?.(params)
       return hub.publish(params)
     },
-    subscribe: (did: string, topicID: string, options?: HubSubscribeOptions) =>
-      hub.subscribe(did, topicID, options),
-    unsubscribe: (did: string, topicID: string) => hub.unsubscribe(did, topicID),
-    receive: (did: string) => hub.receive(did),
+    subscribe: ({ subscriberDID: did, topicID, ...options }) =>
+      hub.subscribe({ subscriberDID: did, topicID, ...options }),
+    unsubscribe: ({ subscriberDID: did, topicID }) =>
+      hub.unsubscribe({ subscriberDID: did, topicID }),
+    receive: ({ subscriberDID: did }) => hub.receive({ subscriberDID: did }),
     fetchTopic: (params: HubFetchTopicParams) => hub.fetchTopic(params),
   }
 }
@@ -93,15 +89,15 @@ describe('the commit loop converges, serializes and journals', () => {
     const bobToken = 'signed-token: dave is an admin'
     const bobFramedAt: Array<number> = []
 
-    const aliceCommit = alice.peer.commit(buildLedgerCommit(alice, [aliceToken]))
-    const bobCommit = bob.peer.commit(
-      buildLedgerCommit(bob, [bobToken], {
+    const aliceCommit = alice.peer.commit({ build: buildLedgerCommit(alice, [aliceToken]) })
+    const bobCommit = bob.peer.commit({
+      build: buildLedgerCommit(bob, [bobToken], {
         framedAt: bobFramedAt,
         onBuild: () => {
           bobBuilt?.()
         },
       }),
-    )
+    })
     void aliceCommit.then(() => releaseBob?.())
     const [, bobResult] = await Promise.all([aliceCommit, bobCommit])
     await flush()
@@ -163,12 +159,14 @@ describe('the commit loop converges, serializes and journals', () => {
       const build = buildLedgerCommit(alice, [])
       try {
         await expect(
-          alice.peer.commit(async () => {
-            const pending = await build()
-            const framed = decodeMemoryCommit(pending.commit)
-            if (framed == null) throw new Error('missing commit')
-            attempts.push({ epoch: framed.epoch, generation: framed.handshakeGeneration })
-            return pending
+          alice.peer.commit({
+            build: async () => {
+              const pending = await build()
+              const framed = decodeMemoryCommit(pending.commit)
+              if (framed == null) throw new Error('missing commit')
+              attempts.push({ epoch: framed.epoch, generation: framed.handshakeGeneration })
+              return pending
+            },
           }),
         ).resolves.toEqual({})
         expect(attempts.map((attempt) => attempt.epoch)).toEqual([1, 1])
@@ -209,10 +207,12 @@ describe('the commit loop converges, serializes and journals', () => {
     const attempts: Array<number | undefined> = []
     const first = buildLedgerCommit(alice, [])
     await expect(
-      alice.peer.commit(async () => {
-        const pending = await first()
-        attempts.push(decodeMemoryCommit(pending.commit)?.handshakeGeneration)
-        return pending
+      alice.peer.commit({
+        build: async () => {
+          const pending = await first()
+          attempts.push(decodeMemoryCommit(pending.commit)?.handshakeGeneration)
+          return pending
+        },
       }),
     ).rejects.toThrow(CommitDeadlineError)
     await alice.peer.dispose()
@@ -222,10 +222,12 @@ describe('the commit loop converges, serializes and journals', () => {
     })
     const retry = buildLedgerCommit(bob, [])
     try {
-      await bob.peer.commit(async () => {
-        const pending = await retry()
-        attempts.push(decodeMemoryCommit(pending.commit)?.handshakeGeneration)
-        return pending
+      await bob.peer.commit({
+        build: async () => {
+          const pending = await retry()
+          attempts.push(decodeMemoryCommit(pending.commit)?.handshakeGeneration)
+          return pending
+        },
       })
       expect(attempts).toHaveLength(2)
       expect(attempts[1]).toBeGreaterThan(attempts[0] ?? -1)
@@ -248,8 +250,8 @@ describe('the commit loop converges, serializes and journals', () => {
     // Both calls are made before either can finish. The compare-and-set cannot help here —
     // it resolves races between devices, and these are two callers on one.
     await Promise.all([
-      alice.peer.commit(buildLedgerCommit(alice, [first], { framedAt })),
-      alice.peer.commit(buildLedgerCommit(alice, [second], { framedAt })),
+      alice.peer.commit({ build: buildLedgerCommit(alice, [first], { framedAt }) }),
+      alice.peer.commit({ build: buildLedgerCommit(alice, [second], { framedAt }) }),
     ])
     await flush()
 
@@ -289,7 +291,7 @@ describe('the commit loop converges, serializes and journals', () => {
     await flush()
 
     const token = 'signed-token: carol is an admin'
-    await alice.peer.commit(buildLedgerCommit(alice, [token]))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })
 
     // The ordering, not merely the presence of both. The write is durable BEFORE the frame
     // can reach the hub — that is the window a crash lands in — and the slot is cleared
@@ -329,7 +331,7 @@ describe('the commit loop converges, serializes and journals', () => {
     const token = 'signed-token: carol is an admin'
     const framedAt: Array<number> = []
     await expect(
-      alice.peer.commit(buildLedgerCommit(alice, [token], { framedAt })),
+      alice.peer.commit({ build: buildLedgerCommit(alice, [token], { framedAt }) }),
     ).resolves.toEqual({})
     await flush()
 
@@ -361,9 +363,9 @@ describe('the commit loop converges, serializes and journals', () => {
 
     const framedAt: Array<number> = []
     await expect(
-      alice.peer.commit(
-        buildLedgerCommit(alice, ['signed-token: carol is an admin'], { framedAt }),
-      ),
+      alice.peer.commit({
+        build: buildLedgerCommit(alice, ['signed-token: carol is an admin'], { framedAt }),
+      }),
     ).rejects.toThrow(CommitDeadlineError)
 
     expect(framedAt).toEqual([1]) // one attempt was made, and its loss was past the deadline
@@ -382,7 +384,7 @@ describe('the commit loop converges, serializes and journals', () => {
     // ledger commit's onAccepted does — so a peer that adopts the blob itself on acceptance
     // looks right. The Welcome is what it silently drops: it lives in the host's onAccepted,
     // not in `bodies`, and the peer cannot produce one.
-    await alice.peer.commit(buildInviteCommit(alice, 'dave'))
+    await alice.peer.commit({ build: buildInviteCommit(alice, 'dave') })
     await flush()
 
     expect(alice.welcomes).toEqual(['dave'])
@@ -419,7 +421,9 @@ describe('the commit loop converges, serializes and journals', () => {
     // it should ever need — and the zero deadline says so: a wrong anchor fails at once
     // instead of rebasing against a head it can never reach until it runs out of time.
     const token = 'signed-token: carol is an admin'
-    await expect(alice.peer.commit(buildLedgerCommit(alice, [token]))).resolves.toEqual({})
+    await expect(alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })).resolves.toEqual(
+      {},
+    )
     await flush()
 
     expect(alice.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
@@ -453,7 +457,9 @@ describe('the commit loop converges, serializes and journals', () => {
     await flush()
 
     const token = 'signed-token: carol is an admin'
-    await expect(alice.peer.commit(buildLedgerCommit(alice, [token]))).resolves.toEqual({})
+    await expect(alice.peer.commit({ build: buildLedgerCommit(alice, [token]) })).resolves.toEqual(
+      {},
+    )
     await flush()
 
     // Its cursor is null: it processed nothing, because there was nothing there. Anchoring
@@ -478,7 +484,7 @@ describe('the commit loop converges, serializes and journals', () => {
     })
     // No group, so nothing to commit to and nothing to replay. A no-op `commit` that
     // resolved would tell a host its commit landed when there is no group at all.
-    await expect(peer.commit(async () => ({}) as never)).rejects.toThrow(/no MLS port/)
+    await expect(peer.commit({ build: async () => ({}) as never })).rejects.toThrow(/no MLS port/)
     await expect(peer.replay()).resolves.toEqual({})
     await peer.dispose()
   })

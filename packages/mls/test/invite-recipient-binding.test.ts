@@ -53,7 +53,7 @@ describe('commitInvite binds the key package to the invite recipient', () => {
     const bob = randomIdentity()
     const mallory = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-substitution')
+    const { group } = await createGroup({ identity: alice, groupID: 'g-substitution' })
     const { invite } = await createInvite({
       group,
       identity: alice,
@@ -62,15 +62,18 @@ describe('commitInvite binds the key package to the invite recipient', () => {
     })
 
     // What a key-package store that dropped its owner predicate would serve.
-    const malloryBundle = await createKeyPackageBundle(mallory, {
+    const malloryBundle = await createKeyPackageBundle({
+      identity: mallory,
       capabilities: controlCapabilities(),
     })
 
     // `.catch` returning the raw error collapses to `unknown`, so `instanceof` is a real narrow
     // rather than an assertion — and it fails the test on the resolve path too.
-    const thrown: unknown = await commitInvite(group, malloryBundle.publicPackage, invite).catch(
-      (error: unknown) => error,
-    )
+    const thrown: unknown = await commitInvite({
+      group,
+      keyPackage: malloryBundle.publicPackage,
+      invite,
+    }).catch((error: unknown) => error)
 
     if (!(thrown instanceof InviteRecipientMismatchError)) {
       throw new Error(`commitInvite resolved, or rejected with the wrong error: ${String(thrown)}`)
@@ -85,26 +88,30 @@ describe('commitInvite binds the key package to the invite recipient', () => {
     const bob = randomIdentity()
     const mallory = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-no-advance')
+    const { group } = await createGroup({ identity: alice, groupID: 'g-no-advance' })
     const { invite } = await createInvite({
       group,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const malloryBundle = await createKeyPackageBundle(mallory, {
+    const malloryBundle = await createKeyPackageBundle({
+      identity: mallory,
       capabilities: controlCapabilities(),
     })
 
-    await expect(commitInvite(group, malloryBundle.publicPackage, invite)).rejects.toThrow(
-      InviteRecipientMismatchError,
-    )
+    await expect(
+      commitInvite({ group, keyPackage: malloryBundle.publicPackage, invite }),
+    ).rejects.toThrow(InviteRecipientMismatchError)
 
     // The rejection left the source handle untouched: the same invite still commits
     // honestly afterward, admitting Bob and never Mallory — proving both that no partial
     // state from the aborted attempt survived and that the mutex released on rejection.
-    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
-    const { newGroup } = await commitInvite(group, bobBundle.publicPackage, invite)
+    const bobBundle = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: controlCapabilities(),
+    })
+    const { newGroup } = await commitInvite({ group, keyPackage: bobBundle.publicPackage, invite })
     expect(newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
     expect(newGroup.roster.roles.get(normalizeDID(mallory.id))).toBeUndefined()
   })
@@ -113,8 +120,11 @@ describe('commitInvite binds the key package to the invite recipient', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-honest')
-    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { group } = await createGroup({ identity: alice, groupID: 'g-honest' })
+    const bobBundle = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: controlCapabilities(),
+    })
     const { invite } = await createInvite({
       group,
       identity: alice,
@@ -122,7 +132,11 @@ describe('commitInvite binds the key package to the invite recipient', () => {
       permission: 'member',
     })
 
-    const { welcomeMessage, newGroup } = await commitInvite(group, bobBundle.publicPackage, invite)
+    const { welcomeMessage, newGroup } = await commitInvite({
+      group,
+      keyPackage: bobBundle.publicPackage,
+      invite,
+    })
 
     const { group: bobGroup } = await processWelcome({
       identity: bob,
@@ -141,14 +155,20 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-no-role')
-    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { group } = await createGroup({ identity: alice, groupID: 'g-no-role' })
+    const bobBundle = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: controlCapabilities(),
+    })
 
-    const noteToken = await signLedgerEntry(alice, {
-      type: 'app.note',
-      groupID: 'g-no-role',
-      subject: bob.id,
-      value: 'not a role grant',
+    const noteToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: 'app.note',
+        groupID: 'g-no-role',
+        subject: bob.id,
+        value: 'not a role grant',
+      },
     })
     const invite: Invite = {
       groupID: 'g-no-role',
@@ -157,9 +177,9 @@ describe('commitInvite refuses an invite it cannot bind', () => {
       ledgerEntries: [...group.ledgerTokens, noteToken],
     }
 
-    await expect(commitInvite(group, bobBundle.publicPackage, invite)).rejects.toThrow(
-      /enacts no kumiai\.role entry for this group/,
-    )
+    await expect(
+      commitInvite({ group, keyPackage: bobBundle.publicPackage, invite }),
+    ).rejects.toThrow(/enacts no kumiai\.role entry for this group/)
   })
 
   test('an invite carrying a promotion binds to the grant that comes last, not the promotion', async () => {
@@ -168,21 +188,31 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     const carol = randomIdentity()
 
     // Bob joins first, so promoting him is a grant to an existing member.
-    const { group } = await createGroup(alice, 'g-promotion-ride')
-    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { group } = await createGroup({ identity: alice, groupID: 'g-promotion-ride' })
+    const bobBundle = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: controlCapabilities(),
+    })
     const { invite: bobInvite } = await createInvite({
       group,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const { newGroup: withBob } = await commitInvite(group, bobBundle.publicPackage, bobInvite)
+    const { newGroup: withBob } = await commitInvite({
+      group,
+      keyPackage: bobBundle.publicPackage,
+      invite: bobInvite,
+    })
 
-    const promoteBob = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: 'g-promotion-ride',
-      subject: bob.id,
-      value: 'admin',
+    const promoteBob = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: 'g-promotion-ride',
+        subject: bob.id,
+        value: 'admin',
+      },
     })
     const { invite: carolInvite } = await createInvite({
       group: withBob,
@@ -203,14 +233,15 @@ describe('commitInvite refuses an invite it cannot bind', () => {
 
     // Handed the promoted member's key package instead of Carol's, the guard refuses: being
     // *a* role subject in the invite is not enough, it must be the one the invite ends on.
-    const bobSecondBundle = await createKeyPackageBundle(bob, {
+    const bobSecondBundle = await createKeyPackageBundle({
+      identity: bob,
       capabilities: controlCapabilities(),
     })
-    const thrown: unknown = await commitInvite(
-      withBob,
-      bobSecondBundle.publicPackage,
-      withPromotion,
-    ).catch((error: unknown) => error)
+    const thrown: unknown = await commitInvite({
+      group: withBob,
+      keyPackage: bobSecondBundle.publicPackage,
+      invite: withPromotion,
+    }).catch((error: unknown) => error)
 
     if (!(thrown instanceof InviteRecipientMismatchError)) {
       throw new Error(`commitInvite resolved, or rejected with the wrong error: ${String(thrown)}`)
@@ -219,10 +250,15 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     expect(thrown.actualDID).toBe(bob.id)
 
     // And handed Carol's, it commits — the promotion riding along is not itself a problem.
-    const carolBundle = await createKeyPackageBundle(carol, {
+    const carolBundle = await createKeyPackageBundle({
+      identity: carol,
       capabilities: controlCapabilities(),
     })
-    const { newGroup } = await commitInvite(withBob, carolBundle.publicPackage, withPromotion)
+    const { newGroup } = await commitInvite({
+      group: withBob,
+      keyPackage: carolBundle.publicPackage,
+      invite: withPromotion,
+    })
     expect(newGroup.roster.roles.get(bob.id)).toBe('admin')
     expect(newGroup.roster.roles.get(carol.id)).toBe('member')
   })
@@ -231,8 +267,11 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-empty-enacted')
-    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { group } = await createGroup({ identity: alice, groupID: 'g-empty-enacted' })
+    const bobBundle = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: controlCapabilities(),
+    })
 
     // Enacts nothing new — the shape that used to commit (adding bob with no role grant
     // at all) and now hits the same "no recipient to bind to" refusal as an invite whose
@@ -244,9 +283,9 @@ describe('commitInvite refuses an invite it cannot bind', () => {
       ledgerEntries: [...group.ledgerTokens],
     }
 
-    await expect(commitInvite(group, bobBundle.publicPackage, invite)).rejects.toThrow(
-      /enacts no kumiai\.role entry for this group/,
-    )
+    await expect(
+      commitInvite({ group, keyPackage: bobBundle.publicPackage, invite }),
+    ).rejects.toThrow(/enacts no kumiai\.role entry for this group/)
   })
 
   test('the explicit recipient must match the standard invite role grant', async () => {
@@ -254,18 +293,24 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     const carol = randomIdentity()
     const dave = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-grant-order')
-    const carolToken = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: 'g-grant-order',
-      subject: carol.id,
-      value: 'member',
+    const { group } = await createGroup({ identity: alice, groupID: 'g-grant-order' })
+    const carolToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: 'g-grant-order',
+        subject: carol.id,
+        value: 'member',
+      },
     })
-    const daveToken = await signLedgerEntry(alice, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: 'g-grant-order',
-      subject: dave.id,
-      value: 'member',
+    const daveToken = await signLedgerEntry({
+      identity: alice,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: 'g-grant-order',
+        subject: dave.id,
+        value: 'member',
+      },
     })
     const invite: Invite = {
       groupID: 'g-grant-order',
@@ -273,16 +318,25 @@ describe('commitInvite refuses an invite it cannot bind', () => {
       recipientDID: carol.id,
       ledgerEntries: [...group.ledgerTokens, carolToken, daveToken],
     }
-    const daveBundle = await createKeyPackageBundle(dave, { capabilities: controlCapabilities() })
+    const daveBundle = await createKeyPackageBundle({
+      identity: dave,
+      capabilities: controlCapabilities(),
+    })
 
-    await expect(commitInvite(group, daveBundle.publicPackage, invite)).rejects.toMatchObject({
+    await expect(
+      commitInvite({ group, keyPackage: daveBundle.publicPackage, invite }),
+    ).rejects.toMatchObject({
       name: 'InviteRecipientMismatchError',
       expectedDID: carol.id,
       actualDID: dave.id,
     })
-    const { newGroup } = await commitInvite(group, daveBundle.publicPackage, {
-      ...invite,
-      recipientDID: dave.id,
+    const { newGroup } = await commitInvite({
+      group,
+      keyPackage: daveBundle.publicPackage,
+      invite: {
+        ...invite,
+        recipientDID: dave.id,
+      },
     })
 
     expect(newGroup.roster.roles.get(normalizeDID(dave.id))).toBe('member')
@@ -295,8 +349,11 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-x509')
-    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { group } = await createGroup({ identity: alice, groupID: 'g-x509' })
+    const bobBundle = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: controlCapabilities(),
+    })
     const { invite } = await createInvite({
       group,
       identity: alice,
@@ -314,7 +371,7 @@ describe('commitInvite refuses an invite it cannot bind', () => {
       },
     }
 
-    await expect(commitInvite(group, x509Package, invite)).rejects.toThrow(
+    await expect(commitInvite({ group, keyPackage: x509Package, invite })).rejects.toThrow(
       /non-basic credential, which names no DID to bind/,
     )
   })
@@ -331,8 +388,11 @@ describe('commitInvite normalizes both DIDs before comparing', () => {
       didMethod: 'peer:4',
     })
 
-    const { group } = await createGroup(alice, 'g-peer4-longform')
-    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { group } = await createGroup({ identity: alice, groupID: 'g-peer4-longform' })
+    const bobBundle = await createKeyPackageBundle({
+      identity: bob,
+      capabilities: controlCapabilities(),
+    })
 
     // The credential carries bob's short form; the invite names his long form. Both must
     // normalize to the same DID or this honest path breaks.
@@ -344,7 +404,11 @@ describe('commitInvite normalizes both DIDs before comparing', () => {
       permission: 'member',
     })
 
-    const { welcomeMessage, newGroup } = await commitInvite(group, bobBundle.publicPackage, invite)
+    const { welcomeMessage, newGroup } = await commitInvite({
+      group,
+      keyPackage: bobBundle.publicPackage,
+      invite,
+    })
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite,
@@ -360,19 +424,19 @@ describe('commitInvite normalizes both DIDs before comparing', () => {
 test('commitInvite refuses an empty recipient credential ID', async () => {
   const identity = randomIdentity()
   const recipient = randomIdentity()
-  const { group } = await createGroup(identity, 'empty-recipient')
+  const { group } = await createGroup({ identity, groupID: 'empty-recipient' })
   const { invite } = await createInvite({
     group,
     identity,
     recipientDID: recipient.id,
     permission: 'member',
   })
-  const bundle = await createKeyPackageBundle(recipient)
+  const bundle = await createKeyPackageBundle({ identity: recipient })
   bundle.publicPackage.leafNode.credential = {
     credentialType: defaultCredentialTypes.basic,
     identity: new TextEncoder().encode(JSON.stringify({ id: '' })),
   }
-  await expect(commitInvite(group, bundle.publicPackage, invite)).rejects.toThrow(
+  await expect(commitInvite({ group, keyPackage: bundle.publicPackage, invite })).rejects.toThrow(
     'recipient credential names no DID',
   )
 })

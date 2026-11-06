@@ -54,11 +54,17 @@ function frame(value: string): Uint8Array {
   return out
 }
 
-export async function confirmationKey(
-  group: GroupHandle,
-  position: string,
-  commitDigest: string,
-): Promise<Uint8Array> {
+export type ConfirmationKeyParams = {
+  group: GroupHandle
+  position: string
+  commitDigest: string
+}
+
+export async function confirmationKey({
+  group,
+  position,
+  commitDigest,
+}: ConfirmationKeyParams): Promise<Uint8Array> {
   const fields = [group.groupID, position, commitDigest].map(frame)
   const context = new Uint8Array(fields.reduce((size, field) => size + field.length, 0))
   let offset = 0
@@ -66,10 +72,15 @@ export async function confirmationKey(
     context.set(field, offset)
     offset += field.length
   }
-  return await group.exportSecret('kumiai.rejoin-confirm', context, 32)
+  return await group.exportSecret({ label: 'kumiai.rejoin-confirm', context, length: 32 })
 }
 
-export function confirmationTag(key: Uint8Array, requestID: string): string {
+export type ConfirmationTagParams = {
+  key: Uint8Array
+  requestID: string
+}
+
+export function confirmationTag({ key, requestID }: ConfirmationTagParams): string {
   return encodeMultibase(hmac(sha256, key, utf8.encode(requestID)))
 }
 
@@ -103,7 +114,7 @@ export type SealRecoveryVerdictParams = {
 
 export async function sealRecoveryVerdict(params: SealRecoveryVerdictParams): Promise<Uint8Array> {
   const { group, identity, request, verdict } = params
-  const verified = await verifyRecoveryRequest(request)
+  const verified = await verifyRecoveryRequest({ token: request, crypto: group.crypto })
   if (
     normalizeDID(identity.id) !== normalizeDID(group.credential.id) ||
     !isRecoveryVerdict(verdict) ||
@@ -112,10 +123,10 @@ export async function sealRecoveryVerdict(params: SealRecoveryVerdictParams): Pr
     verdict.requestID !== verified.requestID
   )
     throw new Error('Recovery verdict does not bind the signed request')
-  const token = await identity.signToken(
-    { ...verdict, type: VERDICT_TYPE },
-    { embedLongForm: true },
-  )
+  const token = await identity.signToken({
+    payload: { ...verdict, type: VERDICT_TYPE },
+    embedLongForm: true,
+  })
   // A refusal can answer an agent whose leaf the responder no longer holds.
   return await sealToRequest({
     kind: VERDICT_REPLY,
@@ -137,7 +148,10 @@ export async function openRecoveryVerdict(
     requestID,
     ephemeralPrivateKey,
   })
-  const token = await verifyToken(new TextDecoder().decode(plaintext))
+  const token = await verifyToken({
+    crypto: group.crypto,
+    token: new TextDecoder().decode(plaintext),
+  })
   if (
     !isVerifiedToken(token) ||
     token.payload.type !== VERDICT_TYPE ||
@@ -165,10 +179,13 @@ export type RecoverySignerEligibleParams = {
   now?: number
 }
 
-export function recoverySignerEligible(params: RecoverySignerEligibleParams): boolean {
+export async function recoverySignerEligible(
+  params: RecoverySignerEligibleParams,
+): Promise<boolean> {
   const { group, registry, signer, now = Date.now() / 1000 } = params
   const controller = group.anchor.controller
   if (controller == null) return false
+  const options = { crypto: group.crypto }
   try {
     const binding = group.bindingOfDID(signer)
     if (binding?.controller !== controller || binding.prefix == null) return false
@@ -182,22 +199,28 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
         registry.devices.get(normalizeDID(payload.iss))?.status === 'revoked')
     )
       return false
-    const folded = foldChain(controller, binding.prefix)
+    const folded = await foldChain(controller, binding.prefix, options)
     const projection = registry.controllers.get(normalizeDID(controller))
     if (!folded.ok || (folded.states.at(-1)?.gen ?? 0) < (projection?.genFloor ?? 0)) return false
     const bound: ControllerBinding = { ...binding, id: controller, prefix: binding.prefix }
-    const authority = effectiveAuthorityOf(
-      { did: signer, binding: bound, leafKey: binding.leafKey },
+    const authority = await effectiveAuthorityOf({
+      leaf: { did: signer, binding: bound, leafKey: binding.leafKey },
       registry,
       controller,
-    )
+      ...options,
+    })
     if ('status' in authority) return false
     if (binding.member != null && authority.slot === 'membership') {
-      const status = memberRootStatus(registry, controller, {
-        kind: 'member',
-        did: signer,
-        add: binding.member.add,
-        gen: binding.member.g,
+      const status = await memberRootStatus({
+        registry,
+        controller,
+        root: {
+          kind: 'member',
+          did: signer,
+          add: binding.member.add,
+          gen: binding.member.g,
+        },
+        ...options,
       })
       if (
         status.status !== 'effective' ||
@@ -206,9 +229,14 @@ export function recoverySignerEligible(params: RecoverySignerEligibleParams): bo
       )
         return false
     }
-    const expiry = leafExpiry(bound, registry, controller)
+    const expiry = await leafExpiry({ binding: bound, registry, controller, ...options })
     if (expiry == null) return false
-    const time = attestedTreeTime(group.state.ratchetTree, registry, controller)
+    const time = await attestedTreeTime({
+      tree: group.state.ratchetTree,
+      registry,
+      controllerID: controller,
+      ...options,
+    })
     return expiry >= Math.max(time, now - 300)
   } catch {
     return false

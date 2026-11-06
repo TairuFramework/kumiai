@@ -1,3 +1,4 @@
+import type { ControllerLog } from '@kokuin/controller'
 import { type OwnIdentity, randomIdentity, stringifyToken } from '@kokuin/token'
 import {
   type ControllerBinding,
@@ -52,16 +53,14 @@ export async function createRealBoundRecovery(
     managementFixture: (kind: 'root' | 'mbr' | 'membership') => Promise<{
       alice: OwnIdentity
       bob: OwnIdentity
-      log: Parameters<typeof publishControllerLog>[1]
+      log: ControllerLog
       creatorBinding: ControllerBinding
       binding: (iat: number) => Promise<ControllerBinding>
       member: { did: string; add: string }
       newcomer: OwnIdentity
       deniedDID: string
       denialAliases: { long: string; short: string }
-      nextLog: (
-        op: 'log' | 'deny' | 'deny-alias' | 'remove',
-      ) => Parameters<typeof publishControllerLog>[1]
+      nextLog: (op: 'log' | 'deny' | 'deny-alias' | 'remove') => Promise<ControllerLog>
       admissionBinding: (
         authority: 'effective' | 'removed' | 'unavailable' | 'foreign',
       ) => Promise<ControllerBinding>
@@ -91,24 +90,34 @@ export async function createRealBoundRecovery(
     : await management.binding(now - 20)
   let offered = cached
   let source = (
-    await createGroup(alice, 'bound-conformance', {
+    await createGroup({
+      identity: alice,
+      groupID: 'bound-conformance',
       controller: creatorBinding,
       controllerLog: management.log,
     })
   ).group
   if (options.replaceStaleLeaf) {
-    const staleBundle = await createKeyPackageBundle(bob, {
+    const staleBundle = await createKeyPackageBundle({
+      identity: bob,
       controller: await fixture.timedBinding({ identity: bob, iat: now - 10, exp: now + 1000 }),
     })
     const stale = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
-    source = (await commitInvite(source, staleBundle.publicPackage, stale.invite)).newGroup
+    source = (
+      await commitInvite({
+        group: source,
+        keyPackage: staleBundle.publicPackage,
+        invite: stale.invite,
+      })
+    ).newGroup
   }
-  const bundle = await createKeyPackageBundle(bob, {
+  const bundle = await createKeyPackageBundle({
+    identity: bob,
     controller: cached,
     controllerLog: management.log,
   })
   const { invite } = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
-  const added = await commitInvite(source, bundle.publicPackage, invite)
+  const added = await commitInvite({ group: source, keyPackage: bundle.publicPackage, invite })
   source = added.newGroup
   const slot = createLedgerEntrySlot()
   const group = (
@@ -154,7 +163,10 @@ export async function createRealBoundRecovery(
     responder,
     ratchet: async () => {
       const current = await access.read((handle) => handle)
-      await guardedReplace(access, (await renewLeaf(current, cached)).newGroup)
+      await guardedReplace({
+        access,
+        next: (await renewLeaf({ group: current, binding: cached })).newGroup,
+      })
     },
     replaceBinding: async () => {
       offered = await management.binding(now - 10)
@@ -163,26 +175,30 @@ export async function createRealBoundRecovery(
       if (op === 'remove' && bindingKind !== 'root') {
         // Preserve a root-bound peer leaf so recovery reaches candidate validation after removal.
         const current = await access.read((handle) => handle)
-        const renewed = await renewLeaf(
-          current,
-          await fixture.timedBinding({
+        const renewed = await renewLeaf({
+          group: current,
+          binding: await fixture.timedBinding({
             identity: bob,
             iat: now - 10,
             exp: now + 1000,
           }),
-        )
+        })
         const entries = renewed.newGroup.ledgerTokens.slice(current.ledgerTokens.length)
-        const applied = await responder.processCommit(renewed.commitMessage, {
-          senderDID: bob.id,
-          resolveLedgerEntries: async () => entries,
+        const applied = await responder.processCommit({
+          commit: renewed.commitMessage,
+          context: {
+            senderDID: bob.id,
+            resolveLedgerEntries: async () => entries,
+          },
         })
         if (!applied.advanced) throw new Error('Root-bound requester leaf was not installed')
       }
-      const log = management.nextLog(op)
+      const log = await management.nextLog(op)
       const result =
         op === 'log'
-          ? await publishControllerLog(source, log)
-          : await revokeWithProof(source, {
+          ? await publishControllerLog({ group: source, log })
+          : await revokeWithProof({
+              group: source,
               log,
               ...(op === 'deny' || op === 'deny-alias'
                 ? { deny: [management.deniedDID] }
@@ -251,7 +267,9 @@ export async function createRealGroup(size: number, groupID: string): Promise<Re
 
   const committerIdentity = randomIdentity()
   const committerSlot = makeSlot()
-  const { group } = await createGroup(committerIdentity, groupID, {
+  const { group } = await createGroup({
+    identity: committerIdentity,
+    groupID,
     resolveLedgerEntries: committerSlot.resolve,
   })
   const committer: RealMember = {
@@ -271,12 +289,17 @@ export async function createRealGroup(size: number, groupID: string): Promise<Re
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) bodies.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle(identity)
-    const added = await commitInvite(committer.handle, bundle.publicPackage, invite)
+    const bundle = await createKeyPackageBundle({ identity })
+    const added = await commitInvite({
+      group: committer.handle,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     committer.handle = added.newGroup
     // The members already in the group walk forward over the same commit the newcomer's
     // Welcome describes, so the whole group ends at one epoch.
-    for (const member of members) await member.handle.processMessage(added.commitMessage)
+    for (const member of members)
+      await member.handle.processMessage({ message: added.commitMessage })
     const { group: joined } = await processWelcome({
       identity,
       invite,
@@ -301,7 +324,7 @@ export async function buildRealCommit(
     if (member == null) throw new Error(`no member at index ${options.removes}`)
     const leafIndex = group.committer.handle.findMemberLeafIndex(member.identity.id)
     if (leafIndex == null) throw new Error(`no leaf for ${member.identity.id}`)
-    const removed = await removeMember(group.committer.handle, leafIndex)
+    const removed = await removeMember({ group: group.committer.handle, leafIndex })
     group.committer.handle = removed.newGroup
     return removed.commitMessage
   }
@@ -316,8 +339,12 @@ export async function buildRealCommit(
     permission: 'member',
   })
   for (const token of invite.ledgerEntries) group.bodies.set(ledgerEntryDigest(token), token)
-  const bundle = await createKeyPackageBundle(newcomer)
-  const added = await commitInvite(group.committer.handle, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: newcomer })
+  const added = await commitInvite({
+    group: group.committer.handle,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   group.committer.handle = added.newGroup
   return added.commitMessage
 }
@@ -390,10 +417,10 @@ export async function sealRealRecoveryVerdict(
   const { sealToRequest } = await import(
     new URL('../../../mls/src/recovery.ts', import.meta.url).href
   )
-  const token = await member.identity.signToken(
-    { ...verdict, type: 'kumiai.recovery-verdict' },
-    { embedLongForm: true },
-  )
+  const token = await member.identity.signToken({
+    payload: { ...verdict, type: 'kumiai.recovery-verdict' },
+    embedLongForm: true,
+  })
   return await sealToRequest({
     kind: {
       hpkeInfo: new TextEncoder().encode('kumiai/mls/recovery-verdict/v1'),

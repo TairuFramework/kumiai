@@ -20,13 +20,11 @@ import {
 } from '@kumiai/mls'
 import type {
   AppliedRecovery,
-  CommitContext,
   CommitHeader,
   GroupMLS,
   OpenedRecoveryVerdict,
   ProcessCommitResult,
   RecoveryRefusalReason,
-  RecoveryVerdict,
   RosterEntry,
 } from '@kumiai/rpc'
 
@@ -125,9 +123,15 @@ type PendingRequest = {
  */
 const REQUEST_TTL_MS = 120_000
 
+export type RecoveryPendingPutParams = {
+  requestID: string
+  ephemeralPrivateKey: Uint8Array
+  deadlineMs?: number
+}
+
 export type RecoveryPending = {
   get(requestID: string): Uint8Array | null
-  put(requestID: string, ephemeralPrivateKey: Uint8Array, deadlineMs?: number): void
+  put(params: RecoveryPendingPutParams): void
   delete(requestID: string): void
 }
 
@@ -150,7 +154,7 @@ export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPen
       sweep()
       return requests.get(requestID)?.ephemeralPrivateKey ?? null
     },
-    put: (requestID, ephemeralPrivateKey, deadlineMs = 0) => {
+    put: ({ requestID, ephemeralPrivateKey, deadlineMs = 0 }) => {
       const retentionMs = Math.max(ttlMS, deadlineMs)
       sweep()
       const previous = requests.get(requestID)
@@ -213,7 +217,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const port: GroupMLS = {
     async verifyRecoveryRequest(request: Uint8Array) {
       try {
-        const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
+        const crypto = await access.read((group) => group.crypto)
+        const verified = await verifyRecoveryRequest({
+          token: new TextDecoder().decode(request),
+          crypto,
+        })
         return await access.read((group) =>
           verified.groupID === group.groupID
             ? {
@@ -227,13 +235,13 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         return null
       }
     },
-    async confirmationKey(position: string, commitDigest: string) {
+    async confirmationKey({ position, commitDigest }) {
       return await access.read(async (group) => ({
         epoch: Number(group.epoch),
-        key: await confirmationKey(group, position, commitDigest),
+        key: await confirmationKey({ group, position, commitDigest }),
       }))
     },
-    async sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict) {
+    async sealRecoveryVerdict({ request, verdict }) {
       return await access.read((group) =>
         sealRecoveryVerdict({
           group,
@@ -243,10 +251,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         }),
       )
     },
-    async openRecoveryVerdict(
-      sealed: Uint8Array,
-      requestID: string,
-    ): Promise<OpenedRecoveryVerdict | null> {
+    async openRecoveryVerdict({ sealed, requestID }): Promise<OpenedRecoveryVerdict | null> {
       const held = pending.get(requestID)
       if (held == null) return null
       try {
@@ -291,7 +296,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       }
     },
 
-    async processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult> {
+    async processCommit({ commit, context }): Promise<ProcessCommitResult> {
       const frameEpoch = readMessageEpoch(commit)
       const eligible = await access.read(async (group) => {
         const header = await group.readCommitHeader(commit)
@@ -354,7 +359,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       }
     },
 
-    async createRecoveryRequest(requestID: string, deadlineMs?: number): Promise<Uint8Array> {
+    async createRecoveryRequest({ requestID, deadlineMs }): Promise<Uint8Array> {
       const { request, ephemeralPrivateKey } = await access.read((group) =>
         createRecoveryRequest({
           group,
@@ -362,7 +367,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           requestID,
         }),
       )
-      pending.put(requestID, ephemeralPrivateKey, Math.max(REQUEST_TTL_MS, deadlineMs ?? 0))
+      pending.put({
+        requestID,
+        ephemeralPrivateKey,
+        deadlineMs: Math.max(REQUEST_TTL_MS, deadlineMs ?? 0),
+      })
       return utf8.encode(request)
     },
 
@@ -378,7 +387,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       )
     },
 
-    async applyRecovery(sealed: Uint8Array, requestID: string): Promise<AppliedRecovery> {
+    async applyRecovery({ sealed, requestID }): Promise<AppliedRecovery> {
       const held = pending.get(requestID)
       if (held == null) return null
       let reply: RecoveryGroupInfo
@@ -408,11 +417,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       const rejoined = candidate
       if (
         rejoined.group.anchor.controller != null &&
-        !recoverySignerEligible({
+        !(await recoverySignerEligible({
           group: rejoined.group,
           registry: rejoined.knownRegistry,
           signer: reply.signer,
-        })
+        }))
       )
         return null
       const judge = createVerdictJudge({
@@ -435,7 +444,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         confirmationKey: judge.confirmationKey,
         judgeVerdict: judge.judgeVerdict,
         onAccepted: () => {
-          accepted ??= guardedReplace(access, rejoined.group).catch((error: unknown) => {
+          accepted ??= guardedReplace({ access, next: rejoined.group }).catch((error: unknown) => {
             accepted = undefined
             throw error
           })
@@ -459,7 +468,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       )
     },
 
-    async openSealedLedger(sealed: Uint8Array, requestID: string): Promise<Array<string> | null> {
+    async openSealedLedger({ sealed, requestID }): Promise<Array<string> | null> {
       const held = pending.get(requestID)
       if (held == null) return null
       try {
@@ -484,7 +493,8 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       await access.mutate(async (group, persist) => {
         let persisted = false
         try {
-          await group.bootstrapLedger(tokens, {
+          await group.bootstrapLedger({
+            tokens,
             persist: async (current) => {
               await persist(current)
               persisted = true

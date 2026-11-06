@@ -1,6 +1,7 @@
 import { Client, RequestError } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
+import { createNapiCrypto } from '@kokuin/crypto-napi'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import { HubClient } from '@kumiai/hub-client'
 import { type HubProtocol, hubErrorFromCode, type StoredMessage } from '@kumiai/hub-protocol'
@@ -98,14 +99,18 @@ export type WireHub = {
   dispose: () => Promise<void>
 }
 
+// Every frame on this hub is a signed RPC, so it verifies on the native provider, as a host does.
+const crypto = createNapiCrypto()
+
 export function createWireHub(options: { retentionSeconds?: number } = {}): WireHub {
   const store = createMemoryStore({
     retention: { max: options.retentionSeconds ?? 30 * 24 * 60 * 60 },
   })
-  const hubIdentity = randomIdentity()
+  const hubIdentity = randomIdentity({ crypto })
   const firstTransports: HubTransports = new DirectTransports()
   const allTransports: Array<HubTransports> = [firstTransports]
   const hub = createHub({
+    crypto,
     identity: hubIdentity,
     store,
     transport: firstTransports.server,
@@ -133,12 +138,12 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
     })
 
     return {
-      subscribe: async (_subscriberDID, topicID, subscribeOptions) => {
+      subscribe: async ({ subscriberDID: _subscriberDID, topicID, ...subscribeOptions }) => {
         // The hub authenticates the subscriber from the connection, so the DID the caller
         // passes is not sent — it is already the connection's.
         await client.subscribe({ topicID, ...subscribeOptions })
       },
-      unsubscribe: async (_subscriberDID, topicID) => {
+      unsubscribe: async ({ subscriberDID: _subscriberDID, topicID }) => {
         await client.unsubscribe({ topicID })
       },
       publish: async (params) => {
@@ -152,7 +157,7 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
           })
         } catch (error) {
           if (error instanceof RequestError)
-            throw hubErrorFromCode(error.code, error.message) ?? error
+            throw hubErrorFromCode({ code: error.code, message: error.message }) ?? error
           throw error
         }
       },

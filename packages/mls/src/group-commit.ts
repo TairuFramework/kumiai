@@ -118,7 +118,7 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     }
     appended = [...(params.entries ?? [])]
     for (const token of appended) {
-      const verified = await verifyLedgerEntry(token)
+      const verified = await verifyLedgerEntry({ token, crypto: group.crypto })
       if (
         verified == null ||
         verified.entry.groupID !== group.groupID ||
@@ -128,29 +128,38 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
         throw new Error('createInvite: entries must be consumer entries signed by the inviter')
     }
     if (params.controllerLog != null) {
-      const delta = controllerLogDelta(group, params.controllerLog)
+      const delta = await controllerLogDelta({ group, log: params.controllerLog })
       if (delta != null)
         appended.unshift(
-          await signLedgerEntry(identity, {
-            type: DEVICE_ENTRY_TYPE,
-            groupID: group.groupID,
-            subject: group.anchor.controller,
-            value: { op: 'log', proof: delta },
+          await signLedgerEntry({
+            identity,
+            entry: {
+              type: DEVICE_ENTRY_TYPE,
+              groupID: group.groupID,
+              subject: group.anchor.controller,
+              value: { op: 'log', proof: delta },
+            },
           }),
         )
     }
   } else {
     if (params.permission == null)
       throw new Error('createInvite: standard invites require permission')
-    if (group.roster.roles.get(authority(group.registry, identity.id)) !== 'admin') {
+    if (
+      group.roster.roles.get(authority({ registry: group.registry, issuer: identity.id })) !==
+      'admin'
+    ) {
       throw new Error('createInvite: the inviter must be an admin in the group roster')
     }
     appended = [
-      await signLedgerEntry(identity, {
-        type: ROLE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: recipientDID,
-        value: params.permission,
+      await signLedgerEntry({
+        identity,
+        entry: {
+          type: ROLE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: recipientDID,
+          value: params.permission,
+        },
       }),
     ]
   }
@@ -179,7 +188,7 @@ function extensionsWithHead(
   if (current == null) {
     throw new Error('group has no ledger head extension; it cannot enact ledger entries')
   }
-  const next = buildLedgerHeadExtension(extendHead(current.head, entryIDs))
+  const next = buildLedgerHeadExtension(extendHead({ head: current.head, entryIDs }))
   return group.state.groupContext.extensions.map((ext) =>
     ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE ? next : ext,
   )
@@ -257,7 +266,8 @@ export async function commitWithEntries(
   if (
     requireAdmin &&
     group.anchor.controller == null &&
-    group.roster.roles.get(authority(group.registry, group.credential.id)) !== 'admin'
+    group.roster.roles.get(authority({ registry: group.registry, issuer: group.credential.id })) !==
+      'admin'
   ) {
     throw new Error('the committer must be an admin in the group roster')
   }
@@ -270,14 +280,15 @@ export async function commitWithEntries(
   // dead paper no matter who commits it.
   const inputs: Array<FoldInput> = []
   for (const token of enacted) {
-    const verified = await verifyLedgerEntry(token)
+    const verified = await verifyLedgerEntry({ token, crypto: group.crypto })
     if (verified == null) {
       throw new Error('cannot enact a ledger entry whose signature does not verify')
     }
     inputs.push({ verified, entryID: ledgerEntryDigest(token) })
   }
-  const foldEntries = () =>
-    foldEnvelope({
+  const foldEntries = async () =>
+    await foldEnvelope({
+      crypto: group.crypto,
       baseRoster: group.roster,
       baseRegistry: group.registry,
       entries: inputs,
@@ -290,7 +301,7 @@ export async function commitWithEntries(
               memberController: (did) => group.bindingOfDID(did)?.controller,
             },
     })
-  let fold = foldEntries()
+  let fold = await foldEntries()
   if (!fold.ok) {
     if (fold.error != null) throw fold.error
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
@@ -304,13 +315,17 @@ export async function commitWithEntries(
       senderLeafIndex: sourceState.privatePath.leafIndex,
     })),
   ])
-  const clocks = await preservationClock(group, tree, fold.registry)
+  const clocks = await preservationClock({
+    group,
+    candidateTree: tree,
+    candidateRegistry: fold.registry,
+  })
   for (const clock of clocks) {
-    const verified = await verifyLedgerEntry(clock)
+    const verified = await verifyLedgerEntry({ token: clock, crypto: group.crypto })
     if (verified == null) throw new Error('Invalid preservation clock')
     enacted.push(clock)
     inputs.push({ verified, entryID: ledgerEntryDigest(clock) })
-    fold = foldEntries()
+    fold = await foldEntries()
     if (!fold.ok) throw fold.error ?? new Error(fold.reason)
   }
 
@@ -318,7 +333,7 @@ export async function commitWithEntries(
   // registry so the committer never authors a commit every receiver's own gate will reject.
   const proofCtx = {
     bindingOfDID: (d: string) => group.bindingOfDID(d),
-    controllerOf: (d: string) => controllerOf(group.registry, d),
+    controllerOf: (d: string) => controllerOf({ registry: group.registry, deviceDID: d }),
   }
   for (const input of inputs) {
     if (input.verified.entry.type !== DEVICE_ENTRY_TYPE) continue
@@ -328,7 +343,13 @@ export async function commitWithEntries(
     ) {
       continue
     }
-    const ok = await verifyDeviceEntry(input.verified as VerifiedLedgerEntry<DeviceValue>, proofCtx)
+    const ok = await verifyDeviceEntry(
+      input.verified as VerifiedLedgerEntry<DeviceValue>,
+      proofCtx,
+      {
+        crypto: group.crypto,
+      },
+    )
     if (!ok) {
       throw new Error(`cannot enact device entry ${input.entryID}: proof verification failed`)
     }
@@ -379,14 +400,14 @@ export async function commitWithEntries(
     ],
   }
   try {
-    gate.check(incoming)
+    await gate.check(incoming)
   } catch (cause) {
     if (params.pendingProposals == null) throw cause
-    const error = new CommitRejectedError(
-      incoming.proposals,
-      incoming.senderLeafIndex,
-      rejectionReason(cause),
-    )
+    const error = new CommitRejectedError({
+      proposals: incoming.proposals,
+      senderLeafIndex: incoming.senderLeafIndex,
+      reason: rejectionReason(cause),
+    })
     error.cause = cause
     throw error
   }
@@ -487,6 +508,11 @@ export type CommitLedgerEntriesResult = {
   epoch: bigint
 }
 
+export type CommitLedgerEntriesParams = {
+  group: GroupHandle
+  tokens: Array<string>
+}
+
 /**
  * The admin write path for the control ledger: a commit carrying no membership
  * proposal, only the entries it enacts and the head move covering them. An entry that
@@ -506,16 +532,16 @@ export type CommitLedgerEntriesResult = {
  * The mutex only serializes concurrent calls against one handle. A source whose commit
  * was accepted is superseded and must never be reused.
  */
-export async function commitLedgerEntries(
-  group: GroupHandle,
-  tokens: Array<string>,
-): Promise<CommitLedgerEntriesResult> {
+export async function commitLedgerEntries({
+  group,
+  tokens,
+}: CommitLedgerEntriesParams): Promise<CommitLedgerEntriesResult> {
   return mutexFor(group).run(async () => {
     if (tokens.length === 0) {
       throw new Error('commitLedgerEntries: no ledger entries to commit')
     }
     const result = await commitWithEntries({ group, extraProposals: [], enacted: tokens })
-    const newGroup = deriveGroup(group, result.newState)
+    const newGroup = await deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries(result.enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
@@ -540,6 +566,12 @@ export type CommitInviteResult = {
   epoch: bigint
 }
 
+export type CommitInviteParams = {
+  group: GroupHandle
+  keyPackage: KeyPackage
+  invite: Invite
+}
+
 /**
  * Commit an invite by adding the invitee's key package. Produces an MLS Commit +
  * Welcome.
@@ -562,11 +594,11 @@ export type CommitInviteResult = {
  * The mutex only serializes concurrent calls against one handle; it does not make a
  * second commit from a superseded handle safe.
  */
-export async function commitInvite(
-  group: GroupHandle,
-  keyPackage: KeyPackage,
-  invite: Invite,
-): Promise<CommitInviteResult> {
+export async function commitInvite({
+  group,
+  keyPackage,
+  invite,
+}: CommitInviteParams): Promise<CommitInviteResult> {
   return mutexFor(group).run(async () => {
     if (invite.groupID !== group.groupID) {
       throw new Error(`commitInvite: invite is for group ${invite.groupID}, not ${group.groupID}`)
@@ -578,7 +610,7 @@ export async function commitInvite(
     if (group.anchor.controller == null) {
       let grantedTo: string | null = null
       for (const token of enacted) {
-        const verified = await verifyLedgerEntry(token)
+        const verified = await verifyLedgerEntry({ token, crypto: group.crypto })
         if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
           grantedTo = verified.entry.subject
         }
@@ -645,7 +677,7 @@ export async function commitInvite(
       ratchetTreeExtension: true,
     })
 
-    const newGroup = deriveGroup(group, result.newState)
+    const newGroup = await deriveGroup(group, result.newState)
 
     if (result.welcome == null) {
       throw new Error('commitInvite: expected a Welcome message for the add proposal')

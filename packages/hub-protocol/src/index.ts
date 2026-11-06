@@ -5,6 +5,7 @@
  */
 
 export { keyPackageDigest } from './digest.js'
+export type { HubErrorFromCodeParams } from './errors.js'
 export {
   AuthorizationDeniedError,
   HeadMismatchError,
@@ -52,6 +53,7 @@ export type {
   WakeSendParams,
   WakeVerdict,
 } from './wake.js'
+export type { OpenWakeHintParams, SealWakeHintParams } from './wake-envelope.js'
 export {
   openWakeHint,
   sealWakeHint,

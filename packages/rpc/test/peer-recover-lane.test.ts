@@ -1,9 +1,4 @@
-import type {
-  HubFetchTopicParams,
-  HubPublishParams,
-  HubSubscribeOptions,
-  LogHub,
-} from '@kumiai/hub-tunnel'
+import type { HubFetchTopicParams, HubPublishParams, LogHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import { classifyCommit } from '../src/classify.js'
@@ -59,7 +54,7 @@ function recoveryRequests(hub: FakeHub, rs: Uint8Array): Array<unknown> {
  *  SEPARATE lane operation, queued behind the one that handed the entries over — a host that
  *  could only do this from inside the peer would be committing under the lane's own mutex. */
 async function reenactFrom(member: TestPeer, reenact: Array<string>): Promise<void> {
-  if (reenact.length > 0) await member.peer.commit(buildLedgerCommit(member, reenact))
+  if (reenact.length > 0) await member.peer.commit({ build: buildLedgerCommit(member, reenact) })
 }
 
 /**
@@ -101,9 +96,9 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
 
     // Admin A commits `circle x -> Foo`. The hub ACCEPTS it — that is what defines this path —
     // and she dies before adopting it.
-    await expect(dead.peer.commit(buildLedgerCommit(dead, ['circle:x=Foo']))).rejects.toThrow(
-      /the process died/,
-    )
+    await expect(
+      dead.peer.commit({ build: buildLedgerCommit(dead, ['circle:x=Foo']) }),
+    ).rejects.toThrow(/the process died/)
     await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Foo')
     expect(dead.mls.epoch()).toBe(1) // she never adopted it
@@ -124,7 +119,7 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
     expect(bob.mls.epoch()).toBe(3)
 
     // ...and then admin B overwrites the same subject. Everyone applies it. The circle is "Bar".
-    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bar']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['circle:x=Bar']) })
     await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Bar')
 
@@ -185,7 +180,7 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await bob.peer.resync()
-    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, ['circle:x=Bob']) })
     await bob.peer.resync()
 
     const alice = makeMLSPeer(hub, 'alice', rs, {
@@ -390,15 +385,16 @@ describe('recover() is a compare-and-set loop of its own', { concurrent: false }
     // case, not the exotic one: a heal runs precisely when the group is under commit pressure.
     let raced = false
     const racingHub: LogHub = {
-      subscribe: (did: string, topicID: string, options?: HubSubscribeOptions) =>
-        hub.subscribe(did, topicID, options),
-      unsubscribe: (did: string, topicID: string) => hub.unsubscribe(did, topicID),
+      subscribe: ({ subscriberDID: did, topicID, ...options }) =>
+        hub.subscribe({ subscriberDID: did, topicID, ...options }),
+      unsubscribe: ({ subscriberDID: did, topicID }) =>
+        hub.unsubscribe({ subscriberDID: did, topicID }),
       fetchTopic: (params: HubFetchTopicParams) => hub.fetchTopic(params),
-      receive: (did: string) => hub.receive(did),
+      receive: ({ subscriberDID: did }) => hub.receive({ subscriberDID: did }),
       publish: async (params: HubPublishParams) => {
         if (!raced && params.topicID === commitTopic(rs) && params.retain === 'log') {
           raced = true
-          await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+          await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin']) })
           await bob.peer.resync()
         }
         return hub.publish(params)
@@ -500,9 +496,9 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
     // The commit unwinds rather than waiting: the trigger RECORDS, the pull finishes, the lane
     // is released, and the heal runs behind it as its own operation. A peer that awaited the
     // heal here would wait on a queue containing itself, and this call would never return.
-    await expect(alice.peer.commit(buildLedgerCommit(alice, ['circle:x=Alice']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+    await expect(
+      alice.peer.commit({ build: buildLedgerCommit(alice, ['circle:x=Alice']) }),
+    ).rejects.toThrow(RecoveryRequiredError)
     await drainUntil(
       () =>
         alice.mls.epoch() === bob.mls.epoch() &&
@@ -515,7 +511,7 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
     expect(bob.mls.leaves().filter((did) => did === 'alice')).toHaveLength(1)
 
     // And the host's re-issued commit — the SECOND commit of the heal — lands.
-    await alice.peer.commit(buildLedgerCommit(alice, ['circle:x=Alice']))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, ['circle:x=Alice']) })
     await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Alice')
 
@@ -623,7 +619,9 @@ describe('a bootstrap that cannot complete is a degraded state, not a heal', {
       recovery,
     })
     await flush()
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
+    await bob.peer.commit({
+      build: buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']),
+    })
     await flush()
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
@@ -684,7 +682,7 @@ async function starveBootstrap(
   })
   const bob = makeMLSPeer(hub, 'bob', rs, { mls: bobMLS, crypto: bobCrypto, members, recovery })
   await flush()
-  await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
+  await bob.peer.commit({ build: buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']) })
   await flush()
 
   const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -738,7 +736,7 @@ describe('commit() refuses on an incomplete ledger', { concurrent: false }, () =
     // is ever called.
     const framedAt: Array<number> = []
     await expect(
-      alice.peer.commit(buildLedgerCommit(alice, ['role:eve=admin'], { framedAt })),
+      alice.peer.commit({ build: buildLedgerCommit(alice, ['role:eve=admin'], { framedAt }) }),
     ).rejects.toThrow(RecoveryRequiredError)
     await flush(200)
 
@@ -808,7 +806,7 @@ describe('the storm-collapse suppression set is bounded', { concurrent: false },
       hub.publish({
         senderDID: 'zoe',
         topicID: rendezvous,
-        payload: encodeHandshakeFrame(kind, payload),
+        payload: encodeHandshakeFrame({ kind, payload }),
       })
     const bobRepliesTo = (requestID: string): number =>
       hub.published.filter((m) => {
@@ -825,10 +823,16 @@ describe('the storm-collapse suppression set is bounded', { concurrent: false },
       }).length
 
     // Bob sees a reply for "R": storm-collapse records it, and he will not answer a request for it.
-    await inject(HANDSHAKE_KIND.recoveryReply, encodeRecoveryReply('R', new Uint8Array([1])))
+    await inject(
+      HANDSHAKE_KIND.recoveryReply,
+      encodeRecoveryReply({ requestID: 'R', groupInfo: new Uint8Array([1]) }),
+    )
     await flush()
-    const req1 = await requester.createRecoveryRequest('R')
-    await inject(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest('R', req1))
+    const req1 = await requester.createRecoveryRequest({ requestID: 'R' })
+    await inject(
+      HANDSHAKE_KIND.recoveryRequest,
+      encodeRecoveryRequest({ requestID: 'R', request: req1 }),
+    )
     await flush(60)
     expect(bobRepliesTo('R')).toBe(0)
 
@@ -837,7 +841,7 @@ describe('the storm-collapse suppression set is bounded', { concurrent: false },
     for (let i = 0; i <= 1024; i++) {
       await inject(
         HANDSHAKE_KIND.recoveryReply,
-        encodeRecoveryReply(`flood-${i}`, new Uint8Array([1])),
+        encodeRecoveryReply({ requestID: `flood-${i}`, groupInfo: new Uint8Array([1]) }),
       )
     }
     await flush(300)
@@ -846,8 +850,11 @@ describe('the storm-collapse suppression set is bounded', { concurrent: false },
     // exactly why the bound is safe: eviction can only ever cost a redundant, roster-authorized
     // reply — never a leak, and never the loss of a LIVE suppression (a live one is far too
     // recent to be the oldest).
-    const req2 = await requester.createRecoveryRequest('R')
-    await inject(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest('R', req2))
+    const req2 = await requester.createRecoveryRequest({ requestID: 'R' })
+    await inject(
+      HANDSHAKE_KIND.recoveryRequest,
+      encodeRecoveryRequest({ requestID: 'R', request: req2 }),
+    )
     await flush(60)
     expect(bobRepliesTo('R')).toBe(1)
 

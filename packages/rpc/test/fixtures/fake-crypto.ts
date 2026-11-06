@@ -216,7 +216,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       }),
     )
 
-  const wrap: GroupCrypto['wrap'] = (bytes, opts) => {
+  const wrap: GroupCrypto['wrap'] = ({ bytes, ...opts }) => {
     const did = fromUTF(localDID)
     const aad = opts?.aad ?? new Uint8Array()
     const framed = new Uint8Array(
@@ -324,7 +324,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       throw new Error('cannot open: not a well-formed sealed frame')
     }
     if (sealedAt !== epoch) {
-      throw new FrameEpochError(sealedAt, epoch)
+      throw new FrameEpochError({ frameEpoch: sealedAt, handleEpoch: epoch })
     }
     // Tag-verify BEFORE the expectedAAD compare and BEFORE spending the generation: a tampered or
     // forged frame — including one an attacker rewrote by exploiting the XOR's linearity — must
@@ -356,7 +356,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     const payload = framed.subarray(headerEnd + didLen + aadLen, framed.length - TAG_BYTES)
     return { payload, senderDID, spentKey }
   }
-  const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
+  const unwrap: GroupCrypto['unwrap'] = ({ bytes, ...opts }) => {
     if (opts?.frame == null) {
       const { payload, senderDID } = open(bytes, opts, true)
       return { payload, senderDID, epoch }
@@ -452,7 +452,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     // fell back to a default for an omitted label would hide the exact caller mistake the port's
     // required parameter exists to make loud. See {@link fakeEpochSecret}: its own default label
     // is a convenience for OTHER test call sites, not something this method may lean on.
-    exportSecret: (label, length = secret.length) => ({
+    exportSecret: ({ label, length = secret.length }) => ({
       secret: fakeEpochSecret(epoch, label, length, secret),
       epoch,
     }),

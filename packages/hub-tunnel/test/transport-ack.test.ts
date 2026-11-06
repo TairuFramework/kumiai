@@ -23,11 +23,11 @@ describe('the tunnel acks what it has handled', () => {
     // enumerable properties only — every prototype method would be lost.
     const ackingHub: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
-      subscribe: (subscriberDID, topicID, options) =>
-        fakeHub.subscribe(subscriberDID, topicID, options),
-      unsubscribe: (subscriberDID, topicID) => fakeHub.unsubscribe(subscriberDID, topicID),
-      receive: (subscriberDID): HubReceiveSubscription => {
-        const inner = fakeHub.receive(subscriberDID)
+      subscribe: ({ subscriberDID, topicID, ...options }) =>
+        fakeHub.subscribe({ subscriberDID, topicID, ...options }),
+      unsubscribe: ({ subscriberDID, topicID }) => fakeHub.unsubscribe({ subscriberDID, topicID }),
+      receive: ({ subscriberDID }): HubReceiveSubscription => {
+        const inner = fakeHub.receive({ subscriberDID })
         return {
           [Symbol.asyncIterator]: () => inner[Symbol.asyncIterator](),
           return: () => inner.return?.(),
@@ -80,11 +80,11 @@ describe('the tunnel acks what it has handled', () => {
     // hub — the only place that proves the wrapper forwards `ack` rather than swallowing it.
     const ackingHub: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
-      subscribe: (subscriberDID, topicID, options) =>
-        fakeHub.subscribe(subscriberDID, topicID, options),
-      unsubscribe: (subscriberDID, topicID) => fakeHub.unsubscribe(subscriberDID, topicID),
-      receive: (subscriberDID): HubReceiveSubscription => {
-        const inner = fakeHub.receive(subscriberDID)
+      subscribe: ({ subscriberDID, topicID, ...options }) =>
+        fakeHub.subscribe({ subscriberDID, topicID, ...options }),
+      unsubscribe: ({ subscriberDID, topicID }) => fakeHub.unsubscribe({ subscriberDID, topicID }),
+      receive: ({ subscriberDID }): HubReceiveSubscription => {
+        const inner = fakeHub.receive({ subscriberDID })
         return {
           [Symbol.asyncIterator]: () => inner[Symbol.asyncIterator](),
           return: () => inner.return?.(),
@@ -131,11 +131,11 @@ describe('the tunnel acks what it has handled', () => {
     const acked: Array<string> = []
     const ackingHub: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
-      subscribe: (subscriberDID, topicID, options) =>
-        fakeHub.subscribe(subscriberDID, topicID, options),
-      unsubscribe: (subscriberDID, topicID) => fakeHub.unsubscribe(subscriberDID, topicID),
-      receive: (subscriberDID): HubReceiveSubscription => {
-        const inner = fakeHub.receive(subscriberDID)
+      subscribe: ({ subscriberDID, topicID, ...options }) =>
+        fakeHub.subscribe({ subscriberDID, topicID, ...options }),
+      unsubscribe: ({ subscriberDID, topicID }) => fakeHub.unsubscribe({ subscriberDID, topicID }),
+      receive: ({ subscriberDID }): HubReceiveSubscription => {
+        const inner = fakeHub.receive({ subscriberDID })
         return {
           [Symbol.asyncIterator]: () => inner[Symbol.asyncIterator](),
           return: () => inner.return?.(),
@@ -192,11 +192,11 @@ describe('the tunnel acks what it has handled', () => {
     // happens before `Promise.resolve` is ever reached.
     const throwingHub: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
-      subscribe: (subscriberDID, topicID, options) =>
-        fakeHub.subscribe(subscriberDID, topicID, options),
-      unsubscribe: (subscriberDID, topicID) => fakeHub.unsubscribe(subscriberDID, topicID),
-      receive: (subscriberDID): HubReceiveSubscription => {
-        const inner = fakeHub.receive(subscriberDID)
+      subscribe: ({ subscriberDID, topicID, ...options }) =>
+        fakeHub.subscribe({ subscriberDID, topicID, ...options }),
+      unsubscribe: ({ subscriberDID, topicID }) => fakeHub.unsubscribe({ subscriberDID, topicID }),
+      receive: ({ subscriberDID }): HubReceiveSubscription => {
+        const inner = fakeHub.receive({ subscriberDID })
         return {
           [Symbol.asyncIterator]: () => inner[Symbol.asyncIterator](),
           return: () => inner.return?.(),
@@ -265,11 +265,11 @@ describe('the tunnel acks what it has handled', () => {
     let returned = false
     const ackingHub: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
-      subscribe: (subscriberDID, topicID, options) =>
-        fakeHub.subscribe(subscriberDID, topicID, options),
-      unsubscribe: (subscriberDID, topicID) => fakeHub.unsubscribe(subscriberDID, topicID),
-      receive: (subscriberDID): HubReceiveSubscription => {
-        const inner = fakeHub.receive(subscriberDID)
+      subscribe: ({ subscriberDID, topicID, ...options }) =>
+        fakeHub.subscribe({ subscriberDID, topicID, ...options }),
+      unsubscribe: ({ subscriberDID, topicID }) => fakeHub.unsubscribe({ subscriberDID, topicID }),
+      receive: ({ subscriberDID }): HubReceiveSubscription => {
+        const inner = fakeHub.receive({ subscriberDID })
         return {
           // The pump calls `.return()` on THIS iterator (`subscription[Symbol.asyncIterator]()`),
           // not on the subscription's own `return` field — the abandon must be modeled here.

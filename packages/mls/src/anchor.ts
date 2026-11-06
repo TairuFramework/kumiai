@@ -123,11 +123,16 @@ export function buildGroupAnchorExtension(anchor: GroupAnchor): GroupContextExte
   })
 }
 
+export type BuildCurrentGroupAnchorExtensionParams = {
+  creatorDID: string
+  app?: unknown
+}
+
 /** Build the anchor extension for a freshly created group at the current version. */
-export function buildCurrentGroupAnchorExtension(
-  creatorDID: string,
-  app?: unknown,
-): GroupContextExtension {
+export function buildCurrentGroupAnchorExtension({
+  creatorDID,
+  app,
+}: BuildCurrentGroupAnchorExtensionParams): GroupContextExtension {
   return buildGroupAnchorExtension({ creatorDID, version: CURRENT_VERSION, app })
 }
 
@@ -149,7 +154,9 @@ export function controlCapabilities(): Capabilities {
   return { ...base, extensions: [...extensions] }
 }
 
-function findAnchorExtension(handle: GroupHandle): GroupContextExtension | undefined {
+function findAnchorExtension(
+  handle: Pick<GroupHandle, 'state'>,
+): GroupContextExtension | undefined {
   return handle.state.groupContext.extensions.find(
     (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
   )
@@ -179,7 +186,7 @@ export function readGroupAnchorExtension(handle: GroupHandle): GroupContextExten
  * so this returns a non-null anchor and the member joins. Only the payload a v1 build cannot
  * interpret is withheld.
  */
-export function readGroupAnchor(handle: GroupHandle): GroupAnchor | null {
+export function readGroupAnchor(handle: Pick<GroupHandle, 'state'>): GroupAnchor | null {
   const extension = findAnchorExtension(handle)
   if (extension == null) {
     return null

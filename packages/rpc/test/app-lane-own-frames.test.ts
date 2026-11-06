@@ -12,29 +12,33 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 test('the app-log drain never opens a frame the hub attributes to this member', async () => {
   const hub = new DurableFakeHub()
-  const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+  const topicID = protocolTopic({
+    secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+    epoch: 1,
+    protocol: 'chat',
+  })
   const aad = encodeAppAAD({ topicID, intent: 'log' })
 
   // A member reads its own retained frames back on a history pull. MLS cannot open a message
   // its own sender ratchet sealed, so opening one is a guaranteed failure reported as an open
   // failure, never a delivery.
-  const bobSealed = await createFakeCrypto({ epoch: 1, localDID: 'bob' }).wrap(
-    encodeEventFrame('chat/posted', { text: 'mine' }),
-    { aad },
-  )
+  const bobSealed = await createFakeCrypto({ epoch: 1, localDID: 'bob' }).wrap({
+    bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'mine' } }),
+    aad,
+  })
   await hub.publish({ senderDID: 'bob', topicID, payload: bobSealed, retain: 'log' })
-  const carolSealed = await createFakeCrypto({ epoch: 1, localDID: 'carol' }).wrap(
-    encodeEventFrame('chat/posted', { text: 'from carol' }),
-    { aad },
-  )
+  const carolSealed = await createFakeCrypto({ epoch: 1, localDID: 'carol' }).wrap({
+    bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'from carol' } }),
+    aad,
+  })
   await hub.publish({ senderDID: 'carol', topicID, payload: carolSealed, retain: 'log' })
 
   const base = createFakeCrypto({ epoch: 1, localDID: 'bob' })
   const opened: Array<Uint8Array> = []
   const crypto: typeof base = Object.assign(Object.create(base) as typeof base, {
-    unwrap: ((bytes, opts) => {
+    unwrap: (({ bytes, ...opts }) => {
       opened.push(bytes)
-      return base.unwrap(bytes, opts)
+      return base.unwrap({ bytes, ...opts })
     }) satisfies GroupCrypto['unwrap'],
   })
   const seen: Array<unknown> = []

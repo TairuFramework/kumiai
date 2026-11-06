@@ -139,7 +139,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       entered.resolve()
       await gate.promise
     })
-    const committing = bob.peer.commit(buildLedgerCommit(bob, []))
+    const committing = bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     await entered.promise
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'window' } })
     await flush()
@@ -161,7 +161,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     'physical removal reports gaps but removal of the cursor alone does not ($name)',
     async ({ Hub }) => {
       const hub = new Hub()
-      hub.subscribe('reader', 'topic')
+      hub.subscribe({ subscriberDID: 'reader', topicID: 'topic' })
       const a = await hub.publish({
         senderDID: 'alice',
         topicID: 'topic',
@@ -306,7 +306,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         recovery: { timeoutMs: 30, deadlineMs: 500, getDelayMs: () => 0 },
       })
       await Promise.all([alice.peer.resync(), bob.peer.resync()])
-      await alice.peer.commit(buildLedgerCommit(alice, []))
+      await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
       await bob.peer.replay()
       hub.detach('bob')
       const publish = hub.publish.bind(hub)
@@ -319,7 +319,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           !injected
         ) {
           injected = true
-          await alice.peer.commit(buildLedgerCommit(alice, []))
+          await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
           if (tail)
             await publish({
               senderDID: 'mallory',
@@ -528,7 +528,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       const sealed = await wrap(...args)
       if (!injected) {
         injected = true
-        await bob.peer.commit(buildLedgerCommit(bob, []))
+        await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
       }
       return sealed
     })
@@ -684,7 +684,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           injected < changes
         ) {
           injected++
-          await bob.peer.commit(buildLedgerCommit(bob, []))
+          await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
           await flush()
         }
         return publish(params)
@@ -822,7 +822,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     const carol = member(hub, 'carol')
     await flush()
     hub.detach('bob')
-    await alice.peer.commit(buildRemoveCommit(alice, 'carol'))
+    await alice.peer.commit({ build: buildRemoveCommit(alice, 'carol') })
     await alice.peer.replay()
     await flush()
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'survivors' } })
@@ -832,9 +832,15 @@ describe('recovery ordering', { concurrent: false }, () => {
     const current = alice.anchorStore.stored()
     const old = carol.anchorStore.stored()
     if (current == null || old == null) throw new Error('Missing anchor')
-    expect(frame.topicID).toBe(protocolTopic(current.secret, current.epoch, 'chat'))
-    expect(frame.topicID).not.toBe(protocolTopic(old.secret, old.epoch, 'chat'))
-    await expect(Promise.resolve().then(() => carol.crypto.unwrap(frame.payload))).rejects.toThrow()
+    expect(frame.topicID).toBe(
+      protocolTopic({ secret: current.secret, epoch: current.epoch, protocol: 'chat' }),
+    )
+    expect(frame.topicID).not.toBe(
+      protocolTopic({ secret: old.secret, epoch: old.epoch, protocol: 'chat' }),
+    )
+    await expect(
+      Promise.resolve().then(() => carol.crypto.unwrap({ bytes: frame.payload })),
+    ).rejects.toThrow()
   })
 
   test('restored inventory yields after 64 entries before continuing in order', async () => {
@@ -845,7 +851,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         seq,
         protocol: 'chat',
         prc: 'chat/posted',
-        data: encodeEventFrame('chat/posted', { seq }),
+        data: encodeEventFrame({ prc: 'chat/posted', data: { seq } }),
         lastAttempt: null,
       })
     const yielded = deferred<number>()
@@ -868,7 +874,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     const entered = deferred<void>()
     const bob = member(hub, 'bob')
     await flush()
-    await bob.peer.commit(buildLedgerCommit(bob, []))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     const publish = hub.publish.bind(hub)
     vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
       if (params.senderDID === 'bob' && params.topicID !== commitTopic(secret)) {
@@ -929,7 +935,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       },
     })
     await flush()
-    await bob.peer.commit(buildLedgerCommit(bob, []))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     const own = hub.head(commitTopic(secret))
     if (own == null) throw new Error('Missing own commit')
     await hub.publish({
@@ -1070,7 +1076,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         params.retain === 'log'
       ) {
         injected = true
-        await alice.peer.commit(buildLedgerCommit(alice, []))
+        await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
       }
       return publish(params)
     })
@@ -1105,7 +1111,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     const release = deferred<void>()
     const publishSpy = vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
       if (params.senderDID === 'bob' && params.topicID !== commitTopic(secret)) {
-        await alice.peer.commit(buildLedgerCommit(alice, []))
+        await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
         const result = await publish(params)
         acknowledged.resolve()
         await release.promise
@@ -1130,8 +1136,8 @@ describe('recovery ordering', { concurrent: false }, () => {
     const current = replacement.anchorStore.stored()
     if (current == null) throw new Error('Missing replacement anchor')
     const topics = [
-      protocolTopic(old.secret, old.epoch, 'chat'),
-      protocolTopic(current.secret, current.epoch, 'chat'),
+      protocolTopic({ secret: old.secret, epoch: old.epoch, protocol: 'chat' }),
+      protocolTopic({ secret: current.secret, epoch: current.epoch, protocol: 'chat' }),
     ]
     const apps = hub.published.filter((m) => m.senderDID === 'bob' && topics.includes(m.topicID))
     expect(apps.map((m) => bob.crypto.frameEpoch(m.payload))).toEqual([1, 2])
@@ -1207,17 +1213,21 @@ describe('recovery ordering', { concurrent: false }, () => {
       await flush()
       const anchor = bob.anchorStore.stored()
       if (anchor == null) throw new Error('Missing anchor')
-      const appTopic = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+      const appTopic = protocolTopic({
+        secret: anchor.secret,
+        epoch: anchor.epoch,
+        protocol: 'chat',
+      })
       const wrap = bob.crypto.wrap.bind(bob.crypto)
       const sealed = new Map<string, { seq: number; epoch: number | null }>()
       let seals = 0
       vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
         if (++seals === 2 && during === 'seal') {
-          await bob.peer.commit(buildLedgerCommit(bob, []))
+          await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
           await flush()
         }
         const payload = await wrap(...args)
-        const message = decodeFrame(args[0]) as { payload: { data: { seq: number } } }
+        const message = decodeFrame(args[0].bytes) as { payload: { data: { seq: number } } }
         sealed.set(Array.from(payload).join(','), {
           seq: message.payload.data.seq,
           epoch: bob.crypto.frameEpoch(payload),
@@ -1232,7 +1242,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           const result = await publish(params)
           if (!injected && params.senderDID === 'bob' && params.topicID === appTopic) {
             injected = true
-            await alice.peer.commit(buildLedgerCommit(alice, []))
+            await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
           }
           return result
         })

@@ -168,7 +168,12 @@ export async function mintLeafCapability(params: MintLeafCapabilityParams): Prom
     const parent = readCapability(params.parent)
     if (parent.payload.cap !== undefined) throw new LeafBindingError('chain-depth')
     assertControllerGrant(parent.payload, params.controllerID)
-    if (!hasPermission({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, parent.payload)) {
+    if (
+      !hasPermission({
+        expected: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
+        granted: parent.payload,
+      })
+    ) {
       throw new Error('Parent does not grant leaf authentication')
     }
     assertCapabilityLifetime(parent.payload, MAX_TRUSTED_GRANT_LIFETIME)
@@ -190,9 +195,11 @@ export async function mintLeafCapability(params: MintLeafCapabilityParams): Prom
     ) {
       throw new Error('Parent capability is not valid at issuance')
     }
-    return stringifyToken(await params.signer.signToken({ ...payload, cap: params.parent }))
+    return stringifyToken(
+      await params.signer.signToken({ payload: { ...payload, cap: params.parent } }),
+    )
   }
-  return stringifyToken(await params.signer.signToken(payload))
+  return stringifyToken(await params.signer.signToken({ payload: payload }))
 }
 
 export async function mintTrustedGrant(params: MintTrustedGrantParams): Promise<string> {
@@ -203,5 +210,5 @@ export async function mintTrustedGrant(params: MintTrustedGrantParams): Promise<
   if (params.member == null) {
     assertControllerGrant({ ...payload, iss: params.signer.id }, params.controllerID)
   }
-  return stringifyToken(await params.signer.signToken(payload))
+  return stringifyToken(await params.signer.signToken({ payload: payload }))
 }

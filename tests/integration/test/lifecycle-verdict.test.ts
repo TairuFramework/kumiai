@@ -46,7 +46,9 @@ async function setup(
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
   const identity = fixture.agent(41)
   let group = (
-    await createGroup(identity, 'lifecycle-verdict', {
+    await createGroup({
+      identity,
+      groupID: 'lifecycle-verdict',
       ...(options.standard
         ? {}
         : {
@@ -56,7 +58,8 @@ async function setup(
     })
   ).group
   const bob = fixture.agent(61)
-  const bundle = await createKeyPackageBundle(bob, {
+  const bundle = await createKeyPackageBundle({
+    identity: bob,
     controller: await fixture.timedBinding({ identity: bob, iat: 100, exp: 200, ...options }),
   })
   const { invite } = await createInvite({
@@ -65,7 +68,7 @@ async function setup(
     recipientDID: bob.id,
     ...(options.standard ? { permission: 'member' } : {}),
   })
-  const added = await commitInvite(group, bundle.publicPackage, invite)
+  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   group = added.newGroup
   const responderGroup = (
     await processWelcome({
@@ -105,10 +108,15 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
     controllers: new Map(registrySeed().controllers),
   }
   expect(
-    recoverySignerEligible({ group: s.group(), registry: known, signer: s.identity.id, now: 500 }),
+    await recoverySignerEligible({
+      group: s.group(),
+      registry: known,
+      signer: s.identity.id,
+      now: 500,
+    }),
   ).toBe(true)
   expect(
-    recoverySignerEligible({
+    await recoverySignerEligible({
       group: s.group(),
       registry: known,
       signer: s.identity.id,
@@ -116,7 +124,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
     }),
   ).toBe(false)
   expect(
-    recoverySignerEligible({
+    await recoverySignerEligible({
       group: s.group(),
       registry: known,
       signer: fixture.agent(81).id,
@@ -127,11 +135,21 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
   if (projection == null) throw new Error('Missing controller projection')
   known.controllers.set(fixture.controllerID, { ...projection, genFloor: 1, timeFloor: 0 })
   expect(
-    recoverySignerEligible({ group: s.group(), registry: known, signer: s.identity.id, now: 150 }),
+    await recoverySignerEligible({
+      group: s.group(),
+      registry: known,
+      signer: s.identity.id,
+      now: 150,
+    }),
   ).toBe(false)
   known.controllers.set(fixture.controllerID, { ...projection, genFloor: 0, timeFloor: 201 })
   expect(
-    recoverySignerEligible({ group: s.group(), registry: known, signer: s.identity.id, now: 150 }),
+    await recoverySignerEligible({
+      group: s.group(),
+      registry: known,
+      signer: s.identity.id,
+      now: 150,
+    }),
   ).toBe(false)
   known.devices.set(s.identity.id, {
     controller: fixture.controllerID,
@@ -139,18 +157,26 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
     proofRef: { chainIndex: 1 },
   })
   expect(
-    recoverySignerEligible({ group: s.group(), registry: known, signer: s.identity.id, now: 150 }),
+    await recoverySignerEligible({
+      group: s.group(),
+      registry: known,
+      signer: s.identity.id,
+      now: 150,
+    }),
   ).toBe(false)
 })
 
 test('pending verdicts bind the epoch, position, digest and tag, and adoption is idempotent', async () => {
   const s = await setup()
   const requestID = 'verdict-request'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const request = await s.mls.createRecoveryRequest({ requestID })
+  const pending = await s.mls.applyRecovery({
+    sealed: await s.responder.sealGroupInfo(request),
+    requestID,
+  })
   if (pending == null || 'renewalRequired' in pending) throw new Error('No pending recovery')
   const before = await s.mls.readEpoch()
-  const key = await pending.confirmationKey('position', 'digest')
+  const key = await pending.confirmationKey({ position: 'position', commitDigest: 'digest' })
   expect(await s.mls.readEpoch()).toBe(before)
   expect(pending.epoch).toBe(before + 1)
   const { confirmationTag } = await import('@kumiai/mls')
@@ -161,23 +187,25 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
     commitDigest: 'digest',
     verdict: 'confirmed' as const,
     epoch: pending.epoch,
-    tag: confirmationTag(key, requestID),
+    tag: confirmationTag({ key, requestID }),
   }
-  const sealed = await s.responder.sealRecoveryVerdict(request, verdict)
-  const opened = await s.mls.openRecoveryVerdict(sealed, requestID)
+  const sealed = await s.responder.sealRecoveryVerdict({ request, verdict })
+  const opened = await s.mls.openRecoveryVerdict({ sealed, requestID })
   if (opened == null) throw new Error('No opened verdict')
-  expect(pending.judgeVerdict(opened)).toBe('authoritative')
+  expect(await pending.judgeVerdict(opened)).toBe('authoritative')
   for (const change of [
     { epoch: before },
     { position: 'other' },
     { commitDigest: 'other' },
-    { tag: confirmationTag(new Uint8Array(32), requestID) },
+    { tag: confirmationTag({ key: new Uint8Array(32), requestID }) },
     { groupID: 'other' },
     { requestID: 'other' },
   ]) {
-    expect(pending.judgeVerdict({ ...opened, verdict: { ...verdict, ...change } })).toBe('advisory')
+    expect(await pending.judgeVerdict({ ...opened, verdict: { ...verdict, ...change } })).toBe(
+      'advisory',
+    )
   }
-  expect(pending.judgeVerdict({ ...opened, signer: fixture.agent(81).id })).toBe('advisory')
+  expect(await pending.judgeVerdict({ ...opened, signer: fixture.agent(81).id })).toBe('advisory')
   await pending.onAccepted()
   await pending.onAccepted()
   expect(await s.mls.readEpoch()).toBe(pending.epoch)
@@ -185,10 +213,13 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
 
 test('candidate registries retain revocations and stale refusals are advisory', async () => {
   const s = await setup()
-  const request = await s.mls.createRecoveryRequest('stale')
-  const candidate = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), 'stale')
+  const request = await s.mls.createRecoveryRequest({ requestID: 'stale' })
+  const candidate = await s.mls.applyRecovery({
+    sealed: await s.responder.sealGroupInfo(request),
+    requestID: 'stale',
+  })
   if (candidate == null || 'renewalRequired' in candidate) throw new Error('No pending recovery')
-  await candidate.confirmationKey('position', 'digest')
+  await candidate.confirmationKey({ position: 'position', commitDigest: 'digest' })
   const { createVerdictJudge } = await import(
     new URL('../../../packages/mls-rpc/src/recovery.ts', import.meta.url).href
   )
@@ -212,17 +243,28 @@ test('candidate registries retain revocations and stale refusals are advisory', 
     ]),
   }
   const { assertRetainsKnownEffects, RecoveryKnowledgeError } = await import('@kumiai/mls')
-  expect(() =>
-    assertRetainsKnownEffects(fixture.controllerID, known, current.knownRegistry),
-  ).toThrow(new RecoveryKnowledgeError('revocation'))
-  expect(() => assertRetainsKnownEffects(fixture.controllerID, registrySeed(), known)).not.toThrow()
+  await expect(
+    async () =>
+      await assertRetainsKnownEffects({
+        controller: fixture.controllerID,
+        known,
+        candidate: current.knownRegistry,
+      }),
+  ).rejects.toThrow(new RecoveryKnowledgeError('revocation'))
+  await expect(
+    assertRetainsKnownEffects({
+      controller: fixture.controllerID,
+      known: registrySeed(),
+      candidate: known,
+    }),
+  ).resolves.not.toThrow()
   const judge = createVerdictJudge({
     group: current.group,
     sourceTree: current.sourceTree,
     known,
     requestID: 'stale',
   })
-  const key = await judge.confirmationKey('position', 'digest')
+  const key = await judge.confirmationKey({ position: 'position', commitDigest: 'digest' })
   const { confirmationTag } = await import('@kumiai/mls')
   const binding = {
     groupID: s.group().groupID,
@@ -236,59 +278,59 @@ test('candidate registries retain revocations and stale refusals are advisory', 
     known: current.knownRegistry,
     requestID: 'stale',
   })
-  const controlKey = await control.confirmationKey('position', 'digest')
-  expect(recoverySignerEligible({ group: current.group, registry: known, signer: s.bob.id })).toBe(
-    false,
-  )
+  const controlKey = await control.confirmationKey({ position: 'position', commitDigest: 'digest' })
   expect(
-    recoverySignerEligible({
+    await recoverySignerEligible({ group: current.group, registry: known, signer: s.bob.id }),
+  ).toBe(false)
+  expect(
+    await recoverySignerEligible({
       group: current.group,
       registry: current.knownRegistry,
       signer: s.bob.id,
     }),
   ).toBe(true)
   expect(
-    control.judgeVerdict({
+    await control.judgeVerdict({
       signer: s.bob.id,
       verdict: { ...binding, verdict: 'refused', reason: 'policy' },
     }),
   ).toBe('authoritative')
   expect(
-    control.judgeVerdict({
+    await control.judgeVerdict({
       signer: s.bob.id,
       verdict: {
         ...binding,
         verdict: 'confirmed',
         epoch: candidate.epoch,
-        tag: confirmationTag(controlKey, 'stale'),
+        tag: confirmationTag({ key: controlKey, requestID: 'stale' }),
       },
     }),
   ).toBe('authoritative')
   expect(
-    judge.judgeVerdict({
+    await judge.judgeVerdict({
       signer: s.bob.id,
       verdict: { ...binding, verdict: 'refused', reason: 'policy' },
     }),
   ).toBe('advisory')
   expect(
-    judge.judgeVerdict({
+    await judge.judgeVerdict({
       signer: s.bob.id,
       verdict: {
         ...binding,
         verdict: 'confirmed',
         epoch: candidate.epoch,
-        tag: confirmationTag(key, 'stale'),
+        tag: confirmationTag({ key, requestID: 'stale' }),
       },
     }),
   ).toBe('advisory')
   expect(
-    judge.judgeVerdict({
+    await judge.judgeVerdict({
       signer: s.identity.id,
       verdict: {
         ...binding,
         verdict: 'confirmed',
         epoch: candidate.epoch,
-        tag: confirmationTag(key, 'stale'),
+        tag: confirmationTag({ key, requestID: 'stale' }),
       },
     }),
   ).toBe('advisory')
@@ -305,10 +347,10 @@ test('a revoked trusted issuer makes its child advisory and unknown revocation r
     controllers: new Map(),
   }
   expect(
-    recoverySignerEligible({ group: s.group(), registry: known, signer: s.bob.id, now: 150 }),
+    await recoverySignerEligible({ group: s.group(), registry: known, signer: s.bob.id, now: 150 }),
   ).toBe(false)
   expect(
-    recoverySignerEligible({
+    await recoverySignerEligible({
       group: s.group(),
       registry: registrySeed(),
       signer: s.bob.id,
@@ -316,7 +358,7 @@ test('a revoked trusted issuer makes its child advisory and unknown revocation r
     }),
   ).toBe(true)
   expect(
-    recoverySignerEligible({
+    await recoverySignerEligible({
       group: s.group(),
       registry: registrySeed(),
       signer: s.bob.id,
@@ -330,14 +372,15 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
   const { controllerSeed, inception } = await import(
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
-  const rev = revokeChain({
+  const rev = await revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: fixture.controllerID,
     chain: [inception],
     subject: s.bob.id,
   })
-  const removed = await revokeWithProof(s.group(), {
+  const removed = await revokeWithProof({
+    group: s.group(),
     deny: [s.bob.id],
     log: { chain: [inception, rev], events: [] },
   })
@@ -350,9 +393,12 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
     },
   })
   const mls = createGroupMLS({ identity: s.identity, access, entrySlot: createLedgerEntrySlot() })
-  const request = await mls.createRecoveryRequest('revoked-attestation')
+  const request = await mls.createRecoveryRequest({ requestID: 'revoked-attestation' })
   expect(
-    await mls.applyRecovery(await s.responder.sealGroupInfo(request), 'revoked-attestation'),
+    await mls.applyRecovery({
+      sealed: await s.responder.sealGroupInfo(request),
+      requestID: 'revoked-attestation',
+    }),
   ).toBeNull()
 })
 
@@ -360,40 +406,43 @@ test('a chained GroupInfo signer with a denied issuer is refused', async () => {
   const issuer = fixture.agent(81)
   const parent = (await fixture.timedBinding({ identity: issuer, iat: 100, exp: 200 })).capability
   const s = await setup({ issuer, parent })
-  const request = await s.mls.createRecoveryRequest('issuer-attestation')
+  const request = await s.mls.createRecoveryRequest({ requestID: 'issuer-attestation' })
   const reply = await s.responder.sealGroupInfo(request)
   // A folded registry is the sole input to signer trust.
   const known = s.group().registry.devices as Map<string, { controller: string; status: 'revoked' }>
   known.set(issuer.id, { controller: fixture.controllerID, status: 'revoked' })
-  expect(await s.mls.applyRecovery(reply, 'issuer-attestation')).toBeNull()
+  expect(await s.mls.applyRecovery({ sealed: reply, requestID: 'issuer-attestation' })).toBeNull()
 })
 
 test('a GroupInfo attestation re-signed by a DID absent from the pending tree is refused', async () => {
   const s = await setup()
   const outsider = fixture.agent(81)
-  const impostor = new GroupHandle({
+  const impostor = await GroupHandle.create({
     state: s.responderGroup.state,
     context: s.responderGroup.context,
     credential: { id: outsider.id, groupID: s.responderGroup.groupID },
   })
-  await impostor.bootstrapLedger(s.responderGroup.ledgerTokens)
+  await impostor.bootstrapLedger({ tokens: s.responderGroup.ledgerTokens })
   const { sealGroupInfo } = await import('@kumiai/mls')
-  const request = await s.mls.createRecoveryRequest('leafless-attestation')
+  const request = await s.mls.createRecoveryRequest({ requestID: 'leafless-attestation' })
   const sealed = await sealGroupInfo({
     group: impostor,
     identity: outsider,
     request: new TextDecoder().decode(request),
   })
-  expect(await s.mls.applyRecovery(sealed, 'leafless-attestation')).toBeNull()
+  expect(await s.mls.applyRecovery({ sealed, requestID: 'leafless-attestation' })).toBeNull()
 })
 
 test('outside lifecycle groups a valid confirmed tag needs no known leaf, while refusals require the source tree', async () => {
   const s = await setup({ standard: true })
   const requestID = 'standard-verdict'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const candidate = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const request = await s.mls.createRecoveryRequest({ requestID })
+  const candidate = await s.mls.applyRecovery({
+    sealed: await s.responder.sealGroupInfo(request),
+    requestID,
+  })
   if (candidate == null || 'renewalRequired' in candidate) throw new Error('No pending recovery')
-  const key = await candidate.confirmationKey('position', 'digest')
+  const key = await candidate.confirmationKey({ position: 'position', commitDigest: 'digest' })
   const { confirmationTag } = await import('@kumiai/mls')
   const outsider = fixture.agent(81)
   const binding = {
@@ -406,18 +455,18 @@ test('outside lifecycle groups a valid confirmed tag needs no known leaf, while 
     ...binding,
     verdict: 'confirmed' as const,
     epoch: candidate.epoch,
-    tag: confirmationTag(key, requestID),
+    tag: confirmationTag({ key, requestID }),
   }
   const opened = { signer: outsider.id, verdict }
-  expect(candidate.judgeVerdict(opened)).toBe('authoritative')
+  expect(await candidate.judgeVerdict(opened)).toBe('authoritative')
   expect(
-    candidate.judgeVerdict({
+    await candidate.judgeVerdict({
       ...opened,
       verdict: { ...binding, verdict: 'refused', reason: 'policy' },
     }),
   ).toBe('advisory')
   expect(
-    candidate.judgeVerdict({
+    await candidate.judgeVerdict({
       signer: s.bob.id,
       verdict: { ...binding, verdict: 'refused', reason: 'policy' },
     }),
@@ -436,7 +485,7 @@ test('the real commit port propagates binding and lapse refusals without advanci
       identity: s.bob,
       binding,
     })
-    expect(await s.mls.processCommit(commit, {})).toEqual({
+    expect(await s.mls.processCommit({ commit, context: {} })).toEqual({
       advanced: false,
       epochBefore: before,
       epochAfter: before,
@@ -448,13 +497,13 @@ test('the real commit port propagates binding and lapse refusals without advanci
 
 test('caller rejection and a replacement without a prior leaf propagate policy and invalid', async () => {
   const s = await setup()
-  const rejector = new GroupHandle({
+  const rejector = await GroupHandle.create({
     state: s.group().state,
     context: s.group().context,
     credential: s.group().credential,
     commitPolicy: () => 'reject',
   })
-  await rejector.bootstrapLedger(s.group().ledgerTokens)
+  await rejector.bootstrapLedger({ tokens: s.group().ledgerTokens })
   const mls = createGroupMLS({
     identity: s.identity,
     entrySlot: createLedgerEntrySlot(),
@@ -470,7 +519,10 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
     identity: s.bob,
     binding: await fixture.timedBinding({ identity: s.bob, iat: 100, exp: 200 }),
   })
-  expect(await mls.processCommit(valid, {})).toMatchObject({ advanced: false, refusal: 'policy' })
+  expect(await mls.processCommit({ commit: valid, context: {} })).toMatchObject({
+    advanced: false,
+    refusal: 'policy',
+  })
   const outsider = fixture.agent(81)
   const invalid = await fixture.lowLevelExternal({
     group: s.group(),
@@ -478,7 +530,7 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
     binding: await fixture.timedBinding({ identity: outsider, iat: 100, exp: 200 }),
     resync: false,
   })
-  expect(await s.mls.processCommit(invalid, {})).toMatchObject({
+  expect(await s.mls.processCommit({ commit: invalid, context: {} })).toMatchObject({
     advanced: false,
     refusal: 'invalid',
   })
@@ -487,13 +539,16 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
 test('the rejoiner cannot count its own signed confirmation', async () => {
   const s = await setup()
   const requestID = 'self-verdict'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const request = await s.mls.createRecoveryRequest({ requestID })
+  const pending = await s.mls.applyRecovery({
+    sealed: await s.responder.sealGroupInfo(request),
+    requestID,
+  })
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected candidate')
-  const key = await pending.confirmationKey('position', 'digest')
+  const key = await pending.confirmationKey({ position: 'position', commitDigest: 'digest' })
   const { confirmationTag } = await import('@kumiai/mls')
   expect(
-    pending.judgeVerdict({
+    await pending.judgeVerdict({
       signer: s.identity.id,
       verdict: {
         groupID: s.group().groupID,
@@ -502,7 +557,7 @@ test('the rejoiner cannot count its own signed confirmation', async () => {
         commitDigest: 'digest',
         verdict: 'confirmed',
         epoch: pending.epoch,
-        tag: confirmationTag(key, requestID),
+        tag: confirmationTag({ key, requestID }),
       },
     }),
   ).toBe('advisory')

@@ -1,5 +1,6 @@
 import {
   type ConformanceLogHub,
+  type ConformanceMailboxHubReceiveParams,
   type ConformanceReceiveSubscription,
   testHubStoreConformance,
   testLogHubConformance,
@@ -42,7 +43,9 @@ function logHubOver(store: HubStore): ConformanceLogHub {
     return next
   }
 
-  function receive(subscriberDID: string): ConformanceReceiveSubscription {
+  function receive({
+    subscriberDID,
+  }: ConformanceMailboxHubReceiveParams): ConformanceReceiveSubscription {
     let stopped = false
     let after: string | undefined
     const buffered: Array<StoredMessage> = []
@@ -78,10 +81,10 @@ function logHubOver(store: HubStore): ConformanceLogHub {
   }
 
   return {
-    subscribe: (subscriberDID, topicID, options) => {
+    subscribe: ({ subscriberDID, topicID, ...options }) => {
       return chain(() => store.subscribe({ subscriberDID, topicID, retention: options?.retention }))
     },
-    unsubscribe: (subscriberDID, topicID) => {
+    unsubscribe: ({ subscriberDID, topicID }) => {
       return chain(() => store.unsubscribe({ subscriberDID, topicID }))
     },
     receive,

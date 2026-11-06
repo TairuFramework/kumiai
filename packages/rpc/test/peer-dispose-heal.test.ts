@@ -72,7 +72,9 @@ describe('dispose during an in-flight heal', () => {
       recovery: { timeoutMs: 300, getDelayMs: () => 5, deadlineMs: 800 },
     })
     await flush()
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
+    await bob.peer.commit({
+      build: buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']),
+    })
     await flush()
 
     // Alice rejoins against the lying responder: her external commit lands, but her bootstrap

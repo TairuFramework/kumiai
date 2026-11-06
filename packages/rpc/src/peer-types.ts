@@ -302,10 +302,20 @@ export type InternalSurface = {
   to: (memberDID: string) => Promise<Client<ProtocolDefinition>>
 }
 
+export type GroupPeerDropAppFrameParams = {
+  topicID: string
+  position: string
+}
+
+export type GroupPeerCommitParams = {
+  build: () => Promise<PendingCommit>
+  holdLogSends?: true
+}
+
 export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
   /** Accept loss of one buffered sealed app frame, then resume the journal-first walk. */
-  dropAppFrame: (topicID: string, position: string) => Promise<void>
+  dropAppFrame: (params: GroupPeerDropAppFrameParams) => Promise<void>
   /** Schedule an immediate app pull and wake matching delivery workers. No-op after disposal. */
   retryAppDelivery: (topicID?: string) => Promise<void>
   /**
@@ -326,10 +336,7 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    * ({@link "commit".CommitDeadlineError}). Call {@link replay} after a throw to collect any
    * undrained `lost` / `reenact` work.
    */
-  commit: (
-    build: () => Promise<PendingCommit>,
-    options?: { holdLogSends?: true },
-  ) => Promise<LaneResult>
+  commit: (params: GroupPeerCommitParams) => Promise<LaneResult>
   /**
    * Replay the journal on its own, for startup: republish any pending commit under its original
    * idempotency key and hand back what did not survive. The host's collector to call before

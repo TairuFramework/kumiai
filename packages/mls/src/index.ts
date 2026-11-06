@@ -9,6 +9,7 @@ export type {
 } from 'ts-mls'
 export { defaultCapabilities, defaultProposalTypes, makeCustomExtension } from 'ts-mls'
 
+export type { BuildCurrentGroupAnchorExtensionParams } from './anchor.js'
 export {
   buildCurrentGroupAnchorExtension,
   buildGroupAnchorExtension,
@@ -21,6 +22,7 @@ export {
   readGroupAnchor,
   readGroupAnchorExtension,
 } from './anchor.js'
+export type { DIDAuthenticationDependenciesMayKeepDeniedIssuerParams } from './authentication.js'
 export {
   createDIDAuthenticationService,
   type DIDAuthenticationDependencies,
@@ -43,7 +45,9 @@ export {
   encodeClientState,
   sanitizeRatchetTree,
 } from './codec.js'
+export type { EffectDeltaParams, IngestControllerLogParams } from './controller-ingest.js'
 export { effectDelta, type FoldOk, ingestControllerLog } from './controller-ingest.js'
+export type { MemberDropIndicesParams } from './controller-log.js'
 export { memberDropIndices } from './controller-log.js'
 export {
   type ControllerBinding,
@@ -59,6 +63,7 @@ export {
   nobleCryptoProvider,
 } from './crypto.js'
 export type { LeafBinding } from './device-proof.js'
+export type { PrefixRelationParams } from './embedded-resolver.js'
 export { createRegistryControllerResolver, prefixRelation } from './embedded-resolver.js'
 export {
   CONTROL_ENVELOPE_VERSION,
@@ -87,6 +92,11 @@ export {
   RevokeProofError,
   type RevokeProofReason,
 } from './errors.js'
+export type {
+  FoldLedgerParams,
+  LedgerReducerApplyParams,
+  LedgerReducerVerifyAuthorityParams,
+} from './fold.js'
 export {
   type FoldDrop,
   type FoldInput,
@@ -145,8 +155,42 @@ export {
   revokeDevice,
   type SendAdmission,
 } from './group.js'
+export type { CommitInviteParams, CommitLedgerEntriesParams } from './group-commit.js'
 export { KUMIAI_KEY_RETENTION_CONFIG } from './group-context.js'
+export type { CreateGroupParams } from './group-create.js'
+export type {
+  CreateKeyPackageBundleParams,
+  CreateLastResortKeyPackageBundleParams,
+  MakeMLSCredentialParams,
+} from './group-credential.js'
+export type {
+  AddDeviceParams,
+  AnnounceControllerBeaconParams,
+  LabelDeviceParams,
+  RegisterDeviceParams,
+  RevokeDeviceParams,
+} from './group-device.js'
+export type {
+  CommitRejectedErrorParams,
+  GroupHandleAdvanceSenderGenerationParams,
+  GroupHandleBootstrapLedgerParams,
+  GroupHandleDecryptParams,
+  GroupHandleDecryptStagedParams,
+  GroupHandleEncryptParams,
+  GroupHandleExportSecretParams,
+  GroupHandleProcessMessageParams,
+  RegistryAtParams,
+} from './group-handle.js'
 export { registryAt } from './group-handle.js'
+export type {
+  AttestTreeTimeParams,
+  ControllerLogDeltaParams,
+  PreservationClockParams,
+  PublishControllerLogParams,
+  RemovalEvidenceParams,
+  RenewLeafParams,
+  SurvivorTargetsParams,
+} from './group-lifecycle.js'
 export {
   attestTreeTime,
   type CommitResult,
@@ -158,6 +202,7 @@ export {
   type RemovalEvidence,
   type RemoveLapsedLeavesResult,
   type RevokeBuildResult,
+  type RevokeProofInput,
   type RevokeWithProofParams,
   removalEvidence,
   removeLapsedLeaves,
@@ -165,6 +210,15 @@ export {
   revokeWithProof,
   survivorTargets,
 } from './group-lifecycle.js'
+export type { RemoveMemberParams } from './group-membership.js'
+export type { JoinGroupExternalParamsBeforeBindingParams } from './group-welcome.js'
+export type {
+  AssertHeadMatchesParams,
+  ComputeHeadParams,
+  ExtendHeadParams,
+  HeadsMatchParams,
+  LedgerIncompleteErrorParams,
+} from './head.js'
 export {
   assertHeadMatches,
   buildLedgerHeadExtension,
@@ -180,6 +234,7 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
+export type { EpochEventCountParams, HistorySizeParams, SettleAdvisoryParams } from './history.js'
 export {
   epochEventCount,
   HISTORY_HORIZON,
@@ -189,6 +244,7 @@ export {
   SETTLE_PROMPT_EPOCH_EVENTS,
   settleAdvisory,
 } from './history.js'
+export type { KeyPackageRefParams } from './key-package-codec.js'
 export {
   decodeKeyPackage,
   decodePrivateKeyPackage,
@@ -196,6 +252,7 @@ export {
   encodePrivateKeyPackage,
   keyPackageRef,
 } from './key-package-codec.js'
+export type { SignLedgerEntryParams, VerifyLedgerEntryParams } from './ledger.js'
 export {
   type LedgerEntry,
   ledgerEntryDigest,
@@ -203,12 +260,21 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
+export type { AttestedTreeTimeParams, LeafExpiryParams } from './lifecycle.js'
 export {
   type AssertRecoveryBindingParams,
   assertRecoveryBinding,
   attestedTreeTime,
   leafExpiry,
 } from './lifecycle.js'
+export type {
+  CascadeOfParams,
+  ClaimsForParams,
+  EffectiveAuthorityOfParams,
+  EffectOfParams,
+  MemberRootStatusParams,
+  MemberRootsOfParams,
+} from './member-root.js'
 export {
   cascadeOf,
   claimsFor,
@@ -225,11 +291,18 @@ export {
   type RemovedEffect,
   type RemovedMember,
 } from './member-root.js'
+export type { DefaultCommitPolicyParams } from './policy.js'
 export {
   type CommitPolicyContext,
   defaultCommitPolicy,
   MissingLedgerEntriesError,
 } from './policy.js'
+export type {
+  RecoveryRequestErrorParams,
+  SealedGroupInfoErrorParams,
+  SealedLedgerErrorParams,
+  VerifyRecoveryRequestParams,
+} from './recovery.js'
 export {
   type CreateRecoveryRequestParams,
   type CreateRecoveryRequestResult,
@@ -258,6 +331,7 @@ export {
   type VerifiedRecoveryRequest,
   verifyRecoveryRequest,
 } from './recovery.js'
+export type { ConfirmationKeyParams, ConfirmationTagParams } from './recovery-verdict.js'
 export {
   confirmationKey,
   confirmationTag,
@@ -270,6 +344,16 @@ export {
   type SealRecoveryVerdictParams,
   sealRecoveryVerdict,
 } from './recovery-verdict.js'
+export type {
+  AssertRetainsKnownEffectsParams,
+  AuthorityParams,
+  BeaconOfParams,
+  ControllerOfParams,
+  FoldControlParams,
+  RecordedLogOfParams,
+  RegistryForLogParams,
+  RevocationOfParams,
+} from './registry.js'
 export {
   assertRetainsKnownEffects,
   authority,
@@ -291,6 +375,7 @@ export {
   registrySeed,
   revocationOf,
 } from './registry.js'
+export type { FoldRosterParams } from './roster.js'
 export {
   adminCount,
   foldRoster,
@@ -300,6 +385,7 @@ export {
   type RosterState,
   roleReducer,
 } from './roster.js'
+export type { MergeReceiveSecretTreeParams } from './secret-tree.js'
 export { mergeReceiveSecretTree } from './secret-tree.js'
 export { bindingIssuedAt, DuplicateMemberLeafError } from './stale-leaf.js'
 export type { GroupOptions, Invite, KeyPackageBundle } from './types.js'

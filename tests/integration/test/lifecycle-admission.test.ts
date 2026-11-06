@@ -30,7 +30,7 @@ import { createGapHub } from './gap-hub.js'
 
 test('real MLS publishes paired snapshots only after an awaited adoption callback', async () => {
   const identity = randomIdentity()
-  const created = await createGroup(identity, 'admission-integration')
+  const created = await createGroup({ identity, groupID: 'admission-integration' })
   let handle: GroupHandle = created.group
   const epochBefore = Number(handle.epoch)
   const access = simpleHandleAccess({
@@ -44,14 +44,17 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
   })
   const crypto = createGroupCrypto({ access })
   const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
-  const token = await signLedgerEntry(identity, {
-    groupID: handle.groupID,
-    type: 'note',
-    subject: identity.id,
-    value: 'admission',
+  const token = await signLedgerEntry({
+    identity,
+    entry: {
+      groupID: handle.groupID,
+      type: 'note',
+      subject: identity.id,
+      value: 'admission',
+    },
   })
-  const result = await commitLedgerEntries(handle, [token])
-  await guardedReplace(access, result.newGroup)
+  const result = await commitLedgerEntries({ group: handle, tokens: [token] })
+  await guardedReplace({ access, next: result.newGroup })
   expect(mls.sendAdmission()).toEqual({ epoch: Number(handle.epoch), admissible: true })
   expect(crypto.epoch()).toBe(mls.sendAdmission().epoch)
 })
@@ -68,7 +71,7 @@ test('accepted adoption entries seal at the matching admission epoch once the de
   const putEntered = new Promise<void>((resolve) => {
     enteredPut = resolve
   })
-  let handle = (await createGroup(identity, 'admission-dispatch-integration')).group
+  let handle = (await createGroup({ identity, groupID: 'admission-dispatch-integration' })).group
   const epochBefore = Number(handle.epoch)
   const access = simpleHandleAccess({
     handle: () => handle,
@@ -91,8 +94,8 @@ test('accepted adoption entries seal at the matching admission epoch once the de
   const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
   const seals: Array<number> = []
   const wrap = crypto.wrap.bind(crypto)
-  vi.spyOn(crypto, 'wrap').mockImplementation(async (bytes, opts) => {
-    const sealed = await wrap(bytes, opts)
+  vi.spyOn(crypto, 'wrap').mockImplementation(async ({ bytes, ...opts }) => {
+    const sealed = await wrap({ bytes, ...opts })
     const admission = mls.sendAdmission()
     expect(admission.admissible).toBe(true)
     expect(crypto.frameEpoch(sealed)).toBe(admission.epoch)
@@ -131,34 +134,39 @@ test('accepted adoption entries seal at the matching admission epoch once the de
       const state = decodeClientState(blob)
       if (state == null) throw new Error('Invalid journal state')
       if (state.groupContext.epoch <= handle.epoch) return
-      await guardedReplace(
+      await guardedReplace({
         access,
-        await restoreGroup({
+        next: await restoreGroup({
           state,
           credential: handle.credential,
           ledgerEntries: handle.ledgerTokens,
         }),
-      )
+      })
     },
   })
   try {
     await peer.resync()
-    const token = await signLedgerEntry(identity, {
-      groupID: handle.groupID,
-      type: 'note',
-      subject: identity.id,
-      value: 'adoption',
+    const token = await signLedgerEntry({
+      identity,
+      entry: {
+        groupID: handle.groupID,
+        type: 'note',
+        subject: identity.id,
+        value: 'adoption',
+      },
     })
-    const result = await commitLedgerEntries(handle, [token])
+    const result = await commitLedgerEntries({ group: handle, tokens: [token] })
     let adopted = false
     const adoption = peer
-      .commit(async () => ({
-        commit: result.commitMessage,
-        bodies: [token],
-        kind: 'ledger',
-        journal: encodeClientState(result.newGroup.state),
-        onAccepted: () => guardedReplace(access, result.newGroup),
-      }))
+      .commit({
+        build: async () => ({
+          commit: result.commitMessage,
+          bodies: [token],
+          kind: 'ledger',
+          journal: encodeClientState(result.newGroup.state),
+          onAccepted: () => guardedReplace({ access, next: result.newGroup }),
+        }),
+      })
       .then(() => {
         adopted = true
       })

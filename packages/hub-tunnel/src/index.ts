@@ -36,6 +36,11 @@ export {
   hubFrameSchema,
 } from './frame.js'
 export { precedesSequenceID } from './sequence.js'
+export type {
+  HubBaseReceiveParams,
+  HubBaseSubscribeParams,
+  HubBaseUnsubscribeParams,
+} from './transport.js'
 export {
   createHubTunnelTransport,
   type HubBase,

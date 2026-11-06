@@ -1,6 +1,7 @@
 import { audienceConfirmation } from '@kokuin/capability'
 import { createRenew, createRotate, epochHeads } from '@kokuin/controller'
-import { stringifyToken } from '@kokuin/token'
+import { type CryptoProvider, nobleCrypto } from '@kokuin/crypto'
+import { normalizeDID, stringifyToken } from '@kokuin/token'
 import { defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -22,6 +23,7 @@ import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { leafExpiry } from '../src/index.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import {
+  attestedTreeTime,
   isLapsed,
   leafAt,
   prepareLifecycleGate,
@@ -75,7 +77,7 @@ test('membership and Welcome require a recipient and no role token', async () =>
   expect(group.ledgerTokens).toEqual([seed.token])
   expect(invite.recipientDID).toBe(bob.id)
   expect(invite.ledgerEntries).toEqual([seed.token])
-  const result = await commitInvite(group, bundle.publicPackage, invite)
+  const result = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   const { group: joined } = await processWelcome({
     identity: bob,
     invite,
@@ -95,12 +97,14 @@ test('the recipient binds both commit and Welcome, independent of ledger entries
   const { group, bob, invite, bundle } = await admission()
   const other = agent(62)
   const wrong = { ...invite, recipientDID: other.id }
-  await expect(commitInvite(group, bundle.publicPackage, wrong)).rejects.toMatchObject({
+  await expect(
+    commitInvite({ group, keyPackage: bundle.publicPackage, invite: wrong }),
+  ).rejects.toMatchObject({
     name: 'InviteRecipientMismatchError',
     expectedDID: other.id,
     actualDID: bob.id,
   })
-  const result = await commitInvite(group, bundle.publicPackage, invite)
+  const result = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   await expect(
     processWelcome({
       identity: bob,
@@ -126,11 +130,14 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
     bob,
     await timedBinding({ identity: bob, iat: 100, exp: 200 }),
   )
-  const token = await signLedgerEntry(setup.identity, {
-    type: 'app.consumed',
-    groupID: group.groupID,
-    subject: bob.id,
-    value: 'consent-id',
+  const token = await signLedgerEntry({
+    identity: setup.identity,
+    entry: {
+      type: 'app.consumed',
+      groupID: group.groupID,
+      subject: bob.id,
+      value: 'consent-id',
+    },
   })
   setup.tokens.set(ledgerEntryDigest(token), token)
   const { invite } = await createInvite({
@@ -139,8 +146,8 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
     recipientDID: bob.id,
     entries: [token],
   })
-  const first = await commitInvite(group, bundle.publicPackage, invite)
-  const second = await commitInvite(group, bundle.publicPackage, invite)
+  const first = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const second = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   const consumer = await processWelcome({
     identity: bob,
     invite,
@@ -148,8 +155,8 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
     keyPackageBundle: { ...bundle, ownerDID: bob.id },
   })
   expect(consumer.group.ledgerTokens).toEqual([...group.ledgerTokens, token])
-  await receiver.processMessage(first.commitMessage)
-  await expect(receiver.processMessage(second.commitMessage)).rejects.toThrow()
+  await receiver.processMessage({ message: first.commitMessage })
+  await expect(receiver.processMessage({ message: second.commitMessage })).rejects.toThrow()
   const consentConsumptions = receiver.ledger.filter(
     ({ verified }) => verified.entry.type === 'app.consumed',
   ).length
@@ -170,16 +177,23 @@ test('an inviter and consumer issuer need a pre-commit leaf', async () => {
   await expect(createInvite({ group, identity: outsider, recipientDID: bob.id })).rejects.toThrow(
     /leaf/,
   )
-  const token = await signLedgerEntry(outsider, {
-    type: 'app.consumed',
-    groupID: group.groupID,
-    subject: bob.id,
-    value: 'consent-id',
+  const token = await signLedgerEntry({
+    identity: outsider,
+    entry: {
+      type: 'app.consumed',
+      groupID: group.groupID,
+      subject: bob.id,
+      value: 'consent-id',
+    },
   })
   await expect(
-    commitInvite(group, bundle.publicPackage, {
-      ...invite,
-      ledgerEntries: [...group.ledgerTokens, token],
+    commitInvite({
+      group,
+      keyPackage: bundle.publicPackage,
+      invite: {
+        ...invite,
+        ledgerEntries: [...group.ledgerTokens, token],
+      },
     }),
   ).rejects.toThrow(/pre-commit/)
   expect(group.ledgerTokens).toEqual([seed.token])
@@ -190,22 +204,26 @@ test('an inviter and consumer issuer need a pre-commit leaf', async () => {
 test('Add refuses floating and malformed bindings and expired author capability', async () => {
   const { group, bob, invite } = await admission()
   const floating = await rawAdd(group, bob)
-  await expect(commitInvite(group, floating.bundle.publicPackage, invite)).rejects.toMatchObject({
+  await expect(
+    commitInvite({ group, keyPackage: floating.bundle.publicPackage, invite }),
+  ).rejects.toMatchObject({
     reason: 'floating-refused',
   })
   const malformed = await rawAdd(group, bob, {
     ...(await timedBinding({ identity: bob, iat: 100, exp: 200 })),
     id: 'did:key:wrong',
   })
-  await expect(commitInvite(group, malformed.bundle.publicPackage, invite)).rejects.toThrow()
+  await expect(
+    commitInvite({ group, keyPackage: malformed.bundle.publicPackage, invite }),
+  ).rejects.toThrow()
   const expired = await rawAdd(
     group,
     bob,
     await timedBinding({ identity: bob, iat: 100, exp: 150 }),
   )
-  await expect(commitInvite(group, expired.bundle.publicPackage, invite)).rejects.toThrow(
-    /authoring time/,
-  )
+  await expect(
+    commitInvite({ group, keyPackage: expired.bundle.publicPackage, invite }),
+  ).rejects.toThrow(/authoring time/)
 })
 
 test('Welcome admits a live leaf while preserving a lapsed existing leaf', async () => {
@@ -283,7 +301,7 @@ test.each([
       })
       if (accepted) {
         const result = await external
-        await expect(author.processMessage(result.commitMessage)).resolves.toBeNull()
+        await expect(author.processMessage({ message: result.commitMessage })).resolves.toBeNull()
       } else await expect(external).rejects.toMatchObject({ reason: 'lifetime-cap' })
     }
   },
@@ -347,13 +365,14 @@ test.each(['floating', 'foreign', 'malformed'] as const)(
     const own = group.state.ratchetTree[0]
     if (own?.nodeType !== nodeTypes.leaf) throw new Error('Missing creator')
     const binding = await timedBinding({ identity, iat: 100, exp: 200 })
-    own.leaf.credential = makeMLSCredential(
+    own.leaf.credential = makeMLSCredential({
       identity,
-      kind === 'floating'
-        ? undefined
-        : { ...binding, id: kind === 'foreign' ? 'did:kokuin:foreign' : 'did:key:wrong' },
-    )
-    const invalid = deriveGroup(group, (await rawCommit({ group })).newState)
+      controller:
+        kind === 'floating'
+          ? undefined
+          : { ...binding, id: kind === 'foreign' ? 'did:kokuin:foreign' : 'did:key:wrong' },
+    })
+    const invalid = await deriveGroup(group, (await rawCommit({ group })).newState)
     const bob = agent(61)
     const added = await rawAdd(
       invalid,
@@ -423,7 +442,9 @@ test.each([
   })
   const previous = setup.deviceGroup.state
   await expect(
-    addDevice(setup.deviceGroup, setup.deviceIdentity, {
+    addDevice({
+      group: setup.deviceGroup,
+      identity: setup.deviceIdentity,
       keyPackage: bundle.publicPackage,
       device: leaf.deviceID,
       controller: setup.controllerID,
@@ -436,12 +457,12 @@ test.each([
 async function oversizedJoinGroup() {
   authorClock()
   const setup = await pipelineGroup()
-  const rotation = createRotate({
+  const rotation = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: 'h'.repeat(210000),
   })
   const prefix = [inception, rotation]
@@ -460,13 +481,15 @@ async function oversizedJoinGroup() {
     )
     group = fixture.author
   }
-  expect(historySize(group.state.ratchetTree, [])).toBeGreaterThan(HISTORY_HORIZON)
+  expect(historySize({ tree: group.state.ratchetTree, entries: [] })).toBeGreaterThan(
+    HISTORY_HORIZON,
+  )
   return { group, identity: setup.identity, target: agent(82) }
 }
 
 test('external replacement may shrink history while remaining above the horizon', async () => {
   const { group, target } = await oversizedJoinGroup()
-  const sizeBefore = historySize(group.state.ratchetTree, [])
+  const sizeBefore = historySize({ tree: group.state.ratchetTree, entries: [] })
   const { groupInfo } = await exportGroupInfo({ group })
   const result = await joinGroupExternal({
     identity: target,
@@ -475,18 +498,18 @@ test('external replacement may shrink history while remaining above the horizon'
     resync: true,
     controller: await timedBinding({ identity: target, iat: 150, exp: 300 }),
   })
-  const sizeAfter = historySize(result.group.state.ratchetTree, [])
+  const sizeAfter = historySize({ tree: result.group.state.ratchetTree, entries: [] })
   expect(sizeAfter).toBeGreaterThan(HISTORY_HORIZON)
   expect(sizeAfter).toBeLessThan(sizeBefore)
-  await group.processMessage(result.commitMessage)
+  await group.processMessage({ message: result.commitMessage })
   expect(group.epoch).toBe(result.group.epoch)
   expect(group.state.groupContext.treeHash).toEqual(result.group.state.groupContext.treeHash)
-  expect(historySize(group.state.ratchetTree, [])).toBe(sizeAfter)
+  expect(historySize({ tree: group.state.ratchetTree, entries: [] })).toBe(sizeAfter)
 })
 
 test('Welcome may join a shrinking Remove and Add above the horizon', async () => {
   const { group, identity, target } = await oversizedJoinGroup()
-  const sizeBefore = historySize(group.state.ratchetTree, [])
+  const sizeBefore = historySize({ tree: group.state.ratchetTree, entries: [] })
   const bob = agent(61)
   const { invite } = await createInvite({ group, identity, recipientDID: bob.id })
   const added = await rawAdd(group, bob, await timedBinding({ identity: bob, iat: 102, exp: 300 }))
@@ -502,7 +525,7 @@ test('Welcome may join a shrinking Remove and Add above the horizon', async () =
     ratchetTreeExtension: true,
   })
   if (result.welcome == null) throw new Error('Missing Welcome')
-  const sizeAfter = historySize(result.newState.ratchetTree, [])
+  const sizeAfter = historySize({ tree: result.newState.ratchetTree, entries: [] })
   expect(sizeAfter).toBeGreaterThan(HISTORY_HORIZON)
   expect(sizeAfter).toBeLessThan(sizeBefore)
   const { group: joined } = await processWelcome({
@@ -513,7 +536,7 @@ test('Welcome may join a shrinking Remove and Add above the horizon', async () =
   })
   expect(joined.state.groupContext.treeHash).toEqual(result.newState.groupContext.treeHash)
   expect(joined.epoch).toBe(result.newState.groupContext.epoch)
-  expect(historySize(joined.state.ratchetTree, [])).toBe(sizeAfter)
+  expect(historySize({ tree: joined.state.ratchetTree, entries: [] })).toBe(sizeAfter)
   expect(joined.findMemberLeafIndex(target.id)).toBeUndefined()
   expect(joined.findMemberLeafIndex(bob.id)).toBeDefined()
 })
@@ -525,11 +548,13 @@ test('the commit gate still refuses growing history above the horizon', async ()
     agent(61),
     await timedBinding({ identity: agent(61), iat: 102, exp: 300 }),
   )
-  expect(historySize(added.result.newState.ratchetTree, [])).toBeGreaterThan(
-    historySize(group.state.ratchetTree, []),
+  expect(historySize({ tree: added.result.newState.ratchetTree, entries: [] })).toBeGreaterThan(
+    historySize({ tree: group.state.ratchetTree, entries: [] }),
   )
   const previous = group.state
-  await expect(group.processMessage(added.message)).rejects.toMatchObject({ reason: 'binding' })
+  await expect(group.processMessage({ message: added.message })).rejects.toMatchObject({
+    reason: 'binding',
+  })
   expect(group.state).toBe(previous)
   await expect(
     commitWithEntries({
@@ -565,50 +590,105 @@ async function membershipLeaf(lease = 1000) {
   return { ...epoch, group, identity, member, binding, leaf, floor }
 }
 
+test('judging the same projection again does not re-verify its controller log', async () => {
+  const f = await membershipLeaf()
+  let verified = 0
+  const crypto: CryptoProvider = {
+    ...nobleCrypto,
+    verify: (item) => {
+      verified++
+      return nobleCrypto.verify(item)
+    },
+    verifyBatch: (items) => {
+      verified += items.length
+      return nobleCrypto.verifyBatch(items)
+    },
+  }
+  const judge = async () => {
+    const { registry } = f.group
+    await attestedTreeTime({
+      tree: f.group.state.ratchetTree,
+      registry,
+      controllerID: f.did,
+      crypto,
+    })
+    return await leafExpiry({ binding: f.binding, registry, controller: f.did, crypto })
+  }
+  expect(await judge()).toBe(1000)
+  const first = verified
+  expect(first).toBeGreaterThan(0)
+  expect(await judge()).toBe(1000)
+  expect(verified).toBe(first)
+
+  const projection = f.group.registry.controllers.get(normalizeDID(f.did))
+  const log = projection?.recordedLog
+  if (projection == null || log == null) throw new Error('Missing recorded log')
+  // A replaced log is another log, even at the same length.
+  Object.assign(projection, { recordedLog: { ...log, chain: [...log.chain] } })
+  expect(await judge()).toBe(1000)
+  const replaced = verified
+  expect(replaced).toBeGreaterThan(first)
+  // Held logs are reachable through recordedLogOf, so growth in place must refold too.
+  const appended = log.chain.at(-1)
+  if (appended == null) throw new Error('Missing chain event')
+  const held = projection.recordedLog
+  if (held == null) throw new Error('Missing recorded log')
+  ;(held.chain as Array<typeof appended>).push(appended)
+  await judge()
+  expect(verified).toBeGreaterThan(replaced)
+})
+
 test('membership leaf lapses at its lease end by tree time', async () => {
   const f = await membershipLeaf()
-  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(1000)
+  expect(
+    await leafExpiry({ binding: f.binding, registry: f.group.registry, controller: f.did }),
+  ).toBe(1000)
   f.floor(1000)
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({ reason: 'lapsed' })
   f.floor(1001)
-  expect(isLapsed(f.group, f.leaf)).toBe(true)
+  expect(await isLapsed(f.group, f.leaf)).toBe(true)
 })
 
 test('renewal reaches a membership leaf through a log entry', async () => {
   const f = await membershipLeaf()
-  const renew = createRenew({
+  const renew = await createRenew({
     did: f.did,
     head: f.head,
-    parents: epochHeads(f.did, f.log),
+    parents: await epochHeads({ did: f.did, log: f.log }),
     signer: f.root,
     add: f.member.add,
     lease: 2000,
   })
   await f.group.applyLedgerEntries([
-    await signLedgerEntry(f.identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: f.group.groupID,
-      subject: f.did,
-      value: { op: 'log', proof: { chain: [], events: [renew] } },
+    await signLedgerEntry({
+      identity: f.identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: f.group.groupID,
+        subject: f.did,
+        value: { op: 'log', proof: { chain: [], events: [renew] } },
+      },
     }),
   ])
   f.floor(1500)
-  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBe(2000)
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(
+    await leafExpiry({ binding: f.binding, registry: f.group.registry, controller: f.did }),
+  ).toBe(2000)
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
 })
 
 test('phone member keeps its leaf 30 days on a 90-day lease', async () => {
   const f = await membershipLeaf(7_776_000)
   f.floor(2_592_000)
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).resolves.toBeUndefined()
 })
 
 test('membership leaf attests no tree time', async () => {
   const f = await membershipLeaf()
-  expect(treeTime(f.group, f.did)).toBe(100)
+  expect(await treeTime(f.group, f.did)).toBe(100)
   await expect(
     verifyLifecycleProof(f.group, {
       issuer: f.identity.id,
@@ -625,8 +705,10 @@ test('membership leaf attests no tree time', async () => {
 test('an unavailable membership lease keeps existing leaves and refuses admission', async () => {
   const f = await membershipLeaf()
   ;(f.group.registry.controllers as Map<string, unknown>).clear()
-  expect(leafExpiry(f.binding, f.group.registry, f.did)).toBeUndefined()
-  expect(isLapsed(f.group, f.leaf)).toBe(false)
+  expect(
+    await leafExpiry({ binding: f.binding, registry: f.group.registry, controller: f.did }),
+  ).toBeUndefined()
+  expect(await isLapsed(f.group, f.leaf)).toBe(false)
   await expect(validateEntry(f.group, f.leaf)).rejects.toMatchObject({
     reason: 'member-unavailable',
   })
@@ -648,8 +730,8 @@ async function stagedWelcome(membership = false, carriesAdd = true) {
       ? { member: { add: member.add, g: epoch.head.gen }, iat: 100 }
       : {
           capability: stringifyToken(
-            await member.identity.signToken(
-              {
+            await member.identity.signToken({
+              payload: {
                 sub: epoch.did,
                 aud: joiner.id,
                 act: 'authenticate',
@@ -659,18 +741,21 @@ async function stagedWelcome(membership = false, carriesAdd = true) {
                 exp: 200,
                 mbr: { add: member.add, g: epoch.head.gen },
               },
-              { embedLongForm: true },
-            ),
+              embedLongForm: true,
+            }),
           ),
         }),
   }
   const entries = carriesAdd
     ? [
-        await signLedgerEntry(identity, {
-          type: DEVICE_ENTRY_TYPE,
-          groupID: group.groupID,
-          subject: epoch.did,
-          value: { op: 'log', proof: { chain: [], events: epoch.log.events } },
+        await signLedgerEntry({
+          identity,
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: epoch.did,
+            value: { op: 'log', proof: { chain: [], events: epoch.log.events } },
+          },
         }),
       ]
     : []
@@ -722,7 +807,7 @@ test.each([
     Object.assign(judging, { timeFloor: judgingFloor })
     const leaf = leafAt(group.state.ratchetTree, group.state.privatePath.leafIndex)
     if (leaf == null) throw new Error('Missing joiner')
-    expect(leafExpiry(f.binding, registry, f.did)).toBe(1000)
+    expect(await leafExpiry({ binding: f.binding, registry, controller: f.did })).toBe(1000)
     const validate = async () => {
       if (path === 'entry')
         return validateEntry(group, leaf, undefined, { registry, stage: 'full', mode: 'admit' })
@@ -740,7 +825,7 @@ test.each([
           enactedDeviceEntries: [],
         }),
       })
-      gate.check({
+      await gate.check({
         kind: 'proposal',
         proposal: {
           senderLeafIndex: undefined,
@@ -783,33 +868,47 @@ test('Welcome joiner with a membership leaf takes admission from the folded regi
   const { group } = await processWelcome(f.params)
   expect(group.sendAdmission()).toMatchObject({ admissible: true })
   await group.applyLedgerEntries([
-    await signLedgerEntry(f.identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: f.did,
-      value: { op: 'clock', time: 1000 },
+    await signLedgerEntry({
+      identity: f.identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 1000 },
+      },
     }),
   ])
   expect(group.sendAdmission()).toMatchObject({ admissible: true })
   await group.applyLedgerEntries([
-    await signLedgerEntry(f.identity, {
-      type: DEVICE_ENTRY_TYPE,
-      groupID: group.groupID,
-      subject: f.did,
-      value: { op: 'clock', time: 1001 },
+    await signLedgerEntry({
+      identity: f.identity,
+      entry: {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: f.did,
+        value: { op: 'clock', time: 1001 },
+      },
     }),
   ])
   expect(group.sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
-  await expect(group.encrypt(new Uint8Array([1]))).rejects.toMatchObject({ reason: 'lapsed' })
+  await expect(group.encrypt({ plaintext: new Uint8Array([1]) })).rejects.toMatchObject({
+    reason: 'lapsed',
+  })
 })
 
 test('membership key package needs controllerLog', async () => {
   const f = await stagedWelcome(true)
   for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
-    await expect(build(f.member.identity, { controller: f.binding })).rejects.toMatchObject({
+    await expect(
+      build({ identity: f.member.identity, controller: f.binding }),
+    ).rejects.toMatchObject({
       reason: 'member-unavailable',
     })
-    const bundle = await build(f.member.identity, { controller: f.binding, controllerLog: f.log })
+    const bundle = await build({
+      identity: f.member.identity,
+      controller: f.binding,
+      controllerLog: f.log,
+    })
     expect(bundle.ownerDID).toBe(f.member.identity.id)
   }
 })
@@ -817,13 +916,20 @@ test('membership key package needs controllerLog', async () => {
 test('mbr key package verifies against controllerLog', async () => {
   const f = await stagedWelcome()
   for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
-    await expect(build(f.params.identity, { controller: f.binding })).rejects.toMatchObject({
+    await expect(
+      build({ identity: f.params.identity, controller: f.binding }),
+    ).rejects.toMatchObject({
       reason: 'member-unavailable',
     })
-    const bundle = await build(f.params.identity, { controller: f.binding, controllerLog: f.log })
+    const bundle = await build({
+      identity: f.params.identity,
+      controller: f.binding,
+      controllerLog: f.log,
+    })
     expect(bundle.ownerDID).toBe(f.params.identity.id)
     await expect(
-      build(f.params.identity, {
+      build({
+        identity: f.params.identity,
         controller: f.binding,
         controllerLog: { chain: f.log.chain, events: [] },
       }),

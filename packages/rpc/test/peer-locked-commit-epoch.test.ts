@@ -25,9 +25,12 @@ async function runCase(kind: Case, offset: number) {
   const topicID = commitTopic(secret)
   let sequenceID: string
   if (kind === 'unknown-handshake' || kind === 'unknown-commit') {
-    const payload = encodeCommitFrame(new Uint8Array([1]), new Uint8Array())
+    const payload = encodeCommitFrame({
+      commit: new Uint8Array([1]),
+      sealedEntries: new Uint8Array(),
+    })
     if (kind === 'unknown-commit') payload[0] = COMMIT_FRAME_VERSION + 1
-    const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, payload)
+    const frame = encodeHandshakeFrame({ kind: HANDSHAKE_KIND.commit, payload })
     if (kind === 'unknown-handshake') frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
     sequenceID = (await hub.publish({ senderDID: 'zoe', topicID, payload: frame, retain: 'log' }))
       .sequenceID
@@ -172,12 +175,12 @@ describe('commit decisions use the handle epoch', { concurrent: false }, () => {
     const readHeader = vi.spyOn(mls, 'readCommitHeader')
     const originalProcess = mls.processCommit
     let raced = false
-    mls.processCommit = async (commit, context) => {
+    mls.processCommit = async ({ commit, context }) => {
       if (!raced) {
         raced = true
         mls.adopt(mls.buildCommit())
       }
-      return originalProcess(commit, context)
+      return originalProcess({ commit, context })
     }
     const observations: Array<StrandObservation> = []
     const fetch = vi.spyOn(hub, 'fetchTopic')

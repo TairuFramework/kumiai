@@ -138,7 +138,7 @@ export function waitForRecoveryConfirmation(
         opening = opening
           .then(async () => {
             if (finished) return
-            const opened = await port.openRecoveryVerdict(sealed, requestID)
+            const opened = await port.openRecoveryVerdict({ sealed, requestID })
             if (finished || opened == null) return
             const verdict = opened.verdict
             const boundToAttempt =
@@ -152,7 +152,9 @@ export function waitForRecoveryConfirmation(
               (verdict.epoch !== pending.epoch || verdict.tag !== confirmationTag(key, requestID))
             )
               return
-            if (pending.judgeVerdict(opened) === 'advisory') {
+            const standing = await pending.judgeVerdict(opened)
+            if (finished) return
+            if (standing === 'advisory') {
               advisory.set(JSON.stringify(opened), opened)
               if (advisory.size > 1024) {
                 const oldest = advisory.keys().next().value

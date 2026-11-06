@@ -22,7 +22,7 @@ import {
 const recoverySecret = new Uint8Array(32).fill(0x97)
 const members = ['alice', 'bob', 'carol']
 const topic = (epoch: number) =>
-  protocolTopic(fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, 'chat')
+  protocolTopic({ secret: fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, protocol: 'chat' })
 
 describe('recovery ordering', { concurrent: false }, () => {
   test('a failed rotation-record write prevents adoption', async () => {
@@ -41,7 +41,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     await bob.peer.replay()
     reject = true
-    await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).rejects.toThrow(
+    await expect(bob.peer.commit({ build: buildRemoveCommit(bob, 'carol') })).rejects.toThrow(
       'slot unavailable',
     )
     expect(bob.mls.epoch()).toBe(1)
@@ -59,21 +59,23 @@ describe('recovery ordering', { concurrent: false }, () => {
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     const build = buildRemoveCommit(bob, 'carol')
     await expect(
-      bob.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            await pending.onAccepted()
-            throw new Error('adoption notification failed')
-          },
-        }
+      bob.peer.commit({
+        build: async () => {
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              await pending.onAccepted()
+              throw new Error('adoption notification failed')
+            },
+          }
+        },
       }),
     ).rejects.toThrow('adoption notification failed')
     const epochBefore = 1
     const anchorAfterThrow = bob.anchorStore.stored()
     expect(anchorAfterThrow?.epoch).toBe(epochBefore + 1)
-    await bob.peer.commit(buildLedgerCommit(bob, []))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     await alice.peer.resync()
     expect(bob.peer.anchorEpoch()).toBe(2)
     expect(alice.peer.anchorEpoch()).toBe(2)
@@ -96,22 +98,24 @@ describe('recovery ordering', { concurrent: false }, () => {
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     const build = buildInviteCommit(bob, 'dave')
     await expect(
-      bob.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            await pending.onAccepted()
-            throw new Error('adopted')
-          },
-        }
+      bob.peer.commit({
+        build: async () => {
+          const pending = await build()
+          return {
+            ...pending,
+            onAccepted: async () => {
+              await pending.onAccepted()
+              throw new Error('adopted')
+            },
+          }
+        },
       }),
     ).rejects.toThrow('adopted')
     expect(bob.peer.anchorEpoch()).toBe(2)
     await expect.poll(() => alice.peer.anchorEpoch()).toBe(2)
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'added' } })
     await expect.poll(() => seen).toEqual([{ text: 'added' }])
-    await bob.peer.commit(buildRemoveCommit(bob, 'dave'))
+    await bob.peer.commit({ build: buildRemoveCommit(bob, 'dave') })
     expect(bob.peer.anchorEpoch()).toBe(3)
     await expect.poll(() => alice.peer.anchorEpoch()).toBe(3)
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } })
@@ -179,9 +183,9 @@ describe('recovery ordering', { concurrent: false }, () => {
     let pendingRecovery: PendingRecovery | undefined
     let captured = 0
     const exportSecret = bob.crypto.exportSecret
-    bob.crypto.exportSecret = async (label) => {
+    bob.crypto.exportSecret = async ({ label }) => {
       if (label === APP_TOPIC_LABEL) captured++
-      return exportSecret(label)
+      return exportSecret({ label })
     }
     const save = bob.anchorStore.save
     let savedPending: AnchorSlot['pending']
@@ -224,9 +228,9 @@ describe('recovery ordering', { concurrent: false }, () => {
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     let captured = 0
     const exportSecret = bob.crypto.exportSecret
-    bob.crypto.exportSecret = async (label) => {
+    bob.crypto.exportSecret = async ({ label }) => {
       if (label === APP_TOPIC_LABEL) captured++
-      return exportSecret(label)
+      return exportSecret({ label })
     }
     const save = bob.anchorStore.save
     let failResolvedSave = true
@@ -265,7 +269,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect((await bob.anchorStore.load())?.pending).toBeUndefined()
     await dave.peer.dispose()
     const restarted = makeMLSPeer(hub, 'dave', recoverySecret, { restartOf: dave })
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await expect.poll(() => bob.mls.epoch()).toBe(2)
     await expect.poll(() => restarted.mls.epoch()).toBe(2)
     expect(alice.peer.anchorEpoch()).toBe(1)
@@ -292,7 +296,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       return process(...args)
     }
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1, removes: ['carol'] })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toThrow(
       'resolver unavailable',
     )
     const pending = (await bob.anchorStore.load())?.pending
@@ -317,14 +321,14 @@ describe('recovery ordering', { concurrent: false }, () => {
       epoch: 1,
       external: true,
     })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toThrow(
       'earlier anchor rotation is unresolved',
     )
     expect(processes).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toEqual(pending)
     message.payload = original
     refuse = false
-    await bob.peer.commit(buildLedgerCommit(bob, []))
+    await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
     expect(processes).toBe(2)
     expect(bob.mls.epoch()).toBe(3)
     expect(bob.peer.anchorEpoch()).toBe(2)
@@ -350,7 +354,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       })
       await bob.peer.replay()
       refuse = true
-      await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).rejects.toThrow(
+      await expect(bob.peer.commit({ build: buildRemoveCommit(bob, 'carol') })).rejects.toThrow(
         'resolved slot unavailable',
       )
       expect(written.stored()?.epoch).toBe(1)
@@ -359,7 +363,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       if (restart) await bob.peer.dispose()
       refuse = false
       const current = restart ? makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob }) : bob
-      await current.peer.commit(buildLedgerCommit(current, []))
+      await current.peer.commit({ build: buildLedgerCommit(current, []) })
       expect(current.mls.epoch()).toBe(3)
       expect(written.stored()?.epoch).toBe(2)
       expect((await written.load())?.pending).toBeUndefined()
@@ -373,12 +377,14 @@ describe('recovery ordering', { concurrent: false }, () => {
     await bob.peer.replay()
     const pending = await buildRemoveCommit(bob, 'carol')()
     await expect(
-      bob.peer.commit(async () => ({
-        ...pending,
-        onAccepted: async () => {
-          throw new Error('durable replacement not adopted')
-        },
-      })),
+      bob.peer.commit({
+        build: async () => ({
+          ...pending,
+          onAccepted: async () => {
+            throw new Error('durable replacement not adopted')
+          },
+        }),
+      }),
     ).rejects.toThrow('durable replacement not adopted')
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
@@ -397,12 +403,14 @@ describe('recovery ordering', { concurrent: false }, () => {
     await bob.peer.replay()
     const pending = await buildReplaceCommit(bob, 'carol')()
     await expect(
-      bob.peer.commit(async () => ({
-        ...pending,
-        onAccepted: async () => {
-          throw new Error('durable replacement not adopted')
-        },
-      })),
+      bob.peer.commit({
+        build: async () => ({
+          ...pending,
+          onAccepted: async () => {
+            throw new Error('durable replacement not adopted')
+          },
+        }),
+      }),
     ).rejects.toThrow('durable replacement not adopted')
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
@@ -436,7 +444,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     // Dave was Added and never committed, so his leaf still holds an admission the whole time.
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob', 'carol'] })
     await bob.peer.replay()
-    await bob.peer.commit(buildInviteCommit(bob, 'dave'))
+    await bob.peer.commit({ build: buildInviteCommit(bob, 'dave') })
     expect(bob.peer.anchorEpoch()).toBe(2)
     const pending = await (build === 'ledger'
       ? buildLedgerCommit(bob, [])
@@ -444,12 +452,14 @@ describe('recovery ordering', { concurrent: false }, () => {
         ? buildReplaceCommit(bob, 'carol')
         : buildInviteCommit(bob, 'erin'))()
     await expect(
-      bob.peer.commit(async () => ({
-        ...pending,
-        onAccepted: async () => {
-          throw new Error('not adopted')
-        },
-      })),
+      bob.peer.commit({
+        build: async () => ({
+          ...pending,
+          onAccepted: async () => {
+            throw new Error('not adopted')
+          },
+        }),
+      }),
     ).rejects.toThrow('not adopted')
     const slot = await bob.anchorStore.load()
     if (slot?.pending == null) throw new Error('no pending record')
@@ -491,24 +501,24 @@ describe('recovery ordering', { concurrent: false }, () => {
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
     const exportSecret = bob.crypto.exportSecret
     const exported: Array<number> = []
-    bob.crypto.exportSecret = async (label) => {
+    bob.crypto.exportSecret = async ({ label }) => {
       if (label === APP_TOPIC_LABEL) {
         exported.push(bob.mls.epoch())
         if (bob.mls.epoch() === 2) throw new Error('capture interrupted')
       }
-      return exportSecret(label)
+      return exportSecret({ label })
     }
-    await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).rejects.toThrow(
+    await expect(bob.peer.commit({ build: buildRemoveCommit(bob, 'carol') })).rejects.toThrow(
       'capture interrupted',
     )
     await expect.poll(() => alice.mls.epoch()).toBe(2)
     hub.detach('bob')
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     bob.mls.adopt(bob.mls.buildCommit([]))
     await bob.peer
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'after coordinated repair' } })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toBeInstanceOf(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toBeInstanceOf(
       RecoveryRequiredError,
     )
     expect(adoptsAt).not.toContain(3)

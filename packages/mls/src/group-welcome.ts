@@ -87,6 +87,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
       authService: {
         async validateCredential(credential: Credential, signaturePublicKey: Uint8Array) {
           await verifyLeafCredential(credential, signaturePublicKey, {
+            crypto: options?.crypto,
             judging: () => ({ stage: 'structural', mode: 'rejudge' }),
           })
           return true
@@ -117,7 +118,8 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     groupID: invite.groupID,
   }
 
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
+    crypto: options?.crypto,
     state,
     credential,
     context,
@@ -133,10 +135,13 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   if (authenticated == null) {
     throw new Error('processWelcome: the group has no ledger head extension')
   }
-  assertHeadMatches(
-    authenticated.head,
-    computeHead(invite.groupID, invite.ledgerEntries.map(ledgerEntryDigest)),
-  )
+  assertHeadMatches({
+    expected: authenticated.head,
+    actual: computeHead({
+      groupID: invite.groupID,
+      entryIDs: invite.ledgerEntries.map(ledgerEntryDigest),
+    }),
+  })
 
   // Fold the invite's entries: the roster is seeded from the anchor and the fold grants
   // authority only to an admin-so-far, so a member-signed entry cannot promote anyone
@@ -144,7 +149,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   if (group.anchor.controller == null) {
     let namesSelf = false
     for (const token of invite.ledgerEntries) {
-      const verified = await verifyLedgerEntry(token)
+      const verified = await verifyLedgerEntry({ token, crypto: options?.crypto })
       if (
         verified?.entry.type === ROLE_ENTRY_TYPE &&
         verified.entry.groupID === invite.groupID &&
@@ -202,6 +207,11 @@ export async function processWelcomeOnce(
 // External rejoin (RFC 9420 §11.2.1 — stale device self-recovery)
 // ---------------------------------------------------------------------------
 
+export type JoinGroupExternalParamsBeforeBindingParams = {
+  pending: GroupHandle
+  source: GroupHandle
+}
+
 export type JoinGroupExternalParams = {
   identity: OwnIdentity
   /** Framed MLSMessage(GroupInfo) bytes from exportGroupInfo. */
@@ -217,7 +227,7 @@ export type JoinGroupExternalParams = {
   options?: GroupOptions
   authenticatedData?: Uint8Array
   /** @internal Judge the attestation before any replacement-binding checks. */
-  beforeBinding?: (pending: GroupHandle, source: GroupHandle) => Promise<void>
+  beforeBinding?: (params: JoinGroupExternalParamsBeforeBindingParams) => Promise<void>
 }
 
 export type JoinGroupExternalResult = {
@@ -310,6 +320,7 @@ export async function joinGroupExternal(
         )
           throw new LeafBindingError('controller-mismatch')
         await verifyLeafCredential(leafCredential, signaturePublicKey, {
+          crypto: options?.crypto,
           judging: () => ({ stage: 'structural', mode: 'rejudge' }),
           leafLifetime: () =>
             anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400),
@@ -326,7 +337,7 @@ export async function joinGroupExternal(
   // ts-mls rejects the external join. Derive them from the GroupInfo being resynced
   // against, honoring an explicit capabilities override.
   const keyPackage = await generateKeyPackageWithKey({
-    credential: makeMLSCredential(identity, controller),
+    credential: makeMLSCredential({ identity, controller }),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite: context.cipherSuite,
     capabilities: buildLeafCapabilities(groupInfo.groupContext.extensions, options?.capabilities),
@@ -348,7 +359,8 @@ export async function joinGroupExternal(
   }
   const commitMessage = encode(mlsMessageEncoder, framedCommit)
 
-  const group = new GroupHandle({
+  const group = await GroupHandle.create({
+    crypto: options?.crypto,
     state: newState,
     credential,
     context,
@@ -388,16 +400,17 @@ export async function joinGroupExternal(
   const beforeTree = newState.ratchetTree.slice()
   beforeTree[ownIndex * 2] = undefined
   beforeTree[removed.remove.removed * 2] = { ...own, leaf: { ...own.leaf, ...previous } }
-  const before = new GroupHandle({
+  const before = await GroupHandle.create({
+    crypto: options?.crypto,
     state: { ...newState, ratchetTree: beforeTree, groupContext: groupInfo.groupContext },
     credential,
     context: await resolveMlsContext(options, anchor),
   })
   if (ledgerEntries != null) {
-    await before.bootstrapLedger(ledgerEntries)
-    await group.bootstrapLedger(ledgerEntries)
+    await before.bootstrapLedger({ tokens: ledgerEntries })
+    await group.bootstrapLedger({ tokens: ledgerEntries })
   }
-  await params.beforeBinding?.(group, before)
+  await params.beforeBinding?.({ pending: group, source: before })
   if (anchor.controller != null && controller == null)
     throw new LeafBindingError('floating-refused')
   assertBindingAuthorTime(controller)
@@ -413,7 +426,7 @@ export async function joinGroupExternal(
     }),
     externalLeaf: own.leaf,
   })
-  gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
+  await gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
   await gate.postApply(newState)
   await validateWelcomeTree(group)
   return { commitMessage, group, sourceTree: beforeTree, sourceRegistry: before.registry }

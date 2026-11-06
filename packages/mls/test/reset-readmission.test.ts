@@ -51,8 +51,14 @@ import {
 beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(150_000))
 afterEach(() => vi.restoreAllMocks())
 
-function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
-  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain: log, subject })
+async function revoke(log: Array<SignedEvent>, subject: string): Promise<SignedEvent> {
+  return await revokeChain({
+    seed: controllerSeed,
+    profile: 0,
+    did: controllerID,
+    chain: log,
+    subject,
+  })
 }
 
 async function resetRemoved() {
@@ -60,12 +66,16 @@ async function resetRemoved() {
   const target = agent(51)
   const old = await timedBinding({ identity: target, iat: 100, exp: 200 })
   const fixture = await lowLevelWelcome(setup.group, target, old)
-  const log = [inception, createReset(controllerSeed, 0, 1)]
-  const renewed = await renewLeaf(
-    fixture.author,
-    await timedBinding({ identity: setup.identity, iat: 150, exp: 250, prefix: log }),
-  )
-  const reset = await revokeWithProof(renewed.newGroup, { reset: true, log: asControllerLog(log) })
+  const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
+  const renewed = await renewLeaf({
+    group: fixture.author,
+    binding: await timedBinding({ identity: setup.identity, iat: 150, exp: 250, prefix: log }),
+  })
+  const reset = await revokeWithProof({
+    group: renewed.newGroup,
+    reset: true,
+    log: asControllerLog(log),
+  })
   expect(reset.status).toBe('built')
   if (reset.status !== 'built') throw new Error('Missing reset')
   const group = reset.result.newGroup
@@ -73,7 +83,7 @@ async function resetRemoved() {
     status: 'revoked',
     reason: 'reset',
   })
-  expect(authority(group.registry, target.id)).toBe(target.id)
+  expect(authority({ registry: group.registry, issuer: target.id })).toBe(target.id)
   return { ...setup, group, target, old, log }
 }
 
@@ -82,9 +92,9 @@ test('reset keeps reset-only readmission', async () => {
   const binding = await timedBinding({ identity: target, iat: 150, exp: 250, prefix: log })
   const bundle = await rawBundle(group, target, binding)
   const { invite } = await createInvite({ group, identity, recipientDID: target.id })
-  const added = await commitInvite(group, bundle.publicPackage, invite)
-  const receiver = deriveGroup(group, structuredClone(group.state))
-  await receiver.processMessage(added.commitMessage)
+  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const receiver = await deriveGroup(group, structuredClone(group.state))
+  await receiver.processMessage({ message: added.commitMessage })
   const { group: joined } = await processWelcome({
     identity: target,
     invite,
@@ -96,7 +106,7 @@ test('reset keeps reset-only readmission', async () => {
       controller: controllerID,
       status: 'active',
     })
-    expect(authority(member.registry, target.id)).toBe(controllerID)
+    expect(authority({ registry: member.registry, issuer: target.id })).toBe(controllerID)
   }
   const commit = await commitWithEntries({
     group: joined,
@@ -104,14 +114,16 @@ test('reset keeps reset-only readmission', async () => {
     enacted: [],
     requireAdmin: false,
   })
-  await added.newGroup.processMessage(encode(mlsMessageEncoder, commit.commit))
+  await added.newGroup.processMessage({ message: encode(mlsMessageEncoder, commit.commit) })
   expect(added.newGroup.epoch).toBe(joined.epoch + 1n)
 })
 
 test('resetRemovedDeviceRefusedWithOldGenerationEvidence', async () => {
   const { group, target, old } = await resetRemoved()
   const bundle = await rawBundle(group, target, old)
-  expect(mayReadmitResetDevice(group.registry, { id: target.id, controller: old })).toBe(false)
+  expect(await mayReadmitResetDevice(group.registry, { id: target.id, controller: old })).toBe(
+    false,
+  )
   await expect(
     commitWithEntries({
       group,
@@ -136,7 +148,7 @@ test('authentication validateCredential agrees with checkBinding for reset evide
     const bundle = await rawBundle(group, target, binding)
     expect(
       await group.context.authService.validateCredential(
-        makeMLSCredential(target, binding),
+        makeMLSCredential({ identity: target, controller: binding }),
         target.publicKey,
       ),
     ).toBe(accepted)
@@ -152,8 +164,9 @@ test('authentication validateCredential agrees with checkBinding for reset evide
 test('subjectRevokedDeviceStillRefused', async () => {
   const setup = await pipelineGroup()
   const target = agent(51)
-  const log = [inception, revoke([inception], target.id)]
-  const result = await revokeWithProof(setup.group, {
+  const log = [inception, await revoke([inception], target.id)]
+  const result = await revokeWithProof({
+    group: setup.group,
     deny: [target.id],
     log: asControllerLog(log),
   })
@@ -182,9 +195,10 @@ test('cascadeRevokedDeviceStillRefused', async () => {
   const parent = await trustedGrant(issuer, [inception])
   const chained = await timedBinding({ identity: target, iat: 150, exp: 250, issuer, parent })
   const fixture = await belowGateWelcome(setup.group, target, withoutHolderEvidence(chained))
-  const result = await revokeWithProof(fixture.author, {
+  const result = await revokeWithProof({
+    group: fixture.author,
     deny: [issuer.id],
-    log: asControllerLog([inception, revoke([inception], issuer.id)]),
+    log: asControllerLog([inception, await revoke([inception], issuer.id)]),
   })
   expect(result.status).toBe('built')
   if (result.status !== 'built') throw new Error('Missing cascade')
@@ -204,8 +218,8 @@ test('cascadeRevokedDeviceStillRefused', async () => {
       target.publicKey,
     ),
   ).toBe(false)
-  const resetLog = [inception, createReset(controllerSeed, 0, 1)]
-  const resetCascade = registryApply(
+  const resetLog = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
+  const resetCascade = await registryApply(
     {
       issuer: group.credential.id,
       entry: {
@@ -225,13 +239,18 @@ test('cascadeRevokedDeviceStillRefused', async () => {
     controllerID,
   )
   const fresh = await timedBinding({ identity: target, iat: 150, exp: 250, prefix: resetLog })
-  expect(mayReadmitResetDevice(resetCascade, { id: target.id, controller: fresh })).toBe(false)
+  expect(await mayReadmitResetDevice(resetCascade, { id: target.id, controller: fresh })).toBe(
+    false,
+  )
   expect(
     await createDIDAuthenticationService({
       judging: () => ({ registry: resetCascade, stage: 'full', mode: 'admit' }),
-    }).validateCredential(makeMLSCredential(target, fresh), target.publicKey),
+    }).validateCredential(
+      makeMLSCredential({ identity: target, controller: fresh }),
+      target.publicKey,
+    ),
   ).toBe(false)
-  const registry = registryApply(
+  const registry = await registryApply(
     {
       issuer: group.credential.id,
       entry: {
@@ -250,7 +269,7 @@ test('cascadeRevokedDeviceStillRefused', async () => {
     group.registry,
     controllerID,
   )
-  const added = registryApply(
+  const added = await registryApply(
     {
       issuer: group.credential.id,
       entry: {
@@ -264,7 +283,7 @@ test('cascadeRevokedDeviceStillRefused', async () => {
   )
   expect(added.devices.get(target.id)).toMatchObject({ status: 'revoked', cascadedFrom: issuer.id })
   expect(
-    mayReadmitResetDevice(added, {
+    await mayReadmitResetDevice(added, {
       id: target.id,
       controller: await timedBinding({ identity: target, iat: 150, exp: 250, prefix: resetLog }),
     }),
@@ -273,7 +292,7 @@ test('cascadeRevokedDeviceStillRefused', async () => {
 
 async function trustedGrant(identity: ReturnType<typeof agent>, prefix: Array<SignedEvent>) {
   return mintTrustedGrant({
-    signer: createControllerIdentity({
+    signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
       log: asControllerLog(prefix),
@@ -309,7 +328,7 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
     [fresh, true],
     [withoutHolderEvidence(fresh), false],
   ] as const) {
-    const credential = makeMLSCredential(target, binding)
+    const credential = makeMLSCredential({ identity: target, controller: binding })
     expect(await group.context.authService.validateCredential(credential, target.publicKey)).toBe(
       accepted,
     )
@@ -320,7 +339,7 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
   }
   const bundle = await rawBundle(group, target, fresh)
   const { invite } = await createInvite({ group, identity, recipientDID: target.id })
-  const added = await commitInvite(group, bundle.publicPackage, invite)
+  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   const { group: joined } = await processWelcome({
     identity: target,
     invite,
@@ -339,9 +358,10 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
 
 test('resetThenSubjectRevokedStaysTerminal', async () => {
   const { group, target, log } = await resetRemoved()
-  const result = await revokeWithProof(group, {
+  const result = await revokeWithProof({
+    group,
     deny: [target.id],
-    log: asControllerLog([...log, revoke(log, target.id)]),
+    log: asControllerLog([...log, await revoke(log, target.id)]),
   })
   expect(result.status).toBe('built')
   if (result.status !== 'built') throw new Error('Missing revoke')
@@ -354,7 +374,7 @@ test('resetThenSubjectRevokedStaysTerminal', async () => {
   await expect(
     validateEntry(result.result.newGroup, bundle.publicPackage.leafNode),
   ).rejects.toMatchObject({ reason: 'denied-id' })
-  const plain = registryApply(
+  const plain = await registryApply(
     {
       issuer: group.credential.id,
       entry: {
@@ -367,8 +387,8 @@ test('resetThenSubjectRevokedStaysTerminal', async () => {
     group.registry,
   )
   expect(plain.devices.get(target.id)?.reason).toBeUndefined()
-  const add = (registry: typeof group.registry) =>
-    registryApply(
+  const add = async (registry: typeof group.registry) =>
+    await registryApply(
       {
         issuer: group.credential.id,
         entry: {
@@ -380,11 +400,11 @@ test('resetThenSubjectRevokedStaysTerminal', async () => {
       },
       registry,
     )
-  expect(add(group.registry).devices.get(target.id)).toEqual({
+  expect((await add(group.registry)).devices.get(target.id)).toEqual({
     controller: controllerID,
     status: 'active',
   })
-  expect(add(plain).devices.get(target.id)?.status).toBe('revoked')
+  expect((await add(plain)).devices.get(target.id)?.status).toBe('revoked')
 })
 
 test.each(['ordinary Remove', 'self-removal'] as const)(
@@ -402,7 +422,11 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       identity,
       recipientDID: observer.id,
     })
-    const observerAdd = await commitInvite(group, observerBundle.publicPackage, observerInvite)
+    const observerAdd = await commitInvite({
+      group,
+      keyPackage: observerBundle.publicPackage,
+      invite: observerInvite,
+    })
     const { group: receiver } = await processWelcome({
       identity: observer,
       invite: observerInvite,
@@ -416,8 +440,12 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       identity,
       recipientDID: target.id,
     })
-    const added = await commitInvite(observerAdd.newGroup, bundle.publicPackage, invite)
-    await receiver.processMessage(added.commitMessage)
+    const added = await commitInvite({
+      group: observerAdd.newGroup,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
+    await receiver.processMessage({ message: added.commitMessage })
     const { group: joined } = await processWelcome({
       identity: target,
       invite,
@@ -427,18 +455,18 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
     let author = added.newGroup
     if (removal === 'ordinary Remove') {
       vi.spyOn(Date, 'now').mockReturnValue(210_000)
-      const renewal = await renewLeaf(
-        author,
-        await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
-      )
+      const renewal = await renewLeaf({
+        group: author,
+        binding: await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
+      })
       for (const held of renewal.newGroup.ledger) tokens.set(held.entryID, held.token)
-      await receiver.processMessage(renewal.commitMessage)
+      await receiver.processMessage({ message: renewal.commitMessage })
       author = renewal.newGroup
     }
     if (removal === 'self-removal') {
       const proposal = await proposeSelfRemoval(joined)
-      await author.processMessage(proposal.frame)
-      await receiver.processMessage(proposal.frame)
+      await author.processMessage({ message: proposal.frame })
+      await receiver.processMessage({ message: proposal.frame })
     }
     const removed =
       removal === 'ordinary Remove'
@@ -446,9 +474,9 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
         : await commitSelfRemovals(author)
     if (removed == null) throw new Error('Missing removal')
     for (const held of removed.newGroup.ledger) tokens.set(held.entryID, held.token)
-    await receiver.processMessage(removed.commitMessage)
+    await receiver.processMessage({ message: removed.commitMessage })
     author = removed.newGroup
-    const reconstructed = deriveGroup(author, structuredClone(author.state))
+    const reconstructed = await deriveGroup(author, structuredClone(author.state))
     const later = agent(71)
     const laterBinding = await timedBinding({
       identity: later,
@@ -462,7 +490,11 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       identity,
       recipientDID: later.id,
     })
-    const laterAdd = await commitInvite(author, laterBundle.publicPackage, laterInvite)
+    const laterAdd = await commitInvite({
+      group: author,
+      keyPackage: laterBundle.publicPackage,
+      invite: laterInvite,
+    })
     const { group: laterJoiner } = await processWelcome({
       identity: later,
       invite: laterInvite,
@@ -474,10 +506,10 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
     for (const member of [author, receiver, reconstructed, laterJoiner]) {
       expect(member.registry.devices.get(target.id)).toEqual(expected)
       expect(denySetOf(member.registry)).toEqual(denySetOf(author.registry))
-      expect(authority(member.registry, target.id)).toBe(target.id)
+      expect(authority({ registry: member.registry, issuer: target.id })).toBe(target.id)
       expect(
         await member.context.authService.validateCredential(
-          makeMLSCredential(target),
+          makeMLSCredential({ identity: target }),
           target.publicKey,
         ),
       ).toBe(false)
@@ -488,10 +520,10 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
 test('ordinary Add refuses expired post-reset evidence', async () => {
   const { group, identity, target, log } = await resetRemoved()
   vi.spyOn(Date, 'now').mockReturnValue(210_000)
-  const renewed = await renewLeaf(
+  const renewed = await renewLeaf({
     group,
-    await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
-  )
+    binding: await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
+  })
   const binding = await timedBinding({ identity: target, iat: 150, exp: 200, prefix: log })
   const bundle = await rawBundle(renewed.newGroup, target, binding)
   await expect(
@@ -509,26 +541,28 @@ test('ordinary Add refuses expired post-reset evidence', async () => {
 test('authentication refuses reset readmission under a different genuine controller', async () => {
   const { group, target } = await resetRemoved()
   const seed = new Uint8Array(32).fill(91)
-  const inception = createInception(seed, 0)
+  const inception = await createInception({ seed: seed, profile: 0 })
   const id = didFromInception(inception.event)
-  const prefix = [inception, createReset(seed, 0, 1)]
-  const signer = createControllerIdentity({ seed, profile: 0, log: asControllerLog(prefix) })
+  const prefix = [inception, await createReset({ seed: seed, profile: 0, gen: 1 })]
+  const signer = await createControllerIdentity({ seed, profile: 0, log: asControllerLog(prefix) })
   const binding = {
     id,
     prefix,
     capability: stringifyToken(
       await signer.signToken({
-        sub: id,
-        aud: target.id,
-        act: 'authenticate',
-        res: 'kumiai/mls-leaf',
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: target.publicKey }),
-        iat: 150,
-        exp: 250,
+        payload: {
+          sub: id,
+          aud: target.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: target.publicKey }),
+          iat: 150,
+          exp: 250,
+        },
       }),
     ),
   }
-  const credential = makeMLSCredential(target, binding)
+  const credential = makeMLSCredential({ identity: target, controller: binding })
   expect(
     await createDIDAuthenticationService().validateCredential(credential, target.publicKey),
   ).toBe(true)

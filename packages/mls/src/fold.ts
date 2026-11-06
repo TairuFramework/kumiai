@@ -1,6 +1,16 @@
 import type { GroupAnchor } from './anchor.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 
+export type LedgerReducerVerifyAuthorityParams<TValue, TState> = {
+  verified: VerifiedLedgerEntry<TValue>
+  stateSoFar: TState
+}
+
+export type LedgerReducerApplyParams<TValue, TState> = {
+  verified: VerifiedLedgerEntry<TValue>
+  stateSoFar: TState
+}
+
 /**
  * A per-type projection over the control ledger. The fold stays free of any
  * admin/circle semantics: a reducer owns its own initial state (derived from
@@ -17,9 +27,9 @@ export type LedgerReducer<TValue, TState> = {
    */
   seed(anchor: GroupAnchor): TState
   /** Is the verified issuer allowed to make this claim, given the state so far? */
-  verifyAuthority(verified: VerifiedLedgerEntry<TValue>, stateSoFar: TState): boolean
+  verifyAuthority(params: LedgerReducerVerifyAuthorityParams<TValue, TState>): boolean
   /** Fold step: return the next state after applying an authorized claim. */
-  apply(verified: VerifiedLedgerEntry<TValue>, stateSoFar: TState): TState
+  apply(params: LedgerReducerApplyParams<TValue, TState>): TState
 }
 
 /**
@@ -37,6 +47,13 @@ export type FoldDrop = {
   entryID: string
   type: string
   reason: string
+}
+
+export type FoldLedgerParams<TValue, TState> = {
+  entries: Array<FoldInput<TValue>>
+  anchor: GroupAnchor
+  reducer: LedgerReducer<TValue, TState>
+  onDrop?: (drop: FoldDrop) => void
 }
 
 /**
@@ -69,12 +86,12 @@ export type FoldDrop = {
  * authority-failed drops are expected, so the caller decides whether to surface
  * them rather than the fold emitting to the console.
  */
-export function foldLedger<TValue, TState>(
-  entries: Array<FoldInput<TValue>>,
-  anchor: GroupAnchor,
-  reducer: LedgerReducer<TValue, TState>,
-  onDrop?: (drop: FoldDrop) => void,
-): TState {
+export function foldLedger<TValue, TState>({
+  entries,
+  anchor,
+  reducer,
+  onDrop,
+}: FoldLedgerParams<TValue, TState>): TState {
   let state = reducer.seed(anchor)
   for (const { verified, entryID } of entries) {
     const { entry } = verified
@@ -86,11 +103,11 @@ export function foldLedger<TValue, TState>(
       })
       continue
     }
-    if (!reducer.verifyAuthority(verified, state)) {
+    if (!reducer.verifyAuthority({ verified, stateSoFar: state })) {
       onDrop?.({ entryID, type: entry.type, reason: `issuer '${verified.issuer}' not authorized` })
       continue
     }
-    state = reducer.apply(verified, state)
+    state = reducer.apply({ verified, stateSoFar: state })
   }
   return state
 }

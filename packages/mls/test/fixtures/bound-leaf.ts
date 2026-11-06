@@ -36,7 +36,7 @@ async function buildDevice(
   method: 'key' | 'peer:4',
 ): Promise<DeviceIdentity> {
   if (method === 'key') {
-    const signing = createSigningIdentity(deviceSeed)
+    const signing = createSigningIdentity({ privateKey: deviceSeed })
     return { id: signing.id, publicKey: signing.publicKey }
   }
   const identity = await createIdentity({
@@ -55,24 +55,27 @@ export async function buildBoundLeaf(options: BuildBoundLeafOptions = {}): Promi
   const deviceSeed = options.deviceSeed ?? new Uint8Array(32).fill(41)
   const profile = options.profile ?? 0
 
-  const inception = createInception(controllerSeed, profile)
+  const inception = await createInception({ seed: controllerSeed, profile: profile })
   const controllerID = didFromInception(inception.event)
-  const controller = createControllerIdentity({
+  const controller = await createControllerIdentity({
     seed: controllerSeed,
     profile,
     log: asControllerLog([inception]),
   })
   const device = await buildDevice(deviceSeed, options.deviceMethod ?? 'key')
 
-  const capabilityToken = await createCapability(controller, {
-    sub: controllerID,
-    aud: device.id,
-    act: 'authenticate',
-    res: 'kumiai/mls-leaf',
-    iat: now(),
-    exp: now() + 3600,
-    cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
-    ...options.capabilityOverrides,
+  const capabilityToken = await createCapability({
+    signer: controller,
+    payload: {
+      sub: controllerID,
+      aud: device.id,
+      act: 'authenticate',
+      res: 'kumiai/mls-leaf',
+      iat: now(),
+      exp: now() + 3600,
+      cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
+      ...options.capabilityOverrides,
+    },
   })
 
   const binding: ControllerBinding = {

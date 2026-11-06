@@ -67,10 +67,10 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle(invitee)
-  const commit = await commitInvite(admin, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: invitee })
+  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
   for (const other of others) {
-    await other.processMessage(commit.commitMessage)
+    await other.processMessage({ message: commit.commitMessage })
   }
   const { group } = await processWelcome({
     identity: invitee,
@@ -90,7 +90,9 @@ async function threeMemberGroup(groupID: string) {
   const bob = randomIdentity()
   const carol = randomIdentity()
 
-  const { group: created } = await createGroup(alice, groupID, {
+  const { group: created } = await createGroup({
+    identity: alice,
+    groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
   })
   const withBob = await inviteMember(fixture, created, alice, bob)
@@ -195,11 +197,13 @@ describe('sealed GroupInfo recovery', () => {
       resync: true,
       options: { resolveLedgerEntries: fixture.resolveLedgerEntries },
     })
-    await aliceGroup.processMessage(commitMessage)
+    await aliceGroup.processMessage({ message: commitMessage })
     expect(aliceGroup.epoch).toBe(bobRejoined.epoch)
 
-    const message = await aliceGroup.encrypt(new TextEncoder().encode('back in the group'))
-    const received = await bobRejoined.processMessage(message)
+    const message = await aliceGroup.encrypt({
+      plaintext: new TextEncoder().encode('back in the group'),
+    })
+    const received = await bobRejoined.processMessage({ message })
     expect(new TextDecoder().decode(received as Uint8Array)).toBe('back in the group')
   })
 
@@ -377,7 +381,10 @@ describe('sealed GroupInfo recovery', () => {
     // Bob holds a handle in a group of his own. The request it mints is validly
     // signed — it just names another group.
     const mallory = randomIdentity()
-    const { group: otherGroup } = await createGroup(mallory, 'recovery-group-b')
+    const { group: otherGroup } = await createGroup({
+      identity: mallory,
+      groupID: 'recovery-group-b',
+    })
     const { request } = await createRecoveryRequest({
       group: otherGroup,
       identity: mallory,
@@ -400,7 +407,10 @@ describe('sealed GroupInfo recovery', () => {
     // A DID that was never in the group. It signs a well-formed request for this
     // group id — the signature verifies; the tree is what refuses it.
     const outsider = randomIdentity()
-    const { group: outsiderGroup } = await createGroup(outsider, 'recovery-roster')
+    const { group: outsiderGroup } = await createGroup({
+      identity: outsider,
+      groupID: 'recovery-roster',
+    })
     const outsiderRequest = await createRecoveryRequest({
       group: outsiderGroup,
       identity: outsider,
@@ -418,7 +428,7 @@ describe('sealed GroupInfo recovery', () => {
     // her leaf out of the tree, so there is no policy for a host to forget.
     const carolLeaf = aliceGroup.findMemberLeafIndex(carol.id)
     expect(carolLeaf).toBeDefined()
-    const removal = await removeMember(aliceGroup, carolLeaf as number)
+    const removal = await removeMember({ group: aliceGroup, leafIndex: carolLeaf as number })
     expect(removal.newGroup.findMemberLeafIndex(carol.id)).toBeUndefined()
 
     const carolRequest = await createRecoveryRequest({
@@ -440,7 +450,7 @@ describe('sealed GroupInfo recovery', () => {
     await expect(
       sealGroupInfo({ group: bobGroup, identity: bob, request: carolRequest.request }),
     ).resolves.toBeInstanceOf(Uint8Array)
-    await bobGroup.processMessage(removal.commitMessage)
+    await bobGroup.processMessage({ message: removal.commitMessage })
     await expect(
       sealGroupInfo({ group: bobGroup, identity: bob, request: carolRequest.request }),
     ).rejects.toMatchObject({ reason: 'not-a-member' })
@@ -491,7 +501,10 @@ describe('sealed GroupInfo recovery', () => {
     // is the one the signature checks against, so this is caught as a forgery and the
     // roster check is never reached.
     const mallory = randomIdentity()
-    const { group: malloryGroup } = await createGroup(mallory, 'recovery-signature')
+    const { group: malloryGroup } = await createGroup({
+      identity: mallory,
+      groupID: 'recovery-signature',
+    })
     const malloryRequest = await createRecoveryRequest({
       group: malloryGroup,
       identity: mallory,
@@ -567,7 +580,9 @@ describe('sealed GroupInfo recovery', () => {
     const bob = randomIdentity()
     const dave = randomIdentity()
 
-    const { group: created } = await createGroup(alice, 'recovery-stranded', {
+    const { group: created } = await createGroup({
+      identity: alice,
+      groupID: 'recovery-stranded',
       resolveLedgerEntries: fixture.resolveLedgerEntries,
     })
     const { admin: aliceGroup, group: bobGroup } = await inviteMember(fixture, created, alice, bob)
@@ -582,9 +597,13 @@ describe('sealed GroupInfo recovery', () => {
       permission: 'member',
     })
     fixture.publish(invite)
-    const daveBundle = await createKeyPackageBundle(dave)
-    const accepted = await commitInvite(aliceGroup, daveBundle.publicPackage, invite)
-    await bobGroup.processMessage(accepted.commitMessage)
+    const daveBundle = await createKeyPackageBundle({ identity: dave })
+    const accepted = await commitInvite({
+      group: aliceGroup,
+      keyPackage: daveBundle.publicPackage,
+      invite,
+    })
+    await bobGroup.processMessage({ message: accepted.commitMessage })
     expect(bobGroup.epoch).toBe(2n)
     expect(aliceGroup.epoch).toBe(1n)
 
@@ -636,20 +655,24 @@ describe('sealed GroupInfo recovery', () => {
       resync: true,
       options: { resolveLedgerEntries: fixture.resolveLedgerEntries },
     })
-    await bobGroup.processMessage(commitMessage)
+    await bobGroup.processMessage({ message: commitMessage })
     expect(bobGroup.epoch).toBe(3n)
     expect(aliceRejoined.epoch).toBe(bobGroup.epoch)
     expect(aliceRejoined.treeHash).toEqual(bobGroup.treeHash)
 
     // She is back: traffic flows both ways at the new epoch, which no amount of
     // ledger-policy short-circuiting could fake.
-    const fromBob = await bobGroup.encrypt(new TextEncoder().encode('you are back'))
+    const fromBob = await bobGroup.encrypt({ plaintext: new TextEncoder().encode('you are back') })
     expect(
-      new TextDecoder().decode((await aliceRejoined.processMessage(fromBob)) as Uint8Array),
+      new TextDecoder().decode(
+        (await aliceRejoined.processMessage({ message: fromBob })) as Uint8Array,
+      ),
     ).toBe('you are back')
-    const fromAlice = await aliceRejoined.encrypt(new TextEncoder().encode('thanks'))
-    expect(new TextDecoder().decode((await bobGroup.processMessage(fromAlice)) as Uint8Array)).toBe(
-      'thanks',
-    )
+    const fromAlice = await aliceRejoined.encrypt({ plaintext: new TextEncoder().encode('thanks') })
+    expect(
+      new TextDecoder().decode(
+        (await bobGroup.processMessage({ message: fromAlice })) as Uint8Array,
+      ),
+    ).toBe('thanks')
   })
 })

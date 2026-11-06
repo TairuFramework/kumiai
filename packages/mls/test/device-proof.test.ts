@@ -9,12 +9,12 @@ import { buildManagementCapability } from './fixtures/management-capability.js'
 
 const GROUP = 'g'
 const CONTROLLER_SEED = new Uint8Array(32).fill(31)
-const inception = createInception(CONTROLLER_SEED, 0)
+const inception = await createInception({ seed: CONTROLLER_SEED, profile: 0 })
 const PROFILE = didFromInception(inception.event)
 const PREFIX: Array<SignedEvent> = [inception]
 
-const manager = createSigningIdentity(new Uint8Array(32).fill(51))
-const other = createSigningIdentity(new Uint8Array(32).fill(61))
+const manager = createSigningIdentity({ privateKey: new Uint8Array(32).fill(51) })
+const other = createSigningIdentity({ privateKey: new Uint8Array(32).fill(61) })
 
 function entry(issuer: string, subject: string, value: DeviceValue) {
   return { issuer, entry: { type: DEVICE_ENTRY_TYPE, groupID: GROUP, subject, value } }

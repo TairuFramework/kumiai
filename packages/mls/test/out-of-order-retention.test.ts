@@ -31,7 +31,7 @@ async function twoMemberGroup(groupID: string) {
   const publish = (invite: Invite) => {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
-  const { group: created } = await createGroup(alice, groupID, { resolveLedgerEntries })
+  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -39,8 +39,8 @@ async function twoMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle(bob)
-  const added = await commitInvite(created, bundle.publicPackage, invite)
+  const bundle = await createKeyPackageBundle({ identity: bob })
+  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -54,7 +54,8 @@ async function twoMemberGroup(groupID: string) {
 
 async function sealMany(sender: GroupHandle, count: number): Promise<Array<Uint8Array>> {
   const sealed: Array<Uint8Array> = []
-  for (let i = 0; i < count; i++) sealed.push(await sender.encrypt(utf8.encode(`frame ${i}`)))
+  for (let i = 0; i < count; i++)
+    sealed.push(await sender.encrypt({ plaintext: utf8.encode(`frame ${i}`) }))
   return sealed
 }
 
@@ -64,11 +65,13 @@ describe('out-of-order receive within an epoch', () => {
   test('a receiver opens an older backlog after a newer frame', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('out-of-order-backlog')
     const backlog = await sealMany(aliceGroup, 20)
-    const newest = await aliceGroup.encrypt(utf8.encode('newest'))
+    const newest = await aliceGroup.encrypt({ plaintext: utf8.encode('newest') })
 
-    expect(text.decode((await bobGroup.decrypt(newest)).payload)).toBe('newest')
+    expect(text.decode((await bobGroup.decrypt({ message: newest })).payload)).toBe('newest')
     for (const [index, frame] of backlog.entries()) {
-      expect(text.decode((await bobGroup.decrypt(frame)).payload)).toBe(`frame ${index}`)
+      expect(text.decode((await bobGroup.decrypt({ message: frame })).payload)).toBe(
+        `frame ${index}`,
+      )
     }
   })
 
@@ -76,27 +79,31 @@ describe('out-of-order receive within an epoch', () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('out-of-order-window')
     const size = KUMIAI_KEY_RETENTION_CONFIG.retainKeysForGenerations
     const backlog = await sealMany(aliceGroup, size)
-    const newest = await aliceGroup.encrypt(utf8.encode('newest'))
+    const newest = await aliceGroup.encrypt({ plaintext: utf8.encode('newest') })
 
-    await bobGroup.decrypt(newest)
+    await bobGroup.decrypt({ message: newest })
     // The first frame is the oldest key the window keeps.
-    expect(text.decode((await bobGroup.decrypt(backlog[0] as Uint8Array)).payload)).toBe('frame 0')
-    expect(text.decode((await bobGroup.decrypt(backlog[size - 1] as Uint8Array)).payload)).toBe(
-      `frame ${size - 1}`,
-    )
+    expect(
+      text.decode((await bobGroup.decrypt({ message: backlog[0] as Uint8Array })).payload),
+    ).toBe('frame 0')
+    expect(
+      text.decode((await bobGroup.decrypt({ message: backlog[size - 1] as Uint8Array })).payload),
+    ).toBe(`frame ${size - 1}`)
   })
 
   test('a frame older than the retention window is refused as in the past', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('out-of-order-expired')
     const size = KUMIAI_KEY_RETENTION_CONFIG.retainKeysForGenerations
     const backlog = await sealMany(aliceGroup, size + 1)
-    const newest = await aliceGroup.encrypt(utf8.encode('newest'))
+    const newest = await aliceGroup.encrypt({ plaintext: utf8.encode('newest') })
 
-    await bobGroup.decrypt(newest)
-    await expect(bobGroup.decrypt(backlog[0] as Uint8Array)).rejects.toThrow(
+    await bobGroup.decrypt({ message: newest })
+    await expect(bobGroup.decrypt({ message: backlog[0] as Uint8Array })).rejects.toThrow(
       'Desired gen in the past',
     )
-    expect(text.decode((await bobGroup.decrypt(backlog[1] as Uint8Array)).payload)).toBe('frame 1')
+    expect(
+      text.decode((await bobGroup.decrypt({ message: backlog[1] as Uint8Array })).payload),
+    ).toBe('frame 1')
   })
 
   test('the retention survives a persist and restore of the receiver', async () => {
@@ -109,7 +116,9 @@ describe('out-of-order receive within an epoch', () => {
       options: { resolveLedgerEntries },
     })
     const backlog = await sealMany(aliceGroup, 20)
-    await restored.decrypt(await aliceGroup.encrypt(utf8.encode('newest')))
+    await restored.decrypt({
+      message: await aliceGroup.encrypt({ plaintext: utf8.encode('newest') }),
+    })
     // Persisted with the skipped keys, then restored again: they still open.
     const again = await restoreGroup({
       state: decodeClientState(encodeClientState(restored.state)) as typeof restored.state,
@@ -118,7 +127,7 @@ describe('out-of-order receive within an epoch', () => {
       options: { resolveLedgerEntries },
     })
     for (const [index, frame] of backlog.entries()) {
-      expect(text.decode((await again.decrypt(frame)).payload)).toBe(`frame ${index}`)
+      expect(text.decode((await again.decrypt({ message: frame })).payload)).toBe(`frame ${index}`)
     }
   })
 
@@ -126,14 +135,14 @@ describe('out-of-order receive within an epoch', () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('out-of-order-forward')
     // ts-mls refuses a jump beyond 200 generations by default.
     await sealMany(aliceGroup, 300)
-    const newest = await aliceGroup.encrypt(utf8.encode('newest'))
-    expect(text.decode((await bobGroup.decrypt(newest)).payload)).toBe('newest')
+    const newest = await aliceGroup.encrypt({ plaintext: utf8.encode('newest') })
+    expect(text.decode((await bobGroup.decrypt({ message: newest })).payload)).toBe('newest')
   })
 
   test('a handle built on a caller context without a client config gets the kumiai retention', async () => {
     const { bobGroup } = await twoMemberGroup('out-of-order-caller-context')
     const { clientConfig: _omitted, ...context } = bobGroup.context
-    const handle = new GroupHandle({
+    const handle = await GroupHandle.create({
       state: bobGroup.state,
       credential: bobGroup.credential,
       context,

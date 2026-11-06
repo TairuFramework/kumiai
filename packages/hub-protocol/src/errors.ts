@@ -96,12 +96,17 @@ export function hubErrorCodeOf(error: unknown): HubErrorCode | null {
   return null
 }
 
+export type HubErrorFromCodeParams = {
+  code: string
+  message: string
+}
+
 /**
  * Rebuild a named hub error from an error reply's code, so a caller can branch on the error class
  * rather than on a string. Returns null for anything else — including a transport failure, which
  * is exactly the distinction that matters.
  */
-export function hubErrorFromCode(code: string, message: string): Error | null {
+export function hubErrorFromCode({ code, message }: HubErrorFromCodeParams): Error | null {
   switch (code) {
     case HUB_ERROR_CODES.headMismatch:
       return new HeadMismatchError(message)

@@ -84,29 +84,34 @@ describe('hub HTTP server', () => {
         client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
       ).rejects.toThrow('Access denied')
       const jti = crypto.randomUUID()
-      const record = await createRevocationRecord(identity, jti)
+      const record = await createRevocationRecord({ signer: identity, jti: jti })
       await revocation.backend.add(record)
-      expect(await revocation.backend.get(jti, identity.id)).toEqual(record)
+      expect(await revocation.backend.get({ jti: jti, issuer: identity.id })).toEqual(record)
       await grants.store.grant({ subject: identity.id, pattern: 'hub/*', createdBy: identity.id })
-      const capability = await createCapability(identity, {
-        sub: identity.id,
-        aud: caller.id,
-        act: '*',
-        res: '*',
+      const capability = await createCapability({
+        signer: identity,
+        payload: {
+          sub: identity.id,
+          aud: caller.id,
+          act: '*',
+          res: '*',
+        },
       })
       const transport = new ClientTransport<HubProtocol>({ url: `${server.url}/hub` })
       cleanups.push(() => transport.dispose())
       await transport.write(
         await caller.signToken({
-          typ: 'request',
-          prc: 'hub/v1/subscribe',
-          rid: 'optional-jti',
-          prm: { topicID: TOPIC },
-          aud: identity.id,
-          sub: identity.id,
-          cap: stringifyToken(capability),
-          iat: Math.floor(Date.now() / 1000),
-        } as const),
+          payload: {
+            typ: 'request',
+            prc: 'hub/v1/subscribe',
+            rid: 'optional-jti',
+            prm: { topicID: TOPIC },
+            aud: identity.id,
+            sub: identity.id,
+            cap: stringifyToken(capability),
+            iat: Math.floor(Date.now() / 1000),
+          } as const,
+        }),
       )
       expect((await transport.read()).value?.payload).toMatchObject({
         typ: 'result',
@@ -190,14 +195,17 @@ describe('hub HTTP server', () => {
     const identity = randomIdentity()
     const caller = randomIdentity()
     const jti = crypto.randomUUID()
-    const capability = await createCapability(identity, {
-      sub: identity.id,
-      aud: caller.id,
-      act: '*',
-      res: '*',
-      jti,
+    const capability = await createCapability({
+      signer: identity,
+      payload: {
+        sub: identity.id,
+        aud: caller.id,
+        act: '*',
+        res: '*',
+        jti,
+      },
     })
-    const record = await createRevocationRecord(identity, jti)
+    const record = await createRevocationRecord({ signer: identity, jti: jti })
     let revoke: (() => Promise<void>) | undefined
     const probe = definePlugin({
       name: pluginName<void>()('test:revocation'),
@@ -223,15 +231,17 @@ describe('hub HTTP server', () => {
     cleanups.push(() => transport.dispose())
     async function subscribe(rid: string) {
       const message = await caller.signToken({
-        typ: 'request',
-        prc: 'hub/v1/subscribe',
-        rid,
-        prm: { topicID: TOPIC },
-        aud: identity.id,
-        sub: identity.id,
-        cap: stringifyToken(capability),
-        iat: Math.floor(Date.now() / 1000),
-      } as const)
+        payload: {
+          typ: 'request',
+          prc: 'hub/v1/subscribe',
+          rid,
+          prm: { topicID: TOPIC },
+          aud: identity.id,
+          sub: identity.id,
+          cap: stringifyToken(capability),
+          iat: Math.floor(Date.now() / 1000),
+        } as const,
+      })
       await transport.write(message)
       return (await transport.read()).value?.payload
     }
@@ -259,25 +269,30 @@ describe('hub HTTP server', () => {
       'Access denied',
     )
     const caller = randomIdentity()
-    const capability = await createCapability(identity, {
-      sub: identity.id,
-      aud: caller.id,
-      act: '*',
-      res: '*',
+    const capability = await createCapability({
+      signer: identity,
+      payload: {
+        sub: identity.id,
+        aud: caller.id,
+        act: '*',
+        res: '*',
+      },
     })
     const transport = new ClientTransport<HubProtocol>({ url: `${server.url}/hub` })
     cleanups.push(() => transport.dispose())
     await transport.write(
       await caller.signToken({
-        typ: 'request',
-        prc: 'hub/v1/subscribe',
-        rid: 'missing-jti',
-        prm: { topicID: TOPIC },
-        aud: identity.id,
-        sub: identity.id,
-        cap: stringifyToken(capability),
-        iat: Math.floor(Date.now() / 1000),
-      } as const),
+        payload: {
+          typ: 'request',
+          prc: 'hub/v1/subscribe',
+          rid: 'missing-jti',
+          prm: { topicID: TOPIC },
+          aud: identity.id,
+          sub: identity.id,
+          cap: stringifyToken(capability),
+          iat: Math.floor(Date.now() / 1000),
+        } as const,
+      }),
     )
     expect((await transport.read()).value?.payload).toMatchObject({
       typ: 'error',

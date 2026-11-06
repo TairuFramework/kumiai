@@ -16,13 +16,13 @@ describe('createBroadcastResponder', () => {
     const responder = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      requestHandlers: { add: (prm) => (prm as { n: number }).n + 1 },
+      requestHandlers: { add: ({ prm }) => (prm as { n: number }).n + 1 },
     })
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const result = await client.request('add', { n: 41 }, { timeoutMs: 1000 })
+    const result = await client.request({ prc: 'add', prm: { n: 41 }, timeoutMs: 1000 })
     expect(result).toBe(42)
 
     await client.dispose()
@@ -45,7 +45,7 @@ describe('createBroadcastResponder', () => {
     })
 
     await expect(
-      client.request('boom', {}, { errorThreshold: 1, timeoutMs: 1000 }),
+      client.request({ prc: 'boom', prm: {}, errorThreshold: 1, timeoutMs: 1000 }),
     ).rejects.toThrow(/error/i)
 
     await client.dispose()
@@ -65,13 +65,13 @@ describe('createBroadcastResponder', () => {
 
     // Inject raw non-JSON bytes directly onto the bus, bypassing the transport's
     // write() guard. This simulates an undecryptable message from another group.
-    bus.publish(TOPIC, fromUTF('not-valid-json{{{{'))
+    bus.publish({ topicID: TOPIC, payload: fromUTF('not-valid-json{{{{') })
 
     // Let the failing decode settle — the stream must NOT die.
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
 
     // The responder and client transports should still be functional.
-    const result = await client.request('ping', {}, { timeoutMs: 1000 })
+    const result = await client.request({ prc: 'ping', prm: {}, timeoutMs: 1000 })
     expect(result).toBe('pong')
 
     await client.dispose()
@@ -85,21 +85,21 @@ describe('createBroadcastResponder', () => {
     const fast = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      requestHandlers: { catchup: suppressible(() => 'answer', { jitterMs: 100 }) },
+      requestHandlers: { catchup: suppressible({ handler: () => 'answer', jitterMs: 100 }) },
       getJitterMs: () => 0,
     })
     const slowHandler = vi.fn(() => 'answer')
     const slow = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-2',
-      requestHandlers: { catchup: suppressible(slowHandler, { jitterMs: 100 }) },
+      requestHandlers: { catchup: suppressible({ handler: slowHandler, jitterMs: 100 }) },
       getJitterMs: () => 50,
     })
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const result = await client.request('catchup', {}, { timeoutMs: 200 })
+    const result = await client.request({ prc: 'catchup', prm: {}, timeoutMs: 200 })
     expect(result).toBe('answer')
     expect(slowHandler).not.toHaveBeenCalled()
 
@@ -117,26 +117,26 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
       requestHandlers: {
-        ask: suppressible(
-          () => {
+        ask: suppressible({
+          handler: () => {
             throw new Error('nope')
           },
-          { jitterMs: 100 },
-        ),
+          jitterMs: 100,
+        }),
       },
       getJitterMs: () => 0,
     })
     const healthy = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-2',
-      requestHandlers: { ask: suppressible(() => 'ok', { jitterMs: 100 }) },
+      requestHandlers: { ask: suppressible({ handler: () => 'ok', jitterMs: 100 }) },
       getJitterMs: () => 50,
     })
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    const result = await client.request('ask', {}, { timeoutMs: 500 })
+    const result = await client.request({ prc: 'ask', prm: {}, timeoutMs: 500 })
     expect(result).toBe('ok')
 
     await client.dispose()
@@ -150,24 +150,24 @@ describe('createBroadcastResponder', () => {
     const responder = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      requestHandlers: { ping: suppressible(() => 'pong', { jitterMs: 0 }) },
+      requestHandlers: { ping: suppressible({ handler: () => 'pong', jitterMs: 0 }) },
       getJitterMs: () => 0,
     })
     // A raw error `res` frame is injected onto the bus for the exact rid the client is
     // about to use, before the real request reaches the responder. If the observe-loop
     // suppressed on it (pre-fix), the responder would silently ignore that request.
-    bus.publish(
-      TOPIC,
-      encodeFrame({
+    bus.publish({
+      topicID: TOPIC,
+      payload: encodeFrame({
         payload: { typ: 'ctrl', prc: 'ping', data: { kind: 'res', rid, err: 'boom' } },
       }),
-    )
+    })
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       runtime: createRuntime({ getRandomID: () => rid }),
     })
 
-    const result = await client.request('ping', {}, { timeoutMs: 500 })
+    const result = await client.request({ prc: 'ping', prm: {}, timeoutMs: 500 })
     expect(result).toBe('pong')
 
     await client.dispose()
@@ -191,7 +191,7 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    await client.dispatch('note', { hello: 'world' })
+    await client.dispatch({ prc: 'note', data: { hello: 'world' } })
     await new Promise<void>((resolve) => setTimeout(resolve, 10))
 
     expect(received).toHaveLength(1)
@@ -217,12 +217,12 @@ describe('createBroadcastResponder', () => {
 
     // An app event (typ:'event') whose OWN data legitimately carries kind:'req'. This is app data,
     // not a control frame, and must reach the event listener — the collision this change fixes.
-    bus.publish(
-      TOPIC,
-      encodeFrame({
+    bus.publish({
+      topicID: TOPIC,
+      payload: encodeFrame({
         payload: { typ: 'event', prc: 'note', data: { kind: 'req', rid: 'x', hello: 'world' } },
       }),
-    )
+    })
     await new Promise<void>((resolve) => setTimeout(resolve, 10))
 
     expect(received).toHaveLength(1)
@@ -247,12 +247,12 @@ describe('createBroadcastResponder', () => {
 
     // A control frame (typ:'ctrl', kind:'req') whose rid is not a string fails the req guard. It is
     // control, so it is NEVER forwarded to the events emitter regardless.
-    bus.publish(
-      TOPIC,
-      encodeFrame({
+    bus.publish({
+      topicID: TOPIC,
+      payload: encodeFrame({
         payload: { typ: 'ctrl', prc: 'note', data: { kind: 'req', rid: 123, prm: {} } },
       }),
-    )
+    })
     await new Promise<void>((resolve) => setTimeout(resolve, 10))
 
     expect(received).toHaveLength(0)
@@ -271,7 +271,7 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
       requestHandlers: {
-        slow: (_prm, context) => {
+        slow: ({ context }) => {
           capturedSignal = context?.signal
           release()
           // Never resolves on its own; the test disposes the responder to abort it.
@@ -285,7 +285,7 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    void client.request('slow', {}, { timeoutMs: 1000 }).catch(() => {})
+    void client.request({ prc: 'slow', prm: {}, timeoutMs: 1000 }).catch(() => {})
     await started
     expect(capturedSignal?.aborted).toBe(false)
 
@@ -305,7 +305,7 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
       requestHandlers: {
-        slow: (_prm, context) => {
+        slow: ({ context }) => {
           release()
           // Resolves ON abort, the exact pattern that resumes `handleRequest` after
           // `dispose()` has already cleared `suppressTimers`/`inFlight`.
@@ -319,7 +319,7 @@ describe('createBroadcastResponder', () => {
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     })
 
-    void client.request('slow', {}, { timeoutMs: 1000 }).catch(() => {})
+    void client.request({ prc: 'slow', prm: {}, timeoutMs: 1000 }).catch(() => {})
     await started
 
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')

@@ -1,15 +1,25 @@
+export type BroadcastBusPublishParams = {
+  topicID: string
+  payload: Uint8Array
+}
+
+export type BroadcastBusSubscribeParams = {
+  topicID: string
+  onMessage: (payload: Uint8Array, ack?: () => void) => void
+}
+
 /**
  * Abstraction over a 1→N publish/subscribe bus addressed by opaque topic IDs.
  * The hub implements this; `createMemoryBus` is the in-process fake.
  */
 export type BroadcastBus = {
-  publish(topicID: string, payload: Uint8Array): void | Promise<void>
+  publish(params: BroadcastBusPublishParams): void | Promise<void>
   /**
    * `ack` marks the payload durably handled so a durable hub stops redelivering it. Absent on an
    * in-process bus that never redelivers; ignorable by a subscriber that needs no durability gate.
    * A one-parameter callback stays assignable, so adding it broke nothing.
    */
-  subscribe(topicID: string, onMessage: (payload: Uint8Array, ack?: () => void) => void): () => void
+  subscribe(params: BroadcastBusSubscribeParams): () => void
 }
 
 /**
@@ -26,7 +36,7 @@ export type BroadcastBus = {
 export function createMemoryBus(): BroadcastBus {
   const topics = new Map<string, Set<(payload: Uint8Array) => void>>()
   return {
-    publish(topicID, payload) {
+    publish({ topicID, payload }) {
       const subscribers = topics.get(topicID)
       if (subscribers == null) {
         return
@@ -35,7 +45,7 @@ export function createMemoryBus(): BroadcastBus {
         onMessage(payload)
       }
     },
-    subscribe(topicID, onMessage) {
+    subscribe({ topicID, onMessage }) {
       let subscribers = topics.get(topicID)
       if (subscribers == null) {
         subscribers = new Set()

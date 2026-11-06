@@ -13,7 +13,11 @@ import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
-const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+const topicID = protocolTopic({
+  secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+  epoch: 1,
+  protocol: 'chat',
+})
 const secret = new Uint8Array(32).fill(0x97)
 
 function pendingStore() {
@@ -47,10 +51,12 @@ async function publish(
   return hub.publish({
     topicID,
     senderDID: 'alice',
-    payload: await sender.wrap(
-      fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } })),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    ),
+    payload: await sender.wrap({
+      bytes: fromUTF(
+        JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: { text } } }),
+      ),
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    }),
     retain: 'log',
   })
 }
@@ -72,8 +78,8 @@ describe('durable storage stall', () => {
     await bob.peer.protocol('chat').to('alice')
     hub.detach('bob')
     const frame = await publish(hub, createFakeCrypto({ epoch: 1, localDID: 'alice' }), 'retry')
-    await alice.peer.commit(buildLedgerCommit(alice, []))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
     expect(stalled).toHaveBeenCalledTimes(1)
@@ -109,11 +115,16 @@ describe('durable storage stall', () => {
 
   test('reports each blocked protocol once across repeated drains', async () => {
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
-    const topics = ['chat', 'other'].map((name) => protocolTopic(anchor.secret, 1, name))
+    const topics = ['chat', 'other'].map((name) =>
+      protocolTopic({ secret: anchor.secret, epoch: 1, protocol: name }),
+    )
     const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
     const frames = await Promise.all(
       topics.map((topic) =>
-        sender.wrap(fromUTF('future'), { aad: encodeAppAAD({ topicID: topic, intent: 'log' }) }),
+        sender.wrap({
+          bytes: fromUTF('future'),
+          aad: encodeAppAAD({ topicID: topic, intent: 'log' }),
+        }),
       ),
     )
     const notices = vi.fn()
@@ -215,7 +226,8 @@ describe('durable storage stall', () => {
   test('a completed pending frame resumes even when cursor save rejects', async () => {
     const position = '000000000001'
     const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
-    const sealed = await sender.wrap(fromUTF('saved'), {
+    const sealed = await sender.wrap({
+      bytes: fromUTF('saved'),
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     })
     const reader = createFakeCrypto({
@@ -265,7 +277,7 @@ describe('durable storage stall', () => {
     expect(stalled).toHaveBeenCalledTimes(1)
     reader.setEpoch(2)
     await lane.deliver()
-    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(topicID, position))
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith({ topicID, position }))
     await vi.waitFor(() => expect(lane.pendingRecords()).toHaveLength(0))
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
       groupID: 'group',
@@ -279,10 +291,10 @@ describe('durable storage stall', () => {
 
   test('dropping a sealed frame resumes even when cursor save rejects', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap({
+      bytes: fromUTF('future'),
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const stalled = vi.fn()
     const resumed = vi.fn()
     const save = vi.fn(async () => {
@@ -328,7 +340,7 @@ describe('durable storage stall', () => {
     await lane.deliver()
     expect(stalled).toHaveBeenCalledTimes(1)
     await expect(lane.dropFrame(topicID, position)).rejects.toThrow('cursor unavailable')
-    expect(save).toHaveBeenCalledWith(topicID, position)
+    expect(save).toHaveBeenCalledWith({ topicID, position })
     expect(resumed).toHaveBeenCalledExactlyOnceWith({
       groupID: 'group',
       protocol: 'chat',
@@ -341,10 +353,10 @@ describe('durable storage stall', () => {
 
   test('a resume observer reset cannot skip the cursor save for a dropped frame', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap({
+      bytes: fromUTF('future'),
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const cursor = createMemoryAppCursorStore()
     const stalled = vi.fn()
     let lane: ReturnType<typeof createAppLane>
@@ -395,7 +407,8 @@ describe('durable storage stall', () => {
 
   test('a resume observer reset cannot skip the cursor save for a completed record', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('saved'), {
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap({
+      bytes: fromUTF('saved'),
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     })
     const reader = createFakeCrypto({
@@ -450,7 +463,8 @@ describe('durable storage stall', () => {
 
   test('a resume queued behind a cursor save is not delivered after disposal', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('saved'), {
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap({
+      bytes: fromUTF('saved'),
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     })
     const reader = createFakeCrypto({
@@ -515,10 +529,10 @@ describe('durable storage stall', () => {
 
   test('a direct lane contains throwing stall and resume observers across reset and drop', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap({
+      bytes: fromUTF('future'),
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const stalled = vi.fn(() => {
       throw new Error('stall observer failed')
     })
@@ -575,10 +589,10 @@ describe('durable storage stall', () => {
 
   test('disposing with an uncleared stall emits no resume', async () => {
     const position = '000000000001'
-    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
-      fromUTF('future'),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap({
+      bytes: fromUTF('future'),
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const stalled = vi.fn()
     const resumed = vi.fn()
     const lane = createAppLane({
@@ -621,7 +635,8 @@ describe('durable storage stall', () => {
 
   test('a far-future frame reports a stall until dropped', async () => {
     const sender = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
-    const sealed = await sender.wrap(fromUTF('future'), {
+    const sealed = await sender.wrap({
+      bytes: fromUTF('future'),
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     })
     const notices = vi.fn()
@@ -683,10 +698,10 @@ describe('durable storage stall', () => {
 
   test('a future-epoch stall resumes after its record completes', async () => {
     const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
-    const sealed = await sender.wrap(
-      fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: {} } })),
-      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
-    )
+    const sealed = await sender.wrap({
+      bytes: fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: {} } })),
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
     const reader = createFakeCrypto({
       epoch: 1,
       localDID: 'bob',
@@ -862,11 +877,11 @@ describe('durable storage stall', () => {
     hub.detach('bob')
     const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const first = await publish(hub, sender, 'first')
-    await alice.peer.commit(buildLedgerCommit(alice, []))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
     expect(notices).toHaveBeenCalledTimes(1)
@@ -881,7 +896,7 @@ describe('durable storage stall', () => {
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
     const journalRead = vi.spyOn(bob.journal, 'get')
-    await bob.peer.dropAppFrame(topicID, first.sequenceID)
+    await bob.peer.dropAppFrame({ topicID, position: first.sequenceID })
     expect(journalRead).toHaveBeenCalled()
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.appCursorStore.stored(topicID)).toBe(first.sequenceID)
@@ -894,7 +909,7 @@ describe('durable storage stall', () => {
     })
 
     const second = await publish(hub, createFakeCrypto({ epoch: 2, localDID: 'alice' }), 'second')
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
     expect(notices).toHaveBeenCalledTimes(2)
@@ -923,10 +938,12 @@ describe('durable storage stall', () => {
       releaseBuild = resolve
     })
     const stopped = new Error('stop before publishing')
-    const commit = bob.peer.commit(async () => {
-      enterBuild?.()
-      await held
-      throw stopped
+    const commit = bob.peer.commit({
+      build: async () => {
+        enterBuild?.()
+        await held
+        throw stopped
+      },
     })
     const rejected = expect(commit).rejects.toBe(stopped)
     await building
@@ -958,8 +975,8 @@ describe('durable storage stall', () => {
     await bob.peer.protocol('chat').to('alice')
     hub.detach('bob')
     await publish(hub, createFakeCrypto({ epoch: 1, localDID: 'alice' }), 'resume')
-    await alice.peer.commit(buildLedgerCommit(alice, []))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
     expect(stalled).toHaveBeenCalledTimes(1)
@@ -1008,16 +1025,18 @@ describe('durable storage stall', () => {
     const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const frame = await publish(hub, sender, 'held')
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
-    await expect(bob.peer.dropAppFrame('another topic', frame.sequenceID)).rejects.toThrow(
-      /buffered/,
+    await expect(
+      bob.peer.dropAppFrame({ topicID: 'another topic', position: frame.sequenceID }),
+    ).rejects.toThrow(/buffered/)
+    await expect(bob.peer.dropAppFrame({ topicID, position: frame.sequenceID })).rejects.toThrow(
+      /pending/,
     )
-    await expect(bob.peer.dropAppFrame(topicID, frame.sequenceID)).rejects.toThrow(/pending/)
     store.setFail(true)
     const behind = await publish(hub, sender, 'behind')
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toSatisfy(
       isAppFrameStorageError,
     )
-    await expect(bob.peer.dropAppFrame(topicID, behind.sequenceID)).rejects.toThrow(
+    await expect(bob.peer.dropAppFrame({ topicID, position: behind.sequenceID })).rejects.toThrow(
       /earlier.*pending/,
     )
     expect(store.rows.size).toBe(1)

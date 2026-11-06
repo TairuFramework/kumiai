@@ -36,9 +36,9 @@ test('standalone entry helpers preserve the factory blob format in both directio
   oldSealed.set(nonce, 1)
   oldSealed.set(xchacha20poly1305(key, nonce).encrypt(entries), 25)
 
-  expect(sealEntries(key, entries, runtime)).toEqual(oldSealed)
-  expect(openEntries(key, oldSealed)).toEqual(entries)
-  expect(openEntries(key, sealEntries(key, entries, runtime))).toEqual(entries)
+  expect(sealEntries({ key, entries, runtime })).toEqual(oldSealed)
+  expect(openEntries({ key, sealed: oldSealed })).toEqual(entries)
+  expect(openEntries({ key, sealed: sealEntries({ key, entries, runtime }) })).toEqual(entries)
   expect(key).toEqual(Uint8Array.from({ length: 32 }, (_, index) => index))
   expect(oldSealed.length).toBe(1 + 24 + entries.length + 16)
 
@@ -52,18 +52,22 @@ test('standalone entry helpers preserve the factory blob format in both directio
     runtime,
   })
   expect((await crypto.sealEntries(entries)).sealed).toEqual(oldSealed)
-  expect(await crypto.openEntries(sealEntries(key, entries, runtime))).toEqual(entries)
+  expect(await crypto.openEntries(sealEntries({ key, entries, runtime }))).toEqual(entries)
 })
 
 test('standalone open keeps the existing errors', () => {
   const key = new Uint8Array(32)
-  expect(() => openEntries(key, new Uint8Array(25))).toThrow('openEntries: not a sealed blob')
+  expect(() => openEntries({ key, sealed: new Uint8Array(25) })).toThrow(
+    'openEntries: not a sealed blob',
+  )
   const future = new Uint8Array(26)
   future[0] = 2
-  expect(() => openEntries(key, future)).toThrow('openEntries: unsupported blob version 2')
-  const sealed = sealEntries(key, new Uint8Array([1]))
+  expect(() => openEntries({ key, sealed: future })).toThrow(
+    'openEntries: unsupported blob version 2',
+  )
+  const sealed = sealEntries({ key, entries: new Uint8Array([1]) })
   sealed[sealed.length - 1] = (sealed[sealed.length - 1] as number) ^ 1
-  expect(() => openEntries(key, sealed)).toThrow()
+  expect(() => openEntries({ key, sealed })).toThrow()
 })
 
 test('factory seals after releasing access and wipes the derived key on a seal error', async () => {
@@ -111,11 +115,15 @@ test('factory seals after releasing access and wipes the derived key on a seal e
 test('entry and recovery derivation use the existing labels, context and bytes', async () => {
   const group = await createRealGroup(1, 'standalone-derivation')
   const handle = group.committer.handle
-  const expected = await handle.exportSecret(ENTRY_SEAL_LABEL, new Uint8Array(), 32)
-  expect(await deriveEntryKey(handle)).toEqual(expected)
+  const expected = await handle.exportSecret({
+    label: ENTRY_SEAL_LABEL,
+    context: new Uint8Array(),
+    length: 32,
+  })
+  expect(await deriveEntryKey({ handle })).toEqual(expected)
   const label = 'custom-entry-label'
-  expect(await deriveEntryKey(handle, label)).toEqual(
-    await handle.exportSecret(label, new Uint8Array(), 32),
+  expect(await deriveEntryKey({ handle, label })).toEqual(
+    await handle.exportSecret({ label, context: new Uint8Array(), length: 32 }),
   )
   const recovery = await deriveRecoverySecret(handle)
   const { cipherSuite } = handle.context
@@ -134,7 +142,7 @@ test('pending recovery keys expire at 120,000 ms and sweep on access', () => {
   vi.useFakeTimers()
   const pending = createRecoveryPending()
   const key = new Uint8Array([1, 2, 3])
-  pending.put('a', key)
+  pending.put({ requestID: 'a', ephemeralPrivateKey: key })
   vi.advanceTimersByTime(119_999)
   expect(pending.get('a')).toBe(key)
   vi.advanceTimersByTime(1)
@@ -143,7 +151,7 @@ test('pending recovery keys expire at 120,000 ms and sweep on access', () => {
 
   const custom = createRecoveryPending({ ttlMS: 10 })
   const stale = new Uint8Array([9])
-  custom.put('stale', stale)
+  custom.put({ requestID: 'stale', ephemeralPrivateKey: stale })
   vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11)
   expect(custom.get('stale')).toBeNull()
   expect(stale[0]).toBe(0)
@@ -154,9 +162,9 @@ test('pending replacement and deletion zero keys and cancel old timers', () => {
   const pending = createRecoveryPending({ ttlMS: 20 })
   const first = new Uint8Array([1])
   const second = new Uint8Array([2])
-  pending.put('same', first)
+  pending.put({ requestID: 'same', ephemeralPrivateKey: first })
   vi.advanceTimersByTime(5)
-  pending.put('same', second)
+  pending.put({ requestID: 'same', ephemeralPrivateKey: second })
   expect(first[0]).toBe(0)
   vi.advanceTimersByTime(15)
   expect(pending.get('same')).toBe(second)
@@ -168,7 +176,7 @@ test('pending replacement and deletion zero keys and cancel old timers', () => {
 test('pending timer is unrefed', () => {
   const timeout = vi.spyOn(globalThis, 'setTimeout')
   const pending = createRecoveryPending()
-  pending.put('a', new Uint8Array([1]))
+  pending.put({ requestID: 'a', ephemeralPrivateKey: new Uint8Array([1]) })
   const timer = timeout.mock.results.at(-1)?.value as NodeJS.Timeout
   expect(timer.hasRef()).toBe(false)
   pending.delete('a')
@@ -178,7 +186,7 @@ test('a request key remains usable throughout a longer recovery deadline', () =>
   vi.useFakeTimers()
   const pending = createRecoveryPending()
   const key = new Uint8Array([7])
-  pending.put('long-recovery', key, 180_000)
+  pending.put({ requestID: 'long-recovery', ephemeralPrivateKey: key, deadlineMs: 180_000 })
   vi.advanceTimersByTime(120_001)
   expect(pending.get('long-recovery')).toBe(key)
   vi.advanceTimersByTime(59_998)

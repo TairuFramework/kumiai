@@ -1,3 +1,8 @@
+export type AppCursorStoreSaveParams = {
+  topicID: string
+  position: string
+}
+
 /**
  * The host's durable read position on ONE app-lane topic: the last frame the drain is DONE with.
  *
@@ -29,7 +34,7 @@
  */
 export type AppCursorStore = {
   load(topicID: string): Promise<string | null>
-  save(topicID: string, position: string): Promise<void>
+  save(params: AppCursorStoreSaveParams): Promise<void>
 }
 
 /**

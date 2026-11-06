@@ -786,7 +786,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         logUnackedFrames()
         tornDown = true
         notifyWindow()
-        if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
+        if (receiveToken != null)
+          registry.releaseReceiveWriter({ did: clientDID, token: receiveToken })
         registry.unregisterIfIdle(clientDID)
         reader.cancel().catch(() => {})
         writer.abort(new Error('receive channel torn down')).catch(() => {})
@@ -877,9 +878,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         // Binding evicts whatever held the lane: a reconnect means the old connection broke and the
         // server learns last, so the stale writer must give way to the live one. See
         // `HubClientRegistry.bindReceiveWriter`.
-        const { token, evicted } = registry.bindReceiveWriter(clientDID, onLive, () =>
-          endEvicted?.(),
-        )
+        const { token, evicted } = registry.bindReceiveWriter({
+          did: clientDID,
+          writer: onLive,
+          endReceive: () => endEvicted?.(),
+        })
         receiveToken = token
         // After the bind, so the lane is never unheld between the two.
         evicted?.()
@@ -932,7 +935,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         if (!tornDown) logUnackedFrames()
         tornDown = true
         notifyWindow()
-        if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
+        if (receiveToken != null)
+          registry.releaseReceiveWriter({ did: clientDID, token: receiveToken })
         registry.unregisterIfIdle(clientDID)
         reader.cancel().catch(() => {})
         writer.abort(error).catch(() => {})

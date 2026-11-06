@@ -43,7 +43,9 @@ async function setup(
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
   const identity = fixture.agent(41)
   let group = (
-    await createGroup(identity, 'lifecycle-verdict', {
+    await createGroup({
+      identity,
+      groupID: 'lifecycle-verdict',
       ...(options.standard
         ? {}
         : {
@@ -53,7 +55,8 @@ async function setup(
     })
   ).group
   const bob = fixture.agent(61)
-  const bundle = await createKeyPackageBundle(bob, {
+  const bundle = await createKeyPackageBundle({
+    identity: bob,
     controller: await fixture.timedBinding({ identity: bob, iat: 100, exp: 200, ...options }),
   })
   const { invite } = await createInvite({
@@ -62,7 +65,7 @@ async function setup(
     recipientDID: bob.id,
     ...(options.standard ? { permission: 'member' } : {}),
   })
-  const added = await commitInvite(group, bundle.publicPackage, invite)
+  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
   group = added.newGroup
   const responderGroup = (
     await processWelcome({
@@ -108,7 +111,8 @@ async function setup(
 test('the adapter refuses a reply whose ledger omits an own-ledger revocation', async () => {
   const s = await setup()
   const mallory = fixture.agent(81)
-  const bundle = await createKeyPackageBundle(mallory, {
+  const bundle = await createKeyPackageBundle({
+    identity: mallory,
     controller: await fixture.timedBinding({ identity: mallory, iat: 100, exp: 200 }),
   })
   const { invite } = await createInvite({
@@ -116,7 +120,7 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
     identity: s.identity,
     recipientDID: mallory.id,
   })
-  const added = await commitInvite(s.group(), bundle.publicPackage, invite)
+  const added = await commitInvite({ group: s.group(), keyPackage: bundle.publicPackage, invite })
   const malloryGroup = (
     await processWelcome({
       identity: mallory,
@@ -127,18 +131,19 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
   ).group
   expect(malloryGroup.findMemberLeafIndex(mallory.id)).toBeDefined()
   s.install(added.newGroup)
-  await s.responderGroup.processMessage(added.commitMessage)
+  await s.responderGroup.processMessage({ message: added.commitMessage })
   const { controllerSeed, inception } = await import(
     new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
   )
-  const rev = revokeChain({
+  const rev = await revokeChain({
     seed: controllerSeed,
     profile: 0,
     did: fixture.controllerID,
     chain: [inception],
     subject: mallory.id,
   })
-  const removed = await revokeWithProof(s.group(), {
+  const removed = await revokeWithProof({
+    group: s.group(),
     deny: [mallory.id],
     log: { chain: [inception, rev], events: [] },
   })
@@ -146,8 +151,11 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
   s.install(removed.result.newGroup)
   expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')
   const requestID = 'known-revoked-verdict'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const request = await s.mls.createRecoveryRequest({ requestID })
+  const pending = await s.mls.applyRecovery({
+    sealed: await s.responder.sealGroupInfo(request),
+    requestID,
+  })
   expect(pending).toBeNull()
   expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')
   expect(s.group().findMemberLeafIndex(mallory.id)).toBeUndefined()

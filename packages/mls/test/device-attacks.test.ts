@@ -66,9 +66,11 @@ describe('attack: thief holds only an authenticate capability', () => {
     const attackerSeed = new Uint8Array(32).fill(71)
     const attackerLeaf = await buildBoundLeaf({ deviceSeed: attackerSeed })
     const attackerBundle = await buildBoundKeyPackageBundle(attackerLeaf, attackerSeed)
-    const attackerIdentity = createSigningIdentity(attackerSeed)
+    const attackerIdentity = createSigningIdentity({ privateKey: attackerSeed })
 
-    const { newGroup: withAttacker } = await addDevice(managerGroup, managerIdentity, {
+    const { newGroup: withAttacker } = await addDevice({
+      group: managerGroup,
+      identity: managerIdentity,
       keyPackage: attackerBundle.publicPackage,
       device: attackerLeaf.deviceID,
       controller: controllerID,
@@ -83,7 +85,9 @@ describe('attack: thief holds only an authenticate capability', () => {
     }
 
     await expect(
-      revokeDevice(withAttacker, attackerIdentity, {
+      revokeDevice({
+        group: withAttacker,
+        identity: attackerIdentity,
         device: targetDeviceID,
         capability: attackerAuthCap,
       }),
@@ -95,10 +99,11 @@ describe('attack: forged register', () => {
   test('a bound member cannot register a device it does not own, with no management capability', async () => {
     const { deviceGroup, deviceIdentity, controllerID } = await joinBoundDevice()
     await expect(
-      registerDevice(deviceGroup, deviceIdentity, {
+      registerDevice({
+        group: deviceGroup,
+        identity: deviceIdentity,
         device: 'did:key:zSomeoneElsesDevice',
         controller: controllerID,
-        // capability deliberately omitted — not self-register (subject !== issuer), and no proof.
       }),
     ).rejects.toThrow(/proof verification failed/)
   })
@@ -112,7 +117,9 @@ describe('attack: stolen manager (named, accepted limitation)', () => {
     // pinned here as a passing ACCEPT, not treated as something to fix.
     const { managerGroup, managerIdentity, targetDeviceID, capability } =
       await twoDeviceProfileGroup()
-    const { newGroup } = await revokeDevice(managerGroup, managerIdentity, {
+    const { newGroup } = await revokeDevice({
+      group: managerGroup,
+      identity: managerIdentity,
       device: targetDeviceID,
       capability,
     })
@@ -134,54 +141,71 @@ describe('attack: admin-as-controller', () => {
 
     // D self-registers: authority(D) must read the REGISTRY, never the leaf's own embedded
     // controller — this is what lets a device act with its profile's authority at all.
-    const selfReg = await registerDevice(managerGroup, managerIdentity, {
+    const selfReg = await registerDevice({
+      group: managerGroup,
+      identity: managerIdentity,
       device: managerIdentity.id,
       controller: controllerID,
     })
     const deviceGroup = selfReg.newGroup
     publishTokens(tokens, deviceGroup)
-    await creatorGroup.processMessage(selfReg.commitMessage)
+    await creatorGroup.processMessage({ message: selfReg.commitMessage })
 
     // The creator grants the PROFILE P — not the device — admin.
-    const roleToken = await signLedgerEntry(creatorIdentity, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: creatorGroup.groupID,
-      subject: controllerID,
-      value: 'admin',
+    const roleToken = await signLedgerEntry({
+      identity: creatorIdentity,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: creatorGroup.groupID,
+        subject: controllerID,
+        value: 'admin',
+      },
     })
-    const grant = await commitLedgerEntries(creatorGroup, [roleToken])
+    const grant = await commitLedgerEntries({ group: creatorGroup, tokens: [roleToken] })
     creatorGroup = grant.newGroup
     publishTokens(tokens, creatorGroup)
-    await deviceGroup.processMessage(grant.commitMessage)
+    await deviceGroup.processMessage({ message: grant.commitMessage })
 
     // D, a device of the now-admin profile, authors a further admin grant via commitLedgerEntries.
-    const grantToken = await signLedgerEntry(managerIdentity, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: deviceGroup.groupID,
-      subject: 'did:key:zNewAdmin',
-      value: 'admin',
+    const grantToken = await signLedgerEntry({
+      identity: managerIdentity,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: deviceGroup.groupID,
+        subject: 'did:key:zNewAdmin',
+        value: 'admin',
+      },
     })
-    const byDevice = await commitLedgerEntries(deviceGroup, [grantToken])
+    const byDevice = await commitLedgerEntries({ group: deviceGroup, tokens: [grantToken] })
     publishTokens(tokens, byDevice.newGroup)
 
-    await expect(creatorGroup.processMessage(byDevice.commitMessage)).resolves.not.toThrow()
+    await expect(
+      creatorGroup.processMessage({ message: byDevice.commitMessage }),
+    ).resolves.not.toThrow()
     expect(creatorGroup.roster.roles.get(normalizeDID('did:key:zNewAdmin'))).toBe('admin')
   })
 
   test('a device of a NON-admin profile cannot author a role entry — rejected', async () => {
     const { deviceGroup, deviceIdentity, controllerID } = await joinBoundDevice()
     // P is never granted admin in this group — only the creator is.
-    const selfReg = await registerDevice(deviceGroup, deviceIdentity, {
+    const selfReg = await registerDevice({
+      group: deviceGroup,
+      identity: deviceIdentity,
       device: deviceIdentity.id,
       controller: controllerID,
     })
-    const grantToken = await signLedgerEntry(deviceIdentity, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: selfReg.newGroup.groupID,
-      subject: 'did:key:zNewAdmin',
-      value: 'admin',
+    const grantToken = await signLedgerEntry({
+      identity: deviceIdentity,
+      entry: {
+        type: ROLE_ENTRY_TYPE,
+        groupID: selfReg.newGroup.groupID,
+        subject: 'did:key:zNewAdmin',
+        value: 'admin',
+      },
     })
-    await expect(commitLedgerEntries(selfReg.newGroup, [grantToken])).rejects.toThrow(/admin/)
+    await expect(
+      commitLedgerEntries({ group: selfReg.newGroup, tokens: [grantToken] }),
+    ).rejects.toThrow(/admin/)
   })
 })
 
@@ -193,7 +217,9 @@ describe('attack: beacon for a controller the issuer is not a device of', () => 
     // device-proof.ts) requires normalizeDID(binding.controller) === subject, where subject is
     // the announced controller — P !== Q, so the entry is unauthorized.
     await expect(
-      announceControllerBeacon(g.managerGroup, g.managerIdentity, {
+      announceControllerBeacon({
+        group: g.managerGroup,
+        identity: g.managerIdentity,
         controller: 'did:kokuin:someoneElse',
         logLength: 1,
         headDigest: 'zX',
@@ -225,7 +251,9 @@ describe('attack: cross-profile device rebind (Fix 1)', () => {
       await twoDeviceProfileGroup()
     // targetDeviceID is already bound to controllerID (P) via addDevice — same-controller re-register.
     await expect(
-      registerDevice(managerGroup, managerIdentity, {
+      registerDevice({
+        group: managerGroup,
+        identity: managerIdentity,
         device: targetDeviceID,
         controller: controllerID,
         capability,
@@ -241,18 +269,22 @@ describe('attack: unsigned management capability', () => {
 
     const unsignedCapability = stringifyToken(
       createUnsignedToken({
-        iss: controllerID,
-        sub: controllerID,
-        aud: managerIdentity.id,
-        act: MLS_DEVICES_ACT,
-        res: MLS_DEVICES_RES,
-        exp: now() + 3600,
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: managerIdentity.publicKey }),
+        payload: {
+          iss: controllerID,
+          sub: controllerID,
+          aud: managerIdentity.id,
+          act: MLS_DEVICES_ACT,
+          res: MLS_DEVICES_RES,
+          exp: now() + 3600,
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: managerIdentity.publicKey }),
+        },
       }),
     )
 
     await expect(
-      revokeDevice(managerGroup, managerIdentity, {
+      revokeDevice({
+        group: managerGroup,
+        identity: managerIdentity,
         device: targetDeviceID,
         capability: unsignedCapability,
       }),
@@ -260,13 +292,13 @@ describe('attack: unsigned management capability', () => {
   })
 })
 
-describe('attack: history hidden in advisory or clock entries', () => {
-  const oversized = createRotate({
+describe('attack: history hidden in advisory or clock entries', async () => {
+  const oversized = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: 'a'.repeat(393216),
   })
   const fields = [
@@ -291,11 +323,14 @@ describe('attack: history hidden in advisory or clock entries', () => {
           }
         : { op, logLength: 2, headDigest: 'advisory' }
     for (const extra of fields) {
-      const token = await signLedgerEntry(identity, {
-        type: DEVICE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: controllerID,
-        value: { ...base, ...extra },
+      const token = await signLedgerEntry({
+        identity,
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: controllerID,
+          value: { ...base, ...extra },
+        },
       })
       await expect(
         commitWithEntries({ group, extraProposals: [], enacted: [token], requireAdmin: false }),
@@ -326,17 +361,20 @@ describe('attack: history hidden in advisory or clock entries', () => {
                 time: readCapability(binding.capability).payload.iat,
               }
             : { op, logLength: 2, headDigest: 'advisory' }
-        const token = await signLedgerEntry(identity, {
-          type: DEVICE_ENTRY_TYPE,
-          groupID: group.groupID,
-          subject: controllerID,
-          value: { ...base, ...extra },
+        const token = await signLedgerEntry({
+          identity,
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: controllerID,
+            value: { ...base, ...extra },
+          },
         })
         publish(tokens, [token])
         const message = await rawEnact(members.group, [token])
         const epoch = members.joined.epoch
         const registry = members.joined.registry
-        await expect(members.joined.processMessage(message)).rejects.toThrow()
+        await expect(members.joined.processMessage({ message })).rejects.toThrow()
         expect(members.joined.epoch).toBe(epoch)
         expect(members.joined.registry).toBe(registry)
         expect(members.joined.ledgerTokens).toEqual([seed.token])
@@ -346,23 +384,23 @@ describe('attack: history hidden in advisory or clock entries', () => {
   )
 })
 
-function authorityRevoke(subject: string, chain: Array<SignedEvent> = [inception]) {
-  return revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject })
+async function authorityRevoke(subject: string, chain: Array<SignedEvent> = [inception]) {
+  return await revokeChain({ seed: controllerSeed, profile: 0, did: controllerID, chain, subject })
 }
 
-describe('attack: invalid lifecycle proofs keep their classifications', () => {
+describe('attack: invalid lifecycle proofs keep their classifications', async () => {
   const target = agent(61).id
   const firstSubject = agent(71).id
-  const reset = createReset(controllerSeed, 0, 1)
-  const oversized = createRotate({
+  const reset = await createReset({ seed: controllerSeed, profile: 0, gen: 1 })
+  const oversized = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: 'a'.repeat(393216),
   })
-  const rev = authorityRevoke(target)
+  const rev = await authorityRevoke(target)
   const skipped = {
     ...rev,
     event: { ...rev.event, t: 'future', crit: false },
@@ -388,24 +426,24 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       attack: 'wrong controller',
       reason: 'wrong-controller',
       controller: 'did:kokuin:other',
-      proof: [inception, authorityRevoke(target)],
+      proof: [inception, await authorityRevoke(target)],
     },
     {
       attack: 'detached suffix',
       reason: 'detached',
       recorded: true,
-      proof: [authorityRevoke(target)],
+      proof: [await authorityRevoke(target)],
     },
     {
       attack: 'unrecorded reset',
       reason: 'needs-reset',
       recorded: true,
-      proof: [createReset(controllerSeed, 0, 1)],
+      proof: [await createReset({ seed: controllerSeed, profile: 0, gen: 1 })],
     },
     {
       attack: 'missing authority signature',
       reason: 'not-authority-signed',
-      proof: [inception, { ...authorityRevoke(target), sigs: [] }],
+      proof: [inception, { ...(await authorityRevoke(target)), sigs: [] }],
     },
     { attack: 'non-authority signer', reason: 'not-authority-signed', proof: [inception, foreign] },
     { attack: 'delegated revoke', reason: 'not-authority-signed', proof: [inception, delegated] },
@@ -419,7 +457,7 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
     {
       attack: 'over-horizon proof',
       reason: 'too-large',
-      proof: [inception, oversized, authorityRevoke(target, [inception, oversized])],
+      proof: [inception, oversized, await authorityRevoke(target, [inception, oversized])],
     },
     {
       attack: 'forged effects',
@@ -435,46 +473,55 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       const setup = await lifecycleGroup(floor ? [inception, reset] : [inception])
       let group = setup.group
       if (floor) {
-        const token = await signLedgerEntry(setup.identity, {
-          type: DEVICE_ENTRY_TYPE,
-          groupID: group.groupID,
-          subject: controllerID,
-          value: {
-            effects: [],
-            removed: [],
-            op: 'reset',
-            proof: asControllerLog([inception, reset]),
-            revoked: [],
+        const token = await signLedgerEntry({
+          identity: setup.identity,
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: controllerID,
+            value: {
+              effects: [],
+              removed: [],
+              op: 'reset',
+              proof: asControllerLog([inception, reset]),
+              revoked: [],
+            },
           },
         })
         group = (await enact(group, [token])).group
       }
       if (recorded) {
-        const first = await signLedgerEntry(setup.identity, {
-          type: DEVICE_ENTRY_TYPE,
-          groupID: group.groupID,
-          subject: controllerID,
-          value: {
-            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
-            removed: [],
-            op: 'revoke',
-            proof: asControllerLog([authorityRevoke(firstSubject)]),
-            revoked: [{ did: firstSubject }],
+        const first = await signLedgerEntry({
+          identity: setup.identity,
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: controllerID,
+            value: {
+              effects: denyEffects([await authorityRevoke(firstSubject)], firstSubject),
+              removed: [],
+              op: 'revoke',
+              proof: asControllerLog([await authorityRevoke(firstSubject)]),
+              revoked: [{ did: firstSubject }],
+            },
           },
         })
         group = (await enact(group, [first])).group
       }
-      const token = await signLedgerEntry(setup.identity, {
-        type: DEVICE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: controllerID,
-        value: {
-          effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
-          removed: [],
-          op: 'revoke',
-          proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
-          revoked: revoked ?? [{ did: target }],
-          ...(controller == null ? {} : { controller }),
+      const token = await signLedgerEntry({
+        identity: setup.identity,
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: controllerID,
+          value: {
+            effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
+            removed: [],
+            op: 'revoke',
+            proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
+            revoked: revoked ?? [{ did: target }],
+            ...(controller == null ? {} : { controller }),
+          },
         },
       })
       const rejection = await commitWithEntries({
@@ -500,59 +547,68 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
       )
       let group = members.group
       if (floor) {
-        const token = await signLedgerEntry(setup.identity, {
-          type: DEVICE_ENTRY_TYPE,
-          groupID: group.groupID,
-          subject: controllerID,
-          value: {
-            effects: [],
-            removed: [],
-            op: 'reset',
-            proof: asControllerLog([inception, reset]),
-            revoked: [],
+        const token = await signLedgerEntry({
+          identity: setup.identity,
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: controllerID,
+            value: {
+              effects: [],
+              removed: [],
+              op: 'reset',
+              proof: asControllerLog([inception, reset]),
+              revoked: [],
+            },
           },
         })
         const accepted = await enact(group, [token])
         group = accepted.group
         publish(setup.tokens, [token])
-        await members.joined.processMessage(accepted.message)
+        await members.joined.processMessage({ message: accepted.message })
       }
       if (recorded) {
-        const first = await signLedgerEntry(setup.identity, {
-          type: DEVICE_ENTRY_TYPE,
-          groupID: group.groupID,
-          subject: controllerID,
-          value: {
-            effects: denyEffects([authorityRevoke(firstSubject)], firstSubject),
-            removed: [],
-            op: 'revoke',
-            proof: asControllerLog([authorityRevoke(firstSubject)]),
-            revoked: [{ did: firstSubject }],
+        const first = await signLedgerEntry({
+          identity: setup.identity,
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: group.groupID,
+            subject: controllerID,
+            value: {
+              effects: denyEffects([await authorityRevoke(firstSubject)], firstSubject),
+              removed: [],
+              op: 'revoke',
+              proof: asControllerLog([await authorityRevoke(firstSubject)]),
+              revoked: [{ did: firstSubject }],
+            },
           },
         })
         const accepted = await enact(group, [first])
         group = accepted.group
         publish(setup.tokens, [first])
-        await members.joined.processMessage(accepted.message)
+        await members.joined.processMessage({ message: accepted.message })
       }
-      const token = await signLedgerEntry(setup.identity, {
-        type: DEVICE_ENTRY_TYPE,
-        groupID: group.groupID,
-        subject: controllerID,
-        value: {
-          effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
-          removed: [],
-          op: 'revoke',
-          proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
-          revoked: revoked ?? [{ did: target }],
-          ...(controller == null ? {} : { controller }),
+      const token = await signLedgerEntry({
+        identity: setup.identity,
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: group.groupID,
+          subject: controllerID,
+          value: {
+            effects: denyEffects(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof, target),
+            removed: [],
+            op: 'revoke',
+            proof: asControllerLog(proof[0]?.event.t === 'icp' ? proof.slice(1) : proof),
+            revoked: revoked ?? [{ did: target }],
+            ...(controller == null ? {} : { controller }),
+          },
         },
       })
       publish(setup.tokens, [token])
       const message = await rawEnact(group, [token])
       const epoch = members.joined.epoch
       const rejection = await members.joined
-        .processMessage(message)
+        .processMessage({ message })
         .catch((error: unknown) => error)
       expect(rejection).toBeInstanceOf(CommitRejectedError)
       if (!(rejection instanceof CommitRejectedError)) throw new Error('Expected commit rejection')
@@ -574,11 +630,14 @@ describe('attack: reserved lifecycle entries', () => {
       if (seed == null) throw new Error('Missing seed')
       expect(seed.verified.entry.value).toMatchObject({ op: 'seed' })
       expect(members.joined.ledgerTokens).toEqual([seed.token])
-      const token = await signLedgerEntry(identity, {
-        type,
-        groupID: group.groupID,
-        subject: recipient.id,
-        value: 'admin',
+      const token = await signLedgerEntry({
+        identity,
+        entry: {
+          type,
+          groupID: group.groupID,
+          subject: recipient.id,
+          value: 'admin',
+        },
       })
       await expect(
         commitWithEntries({
@@ -591,7 +650,7 @@ describe('attack: reserved lifecycle entries', () => {
       publish(tokens, [token])
       const message = await rawEnact(members.group, [token])
       const epoch = members.joined.epoch
-      await expect(members.joined.processMessage(message)).rejects.toThrow()
+      await expect(members.joined.processMessage({ message })).rejects.toThrow()
       expect(members.joined.epoch).toBe(epoch)
       expect(members.joined.roster.roles).toEqual(new Map([[controllerID, 'admin']]))
       expect(members.joined.ledgerTokens).toEqual([seed.token])

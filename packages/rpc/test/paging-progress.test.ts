@@ -69,7 +69,7 @@ describe('hub log paging', () => {
     const bob = makeMLSPeer(hub, 'bob', secret)
     await bob.peer.protocol('chat').to('alice')
     hub.armed = true
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toThrow(
       /non-increasing log positions/,
     )
     expect(hub.fetches).toBe(2)

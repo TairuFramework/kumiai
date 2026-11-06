@@ -1,4 +1,10 @@
-import { assertTimeClaimsValid, decodeSignedToken, normalizeDID } from '@kokuin/token'
+import type { CryptoProvider } from '@kokuin/crypto'
+import {
+  assertTimeClaimsValid,
+  type CryptoOptions,
+  decodeSignedToken,
+  normalizeDID,
+} from '@kokuin/token'
 import { maybeYield } from '@sozai/async'
 import { toB64 } from '@sozai/codec'
 import { EventEmitter, type EventsSource } from '@sozai/event'
@@ -76,6 +82,7 @@ import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from '
 import {
   assertSenderNotLapsed,
   type CommitRejectionReason,
+  type IncomingMessage,
   isLapsed,
   isUnchangedLeaf,
   type LifecycleGate,
@@ -116,10 +123,35 @@ const MUTEXES = new WeakMap<GroupHandle, Mutex>()
 // Module-private construction path: only clone can supply an already-folded snapshot.
 const CLONE_SOURCE = Symbol('cloneSource')
 type CloneGroupHandleParams = GroupHandleParams & { [CLONE_SOURCE]: GroupHandle }
+const FOLDED_CONTROL = Symbol('foldedControl')
+type FoldedControl = {
+  anchor: GroupAnchor
+  roster: RosterState
+  registry: DeviceRegistry
+  admission: SendAdmission
+}
+type FoldedGroupHandleParams = GroupHandleParams & { [FOLDED_CONTROL]: FoldedControl }
+
+async function computeAdmission(
+  view: Pick<GroupHandle, 'state' | 'anchor' | 'registry'> & CryptoOptions,
+): Promise<SendAdmission> {
+  const leaf = leafAt(view.state.ratchetTree, view.state.privatePath.leafIndex)
+  const epoch = Number(view.state.groupContext.epoch)
+  return Object.freeze(
+    leaf != null && (await isLapsed(view, leaf))
+      ? { epoch, admissible: false, reason: 'lapsed' }
+      : { epoch, admissible: true },
+  )
+}
 
 const HISTORICAL_REGISTRIES = new WeakMap<GroupHandle, Map<string, DeviceRegistry>>()
 
-export function registryAt(group: GroupHandle, head: Uint8Array): DeviceRegistry {
+export type RegistryAtParams = {
+  group: GroupHandle
+  head: Uint8Array
+}
+
+export async function registryAt({ group, head }: RegistryAtParams): Promise<DeviceRegistry> {
   let cache = HISTORICAL_REGISTRIES.get(group)
   if (cache == null) {
     cache = new Map()
@@ -131,15 +163,15 @@ export function registryAt(group: GroupHandle, head: Uint8Array): DeviceRegistry
   let held = genesisHead(group.groupID)
   let length = 0
   for (const entry of group.ledger) {
-    if (headsMatch(held, head)) break
-    held = extendHead(held, [entry.entryID])
+    if (headsMatch({ expected: held, actual: head })) break
+    held = extendHead({ head: held, entryIDs: [entry.entryID] })
     length++
   }
-  if (!headsMatch(held, head)) throw new Error('Unknown epoch ledger head')
-  const registry = foldLedgerControl(
-    group.ledger.slice(0, length),
-    group.anchor,
-    group.groupID,
+  if (!headsMatch({ expected: held, actual: head })) throw new Error('Unknown epoch ledger head')
+  const registry = (
+    await foldLedgerControl(group.ledger.slice(0, length), group.anchor, group.groupID, {
+      crypto: group.crypto,
+    })
   ).registry
   cache.set(key, registry)
   if (cache.size > 8) {
@@ -244,6 +276,12 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true
 }
 
+export type CommitRejectedErrorParams = {
+  proposals: Array<ProposalWithSender>
+  senderLeafIndex?: number
+  reason?: CommitRejectionReason
+}
+
 /** Thrown by GroupHandle.processMessage when the commit policy rejects an incoming
  *  commit. The handle is left at its pre-commit epoch. */
 export class CommitRejectedError extends Error {
@@ -251,11 +289,7 @@ export class CommitRejectedError extends Error {
   #senderLeafIndex?: number
   #reason: CommitRejectionReason
 
-  constructor(
-    proposals: Array<ProposalWithSender>,
-    senderLeafIndex?: number,
-    reason: CommitRejectionReason = 'policy',
-  ) {
+  constructor({ proposals, senderLeafIndex, reason = 'policy' }: CommitRejectedErrorParams) {
     super('Commit rejected by group commit policy')
     this.name = 'CommitRejectedError'
     this.#reason = reason
@@ -291,8 +325,9 @@ type CommitCapture = {
 type CommitPipeline = {
   candidateRegistry: DeviceRegistry
   callback: IncomingMessageCallback | undefined
+  prejudge: (incoming: IncomingMessage) => Promise<void>
   capture: CommitCapture
-  applyOnAccept: (notify?: boolean) => () => void
+  applyOnAccept: (notify?: boolean) => Promise<() => void>
   postApply: (state: ClientState) => Promise<void>
 }
 
@@ -430,37 +465,66 @@ export type HeldLedgerEntry = {
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 const VERIFIED_LEDGER_ENTRIES = new WeakMap<VerifiedLedgerEntry, HeldLedgerEntry>()
-const VERIFIED_LEDGER_TOKENS = new WeakMap<Array<string>, Array<HeldLedgerEntry | undefined>>()
+const VERIFIED_LEDGER_TOKENS = new WeakMap<
+  Array<string>,
+  { crypto: CryptoProvider | undefined; held: Array<HeldLedgerEntry | undefined> }
+>()
 export const VERIFIED_LEDGER_TOKEN_CACHE_SIZE = 4096
-const VERIFIED_LEDGER_TOKEN_CACHE = new Map<string, VerifiedLedgerEntry>()
+type LedgerTokenCache = Map<string, VerifiedLedgerEntry>
+const DEFAULT_LEDGER_TOKEN_CACHE: LedgerTokenCache = new Map()
+const PROVIDER_LEDGER_TOKEN_CACHES = new WeakMap<CryptoProvider, LedgerTokenCache>()
 
-function cachedLedgerEntry(token: string): VerifiedLedgerEntry | null | undefined {
-  const verified = VERIFIED_LEDGER_TOKEN_CACHE.get(token)
+// A token one provider accepted says nothing about another.
+function ledgerTokenCache(options?: CryptoOptions): LedgerTokenCache {
+  const crypto = options?.crypto
+  if (crypto == null) return DEFAULT_LEDGER_TOKEN_CACHE
+  let cache = PROVIDER_LEDGER_TOKEN_CACHES.get(crypto)
+  if (cache == null) {
+    cache = new Map()
+    PROVIDER_LEDGER_TOKEN_CACHES.set(crypto, cache)
+  }
+  return cache
+}
+
+function cachedLedgerEntry(
+  token: string,
+  options?: CryptoOptions,
+): VerifiedLedgerEntry | null | undefined {
+  const cache = ledgerTokenCache(options)
+  const verified = cache.get(token)
   if (verified == null) return undefined
-  VERIFIED_LEDGER_TOKEN_CACHE.delete(token)
-  VERIFIED_LEDGER_TOKEN_CACHE.set(token, verified)
+  cache.delete(token)
+  cache.set(token, verified)
   try {
-    assertTimeClaimsValid(decodeSignedToken(token).payload)
+    assertTimeClaimsValid({ payload: decodeSignedToken(token).payload })
     return structuredClone(verified)
   } catch {
     return null
   }
 }
 
-function cacheLedgerEntry(token: string, verified: VerifiedLedgerEntry): void {
-  VERIFIED_LEDGER_TOKEN_CACHE.delete(token)
-  VERIFIED_LEDGER_TOKEN_CACHE.set(token, structuredClone(verified))
-  if (VERIFIED_LEDGER_TOKEN_CACHE.size > VERIFIED_LEDGER_TOKEN_CACHE_SIZE) {
-    const oldest = VERIFIED_LEDGER_TOKEN_CACHE.keys().next().value
-    if (oldest != null) VERIFIED_LEDGER_TOKEN_CACHE.delete(oldest)
+function cacheLedgerEntry(
+  token: string,
+  verified: VerifiedLedgerEntry,
+  options?: CryptoOptions,
+): void {
+  const cache = ledgerTokenCache(options)
+  cache.delete(token)
+  cache.set(token, structuredClone(verified))
+  if (cache.size > VERIFIED_LEDGER_TOKEN_CACHE_SIZE) {
+    const oldest = cache.keys().next().value
+    if (oldest != null) cache.delete(oldest)
   }
 }
 
-async function verifyCachedLedgerEntry(token: string): Promise<VerifiedLedgerEntry | null> {
-  const cached = cachedLedgerEntry(token)
+async function verifyCachedLedgerEntry(
+  token: string,
+  options?: CryptoOptions,
+): Promise<VerifiedLedgerEntry | null> {
+  const cached = cachedLedgerEntry(token, options)
   if (cached !== undefined) return cached
-  const verified = await verifyLedgerEntry(token)
-  if (verified != null) cacheLedgerEntry(token, verified)
+  const verified = await verifyLedgerEntry({ token, ...options })
+  if (verified != null) cacheLedgerEntry(token, verified, options)
   return verified
 }
 
@@ -481,11 +545,12 @@ function ledgerLogEntry(
  * external rejoiner adopting a fork existing members reject. Ordinary commit admission
  * still enforces expiry.
  */
-function registryWithTreeBindings(
+async function registryWithTreeBindings(
   registry: DeviceRegistry,
   tree: ClientState['ratchetTree'],
   anchor: GroupAnchor,
-): DeviceRegistry {
+  options?: CryptoOptions,
+): Promise<DeviceRegistry> {
   if (anchor.controller == null) return registry
   const devices = new Map(registry.devices)
   for (const node of tree) {
@@ -502,7 +567,7 @@ function registryWithTreeBindings(
       // An unparseable leaf cannot supply reset re-admission evidence.
       continue
     }
-    if (!mayReadmitResetDevice(registry, parsed)) continue
+    if (!(await mayReadmitResetDevice(registry, parsed, options))) continue
     const did = normalizeDID(parsed.id)
     const record = devices.get(did)
     if (record == null) continue
@@ -520,16 +585,17 @@ function registryWithTreeBindings(
  * (see {@link foldControl}), so a role entry's authority resolves against the registry-so-far.
  * The mixed-type log is fed in whole; foldControl drops every unrelated entry by type.
  */
-function foldLedgerControl(
+async function foldLedgerControl(
   ledger: ReadonlyArray<LedgerLogEntry>,
   anchor: GroupAnchor,
   groupID: string,
-): { roster: RosterState; registry: DeviceRegistry } {
+  options?: CryptoOptions,
+): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
   const entries = ledger.map(({ verified, entryID }) => ({ verified, entryID }) as FoldInput)
-  return foldControl(entries, anchor, groupID)
+  return await foldControl({ entries, anchor, groupID, ...options })
 }
 
-export type GroupHandleParams = {
+export type GroupHandleParams = CryptoOptions & {
   state: ClientState
   credential: MemberCredential
   context: MlsContext
@@ -549,11 +615,53 @@ export type GroupHandleParams = {
   speculative?: boolean
 }
 
+export type GroupHandleBootstrapLedgerParams = {
+  tokens: Array<string>
+  persist?: (handle: GroupHandle) => Promise<void> | void
+}
+
+export type GroupHandleExportSecretParams = {
+  label: string
+  context: Uint8Array
+  length?: number
+}
+
+export type GroupHandleEncryptParams = {
+  plaintext: Uint8Array
+  aad?: Uint8Array
+}
+
+export type GroupHandleAdvanceSenderGenerationParams = {
+  target: number
+  maxSteps?: number
+}
+
+export type GroupHandleDecryptParams = {
+  message: Uint8Array
+  expectedAAD?: Uint8Array
+}
+
+export type GroupHandleDecryptStagedParams = {
+  message: Uint8Array
+  opts: { expectedAAD?: Uint8Array }
+  persist: (
+    stagedState: Uint8Array,
+    opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
+  ) => Promise<void>
+}
+
+export type GroupHandleProcessMessageParams = {
+  message: Uint8Array | MlsFramedMessage
+  commitPolicy?: IncomingMessageCallback
+  persist?: (handle: GroupHandle) => Promise<void> | void
+}
+
 /** Mutable wrapper around MLS group state + Enkaku credential. */
 export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
   #context: MlsContext
+  #crypto: CryptoProvider | undefined
   #commitPolicy?: IncomingMessageCallback
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
@@ -570,18 +678,50 @@ export class GroupHandle {
   #admission: SendAdmission
   #pendingControlEvents?: Array<VerifiedLedgerEntry>
 
-  constructor(params: GroupHandleParams) {
+  /**
+   * Seed control state from the genesis anchor in the group's GroupContext. This is the single
+   * choke no anchorless handle slips through: an absent anchor fails closed rather than
+   * installing a permissive roster.
+   */
+  static async create(params: GroupHandleParams): Promise<GroupHandle> {
+    const anchor = readGroupAnchor(params)
+    if (anchor == null) {
+      throw new Error('group has no anchor extension; cannot seed a control roster')
+    }
+    const crypto = params.crypto ?? deviceDenyHolderFor(params.context)?.crypto
+    const folded = await foldLedgerControl(
+      [...(params.ledger ?? [])],
+      anchor,
+      params.credential.groupID,
+      { crypto },
+    )
+    const registry = await registryWithTreeBindings(
+      folded.registry,
+      params.state.ratchetTree,
+      anchor,
+      { crypto },
+    )
+    const admission = await computeAdmission({ state: params.state, anchor, registry, crypto })
+    const seeded: FoldedGroupHandleParams = {
+      ...params,
+      crypto,
+      [FOLDED_CONTROL]: { anchor, roster: folded.roster, registry, admission },
+    }
+    return new GroupHandle(seeded)
+  }
+
+  constructor(params: CloneGroupHandleParams | FoldedGroupHandleParams) {
     this.#state = params.state
     this.#credential = params.credential
     this.#context = params.context
     // A caller-built context without a client config gets kumiai's, as the context a commit
     // rebuilds would: in place, since the context is the key of its deny holder.
     this.#context.clientConfig ??= kumiaiClientConfig()
+    this.#crypto = params.crypto
     this.#commitPolicy = params.commitPolicy
     this.#resolveLedgerEntries = params.resolveLedgerEntries
     this.#onLedgerEntries = params.onLedgerEntries
     const source = (params as Partial<CloneGroupHandleParams>)[CLONE_SOURCE]
-    let admission: SendAdmission | undefined
     if (source != null) {
       const snapshot = structuredClone({
         anchor: source.#anchor,
@@ -596,7 +736,7 @@ export class GroupHandle {
       this.#entryBodies = snapshot.entryBodies
       this.#roster = snapshot.roster
       this.#registry = snapshot.registry
-      admission = Object.freeze(snapshot.admission)
+      this.#admission = Object.freeze(snapshot.admission)
       // Preserve the trusted snapshot, never promote caller-mutated exposed claims.
       for (const [index, held] of source.#ledger.entries()) {
         const copied = this.#ledger[index]
@@ -606,30 +746,21 @@ export class GroupHandle {
         }
       }
     } else {
-      // Seed control state from the genesis anchor in the group's GroupContext. Reading
-      // it here makes the constructor the single choke no anchorless handle slips
-      // through: an absent anchor fails closed rather than installing a permissive roster.
-      const anchor = readGroupAnchor(this)
-      if (anchor == null) {
-        throw new Error('group has no anchor extension; cannot seed a control roster')
-      }
-      this.#anchor = anchor
+      const control = (params as FoldedGroupHandleParams)[FOLDED_CONTROL]
+      this.#anchor = control.anchor
       this.#ledger = [...(params.ledger ?? [])]
       this.#entryBodies = new Map(
         this.#ledger.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
-      const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
-      this.#roster = folded.roster
-      this.#registry = registryWithTreeBindings(
-        folded.registry,
-        this.#state.ratchetTree,
-        this.#anchor,
-      )
+      this.#roster = control.roster
+      this.#registry = control.registry
+      this.#admission = control.admission
     }
     const anchor = this.#anchor
     // Authentication reads only this handle's registry and lifetime limits.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
+      denyHolder.crypto = this.#crypto
       denyHolder.provider = () => this.currentDenySet()
       denyHolder.judging = () => ({
         registry: anchor.controller == null ? undefined : this.registry,
@@ -643,7 +774,6 @@ export class GroupHandle {
     }
     EMITTERS.set(this, params.events ?? new EventEmitter<GroupHandleEvents>())
     this.#pendingControlEvents = params.speculative ? [] : undefined
-    this.#admission = admission ?? this.#computeAdmission()
   }
 
   /** Copy the current checkpoint without replaying ledger tokens or sharing mutable state.
@@ -663,12 +793,15 @@ export class GroupHandle {
               ),
             },
           }
-        : createMlsContext(this.#context.cipherSuite, this.#anchor)
+        : createMlsContext(this.#context.cipherSuite, this.#anchor, undefined, {
+            crypto: this.#crypto,
+          })
     const config = this.#context.clientConfig
     if (config != null) context.clientConfig = copyClientConfig(config)
     context.externalPsks = structuredClone(this.#context.externalPsks)
     const params: CloneGroupHandleParams = {
       [CLONE_SOURCE]: this,
+      crypto: this.#crypto,
       state: structuredClone(this.#state),
       credential: structuredClone(this.#credential),
       context,
@@ -677,16 +810,6 @@ export class GroupHandle {
       onLedgerEntries: options?.onLedgerEntries ?? this.#onLedgerEntries,
     }
     return new GroupHandle(params)
-  }
-
-  #computeAdmission(): SendAdmission {
-    const leaf = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
-    const epoch = Number(this.epoch)
-    return Object.freeze(
-      leaf != null && isLapsed(this, leaf)
-        ? { epoch, admissible: false, reason: 'lapsed' }
-        : { epoch, admissible: true },
-    )
   }
 
   sendAdmission(): SendAdmission {
@@ -723,6 +846,11 @@ export class GroupHandle {
     return this.#context
   }
 
+  /** The kokuin provider this handle verifies with; carried onto clones and derived handles. */
+  get crypto(): CryptoProvider | undefined {
+    return this.#crypto
+  }
+
   /** The commit policy enforced by processMessage, if any. Carried onto
    *  handles derived from this one (commitInvite/removeMember). */
   get commitPolicy(): IncomingMessageCallback | undefined {
@@ -756,10 +884,10 @@ export class GroupHandle {
    *  verification through the returned array; serialised tokens must verify afresh. */
   get ledgerTokens(): Array<string> {
     const tokens = this.#ledger.map(({ token }) => token)
-    VERIFIED_LEDGER_TOKENS.set(
-      tokens,
-      this.#ledger.map(({ verified }) => VERIFIED_LEDGER_ENTRIES.get(verified)),
-    )
+    VERIFIED_LEDGER_TOKENS.set(tokens, {
+      crypto: this.#crypto,
+      held: this.#ledger.map(({ verified }) => VERIFIED_LEDGER_ENTRIES.get(verified)),
+    })
     return tokens
   }
 
@@ -773,10 +901,11 @@ export class GroupHandle {
     return this.#registry
   }
 
-  settleAdvisory(): 'ok' | 'prompt' | 'blocked' {
+  async settleAdvisory(): Promise<'ok' | 'prompt' | 'blocked'> {
     const controller = this.#anchor.controller
-    const log = controller == null ? undefined : recordedLogOf(this.#registry, controller)
-    return log == null ? 'ok' : settleAdvisory(log)
+    const log =
+      controller == null ? undefined : recordedLogOf({ registry: this.#registry, controller })
+    return log == null ? 'ok' : await settleAdvisory({ log, crypto: this.#crypto })
   }
 
   /**
@@ -854,11 +983,11 @@ export class GroupHandle {
           ),
         ]) {
           const device = normalizeDID(effect.did)
-          const record = revocationOf(this, device)
+          const record = revocationOf({ group: this, did: device })
           if (record != null) revoked.push({ device, ...record })
         }
       } else if (value.op === 'revoke') {
-        const controller = controllerOf(this.#registry, subject)
+        const controller = controllerOf({ registry: this.#registry, deviceDID: subject })
         if (controller != null) revoked.push({ device: subject, controller })
       } else if (value.op === 'beacon' && value.logLength != null && value.headDigest != null) {
         emitter.fire('controllerBeaconChanged', {
@@ -909,7 +1038,9 @@ export class GroupHandle {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
       const candidates: Array<LedgerLogEntry> = []
-      const memo = VERIFIED_LEDGER_TOKENS.get(tokens)
+      const remembered = VERIFIED_LEDGER_TOKENS.get(tokens)
+      const memo =
+        remembered != null && remembered.crypto === this.#crypto ? remembered.held : undefined
       const nextMemo: Array<HeldLedgerEntry | undefined> = []
       for (const [index, token] of tokens.entries()) {
         await maybeYield()
@@ -917,13 +1048,13 @@ export class GroupHandle {
         let verified: VerifiedLedgerEntry | null
         if (held?.token === token) {
           try {
-            assertTimeClaimsValid(decodeSignedToken(token).payload)
+            assertTimeClaimsValid({ payload: decodeSignedToken(token).payload })
           } catch {
             continue
           }
           verified = structuredClone(held.verified)
         } else {
-          verified = await verifyCachedLedgerEntry(token)
+          verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
         }
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
@@ -933,20 +1064,29 @@ export class GroupHandle {
         appended.push(verified)
       }
       const ledger = [...this.#ledger, ...candidates]
-      const folded = foldLedgerControl(ledger, this.#anchor, this.groupID)
-      const registry = registryWithTreeBindings(
+      const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID, {
+        crypto: this.#crypto,
+      })
+      const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
+        { crypto: this.#crypto },
       )
+      const admission = await computeAdmission({
+        state: this.#state,
+        anchor: this.#anchor,
+        registry,
+        crypto: this.#crypto,
+      })
       this.#ledger = ledger
       for (const { entryID, token, verified } of candidates) {
         this.#entryBodies.set(entryID, { token, verified })
       }
-      VERIFIED_LEDGER_TOKENS.set(tokens, nextMemo)
+      VERIFIED_LEDGER_TOKENS.set(tokens, { crypto: this.#crypto, held: nextMemo })
       this.#roster = folded.roster
       this.#registry = registry
-      this.#admission = this.#computeAdmission()
+      this.#admission = admission
       if (this.#pendingControlEvents != null) {
         this.emitControlEvents(appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE))
       }
@@ -976,13 +1116,13 @@ export class GroupHandle {
         // Report incomplete and let bootstrap fail loudly.
         return false
       }
-      return headsMatch(
-        authenticated.head,
-        computeHead(
-          this.groupID,
-          this.#ledger.map(({ entryID }) => entryID),
-        ),
-      )
+      return headsMatch({
+        expected: authenticated.head,
+        actual: computeHead({
+          groupID: this.groupID,
+          entryIDs: this.#ledger.map(({ entryID }) => entryID),
+        }),
+      })
     })
   }
 
@@ -1019,10 +1159,7 @@ export class GroupHandle {
    * call back into it. It must write atomically: rejection means nothing was stored.
    * Host callbacks run after successful persist; a callback throw does not undo bootstrap.
    */
-  async bootstrapLedger(
-    tokens: Array<string>,
-    opts?: { persist?: (handle: GroupHandle) => Promise<void> | void },
-  ): Promise<void> {
+  async bootstrapLedger({ tokens, ...opts }: GroupHandleBootstrapLedgerParams): Promise<void> {
     return mutexFor(this).run(async () => {
       const authenticated = readLedgerHead(this)
       if (authenticated == null) {
@@ -1032,13 +1169,16 @@ export class GroupHandle {
       // The gate. Nothing below touches the handle until the last three statements,
       // and nothing above reads the tokens except for their content ids.
       const entryIDs = tokens.map(ledgerEntryDigest)
-      assertHeadMatches(authenticated.head, computeHead(this.groupID, entryIDs))
+      assertHeadMatches({
+        expected: authenticated.head,
+        actual: computeHead({ groupID: this.groupID, entryIDs }),
+      })
 
       const log: Array<LedgerLogEntry> = []
       for (let index = 0; index < tokens.length; index++) {
         await maybeYield()
         const token = tokens[index] as string
-        const verified = await verifyCachedLedgerEntry(token)
+        const verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
         if (verified == null || verified.entry.groupID !== this.groupID) {
           // Unreachable past the gate — the chain digests the token bytes, so an
           // unverifiable or cross-group token cannot sit at a position the head
@@ -1076,18 +1216,28 @@ export class GroupHandle {
         registry: this.#registry,
         admission: this.#admission,
       }
-      const folded = foldLedgerControl(log, this.#anchor, this.groupID)
+      const folded = await foldLedgerControl(log, this.#anchor, this.groupID, {
+        crypto: this.#crypto,
+      })
+      const registry = await registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+        { crypto: this.#crypto },
+      )
+      const admission = await computeAdmission({
+        state: this.#state,
+        anchor: this.#anchor,
+        registry,
+        crypto: this.#crypto,
+      })
       this.#ledger = log
       this.#entryBodies = new Map(
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
       this.#roster = folded.roster
-      this.#registry = registryWithTreeBindings(
-        folded.registry,
-        this.#state.ratchetTree,
-        this.#anchor,
-      )
-      this.#admission = this.#computeAdmission()
+      this.#registry = registry
+      this.#admission = admission
       try {
         await opts?.persist?.(this)
       } catch (error) {
@@ -1137,7 +1287,10 @@ export class GroupHandle {
           // rejects any peer:4 leaf lacking one before it can enter a ratchet tree. restore
           // trusts the host's own persisted state, so neither gate runs on that path.
           const controller = parsed.controller ? parsed.controller.id : undefined
-          const beacon = controller != null ? beaconOf(this.#registry, controller) : undefined
+          const beacon =
+            controller != null
+              ? beaconOf({ registry: this.#registry, controllerDID: controller })
+              : undefined
           // A KeyPackage leaf node is unique to its KeyPackage by its fresh HPKE key, and stays
           // in the tree only until the member's own path or Update replaces it.
           const admission =
@@ -1228,7 +1381,11 @@ export class GroupHandle {
    * exporter secret, which is the epoch the blob being opened was sealed under. Both are silent
    * consequences of this method's plainness; wrapping it "for consistency" breaks both.
    */
-  async exportSecret(label: string, context: Uint8Array, length = 32): Promise<Uint8Array> {
+  async exportSecret({
+    label,
+    context,
+    length = 32,
+  }: GroupHandleExportSecretParams): Promise<Uint8Array> {
     return await mlsExporter(
       this.#state.keySchedule.exporterSecret,
       label,
@@ -1261,7 +1418,7 @@ export class GroupHandle {
           enactedDeviceEntries: [],
         }),
       })
-      gate.check({ kind: 'proposal', proposal: { proposal, senderLeafIndex } })
+      await gate.check({ kind: 'proposal', proposal: { proposal, senderLeafIndex } })
       const result = await createProposal({ context: this.#context, state: this.#state, proposal })
       this.#state = result.newState
       zeroAll(result.consumed)
@@ -1280,10 +1437,10 @@ export class GroupHandle {
    * carried in the clear, so a caller reading it back (or comparing via `decrypt`'s
    * `expectedAAD`) needs no key. Defaults to empty.
    */
-  async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
+  async encrypt({ plaintext, ...opts }: GroupHandleEncryptParams): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
       const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
-      if (own != null && isLapsed(this, own)) throw new LeafLapsedError('lapsed')
+      if (own != null && (await isLapsed(this, own))) throw new LeafLapsedError('lapsed')
       const { newState, message, consumed } = await createApplicationMessage({
         context: this.#context,
         state: this.#state,
@@ -1321,7 +1478,10 @@ export class GroupHandle {
    * removed or suspended member. `target` must be below 0xffffffff, the last generation.
    * On any throw the handle state is unchanged and the secrets derived so far are zeroed.
    */
-  async advanceSenderGeneration(target: number, opts?: { maxSteps?: number }): Promise<void> {
+  async advanceSenderGeneration({
+    target,
+    ...opts
+  }: GroupHandleAdvanceSenderGenerationParams): Promise<void> {
     // 0xffffffff is the last uint32 generation: no frame could follow it.
     if (!Number.isInteger(target) || target < 0 || target >= 0xffffffff) {
       throw new RangeError(`advanceSenderGeneration: ${target} is not a sendable uint32 generation`)
@@ -1332,7 +1492,7 @@ export class GroupHandle {
     }
     return mutexFor(this).run(async () => {
       const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
-      if (own != null && isLapsed(this, own)) throw new LeafLapsedError('lapsed')
+      if (own != null && (await isLapsed(this, own))) throw new LeafLapsedError('lapsed')
       checkCanSendApplicationMessages(this.#state)
       const node = Number(this.#state.privatePath.leafIndex) * 2
       const current = this.#state.secretTree.leafNodes[node]?.application.generation ?? 0
@@ -1521,10 +1681,11 @@ export class GroupHandle {
    * no ratchet generation, so a wrong-topic frame costs nothing to reject. The frame's AAD
    * is always returned, whether or not `expectedAAD` was given.
    */
-  async decrypt(
-    message: Uint8Array,
-    opts?: { expectedAAD?: Uint8Array },
-  ): Promise<{ payload: Uint8Array; senderDID?: string; aad: Uint8Array }> {
+  async decrypt({ message, ...opts }: GroupHandleDecryptParams): Promise<{
+    payload: Uint8Array
+    senderDID?: string
+    aad: Uint8Array
+  }> {
     const decoded = decode(mlsMessageDecoder, message)
     if (decoded == null) throw new Error('decrypt: failed to decode MLSMessage')
     return mutexFor(this).run(async () => {
@@ -1544,7 +1705,7 @@ export class GroupHandle {
         historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
         pm,
       )
-      assertSenderNotLapsed({
+      await assertSenderNotLapsed({
         group: this,
         tree: epochTree,
         leafIndex,
@@ -1572,14 +1733,11 @@ export class GroupHandle {
    * group's handle state. It must not call this handle or the peer. If opening or
    * persistence fails, the live state and its ratchet secrets remain untouched.
    */
-  async decryptStaged(
-    message: Uint8Array,
-    opts: { expectedAAD?: Uint8Array },
-    persist: (
-      stagedState: Uint8Array,
-      opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
-    ) => Promise<void>,
-  ): Promise<{ payload: Uint8Array; senderDID: string; aad: Uint8Array }> {
+  async decryptStaged({ message, opts, persist }: GroupHandleDecryptStagedParams): Promise<{
+    payload: Uint8Array
+    senderDID: string
+    aad: Uint8Array
+  }> {
     const decoded = decode(mlsMessageDecoder, message)
     if (decoded == null) throw new Error('decryptStaged: failed to decode MLSMessage')
     return mutexFor(this).run(async () => {
@@ -1595,7 +1753,7 @@ export class GroupHandle {
         historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
         pm,
       )
-      assertSenderNotLapsed({
+      await assertSenderNotLapsed({
         group: this,
         tree: epochTree,
         leafIndex,
@@ -1686,7 +1844,7 @@ export class GroupHandle {
               const id = ledgerEntryDigest(token)
               // Content-addressing binds the untrusted body to the requested id.
               if (resolved.has(id) || !missing.includes(id)) continue
-              const verified = await verifyCachedLedgerEntry(token)
+              const verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
               if (verified == null) continue
               resolved.set(id, ledgerLogEntry(id, token, verified))
             }
@@ -1701,7 +1859,8 @@ export class GroupHandle {
             return input
           })
 
-          const foldResult = foldEnvelope({
+          const foldResult = await foldEnvelope({
+            crypto: this.#crypto,
             baseRoster: this.#roster,
             baseRegistry: this.#registry,
             entries: ordered,
@@ -1725,7 +1884,7 @@ export class GroupHandle {
 
             const proofCtx = {
               bindingOfDID: (d: string) => this.bindingOfDID(d),
-              controllerOf: (d: string) => controllerOf(this.#registry, d),
+              controllerOf: (d: string) => controllerOf({ registry: this.#registry, deviceDID: d }),
             }
             for (const { verified } of acceptedEntries) {
               if (verified.entry.type !== DEVICE_ENTRY_TYPE) continue
@@ -1738,6 +1897,7 @@ export class GroupHandle {
               const ok = await verifyDeviceEntry(
                 verified as VerifiedLedgerEntry<DeviceValue>,
                 proofCtx,
+                { crypto: this.#crypto },
               )
               if (!ok) {
                 precomputedReject = true
@@ -1785,6 +1945,18 @@ export class GroupHandle {
       if (error instanceof RevokeProofError) capture.proofError = error
       if (error instanceof LeafBindingError) capture.bindingError = error
     }
+    let judged: IncomingMessage | undefined
+    let gateRejection: { error: unknown } | undefined
+    // ts-mls calls its callback synchronously, so the gate judges ahead of the pass that applies.
+    const prejudge = async (incoming: IncomingMessage): Promise<void> => {
+      judged = incoming
+      if (precomputedReject) return
+      try {
+        await gate?.check(incoming)
+      } catch (error) {
+        gateRejection = { error }
+      }
+    }
     const combined: IncomingMessageCallback = (incoming) => {
       // A decode/fold failure is a hard reject even under a caller policy: the
       // ledger the commit depends on is unresolvable or malformed.
@@ -1793,33 +1965,52 @@ export class GroupHandle {
           capture.proofError == null ? 'invalid' : rejectionReason(capture.proofError)
         return 'reject'
       }
-      try {
-        gate?.check(incoming)
-      } catch (error) {
+      // Fail closed: nothing reaches acceptance without the gate having judged this kind of message.
+      if (judged?.kind !== incoming.kind) {
+        capture.reason ??= 'invalid'
+        return 'reject'
+      }
+      if (gateRejection != null) {
+        const { error } = gateRejection
         capture.reason = rejectionReason(error)
         if (error instanceof RevokeProofError) capture.proofError = error
         if (error instanceof LeafBindingError) capture.bindingError = error
         return 'reject'
       }
       if (callerPolicy != null) return callerPolicy(incoming)
-      return this.#anchor.controller == null ? defaultCommitPolicy(incoming, context) : 'accept'
+      return this.#anchor.controller == null ? defaultCommitPolicy({ incoming, context }) : 'accept'
     }
 
-    const applyOnAccept = (notify = true): (() => void) => {
+    const applyOnAccept = async (notify = true): Promise<() => void> => {
       // Appended, never deduped: the log records what this commit enacted, at the
       // position the head chained it.
+      const ledger = [...this.#ledger]
       for (const { token, verified, entryID } of acceptedEntries) {
-        this.#ledger.push({ entryID, token, verified })
-        this.#entryBodies.set(entryID, { token, verified })
+        ledger.push({ entryID, token, verified })
       }
-      this.#roster = candidateRoster
-      const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
-      this.#registry = registryWithTreeBindings(
+      const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID, {
+        crypto: this.#crypto,
+      })
+      const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
+        { crypto: this.#crypto },
       )
-      this.#admission = this.#computeAdmission()
+      const admission = await computeAdmission({
+        state: this.#state,
+        anchor: this.#anchor,
+        registry,
+        crypto: this.#crypto,
+      })
+      // Published together: readers between the folds still see the previous epoch's control state.
+      this.#ledger = ledger
+      for (const { token, verified, entryID } of acceptedEntries) {
+        this.#entryBodies.set(entryID, { token, verified })
+      }
+      this.#roster = candidateRoster
+      this.#registry = registry
+      this.#admission = admission
       const emit = () => {
         this.#notifyAccepted(
           surfaced,
@@ -1835,6 +2026,7 @@ export class GroupHandle {
     return {
       candidateRegistry,
       callback: wrapCommitPolicy(combined, capture),
+      prejudge,
       capture,
       applyOnAccept,
       postApply: async (state) => {
@@ -2046,13 +2238,10 @@ export class GroupHandle {
    * It must write atomically: rejection means nothing was stored. Host callbacks run
    * after successful persist; a callback throw does not undo an advance.
    */
-  async processMessage(
-    message: Uint8Array | MlsFramedMessage,
-    opts?: {
-      commitPolicy?: IncomingMessageCallback
-      persist?: (handle: GroupHandle) => Promise<void> | void
-    },
-  ): Promise<Uint8Array | null> {
+  async processMessage({
+    message,
+    ...opts
+  }: GroupHandleProcessMessageParams): Promise<Uint8Array | null> {
     let decoded: unknown = message
     if (message instanceof Uint8Array) {
       const parsed = decode(mlsMessageDecoder, message)
@@ -2072,7 +2261,7 @@ export class GroupHandle {
           : undefined)
       // Past proposals cannot be enacted at this epoch and need no ratchet or ledger work.
       if (proposalEpoch != null && proposalEpoch < this.epoch) return null
-      const { callback, capture, applyOnAccept, postApply, candidateRegistry } =
+      const { callback, prejudge, capture, applyOnAccept, postApply, candidateRegistry } =
         await this.#prepareCommitPipeline(decoded, opts)
       const previousState = this.#state
       const previousAdmission = this.#admission
@@ -2084,7 +2273,7 @@ export class GroupHandle {
           historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
           application,
         )
-        assertSenderNotLapsed({
+        await assertSenderNotLapsed({
           group: this,
           tree: historical?.ratchetTree ?? this.#state.ratchetTree,
           leafIndex: index,
@@ -2093,86 +2282,103 @@ export class GroupHandle {
       }
       let result: ProcessMessageResult
       try {
-        result = await mlsProcessMessage({
-          context: {
-            ...this.#context,
-            authService: {
-              validateCredential: async (credential, key) => {
-                try {
-                  // Referenced Updates authenticate before the commit callback runs.
-                  const proposed = (
-                    capture.rejected?.proposals ?? Object.values(this.#state.unappliedProposals)
-                  ).find(({ proposal }) => {
-                    if (!isDefaultProposal(proposal)) return false
-                    if (proposal.proposalType === defaultProposalTypes.add)
-                      return proposal.add.keyPackage.leafNode.credential === credential
-                    return (
-                      proposal.proposalType === defaultProposalTypes.update &&
-                      proposal.update.leafNode.credential === credential
-                    )
-                  })
-                  const index =
-                    proposed == null
-                      ? capture.committerLeafIndex
-                      : proposed.proposal.proposalType === defaultProposalTypes.update
-                        ? proposed.senderLeafIndex
-                        : undefined
-                  const retained =
-                    index != null &&
-                    isUnchangedLeaf(this.#state.ratchetTree, index, {
-                      credential,
-                      signaturePublicKey: key,
+        // Both passes read one state, so the gate judges what the real pass applies.
+        const state = this.#state
+        const run = async (
+          action: IncomingMessageCallback | undefined,
+        ): Promise<ProcessMessageResult> =>
+          await mlsProcessMessage({
+            context: {
+              ...this.#context,
+              authService: {
+                validateCredential: async (credential, key) => {
+                  try {
+                    // Referenced Updates authenticate before the commit callback runs.
+                    const proposed = (
+                      capture.rejected?.proposals ?? Object.values(this.#state.unappliedProposals)
+                    ).find(({ proposal }) => {
+                      if (!isDefaultProposal(proposal)) return false
+                      if (proposal.proposalType === defaultProposalTypes.add)
+                        return proposal.add.keyPackage.leafNode.credential === credential
+                      return (
+                        proposal.proposalType === defaultProposalTypes.update &&
+                        proposal.update.leafNode.credential === credential
+                      )
                     })
-                  await verifyLeafCredential(credential, key, {
-                    deviceDenySet: () => denySetOf(candidateRegistry),
-                    judging: () => ({
-                      registry: this.#anchor.controller == null ? undefined : candidateRegistry,
-                      stage: 'full',
-                      mode: retained ? 'retain' : 'admit',
-                    }),
-                    // MLS re-validates the committer's path leaf after its proposals are judged:
-                    // an evidenced child keeps a denied issuer only with the credential it
-                    // already holds at that leaf.
-                    mayKeepDeniedIssuer: () => this.#anchor.controller != null && retained,
-                    leafLifetime: () =>
-                      this.#anchor.controller == null
-                        ? undefined
-                        : (this.#anchor.leafLifetime ?? 86_400),
-                    trustedGrantLifetime: () =>
-                      this.#anchor.controller == null
-                        ? undefined
-                        : (this.#anchor.trustedGrantLifetime ?? 2_592_000),
-                  })
-                  return true
-                } catch (error) {
-                  capture.reason = rejectionReason(error)
-                  if (error instanceof LeafBindingError) capture.bindingError = error
-                  return false
-                }
+                    const index =
+                      proposed == null
+                        ? capture.committerLeafIndex
+                        : proposed.proposal.proposalType === defaultProposalTypes.update
+                          ? proposed.senderLeafIndex
+                          : undefined
+                    const retained =
+                      index != null &&
+                      isUnchangedLeaf(this.#state.ratchetTree, index, {
+                        credential,
+                        signaturePublicKey: key,
+                      })
+                    await verifyLeafCredential(credential, key, {
+                      crypto: this.#crypto,
+                      deviceDenySet: () => denySetOf(candidateRegistry),
+                      judging: () => ({
+                        registry: this.#anchor.controller == null ? undefined : candidateRegistry,
+                        stage: 'full',
+                        mode: retained ? 'retain' : 'admit',
+                      }),
+                      // MLS re-validates the committer's path leaf after its proposals are judged:
+                      // an evidenced child keeps a denied issuer only with the credential it
+                      // already holds at that leaf.
+                      mayKeepDeniedIssuer: () => this.#anchor.controller != null && retained,
+                      leafLifetime: () =>
+                        this.#anchor.controller == null
+                          ? undefined
+                          : (this.#anchor.leafLifetime ?? 86_400),
+                      trustedGrantLifetime: () =>
+                        this.#anchor.controller == null
+                          ? undefined
+                          : (this.#anchor.trustedGrantLifetime ?? 2_592_000),
+                    })
+                    return true
+                  } catch (error) {
+                    capture.reason = rejectionReason(error)
+                    if (error instanceof LeafBindingError) capture.bindingError = error
+                    return false
+                  }
+                },
               },
             },
-          },
-          state: this.#state,
-          message: decoded as MlsFramedMessage,
-          ...(callback != null && { callback }),
-        })
+            state,
+            message: decoded as MlsFramedMessage,
+            ...(action != null && { callback: action }),
+          })
+        // Rejecting leaves the state as it was and consumes nothing; application messages ratchet
+        // and never reach the callback.
+        if (application == null && callback != null) {
+          let incoming: IncomingMessage | undefined
+          await run((seen) => {
+            incoming = seen
+            return 'reject'
+          })
+          if (incoming != null) await prejudge(incoming)
+        }
+        result = await run(callback)
       } catch (error) {
         if (application != null) throw error
-        const rejection = new CommitRejectedError(
-          capture.rejected?.proposals ?? [],
-          capture.rejected?.senderLeafIndex,
-          capture.reason ?? 'invalid',
-        )
+        const rejection = new CommitRejectedError({
+          proposals: capture.rejected?.proposals ?? [],
+          senderLeafIndex: capture.rejected?.senderLeafIndex,
+          reason: capture.reason ?? 'invalid',
+        })
         rejection.cause = capture.bindingError ?? error
         if (error instanceof Error) rejection.message += `: ${error.message}`
         throw rejection
       }
       if (result.kind === 'newState' && result.actionTaken === 'reject') {
-        const rejection = new CommitRejectedError(
-          capture.rejected?.proposals ?? [],
-          capture.rejected?.senderLeafIndex,
-          capture.reason ?? 'policy',
-        )
+        const rejection = new CommitRejectedError({
+          proposals: capture.rejected?.proposals ?? [],
+          senderLeafIndex: capture.rejected?.senderLeafIndex,
+          reason: capture.reason ?? 'policy',
+        })
         const cause = capture.proofError ?? capture.bindingError
         if (cause != null) rejection.cause = cause
         throw rejection
@@ -2181,11 +2387,11 @@ export class GroupHandle {
         try {
           await postApply(result.newState)
         } catch (error) {
-          const rejection = new CommitRejectedError(
-            capture.rejected?.proposals ?? [],
-            capture.rejected?.senderLeafIndex,
-            rejectionReason(error),
-          )
+          const rejection = new CommitRejectedError({
+            proposals: capture.rejected?.proposals ?? [],
+            senderLeafIndex: capture.rejected?.senderLeafIndex,
+            reason: rejectionReason(error),
+          })
           rejection.cause = error
           throw rejection
         }
@@ -2204,7 +2410,7 @@ export class GroupHandle {
         // state its own copies so rollback restores the exact old objects.
         this.#ledger = [...previousLedger]
         this.#entryBodies = new Map(previousEntryBodies)
-        const notify = applyOnAccept(false)
+        const notify = await applyOnAccept(false)
         try {
           await opts.persist(this)
         } catch (error) {
@@ -2220,7 +2426,7 @@ export class GroupHandle {
         notify()
       } else {
         zeroAll(result.consumed)
-        applyOnAccept()
+        await applyOnAccept()
       }
       return null
     })
@@ -2248,7 +2454,7 @@ export function buildCommitPolicyContext(
   const expectedHeadExtensionData =
     currentHead == null
       ? new Uint8Array()
-      : encodeLedgerHead(extendHead(currentHead.head, args.entryIDs))
+      : encodeLedgerHead(extendHead({ head: currentHead.head, entryIDs: args.entryIDs }))
   return {
     baseRoster: args.baseRoster,
     candidateRoster: args.candidateRoster,
@@ -2273,12 +2479,15 @@ export function buildCommitPolicyContext(
 }
 
 /** Build the handle a commit hands back: the post-commit state, everything else inherited. */
-export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle {
-  return new GroupHandle({
+export async function deriveGroup(group: GroupHandle, state: ClientState): Promise<GroupHandle> {
+  return await GroupHandle.create({
     state,
     credential: group.credential,
     // The post-commit handle keeps the source's receive retention, not ts-mls's defaults.
-    context: createMlsContext(group.context.cipherSuite, group.anchor, group.context.clientConfig),
+    context: createMlsContext(group.context.cipherSuite, group.anchor, group.context.clientConfig, {
+      crypto: group.crypto,
+    }),
+    crypto: group.crypto,
     ledger: group.ledger,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,

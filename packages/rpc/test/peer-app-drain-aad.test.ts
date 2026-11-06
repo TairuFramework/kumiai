@@ -23,10 +23,18 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     const recoverySecret = new Uint8Array(32).fill(0x99)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
     // The topic a DIFFERENT protocol running in the same segment would derive. The forged frame
     // below is sealed as though bound for that lane, then placed on bob's actual `chat` lane.
-    const otherTopicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'other-protocol')
+    const otherTopicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'other-protocol',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -43,7 +51,8 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
       senderDID: 'mallory',
       topicID,
       retain: 'log',
-      payload: await forged.wrap(encodeEventFrame('chat/posted', { text: 'wrong topic' }), {
+      payload: await forged.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'wrong topic' } }),
         aad: encodeAppAAD({ topicID: otherTopicID, intent: 'log' }),
       }),
     })
@@ -71,7 +80,11 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     const recoverySecret = new Uint8Array(32).fill(0x9a)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const topicID = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -87,7 +100,8 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
       senderDID: 'mallory',
       topicID,
       retain: 'log',
-      payload: await legacy.wrap(encodeEventFrame('chat/posted', { text: 'legacy, unbound' }), {
+      payload: await legacy.wrap({
+        bytes: encodeEventFrame({ prc: 'chat/posted', data: { text: 'legacy, unbound' } }),
         aad: fromUTF(topicID),
       }),
     })

@@ -15,7 +15,11 @@ import {
   RevokeProofError,
   recoverySignerEligible,
 } from '@kumiai/mls'
-import type { OpenedRecoveryVerdict, PendingRecovery } from '@kumiai/rpc'
+import type {
+  OpenedRecoveryVerdict,
+  PendingRecovery,
+  PendingRecoveryConfirmationKeyParams,
+} from '@kumiai/rpc'
 
 export type RecoveryBindingRequest = {
   groupID: string
@@ -130,15 +134,20 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
           credential: group.credential,
           resync: true,
           controller,
-          beforeBinding: async (pending, source) => {
+          beforeBinding: async ({ pending, source }) => {
             if (group.anchor.controller == null) return
-            assertRetainsKnownEffects(group.anchor.controller, group.registry, source.registry)
+            await assertRetainsKnownEffects({
+              controller: group.anchor.controller,
+              known: group.registry,
+              candidate: source.registry,
+              crypto: group.crypto,
+            })
             if (
-              !recoverySignerEligible({
+              !(await recoverySignerEligible({
                 group: pending,
                 registry: source.registry,
                 signer: reply.signer,
-              })
+              }))
             )
               throw new Error('Ineligible recovery attestation signer')
             signerEligible = true
@@ -147,6 +156,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
               throw new LeafBindingError('floating-refused')
           },
           options: {
+            crypto: group.crypto,
             commitPolicy: group.commitPolicy,
             resolveLedgerEntries: group.resolveLedgerEntries,
             onLedgerEntries: group.onLedgerEntries,
@@ -195,15 +205,15 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
   const { group, sourceTree, known, requestID } = params
   let tuple: BoundRecoveryCommit | undefined
   return {
-    async confirmationKey(position: string, commitDigest: string) {
+    async confirmationKey({ position, commitDigest }: PendingRecoveryConfirmationKeyParams) {
       if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
         throw new Error('Pending recovery already bound to another commit')
       tuple ??= { position, commitDigest }
-      const key = await confirmationKey(group, position, commitDigest)
-      tuple.tag = confirmationTag(key, requestID)
+      const key = await confirmationKey({ group, position, commitDigest })
+      tuple.tag = confirmationTag({ key, requestID })
       return key
     },
-    judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory' {
+    async judgeVerdict(opened: OpenedRecoveryVerdict): Promise<'authoritative' | 'advisory'> {
       const { signer, verdict } = opened
       if (
         normalizeDID(signer) === normalizeDID(group.credential.id) ||
@@ -220,7 +230,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       )
         return 'advisory'
       if (group.anchor.controller != null)
-        return recoverySignerEligible({ group, registry: known, signer })
+        return (await recoverySignerEligible({ group, registry: known, signer }))
           ? 'authoritative'
           : 'advisory'
       if (verdict.verdict === 'confirmed') return 'authoritative'

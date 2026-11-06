@@ -14,6 +14,12 @@ export type RemoveMemberResult = {
   epoch: bigint
 }
 
+export type RemoveMemberParams = {
+  group: GroupHandle
+  leafIndex: number
+  ledgerEntries?: Array<string>
+}
+
 /**
  * Remove a member. Advances the epoch and rotates keys.
  *
@@ -27,11 +33,11 @@ export type RemoveMemberResult = {
  * The mutex only serializes concurrent calls against one handle; it does not make a
  * second commit from a superseded handle safe.
  */
-export async function removeMember(
-  group: GroupHandle,
-  leafIndex: number,
-  ledgerEntries?: Array<string>,
-): Promise<RemoveMemberResult> {
+export async function removeMember({
+  group,
+  leafIndex,
+  ledgerEntries,
+}: RemoveMemberParams): Promise<RemoveMemberResult> {
   return mutexFor(group).run(async () => {
     const removeProposal: DefaultProposal = {
       proposalType: defaultProposalTypes.remove,
@@ -41,7 +47,7 @@ export async function removeMember(
     const enacted = ledgerEntries ?? []
     const result = await commitWithEntries({ group, extraProposals: [removeProposal], enacted })
 
-    const newGroup = deriveGroup(group, result.newState)
+    const newGroup = await deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries(result.enacted)
 
     return {

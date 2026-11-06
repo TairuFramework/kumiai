@@ -2,7 +2,7 @@ import {
   type EffectClaim,
   type GroupHandle,
   type RevokeBuildResult,
-  type RevokeWithProofParams,
+  type RevokeProofInput,
   revokeWithProof,
 } from '@kumiai/mls'
 import type { GroupMLS, GroupPeer, GroupProtocolDefinition } from '@kumiai/rpc'
@@ -22,7 +22,7 @@ export type PublishRevokeResult =
 export type PublishRevokeProofParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
   peer: GroupPeer<Protocols>
   mls: GroupMLS
-  input: RevokeWithProofParams
+  input: RevokeProofInput
   options: RevokeJournalOptions
 }
 
@@ -35,10 +35,10 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
   const finished = Symbol('proof needs no commit')
   let outcome: PublishRevokeResult | undefined
   try {
-    await peer.commit(
-      async () => {
+    await peer.commit({
+      build: async () => {
         const built = await access.read(async (group) => {
-          const result = await revokeWithProof(group, input)
+          const result = await revokeWithProof({ group, ...input })
           return { result, priorTokens: new Set(group.ledgerTokens) }
         })
         if (built.result.status !== 'built') {
@@ -54,13 +54,13 @@ export async function publishRevokeProof<Protocols extends Record<string, GroupP
           kind: 'ledger',
           journal,
           onAccepted: async () => {
-            await guardedReplace(access, newGroup)
+            await guardedReplace({ access, next: newGroup })
             outcome = { status: 'committed', epoch: Number(epoch), effects }
           },
         }
       },
-      { holdLogSends: true },
-    )
+      holdLogSends: true,
+    })
   } catch (error) {
     if (error !== finished) throw error
   }

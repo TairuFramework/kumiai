@@ -21,7 +21,7 @@ export function createMemoryAppCursorStore(): MemoryAppCursorStore {
     async load(topicID: string) {
       return positions.get(topicID) ?? null
     },
-    async save(topicID: string, position: string) {
+    async save({ topicID, position }) {
       // A READ POSITION ONLY MOVES FORWARD, and this is the only place that can say so. The
       // advance rule lives entirely in the peer, so a store that took any position would let a
       // regression there write a cursor backwards and be caught by nothing — the peer would go on

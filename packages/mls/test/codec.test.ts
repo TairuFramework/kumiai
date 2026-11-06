@@ -83,7 +83,7 @@ function proposals(state: ClientState): ClientState {
 describe('encodeClientState / decodeClientState', () => {
   test('v2 round trip preserves state without a reservation', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup(alice, 'codec-round-trip')
+    const { group } = await createGroup({ identity: alice, groupID: 'codec-round-trip' })
 
     const encoded = encodeClientState(group.state)
     const decoded = decodeClientState(encoded)
@@ -99,7 +99,10 @@ describe('encodeClientState / decodeClientState', () => {
   test.each([false, true])(
     'v2 round trip preserves reservation evidence (consumed: %s)',
     async (consumed) => {
-      const { group } = await createGroup(randomIdentity(), 'codec-reservation-round-trip')
+      const { group } = await createGroup({
+        identity: randomIdentity(),
+        groupID: 'codec-reservation-round-trip',
+      })
       const reservation = { epoch: 0x100000001n, generation: 257, consumed }
       const encoded = encodeClientState({ ...group.state, handshakeReservation: reservation })
 
@@ -116,7 +119,10 @@ describe('encodeClientState / decodeClientState', () => {
   )
 
   test.each([1, 3])('refuses a v%s blob before decoding its body', async (version) => {
-    const { group } = await createGroup(randomIdentity(), 'codec-unsupported')
+    const { group } = await createGroup({
+      identity: randomIdentity(),
+      groupID: 'codec-unsupported',
+    })
     const body = encode(clientStateEncoder, group.state)
     const encoded = new Uint8Array((version === 1 ? 1 : 14) + body.length)
     encoded[0] = version
@@ -130,7 +136,10 @@ describe('encodeClientState / decodeClientState', () => {
   test.each([1n << 64n, -1n, 0, '0', undefined])(
     'rejects an invalid reservation epoch %s with a typed error',
     async (epoch) => {
-      const { group } = await createGroup(randomIdentity(), 'codec-invalid-epoch')
+      const { group } = await createGroup({
+        identity: randomIdentity(),
+        groupID: 'codec-invalid-epoch',
+      })
 
       expect(() => {
         encodeClientState({
@@ -144,7 +153,10 @@ describe('encodeClientState / decodeClientState', () => {
   test.each([2 ** 32, 1.5, -1, Number.NaN, Number.POSITIVE_INFINITY, '1', undefined])(
     'rejects an invalid reservation generation %s with a typed error',
     async (generation) => {
-      const { group } = await createGroup(randomIdentity(), 'codec-invalid-generation')
+      const { group } = await createGroup({
+        identity: randomIdentity(),
+        groupID: 'codec-invalid-generation',
+      })
 
       expect(() => {
         encodeClientState({
@@ -159,14 +171,17 @@ describe('encodeClientState / decodeClientState', () => {
     { epoch: 0n, generation: 0, consumed: false },
     { epoch: (1n << 64n) - 1n, generation: 2 ** 32 - 1, consumed: true },
   ])('preserves reservation boundaries $epoch / $generation', async (reservation) => {
-    const { group } = await createGroup(randomIdentity(), 'codec-reservation-boundaries')
+    const { group } = await createGroup({
+      identity: randomIdentity(),
+      groupID: 'codec-reservation-boundaries',
+    })
     const encoded = encodeClientState({ ...group.state, handshakeReservation: reservation })
 
     expect(decodeClientState(encoded)?.handshakeReservation).toEqual(reservation)
   })
 
   test('preserves exact leaf-zero senders with sorted UTF-8 refs', async () => {
-    const { group } = await createGroup(randomIdentity(), 'codec-proposals')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-proposals' })
     const state = proposals(group.state)
     const encoded = encodeClientState(state)
     expect(encoded).toEqual(frame(state, ['YQ==', 'eg==']))
@@ -174,7 +189,7 @@ describe('encodeClientState / decodeClientState', () => {
   })
 
   test('a proposal created by leaf zero retains its sender after restore', async () => {
-    const { group } = await createGroup(randomIdentity(), 'codec-leaf-zero')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-leaf-zero' })
     expect(group.state.privatePath.leafIndex).toBe(0)
     const { newState } = await createProposal({
       context: group.context,
@@ -192,7 +207,7 @@ describe('encodeClientState / decodeClientState', () => {
   test.each([false, true])(
     'decoded secrets do not alias stored bytes (Buffer: %s)',
     async (buffer) => {
-      const { group } = await createGroup(randomIdentity(), 'codec-no-alias')
+      const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-no-alias' })
       const bytes = encodeClientState(group.state)
       const encoded = buffer ? Buffer.concat([Buffer.alloc(7), bytes]).subarray(7) : bytes
       const copy = new Uint8Array(encoded)
@@ -208,14 +223,14 @@ describe('encodeClientState / decodeClientState', () => {
   )
 
   test.each([2, 255])('bad flags %s return undefined', async (flags) => {
-    const { group } = await createGroup(randomIdentity(), 'codec-flags')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-flags' })
     const encoded = frame(group.state)
     encoded[1] = flags
     expect(decodeClientState(encoded)).toBeUndefined()
   })
 
   test.each([2, 255])('bad consumed byte %s returns undefined', async (consumed) => {
-    const { group } = await createGroup(randomIdentity(), 'codec-consumed')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-consumed' })
     const encoded = encodeClientState({
       ...group.state,
       handshakeReservation: { epoch: 0n, generation: 1, consumed: false },
@@ -233,14 +248,17 @@ describe('encodeClientState / decodeClientState', () => {
     { label: 'invalid UTF-8', refs: [new Uint8Array([0xff])] },
     { label: 'BOM-prefixed unknown', refs: ['\uFEFFYQ=='] },
   ])('$label ref returns undefined', async ({ refs }) => {
-    const { group } = await createGroup(randomIdentity(), 'codec-bad-ref')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-bad-ref' })
     expect(decodeClientState(frame(proposals(group.state), refs))).toBeUndefined()
   })
 
   test.each([false, true])(
     'every truncated prefix returns undefined (reservation: %s)',
     async (reserved) => {
-      const { group } = await createGroup(randomIdentity(), 'codec-truncated')
+      const { group } = await createGroup({
+        identity: randomIdentity(),
+        groupID: 'codec-truncated',
+      })
       const encoded = encodeClientState({
         ...proposals(group.state),
         handshakeReservation: reserved ? { epoch: 1n, generation: 2, consumed: true } : undefined,
@@ -252,7 +270,7 @@ describe('encodeClientState / decodeClientState', () => {
   )
 
   test('rejects trailing bytes outside and inside the body', async () => {
-    const { group } = await createGroup(randomIdentity(), 'codec-trailing')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-trailing' })
     const encoded = frame(group.state)
     expect(decodeClientState(new Uint8Array([...encoded, 0]))).toBeUndefined()
     const view = new DataView(encoded.buffer)
@@ -263,7 +281,10 @@ describe('encodeClientState / decodeClientState', () => {
   })
 
   test('rejects a non-canonical optional tag in the body', async () => {
-    const { group } = await createGroup(randomIdentity(), 'codec-optional-tag')
+    const { group } = await createGroup({
+      identity: randomIdentity(),
+      groupID: 'codec-optional-tag',
+    })
     const encoded = frame({ ...group.state, treeHashCache: [undefined] })
     const bodyLength = new DataView(encoded.buffer).getUint32(2)
     expect(decodeClientState(encoded)?.treeHashCache).toEqual([undefined])
@@ -275,7 +296,10 @@ describe('encodeClientState / decodeClientState', () => {
   })
 
   test('rejects an inner vector truncated before an absent sender tag', async () => {
-    const { group } = await createGroup(randomIdentity(), 'codec-inner-truncation')
+    const { group } = await createGroup({
+      identity: randomIdentity(),
+      groupID: 'codec-inner-truncation',
+    })
     const state = {
       ...group.state,
       unappliedProposals: {
@@ -310,7 +334,7 @@ describe('encodeClientState / decodeClientState', () => {
   })
 
   test('oversized body length, ref count and ref length return undefined', async () => {
-    const { group } = await createGroup(randomIdentity(), 'codec-lengths')
+    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-lengths' })
     for (const target of ['body', 'count', 'ref']) {
       const encoded = frame(proposals(group.state), ['YQ=='])
       const view = new DataView(encoded.buffer)
@@ -335,7 +359,7 @@ describe('encodeClientState / decodeClientState', () => {
 
   test('refuses a blob whose version byte is unsupported, even though the rest decodes fine', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup(alice, 'codec-unknown-version')
+    const { group } = await createGroup({ identity: alice, groupID: 'codec-unknown-version' })
 
     const encoded = encodeClientState(group.state)
     expect(encoded[0]).toBe(2)

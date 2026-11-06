@@ -1,4 +1,5 @@
 import {
+  type AuthoritativeLog,
   authoritativeLog,
   type ControllerLog,
   digestOf,
@@ -10,7 +11,8 @@ import {
   LOG_NOT_AUTHORITATIVE,
   mergeLogs,
 } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import type { CryptoProvider } from '@kokuin/crypto'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { foldControllerLog, isDetachedFoldReason } from './controller-log.js'
 import { RevokeProofError } from './errors.js'
@@ -20,23 +22,40 @@ export type FoldOk = Extract<FoldResult, { ok: true }>
 
 const authenticatedFolds = new WeakMap<
   ControllerLog,
-  { controller: string; digest: string; folded: FoldOk }
+  { controller: string; digest: string; folded: FoldOk; crypto: CryptoProvider | undefined }
 >()
 
-export function ingestControllerLog(
-  controller: string,
-  recorded: ControllerLog | undefined,
-  proof: ControllerLog,
-  previous?: ControllerProjection,
-): { log: ControllerLog; before?: FoldOk; after: FoldOk; introduced: Array<string> } {
+export type IngestedControllerLog = {
+  log: ControllerLog
+  before?: FoldOk
+  after: FoldOk
+  introduced: Array<string>
+}
+
+export type IngestControllerLogParams = {
+  controller: string
+  recorded: ControllerLog | undefined
+  proof: ControllerLog
+  previous?: ControllerProjection
+} & CryptoOptions
+
+export async function ingestControllerLog({
+  controller,
+  recorded,
+  proof,
+  previous,
+  ...options
+}: IngestControllerLogParams): Promise<IngestedControllerLog> {
   const did = normalizeDID(controller)
   let before: FoldOk | undefined
   if (recorded != null) {
     const cached = authenticatedFolds.get(recorded)
     const folded =
-      cached?.controller === did && cached.digest === digestOf(recorded)
+      cached?.controller === did &&
+      cached.crypto === options?.crypto &&
+      cached.digest === digestOf(recorded)
         ? structuredClone(cached.folded)
-        : foldControllerLog(did, recorded)
+        : await foldControllerLog(did, recorded, options)
     if (!folded.ok) throw new RevokeProofError('not-authority-signed')
     before = folded
   }
@@ -58,7 +77,7 @@ export function ingestControllerLog(
       throw new RevokeProofError('not-authority-signed')
   }
   const joined = { chain, events: proof.events }
-  const folded = foldControllerLog(did, { chain, events: [] })
+  const folded = await foldControllerLog(did, { chain, events: [] }, options)
   if (!folded.ok) {
     throw new RevokeProofError(
       isDetachedFoldReason(folded.reason) ? 'detached' : 'not-authority-signed',
@@ -71,10 +90,19 @@ export function ingestControllerLog(
   if (first?.t === 'icp' && before != null && folded.head.gen <= before.head.gen)
     throw new RevokeProofError('detached')
 
-  let authoritative: ReturnType<typeof authoritativeLog>
+  let authoritative: AuthoritativeLog
   try {
-    const loaded = recorded == null ? joined : mergeLogs(did, recorded, joined)
-    authoritative = authoritativeLog({ did, loaded, seen: recorded, context: 'device registry' })
+    const loaded =
+      recorded == null
+        ? joined
+        : await mergeLogs({ ...options, did: did, left: recorded, right: joined })
+    authoritative = await authoritativeLog({
+      ...options,
+      did,
+      loaded,
+      seen: recorded,
+      context: 'device registry',
+    })
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause)
     const detached =
@@ -108,14 +136,21 @@ export function ingestControllerLog(
     controller: did,
     digest: digestOf(log),
     folded: structuredClone(after),
+    crypto: options?.crypto,
   })
   return { log, ...(before == null ? {} : { before }), after, introduced }
 }
 
-export function effectDelta(
-  before: KeyState | undefined,
-  after: KeyState,
-): { denied: Array<string>; removed: Array<{ did: string; add: string }>; generation: boolean } {
+export type EffectDeltaParams = {
+  before: KeyState | undefined
+  after: KeyState
+}
+
+export function effectDelta({ before, after }: EffectDeltaParams): {
+  denied: Array<string>
+  removed: Array<{ did: string; add: string }>
+  generation: boolean
+} {
   const denials = (state: KeyState | undefined) => {
     return new Set(
       [...(state?.deny ?? [])].filter((target) => target.startsWith('did:')).map(normalizeDID),

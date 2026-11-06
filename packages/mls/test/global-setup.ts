@@ -11,7 +11,10 @@ export default async function setup(): Promise<() => Promise<void>> {
   const log = await buildSaturatedLog()
   const inception = log.chain[0]
   if (inception?.event.t !== 'icp') throw new Error('Missing saturated inception')
-  const registry = registryForLog(didFromInception(inception.event as InceptionEvent), log)
+  const registry = await registryForLog({
+    controller: didFromInception(inception.event as InceptionEvent),
+    log,
+  })
   const directory = await mkdtemp(join(tmpdir(), 'kumiai-mls-saturated-'))
   const path = join(directory, 'fixture.bin')
   try {

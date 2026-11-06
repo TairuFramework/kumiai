@@ -47,6 +47,7 @@
   "devDependencies": {
     "@enkaku/client": "catalog:",
     "@enkaku/transport": "catalog:",
+    "@kokuin/crypto": "catalog:",
     "@kumiai/hub-conformance": "workspace:^",
     "@kumiai/hub-wake": "workspace:^"
   },

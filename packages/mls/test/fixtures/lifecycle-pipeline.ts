@@ -70,8 +70,8 @@ export async function managementFixture(kind: 'root' | 'mbr' | 'membership') {
     id: epoch.did,
     prefix: log.chain,
     capability: stringifyToken(
-      await pin.identity.signToken(
-        {
+      await pin.identity.signToken({
+        payload: {
           sub: epoch.did,
           aud: identity.id,
           act: 'authenticate',
@@ -81,8 +81,8 @@ export async function managementFixture(kind: 'root' | 'mbr' | 'membership') {
           exp: now + 1000,
           mbr: { add: pin.add, g: 0 },
         },
-        { embedLongForm: true },
-      ),
+        embedLongForm: true,
+      }),
     ),
   })
   return {
@@ -95,23 +95,23 @@ export async function managementFixture(kind: 'root' | 'mbr' | 'membership') {
     newcomer,
     deniedDID: newcomer.id,
     denialAliases: { long: newcomerLongForm, short: newcomer.id },
-    nextLog: (op: 'log' | 'deny' | 'deny-alias' | 'remove') => {
-      const folded = foldControllerLog(epoch.did, log)
+    nextLog: async (op: 'log' | 'deny' | 'deny-alias' | 'remove') => {
+      const folded = await foldControllerLog(epoch.did, log)
       if (!folded.ok) throw new Error(folded.reason)
       const params = {
         did: epoch.did,
         head: folded.head,
-        parents: epochHeads(epoch.did, log),
+        parents: await epochHeads({ did: epoch.did, log: log }),
         signer: epoch.root,
       }
       const event =
         op === 'log'
           ? unknown.event
           : op === 'deny'
-            ? createRevoke({ ...params, target: newcomer.id })
+            ? await createRevoke({ ...params, target: newcomer.id })
             : op === 'deny-alias'
-              ? createRevoke({ ...params, target: newcomerLongForm })
-              : createRemove({ ...params, add: member.add })
+              ? await createRevoke({ ...params, target: newcomerLongForm })
+              : await createRemove({ ...params, add: member.add })
       log = { chain: log.chain, events: [...log.events, event] }
       return log
     },
@@ -136,7 +136,11 @@ export async function timedBinding(params: TimedBindingParams): Promise<Controll
   const prefix = params.prefix ?? [inception]
   const signer =
     params.issuer ??
-    createControllerIdentity({ seed: controllerSeed, profile: 0, log: asControllerLog(prefix) })
+    (await createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    }))
   return {
     id: controllerID,
     prefix,
@@ -147,14 +151,16 @@ export async function timedBinding(params: TimedBindingParams): Promise<Controll
         }),
     capability: stringifyToken(
       await signer.signToken({
-        sub: controllerID,
-        aud: identity.id,
-        act: 'authenticate',
-        res: 'kumiai/mls-leaf',
-        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
-        iat,
-        exp,
-        ...(params.parent == null ? {} : { cap: params.parent }),
+        payload: {
+          sub: controllerID,
+          aud: identity.id,
+          act: 'authenticate',
+          res: 'kumiai/mls-leaf',
+          cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
+          iat,
+          exp,
+          ...(params.parent == null ? {} : { cap: params.parent }),
+        },
       }),
     ),
   }
@@ -171,7 +177,9 @@ export type PipelineGroupOptions = {
 export async function pipelineGroup(options: PipelineGroupOptions = {}) {
   const identity = agent(41)
   const tokens = new Map<string, string>()
-  const { group } = await createGroup(identity, 'lifecycle-pipeline', {
+  const { group } = await createGroup({
+    identity,
+    groupID: 'lifecycle-pipeline',
     ...(options.standard
       ? {}
       : {
@@ -202,7 +210,7 @@ export async function rawBundle(
   binding?: ControllerBinding,
 ) {
   return generateKeyPackageWithKey({
-    credential: makeMLSCredential(identity, binding),
+    credential: makeMLSCredential({ identity, controller: binding }),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite: group.context.cipherSuite,
     capabilities:
@@ -244,7 +252,7 @@ export async function rawCommit(params: RawCommitParams) {
     const head = readLedgerHead(group)
     if (head == null) throw new Error('Missing ledger head')
     const ids = tokens.map(ledgerEntryDigest)
-    const extension = buildLedgerHeadExtension(extendHead(head.head, ids))
+    const extension = buildLedgerHeadExtension(extendHead({ head: head.head, entryIDs: ids }))
     extraProposals.push({
       proposalType: defaultProposalTypes.group_context_extensions,
       groupContextExtensions: {
@@ -294,15 +302,15 @@ export async function lowLevelWelcome(
     keyPackage: added.bundle.publicPackage,
     privateKeys: added.bundle.privatePackage,
   })
-  const joined = new GroupHandle({
+  const joined = await GroupHandle.create({
     state,
     context,
     credential: { id: identity.id, groupID: group.groupID },
     commitPolicy: () => 'accept',
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
-  await joined.bootstrapLedger(group.ledgerTokens)
-  return { ...added, joined, author: deriveGroup(group, added.result.newState) }
+  await joined.bootstrapLedger({ tokens: group.ledgerTokens })
+  return { ...added, joined, author: await deriveGroup(group, added.result.newState) }
 }
 
 /**
@@ -323,15 +331,15 @@ export async function belowGateWelcome(
     keyPackage: added.bundle.publicPackage,
     privateKeys: added.bundle.privatePackage,
   })
-  const joined = new GroupHandle({
+  const joined = await GroupHandle.create({
     state,
     context,
     credential: { id: identity.id, groupID: group.groupID },
     commitPolicy: () => 'accept',
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
-  await joined.bootstrapLedger(group.ledgerTokens)
-  return { ...added, joined, author: deriveGroup(group, added.result.newState) }
+  await joined.bootstrapLedger({ tokens: group.ledgerTokens })
+  return { ...added, joined, author: await deriveGroup(group, added.result.newState) }
 }
 
 /** A chained binding stripped of its holder's evidence. */
@@ -380,7 +388,7 @@ export async function rawUpdate(
   const state = structuredClone(group.state)
   const node = state.ratchetTree[state.privatePath.leafIndex * 2]
   if (node?.nodeType !== nodeTypes.leaf) throw new Error('Missing own leaf')
-  node.leaf.credential = makeMLSCredential(identity, binding)
+  node.leaf.credential = makeMLSCredential({ identity, controller: binding })
   state.signaturePrivateKey = identity.privateKey
   node.leaf.signaturePublicKey = identity.publicKey
   const result = await createUpdateProposal({ context: group.context, state })
@@ -445,17 +453,17 @@ export async function lowLevelApply(group: GroupHandle, message: Uint8Array) {
 }
 
 export async function oversizedBinding(identity: OwnIdentity, iat: number, exp: number) {
-  const rotation = createRotate({
+  const rotation = await createRotate({
     seed: controllerSeed,
     profile: 0,
     did: controllerID,
     prior: inception.event,
-    snapshot: snapshotForChain(controllerID, [inception]),
+    snapshot: await snapshotForChain(controllerID, [inception]),
     seal: 's'.repeat(393216),
   })
   return timedBinding({ identity, iat, exp, prefix: [inception, rotation] })
 }
 
-export function resetPrefix(): Array<SignedEvent> {
-  return [inception, createReset(controllerSeed, 0, 1)]
+export async function resetPrefix(): Promise<Array<SignedEvent>> {
+  return [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
 }

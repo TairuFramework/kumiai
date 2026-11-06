@@ -1,5 +1,5 @@
 import type { SignedEvent } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 
 import { verifyManagementCapability } from './authentication.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
@@ -43,6 +43,7 @@ export type DeviceProofContext = {
 export async function verifyDeviceEntry(
   verified: VerifiedLedgerEntry<DeviceValue>,
   ctx: DeviceProofContext,
+  options?: CryptoOptions,
 ): Promise<boolean> {
   const issuer = normalizeDID(verified.issuer)
   const subject = normalizeDID(verified.entry.subject)
@@ -89,6 +90,7 @@ export async function verifyDeviceEntry(
   if (normalizeDID(binding.controller) !== authorizedProfile) return false
 
   return await verifyManagementCapability({
+    ...options,
     capability: value.capability,
     prefix: binding.prefix,
     controllerID: authorizedProfile,

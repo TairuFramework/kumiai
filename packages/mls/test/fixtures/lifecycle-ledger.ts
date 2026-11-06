@@ -22,12 +22,12 @@ import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../../src/
 import { ledgerEntryDigest } from '../../src/ledger.js'
 
 export const controllerSeed = new Uint8Array(32).fill(31)
-export const inception = createInception(controllerSeed, 0)
+export const inception = await createInception({ seed: controllerSeed, profile: 0 })
 export const controllerID = didFromInception(inception.event)
 
 export function agent(seedByte: number): OwnIdentity {
   const privateKey = new Uint8Array(32).fill(seedByte)
-  return { ...createFullIdentity(privateKey), privateKey }
+  return { ...createFullIdentity({ privateKey: privateKey }), privateKey }
 }
 
 /** A delegating device and the trusted grant it holds. */
@@ -40,7 +40,11 @@ export async function bindingFor(
 ): Promise<ControllerBinding> {
   const signer =
     issuer?.identity ??
-    createControllerIdentity({ seed: controllerSeed, profile: 0, log: asControllerLog(prefix) })
+    (await createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: asControllerLog(prefix),
+    }))
   const holderGrant = issuer == null ? undefined : await trustedGrant(identity, prefix)
   const capability = await mintLeafCapability({
     signer,
@@ -63,7 +67,7 @@ export async function trustedGrant(
   prefix: Array<SignedEvent> = [inception],
 ) {
   return mintTrustedGrant({
-    signer: createControllerIdentity({
+    signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
       log: asControllerLog(prefix),
@@ -81,7 +85,9 @@ export async function lifecycleGroup(
 ) {
   const identity = agent(41)
   const tokens = new Map<string, string>()
-  const { group } = await createGroup(identity, 'lifecycle-ledger', {
+  const { group } = await createGroup({
+    identity,
+    groupID: 'lifecycle-ledger',
     controller: await bindingFor(identity, prefix),
     controllerLog,
     // Isolate ledger checks from the proposal rules supplied by the later consensus gate.
@@ -102,7 +108,7 @@ export async function addMember(
   identity: OwnIdentity,
   binding: ControllerBinding,
 ) {
-  const bundle = await createKeyPackageBundle(identity, { controller: binding })
+  const bundle = await createKeyPackageBundle({ identity, controller: binding })
   const result = await createCommit({
     context: group.context,
     state: group.state,
@@ -119,15 +125,15 @@ export async function addMember(
     keyPackage: bundle.publicPackage,
     privateKeys: bundle.privatePackage,
   })
-  const joined = new GroupHandle({
+  const joined = await GroupHandle.create({
     state: joinedState,
     context,
     credential: { id: identity.id, groupID: group.groupID },
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
-  await joined.bootstrapLedger(group.ledgerTokens)
-  return { group: deriveGroup(group, result.newState), joined }
+  await joined.bootstrapLedger({ tokens: group.ledgerTokens })
+  return { group: await deriveGroup(group, result.newState), joined }
 }
 
 export async function enact(group: GroupHandle, tokens: Array<string>) {
@@ -137,7 +143,7 @@ export async function enact(group: GroupHandle, tokens: Array<string>) {
     enacted: tokens,
     requireAdmin: false,
   })
-  const derived = deriveGroup(group, result.newState)
+  const derived = await deriveGroup(group, result.newState)
   await derived.applyLedgerEntries(result.enacted)
   return { group: derived, message: encode(mlsMessageEncoder, result.commit) }
 }
@@ -151,7 +157,7 @@ export async function rawEnact(group: GroupHandle, tokens: Array<string>) {
   const head = readLedgerHead(group)
   if (head == null) throw new Error('Missing ledger head')
   const entries = tokens.map(ledgerEntryDigest)
-  const extension = buildLedgerHeadExtension(extendHead(head.head, entries))
+  const extension = buildLedgerHeadExtension(extendHead({ head: head.head, entryIDs: entries }))
   const result = await createCommit({
     context: group.context,
     state: group.state,

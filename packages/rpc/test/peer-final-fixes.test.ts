@@ -172,7 +172,7 @@ test('a rejoin that lands on the stranded epoch number clears the strand', async
   await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
   expect(await bob.mls.readEpoch()).toBe(3)
   expect((await store.getCommitCursor())?.stranded).toBeUndefined()
-  await bob.peer.commit(buildLedgerCommit(bob, []))
+  await bob.peer.commit({ build: buildLedgerCommit(bob, []) })
   expect(await bob.mls.readEpoch()).toBe(4)
 })
 
@@ -190,7 +190,7 @@ test('a rejoin that lands on the same epoch number captures a new app anchor', a
   expect((await bob.peer.recover()).advanced).toBe(true)
   expect(await bob.mls.readEpoch()).toBe(3)
   // The forced rotation landed on the same number: the app anchor is captured again, not kept.
-  expect(exportSecret).toHaveBeenCalledWith(APP_TOPIC_LABEL)
+  expect(exportSecret).toHaveBeenCalledWith({ label: APP_TOPIC_LABEL })
 })
 
 test('an ambiguous same-number anchor record found at startup asks for confirmed recovery', async () => {
@@ -225,7 +225,7 @@ test('an ambiguous same-number anchor record found at startup asks for confirmed
     },
   })
   await drainUntil(() => events.some((event) => event.phase === 'started'), 'recovery start')
-  await expect(again.peer.commit(buildLedgerCommit(again, []))).rejects.toThrow(
+  await expect(again.peer.commit({ build: buildLedgerCommit(again, []) })).rejects.toThrow(
     'app anchor requires confirmed recovery',
   )
 })
@@ -244,7 +244,7 @@ test('incomplete ledgers skip commit processing and later wakeups can retry', as
   await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
   await vi.advanceTimersByTimeAsync(50)
   await retry
-  expect(requests).toHaveBeenCalledWith(expect.any(String), 100)
+  expect(requests).toHaveBeenCalledWith({ requestID: expect.any(String), deadlineMs: 100 })
   expect(process).not.toHaveBeenCalled()
   expect(await bob.mls.readEpoch()).toBe(1)
   complete.mockResolvedValue(true)
@@ -320,15 +320,15 @@ test('a walker without an applied epoch record stays silent for an external hist
   await hub.publish({
     senderDID: 'alice',
     topicID: rendezvousTopic(secret),
-    payload: encodeHandshakeFrame(
-      HANDSHAKE_KIND.recoveryConfirmRequest,
-      encodeRecoveryConfirmRequest({
+    payload: encodeHandshakeFrame({
+      kind: HANDSHAKE_KIND.recoveryConfirmRequest,
+      payload: encodeRecoveryConfirmRequest({
         requestID: 'history',
         request,
         position: published.sequenceID,
         commitDigest: digestAppliedCommit(commit),
       }),
-    ),
+    }),
   })
   await drainUntil(() => verify.mock.calls.length > 0, 'confirmation request')
   await bob.peer.resync()

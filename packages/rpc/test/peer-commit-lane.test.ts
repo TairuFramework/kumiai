@@ -48,12 +48,16 @@ describe('the commit lane is pull-driven', () => {
     // secret exported there, under its number, which is what his anchor holds and what his live
     // handle at 3 could no longer export.
     expect(dave.peer.anchorEpoch()).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat'))).toBe(
-      1,
-    )
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3, APP_TOPIC_LABEL), 3, 'chat'))).toBe(
-      0,
-    )
+    expect(
+      hub.subscriberCount(
+        protocolTopic({ secret: fakeEpochSecret(1, APP_TOPIC_LABEL), epoch: 1, protocol: 'chat' }),
+      ),
+    ).toBe(1)
+    expect(
+      hub.subscriberCount(
+        protocolTopic({ secret: fakeEpochSecret(3, APP_TOPIC_LABEL), epoch: 3, protocol: 'chat' }),
+      ),
+    ).toBe(0)
 
     // He needed no help from another member: he asked for no recovery. (Walking frames
     // from epochs he never held is ordinary catch-up, not evidence of a fork.)
@@ -115,7 +119,7 @@ describe('the commit lane is pull-driven', () => {
 
     // Alice commits, and adopts it in onAccepted as the hub takes the frame. The log hands
     // her back her own frame — push never did, because the hub excludes the sender.
-    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await alice.peer.commit({ build: buildLedgerCommit(alice, []) })
     await flush()
     expect(alice.mls.commits()).toBe(0) // adopted, never applied as somebody else's commit
 
@@ -148,7 +152,10 @@ describe('the commit lane is pull-driven', () => {
     await hub.publish({
       senderDID: 'mallory',
       topicID: commitTopic(recoverySecret),
-      payload: encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, new Uint8Array([1])),
+      payload: encodeHandshakeFrame({
+        kind: HANDSHAKE_KIND.recoveryRequest,
+        payload: new Uint8Array([1]),
+      }),
       retain: 'log',
     })
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
@@ -167,9 +174,11 @@ describe('the commit lane is pull-driven', () => {
     // is a hub this lane cannot be built on, and the type says so at the host's wiring.
     const mailboxOnly: MailboxHub = {
       publish: (params) => hub.publish(params),
-      subscribe: (did, topicID) => hub.subscribe(did, topicID),
-      unsubscribe: (did, topicID) => hub.unsubscribe(did, topicID),
-      receive: (did) => hub.receive(did),
+      subscribe: ({ subscriberDID: did, topicID }) =>
+        hub.subscribe({ subscriberDID: did, topicID }),
+      unsubscribe: ({ subscriberDID: did, topicID }) =>
+        hub.unsubscribe({ subscriberDID: did, topicID }),
+      receive: ({ subscriberDID: did }) => hub.receive({ subscriberDID: did }),
     }
     // Never invoked: the assertion IS the compile error, checked by `test:types`. If a
     // MailboxHub ever became assignable here, @ts-expect-error would fail the build.

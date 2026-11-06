@@ -1,4 +1,5 @@
 import {
+  type CryptoOptions,
   decodeMultibase,
   encodeMultibase,
   isVerifiedToken,
@@ -76,14 +77,14 @@ const GROUP_INFO_REPLY: SealedReplyKind = {
   hpkeInfo: utf8.encode('kumiai/mls/recovery/v1'),
   aadDomain: utf8.encode('kumiai/mls/recovery-aad/v1'),
   version: SEALED_GROUP_INFO_VERSION,
-  fail: (reason, message, options) => new SealedGroupInfoError(reason, message, options),
+  fail: (reason, message, options) => new SealedGroupInfoError({ reason, message, ...options }),
 }
 
 const LEDGER_REPLY: SealedReplyKind = {
   hpkeInfo: utf8.encode('kumiai/mls/recovery-ledger/v1'),
   aadDomain: utf8.encode('kumiai/mls/recovery-ledger-aad/v1'),
   version: SEALED_LEDGER_VERSION,
-  fail: (reason, message, options) => new SealedLedgerError(reason, message, options),
+  fail: (reason, message, options) => new SealedLedgerError({ reason, message, ...options }),
 }
 
 /**
@@ -129,12 +130,17 @@ export type RecoveryRequestRejection =
   | 'group-mismatch'
   | 'not-a-member'
 
+export type RecoveryRequestErrorParams = {
+  reason: RecoveryRequestRejection
+  message: string
+} & ErrorOptions
+
 /** Thrown by {@link sealGroupInfo}. The primitive refuses loudly rather than
  *  returning an empty reply; a responder that wants to stay silent catches this. */
 export class RecoveryRequestError extends Error {
   #reason: RecoveryRequestRejection
 
-  constructor(reason: RecoveryRequestRejection, message: string, options?: ErrorOptions) {
+  constructor({ reason, message, ...options }: RecoveryRequestErrorParams) {
     super(message, options)
     this.name = 'RecoveryRequestError'
     this.#reason = reason
@@ -176,12 +182,17 @@ export type SealedGroupInfoRejection = SealedReplyRejection | 'unauthenticated' 
  *  differ, so the AEAD refuses before anything is parsed. */
 export type SealedLedgerRejection = SealedReplyRejection
 
+export type SealedGroupInfoErrorParams = {
+  reason: SealedGroupInfoRejection
+  message: string
+} & ErrorOptions
+
 /** Thrown by {@link openSealedGroupInfo}. Distinguishes "not addressed to me" from
  *  "corrupt", so a peer sifting a shared lane drops the former quietly. */
 export class SealedGroupInfoError extends Error {
   #reason: SealedGroupInfoRejection
 
-  constructor(reason: SealedGroupInfoRejection, message: string, options?: ErrorOptions) {
+  constructor({ reason, message, ...options }: SealedGroupInfoErrorParams) {
     super(message, options)
     this.name = 'SealedGroupInfoError'
     this.#reason = reason
@@ -192,13 +203,18 @@ export class SealedGroupInfoError extends Error {
   }
 }
 
+export type SealedLedgerErrorParams = {
+  reason: SealedReplyRejection
+  message: string
+} & ErrorOptions
+
 /** Thrown by {@link openSealedLedger}, read like its GroupInfo sibling: a requester
  *  sifting a shared lane drops `not-for-me` quietly (every other member's reply to
  *  every other request looks like this) and shouts about `malformed`. */
 export class SealedLedgerError extends Error {
   #reason: SealedReplyRejection
 
-  constructor(reason: SealedReplyRejection, message: string, options?: ErrorOptions) {
+  constructor({ reason, message, ...options }: SealedLedgerErrorParams) {
     super(message, options)
     this.name = 'SealedLedgerError'
     this.#reason = reason
@@ -322,6 +338,10 @@ function recoveryAAD(
   ])
 }
 
+export type VerifyRecoveryRequestParams = {
+  token: string
+} & CryptoOptions
+
 /**
  * Verify a request token's signature and parse its payload. The requester DID is
  * the verified issuer, never a payload field. Unsigned (`alg: 'none'`) tokens are
@@ -329,18 +349,26 @@ function recoveryAAD(
  * attacker-chosen. `embedLongForm` lets it verify offline — a responder needs no
  * DID resolver to answer.
  */
-export async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
+export async function verifyRecoveryRequest({
+  token,
+  ...options
+}: VerifyRecoveryRequestParams): Promise<VerifiedRecoveryRequest> {
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
   try {
-    verified = await verifyToken<RecoveryRequest>(token)
+    verified = await verifyToken<RecoveryRequest>({ ...options, token: token })
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
-    throw new RecoveryRequestError('unverified', 'recovery request signature did not verify', {
+    throw new RecoveryRequestError({
+      reason: 'unverified',
+      message: 'recovery request signature did not verify',
       cause,
     })
   }
   if (!isVerifiedToken<SignedPayload & RecoveryRequest>(verified)) {
-    throw new RecoveryRequestError('unverified', 'recovery request is not signed')
+    throw new RecoveryRequestError({
+      reason: 'unverified',
+      message: 'recovery request is not signed',
+    })
   }
 
   const { iss, type, groupID, requestID, ephemeralKey } = verified.payload
@@ -350,7 +378,10 @@ export async function verifyRecoveryRequest(token: string): Promise<VerifiedReco
     typeof requestID !== 'string' ||
     typeof ephemeralKey !== 'string'
   ) {
-    throw new RecoveryRequestError('malformed', 'recovery request payload is malformed')
+    throw new RecoveryRequestError({
+      reason: 'malformed',
+      message: 'recovery request payload is malformed',
+    })
   }
 
   let ephemeralPublicKey: Uint8Array
@@ -358,15 +389,17 @@ export async function verifyRecoveryRequest(token: string): Promise<VerifiedReco
     ephemeralPublicKey = decodeMultibase(ephemeralKey)
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
-    throw new RecoveryRequestError('malformed', 'recovery request ephemeral key is not multibase', {
+    throw new RecoveryRequestError({
+      reason: 'malformed',
+      message: 'recovery request ephemeral key is not multibase',
       cause,
     })
   }
   if (ephemeralPublicKey.length !== KEM_OUTPUT_LENGTH) {
-    throw new RecoveryRequestError(
-      'malformed',
-      `recovery request ephemeral key must be ${KEM_OUTPUT_LENGTH} bytes`,
-    )
+    throw new RecoveryRequestError({
+      reason: 'malformed',
+      message: `recovery request ephemeral key must be ${KEM_OUTPUT_LENGTH} bytes`,
+    })
   }
 
   return { requesterDID: normalizeDID(iss), groupID, requestID, ephemeralPublicKey }
@@ -413,17 +446,15 @@ export async function createRecoveryRequest(
   const ephemeralPublicKey = await hpke.exportPublicKey(keyPair.publicKey)
   const ephemeralPrivateKey = await hpke.exportPrivateKey(keyPair.privateKey)
 
-  const signed = await identity.signToken<RecoveryRequest>(
-    {
+  const signed = await identity.signToken<RecoveryRequest>({
+    payload: {
       type: RECOVERY_REQUEST_TYPE,
       groupID: group.groupID,
       requestID,
       ephemeralKey: encodeMultibase(ephemeralPublicKey),
     },
-    // Self-verifying offline: a responder must not need a DID resolver to check
-    // the signature of a peer it has never resolved.
-    { embedLongForm: true },
-  )
+    embedLongForm: true,
+  })
 
   return { request: stringifyToken(signed), ephemeralPublicKey, ephemeralPrivateKey }
 }
@@ -452,19 +483,19 @@ export type SealToRequestParams = {
 
 export async function sealToRequest(params: SealToRequestParams): Promise<Uint8Array> {
   const { kind, group, request, plaintext, requireMember = true } = params
-  const verified = await verifyRecoveryRequest(request)
+  const verified = await verifyRecoveryRequest({ token: request, crypto: group.crypto })
 
   if (verified.groupID !== group.groupID) {
-    throw new RecoveryRequestError(
-      'group-mismatch',
-      `recovery request names group ${verified.groupID}, not ${group.groupID}`,
-    )
+    throw new RecoveryRequestError({
+      reason: 'group-mismatch',
+      message: `recovery request names group ${verified.groupID}, not ${group.groupID}`,
+    })
   }
   if (requireMember && group.findMemberLeafIndex(verified.requesterDID) === undefined) {
-    throw new RecoveryRequestError(
-      'not-a-member',
-      `recovery requester ${verified.requesterDID} has no leaf in the current ratchet tree`,
-    )
+    throw new RecoveryRequestError({
+      reason: 'not-a-member',
+      message: `recovery requester ${verified.requesterDID} has no leaf in the current ratchet tree`,
+    })
   }
 
   const { hpke } = group.context.cipherSuite
@@ -558,23 +589,21 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
     )
   }
 
-  const verified = await verifyRecoveryRequest(request)
+  const verified = await verifyRecoveryRequest({ token: request, crypto: group.crypto })
   const { groupInfo } = await exportGroupInfo({ group })
   const ledger =
     group.anchor.controller == null ? undefined : encodeLedgerTokens(await group.getLedger())
 
-  const signed = await identity.signToken<ResponderAttestation>(
-    {
+  const signed = await identity.signToken<ResponderAttestation>({
+    payload: {
       type: RECOVERY_GROUPINFO_TYPE,
       groupID: verified.groupID,
       requestID: verified.requestID,
       groupInfoDigest: encodeMultibase(sha256(groupInfo)),
       ...(ledger == null ? {} : { ledgerDigest: encodeMultibase(sha256(ledger)) }),
     },
-    // Self-verifying offline: the healing peer must check the signature without
-    // resolving the responder.
-    { embedLongForm: true },
-  )
+    embedLongForm: true,
+  })
 
   const plaintext = frameAttestedGroupInfo(stringifyToken(signed), groupInfo, ledger)
   return await sealToRequest({ kind: GROUP_INFO_REPLY, group, request, plaintext })
@@ -619,17 +648,23 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
   const { attestation, group, requestID, groupInfo, ledger } = params
   let verified: Awaited<ReturnType<typeof verifyToken<ResponderAttestation>>>
   try {
-    verified = await verifyToken<ResponderAttestation>(attestation)
+    verified = await verifyToken<ResponderAttestation>({
+      crypto: group.crypto,
+      token: attestation,
+    })
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
-    throw new SealedGroupInfoError(
-      'unauthenticated',
-      'responder attestation signature did not verify',
-      { cause },
-    )
+    throw new SealedGroupInfoError({
+      reason: 'unauthenticated',
+      message: 'responder attestation signature did not verify',
+      cause,
+    })
   }
   if (!isVerifiedToken<SignedPayload & ResponderAttestation>(verified)) {
-    throw new SealedGroupInfoError('unauthenticated', 'responder attestation is not signed')
+    throw new SealedGroupInfoError({
+      reason: 'unauthenticated',
+      message: 'responder attestation is not signed',
+    })
   }
 
   const {
@@ -648,20 +683,20 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
     groupInfoDigest !== encodeMultibase(sha256(groupInfo)) ||
     (ledger != null && ledgerDigest !== encodeMultibase(sha256(ledger)))
   ) {
-    throw new SealedGroupInfoError(
-      'unauthenticated',
-      'responder attestation does not bind this group, request, and GroupInfo',
-    )
+    throw new SealedGroupInfoError({
+      reason: 'unauthenticated',
+      message: 'responder attestation does not bind this group, request, and GroupInfo',
+    })
   }
   // Lifecycle authority is judged against the derived pending tree and joined registry.
   if (
     group.anchor.controller == null &&
     group.findMemberLeafIndex(normalizeDID(iss)) === undefined
   ) {
-    throw new SealedGroupInfoError(
-      'unauthenticated',
-      "responder holds no leaf in the requester's last-known ratchet tree",
-    )
+    throw new SealedGroupInfoError({
+      reason: 'unauthenticated',
+      message: "responder holds no leaf in the requester's last-known ratchet tree",
+    })
   }
   return normalizeDID(iss)
 }
@@ -675,10 +710,10 @@ async function assertResponderIsMember(params: AssertResponderIsMemberParams): P
 function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle): void {
   const binding = readGroupInfoBinding(groupInfo)
   if (binding.groupID !== group.groupID) {
-    throw new SealedGroupInfoError(
-      'group-mismatch',
-      `sealed GroupInfo names group ${binding.groupID}, not ${group.groupID}`,
-    )
+    throw new SealedGroupInfoError({
+      reason: 'group-mismatch',
+      message: `sealed GroupInfo names group ${binding.groupID}, not ${group.groupID}`,
+    })
   }
   const ownAnchor = readGroupAnchorExtension(group)
   const ownData = ownAnchor?.extensionData instanceof Uint8Array ? ownAnchor.extensionData : null
@@ -687,10 +722,10 @@ function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle):
     binding.anchorExtensionData == null ||
     !bytesEqual(ownData, binding.anchorExtensionData)
   ) {
-    throw new SealedGroupInfoError(
-      'group-mismatch',
-      'sealed GroupInfo carries a different genesis anchor than the group being healed',
-    )
+    throw new SealedGroupInfoError({
+      reason: 'group-mismatch',
+      message: 'sealed GroupInfo carries a different genesis anchor than the group being healed',
+    })
   }
 }
 
@@ -739,11 +774,11 @@ export async function openRecoveryGroupInfo(
     ))
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
-    throw new SealedGroupInfoError(
-      'malformed',
-      'sealed plaintext is not a framed, attested GroupInfo',
-      { cause },
-    )
+    throw new SealedGroupInfoError({
+      reason: 'malformed',
+      message: 'sealed plaintext is not a framed, attested GroupInfo',
+      cause,
+    })
   }
 
   // Parse as a GroupInfo before anything trusts its fields.
@@ -751,11 +786,11 @@ export async function openRecoveryGroupInfo(
     inspectGroupInfo(groupInfo)
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
-    throw new SealedGroupInfoError(
-      'malformed',
-      'sealed plaintext is not a framed MLSMessage(GroupInfo)',
-      { cause },
-    )
+    throw new SealedGroupInfoError({
+      reason: 'malformed',
+      message: 'sealed plaintext is not a framed MLSMessage(GroupInfo)',
+      cause,
+    })
   }
 
   // Authenticate the responder, then bind the GroupInfo to this group.
@@ -781,15 +816,22 @@ export async function openRecoveryGroupInfo(
       extension?.extensionData instanceof Uint8Array
         ? decodeLedgerHead(extension.extensionData)
         : null
-    if (head == null) throw new SealedGroupInfoError('malformed', 'GroupInfo has no ledger head')
-    assertHeadMatches(head.head, computeHead(group.groupID, tokens.map(ledgerEntryDigest)))
+    if (head == null)
+      throw new SealedGroupInfoError({
+        reason: 'malformed',
+        message: 'GroupInfo has no ledger head',
+      })
+    assertHeadMatches({
+      expected: head.head,
+      actual: computeHead({ groupID: group.groupID, entryIDs: tokens.map(ledgerEntryDigest) }),
+    })
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause is passed in the third argument.
-    throw new SealedGroupInfoError(
-      'malformed',
-      'recovery ledger does not reproduce the GroupInfo head',
-      { cause },
-    )
+    throw new SealedGroupInfoError({
+      reason: 'malformed',
+      message: 'recovery ledger does not reproduce the GroupInfo head',
+      cause,
+    })
   }
   return { groupInfo, ledger: tokens, signer }
 }
@@ -918,7 +960,9 @@ export async function openSealedLedger(params: OpenSealedLedgerParams): Promise<
     return decodeLedgerTokens(plaintext)
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
-    throw new SealedLedgerError('malformed', 'sealed plaintext is not a framed ledger', {
+    throw new SealedLedgerError({
+      reason: 'malformed',
+      message: 'sealed plaintext is not a framed ledger',
       cause,
     })
   }

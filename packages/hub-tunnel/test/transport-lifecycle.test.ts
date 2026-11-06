@@ -25,7 +25,7 @@ const sendInboundFrame = async (
     seq,
     body: { header: {}, payload: { typ: 'test', msg } },
   }
-  hub.subscribe(localDID, receiveTopicID)
+  hub.subscribe({ subscriberDID: localDID, topicID: receiveTopicID })
   await hub.publish({
     senderDID: peerDID,
     topicID: receiveTopicID,

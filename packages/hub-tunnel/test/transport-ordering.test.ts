@@ -1,12 +1,15 @@
 import { setImmediate } from 'node:timers/promises'
 import type { TransportType } from '@enkaku/transport'
+import type {
+  HubBaseReceiveParams,
+  HubBaseSubscribeParams,
+  HubBaseUnsubscribeParams,
+} from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import { decodeFrame, encodeFrame, type HubFrame, type HubFrameMessageBody } from '../src/frame.js'
 import {
   createHubTunnelTransport,
-  type HubReceiveOptions,
-  type HubSubscribeOptions,
   type MailboxHub,
   type MailboxHubEvents,
 } from '../src/transport.js'
@@ -43,25 +46,21 @@ class DelayedSubscribeHub implements MailboxHub {
     return this.#inner.events
   }
 
-  async subscribe(
-    subscriberDID: string,
-    topicID: string,
-    options?: HubSubscribeOptions,
-  ): Promise<void> {
+  async subscribe({ subscriberDID, topicID, ...options }: HubBaseSubscribeParams): Promise<void> {
     await this.#subscribeGate
-    this.#inner.subscribe(subscriberDID, topicID, options)
+    this.#inner.subscribe({ subscriberDID, topicID, ...options })
     this.#live.add(`${subscriberDID}::${topicID}`)
     this.order.push('subscribe')
   }
 
-  unsubscribe(subscriberDID: string, topicID: string): void {
+  unsubscribe({ subscriberDID, topicID }: HubBaseUnsubscribeParams): void {
     this.#live.delete(`${subscriberDID}::${topicID}`)
     this.order.push('unsubscribe')
-    this.#inner.unsubscribe(subscriberDID, topicID)
+    this.#inner.unsubscribe({ subscriberDID, topicID })
   }
 
-  receive(subscriberDID: string, _options?: HubReceiveOptions) {
-    return this.#inner.receive(subscriberDID)
+  receive({ subscriberDID, ..._options }: HubBaseReceiveParams) {
+    return this.#inner.receive({ subscriberDID })
   }
 
   async publish(params: FakeHubPublishParams): Promise<{ sequenceID: string }> {

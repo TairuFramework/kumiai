@@ -19,14 +19,16 @@ describe('durable app rotation', () => {
     await bob.peer.protocol('chat').to('alice')
     hub.detach('bob')
     const originalExport = bob.crypto.exportSecret.bind(bob.crypto)
-    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation((label, length) => {
+    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation(({ label, length }) => {
       if (label === APP_TOPIC_LABEL && bob.crypto.epoch() === 2) {
         throw new Error('export failed')
       }
-      return originalExport(label, length)
+      return originalExport({ label, length })
     })
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow('export failed')
+    await expect(bob.peer.commit({ build: buildLedgerCommit(bob, []) })).rejects.toThrow(
+      'export failed',
+    )
     const before = hub.published.length
     await bob.peer.protocol('chat').dispatch('chat/posted', {
       data: { text: 'must not leave' },
@@ -55,16 +57,24 @@ describe('durable app rotation', () => {
       release = resolve
     })
     const originalExport = bob.crypto.exportSecret.bind(bob.crypto)
-    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation(async (label, length) => {
+    vi.spyOn(bob.crypto, 'exportSecret').mockImplementation(async ({ label, length }) => {
       if (label === APP_TOPIC_LABEL && bob.crypto.epoch() === 2) {
         entered()
         await held
       }
-      return originalExport(label, length)
+      return originalExport({ label, length })
     })
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
-    const oldTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-    const newTopic = protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')
+    const oldTopic = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
+    const newTopic = protocolTopic({
+      secret: fakeEpochSecret(2, APP_TOPIC_LABEL),
+      epoch: 2,
+      protocol: 'chat',
+    })
     const committing = bob.peer.retryAppDelivery()
     await exporting
     const dispatching = bob.peer.protocol('chat').dispatch('chat/posted', {

@@ -307,6 +307,11 @@ function evaluateExternalCommit(
   return context.didOfLeaf(removeTarget) === did ? 'accept' : 'reject'
 }
 
+export type DefaultCommitPolicyParams = {
+  incoming: IncomingMessage
+  context: CommitPolicyContext
+}
+
 /**
  * Pure receiving-side commit policy: given the resolved context, decides whether an incoming
  * commit or standalone proposal is admissible. Never throws.
@@ -321,10 +326,10 @@ function evaluateExternalCommit(
  * One rule isn't a proposal's own: a commit enacting ledger entries must carry a
  * group-context-extensions proposal, or entries would be enacted without moving the head.
  */
-export function defaultCommitPolicy(
-  incoming: IncomingMessage,
-  context: CommitPolicyContext,
-): IncomingMessageAction {
+export function defaultCommitPolicy({
+  incoming,
+  context,
+}: DefaultCommitPolicyParams): IncomingMessageAction {
   if (incoming.kind === 'proposal') {
     const { proposal, senderLeafIndex } = incoming.proposal
     return evaluateProposal(proposal, senderLeafIndex, context)

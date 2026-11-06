@@ -26,11 +26,15 @@ describe('commit delivery during initialization', () => {
     if (commit == null) throw new Error('missing prepared commit')
 
     const fake = new FakeHub()
-    const appTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const appTopic = protocolTopic({
+      secret: fakeEpochSecret(1, APP_TOPIC_LABEL),
+      epoch: 1,
+      protocol: 'chat',
+    })
     let delivered = false
     const hub: LogHub = {
-      subscribe: (did, topicID, options) => {
-        fake.subscribe(did, topicID, options)
+      subscribe: ({ subscriberDID: did, topicID, ...options }) => {
+        fake.subscribe({ subscriberDID: did, topicID, ...options })
         if (topicID === appTopic && !delivered) {
           delivered = true
           void fake.publish({
@@ -41,10 +45,11 @@ describe('commit delivery during initialization', () => {
           })
         }
       },
-      unsubscribe: (did, topicID) => fake.unsubscribe(did, topicID),
+      unsubscribe: ({ subscriberDID: did, topicID }) =>
+        fake.unsubscribe({ subscriberDID: did, topicID }),
       publish: (params) => fake.publish(params),
       fetchTopic: (params) => fake.fetchTopic(params),
-      receive: (did) => fake.receive(did),
+      receive: ({ subscriberDID: did }) => fake.receive({ subscriberDID: did }),
     }
 
     const crypto = createFakeCrypto({

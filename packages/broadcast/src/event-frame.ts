@@ -1,15 +1,22 @@
 import { type BroadcastMessage, encodeFrame } from './transport.js'
 
+export type BuildEventMessageParams = {
+  prc: string
+  data?: Record<string, unknown>
+}
+
 /**
  * Build the canonical fire-and-forget event message a producer publishes to a broadcast topic:
  * `{ payload: { typ: 'event', prc, data } }`. The single source of that shape (and the empty-`data`
  * default) shared by {@link BroadcastClient.dispatch} and any other producer that must match it.
  */
-export function buildEventMessage(
-  prc: string,
-  data: Record<string, unknown> = {},
-): BroadcastMessage {
+export function buildEventMessage({ prc, data = {} }: BuildEventMessageParams): BroadcastMessage {
   return { payload: { typ: 'event', prc, data } }
+}
+
+export type EncodeEventFrameParams = {
+  prc: string
+  data?: Record<string, unknown>
 }
 
 /**
@@ -19,6 +26,6 @@ export function buildEventMessage(
  * the receive side (`unwrap` then decode) symmetric across both — including the wire version stamp,
  * which `encodeFrame` is the one place to write.
  */
-export function encodeEventFrame(prc: string, data: Record<string, unknown> = {}): Uint8Array {
-  return encodeFrame(buildEventMessage(prc, data))
+export function encodeEventFrame({ prc, data = {} }: EncodeEventFrameParams): Uint8Array {
+  return encodeFrame(buildEventMessage({ prc, data }))
 }

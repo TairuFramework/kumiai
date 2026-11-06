@@ -30,9 +30,9 @@ describe('a subscribe the hub refuses', () => {
     const gate = deferred<void>()
     const hub = new FakeHub()
     const subscribe = hub.subscribe.bind(hub)
-    hub.subscribe = async (subscriberDID, topic, options) => {
+    hub.subscribe = async ({ subscriberDID, topicID: topic, ...options }) => {
       await gate.promise
-      subscribe(subscriberDID, topic, options)
+      subscribe({ subscriberDID, topicID: topic, ...options })
     }
     const mux = createHubMux({ hub, localDID: 'bob' })
     mux.retainTopic(topicID)
@@ -104,9 +104,9 @@ describe('a subscribe the hub refuses', () => {
     await expect(
       mux.publish({ topicID: 'topic:refused', payload: fromUTF('x'), retain: 'log' }),
     ).rejects.toThrow(RetentionExceededError)
-    await expect(mux.bus.publish('topic:refused', fromUTF('x'))).rejects.toThrow(
-      RetentionExceededError,
-    )
+    await expect(
+      mux.bus.publish({ topicID: 'topic:refused', payload: fromUTF('x') }),
+    ).rejects.toThrow(RetentionExceededError)
     await expect(
       mux.mailbox.publish({ senderDID: 'bob', topicID: 'topic:refused', payload: fromUTF('x') }),
     ).rejects.toThrow(RetentionExceededError)
@@ -486,11 +486,11 @@ describe('a peer whose app-topic subscribe is refused', () => {
     })
     await flush()
 
-    const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
-    const topicID = protocolTopic(secret, 1, 'room')
+    const { secret } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    const topicID = protocolTopic({ secret, epoch: 1, protocol: 'room' })
 
     expect(hub.subscriberCount(topicID)).toBe(0)
-    const selfInbox = inboxTopic(secret, 1, 'bob')
+    const selfInbox = inboxTopic({ secret, epoch: 1, memberDID: 'bob' })
     expect(hub.subscriberCount(selfInbox)).toBe(0)
     expect(failures.map((f) => f.topicID)).toEqual([topicID, selfInbox])
     for (const failure of failures) {
@@ -543,9 +543,9 @@ describe('the hub doubles refuse what a real hub refuses', () => {
       const hub = make(100)
       // Refused, exactly as `memoryStore.subscribe` refuses it and as the conformance suite
       // asserts of any conforming store: `requested > max`, so the ceiling itself is allowed.
-      expect(() => hub.subscribe('bob', 'topic:c', { retention: 101 })).toThrow(
-        RetentionExceededError,
-      )
+      expect(() =>
+        hub.subscribe({ subscriberDID: 'bob', topicID: 'topic:c', retention: 101 }),
+      ).toThrow(RetentionExceededError)
       // Not clamped, not partially applied: bob is not a subscriber at all, and the hub gates a
       // topic pull on the caller's own subscription.
       await expect(hub.fetchTopic({ subscriberDID: 'bob', topicID: 'topic:c' })).rejects.toThrow(
@@ -553,7 +553,7 @@ describe('the hub doubles refuse what a real hub refuses', () => {
       )
       expect(hub.subscriberCount('topic:c')).toBe(0)
 
-      hub.subscribe('bob', 'topic:c', { retention: 100 })
+      hub.subscribe({ subscriberDID: 'bob', topicID: 'topic:c', retention: 100 })
       expect(hub.subscriberCount('topic:c')).toBe(1)
     })
 
@@ -563,10 +563,18 @@ describe('the hub doubles refuse what a real hub refuses', () => {
       expect(DEFAULT_MAX_RETENTION).toBe(2_592_000)
       const hub = name === 'FakeHub' ? new FakeHub() : new DurableFakeHub()
       expect(() =>
-        hub.subscribe('bob', 'topic:d', { retention: DEFAULT_MAX_RETENTION + 1 }),
+        hub.subscribe({
+          subscriberDID: 'bob',
+          topicID: 'topic:d',
+          retention: DEFAULT_MAX_RETENTION + 1,
+        }),
       ).toThrow(RetentionExceededError)
       expect(() =>
-        hub.subscribe('bob', 'topic:d', { retention: DEFAULT_MAX_RETENTION }),
+        hub.subscribe({
+          subscriberDID: 'bob',
+          topicID: 'topic:d',
+          retention: DEFAULT_MAX_RETENTION,
+        }),
       ).not.toThrow()
     })
   }

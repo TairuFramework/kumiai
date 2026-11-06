@@ -19,9 +19,9 @@ function countingCrypto(base: FakeCrypto): { crypto: FakeCrypto; opens: Array<st
   const opens: Array<string> = []
   const crypto: FakeCrypto = {
     ...base,
-    unwrap: (bytes) => {
+    unwrap: ({ bytes }) => {
       opens.push(Buffer.from(bytes).toString('base64'))
-      return base.unwrap(bytes)
+      return base.unwrap({ bytes })
     },
   }
   return { crypto, opens }

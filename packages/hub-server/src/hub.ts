@@ -2,7 +2,7 @@ import type { ServerTransportOf } from '@enkaku/protocol'
 import type { AccessRules, ReplayOptions, ResourceLimits, Server } from '@enkaku/server'
 import { serve } from '@enkaku/server'
 import type { VerifyTokenHook } from '@kokuin/capability'
-import type { Identity } from '@kokuin/token'
+import type { CryptoOptions, Identity } from '@kokuin/token'
 import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
 import { hubProtocol } from '@kumiai/hub-protocol'
 
@@ -49,7 +49,7 @@ type SubscriptionReapingStore = HubStore & {
 /** Replay settings a host may tune. The hub always enables replay checks and rejects stale tokens. */
 export type HubReplayOptions = Omit<ReplayOptions, 'enabled' | 'rejectStale'>
 
-export type CreateHubParams = {
+export type CreateHubParams = CryptoOptions & {
   transport: ServerTransportOf<HubProtocol>
   store: HubStore
   /**
@@ -161,6 +161,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     protocol: hubProtocol,
     transport: params.transport,
     identity: params.identity,
+    crypto: params.crypto,
     accessRules: params.accessRules ?? DEFAULT_HUB_ACCESS_RULES,
     verifyToken: params.verifyToken,
     replay: { ...params.replay, enabled: true, rejectStale: true },

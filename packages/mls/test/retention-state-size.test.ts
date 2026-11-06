@@ -20,7 +20,11 @@ async function group(size: number): Promise<Array<GroupHandle>> {
   const tokens = new Map<string, string>()
   const resolveLedgerEntries = async (ids: Array<string>) =>
     ids.map((id) => tokens.get(id) as string)
-  let { group: adminGroup } = await createGroup(admin, `measure-${size}`, { resolveLedgerEntries })
+  let { group: adminGroup } = await createGroup({
+    identity: admin,
+    groupID: `measure-${size}`,
+    resolveLedgerEntries,
+  })
   const members: Array<GroupHandle> = []
   for (let i = 1; i < size; i++) {
     const identity = randomIdentity()
@@ -31,9 +35,13 @@ async function group(size: number): Promise<Array<GroupHandle>> {
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle(identity)
-    const added = await commitInvite(adminGroup, bundle.publicPackage, invite)
-    for (const member of members) await member.processMessage(added.commitMessage)
+    const bundle = await createKeyPackageBundle({ identity })
+    const added = await commitInvite({
+      group: adminGroup,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
+    for (const member of members) await member.processMessage({ message: added.commitMessage })
     const { group: joined } = await processWelcome({
       identity,
       invite,
@@ -59,17 +67,17 @@ test('a receiver in a three-member group keeps its persisted state bounded at st
   for (let epoch = 0; epoch < 5; epoch++) {
     for (const sender of [admin, other]) {
       for (let i = 0; i < frames; i++) {
-        const sealed = await sender.encrypt(new Uint8Array([i & 0xff]))
+        const sealed = await sender.encrypt({ plaintext: new Uint8Array([i & 0xff]) })
         // Round-robin over the sender's two peers: every other frame is the receiver's.
-        if (i % peers === 0) await receiver.decrypt(sealed)
+        if (i % peers === 0) await receiver.decrypt({ message: sealed })
       }
     }
     if (epoch === 4) break
     const built = await createCommit({ context: admin.context, state: admin.state })
     const frame = encode(mlsMessageEncoder, built.commit)
-    await receiver.processMessage(frame)
-    await other.processMessage(frame)
-    admin = deriveGroup(admin, built.newState)
+    await receiver.processMessage({ message: frame })
+    await other.processMessage({ message: frame })
+    admin = await deriveGroup(admin, built.newState)
     admin.confirmAdopted()
   }
   // Two senders, each with a full window in the current and every retained past epoch, at

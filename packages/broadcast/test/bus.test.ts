@@ -8,10 +8,10 @@ describe('createMemoryBus', () => {
     const bus = createMemoryBus()
     const a: Array<string> = []
     const b: Array<string> = []
-    bus.subscribe('t1', (p) => a.push(new TextDecoder().decode(p)))
-    bus.subscribe('t1', (p) => b.push(new TextDecoder().decode(p)))
+    bus.subscribe({ topicID: 't1', onMessage: (p) => a.push(new TextDecoder().decode(p)) })
+    bus.subscribe({ topicID: 't1', onMessage: (p) => b.push(new TextDecoder().decode(p)) })
 
-    bus.publish('t1', fromUTF('hello'))
+    bus.publish({ topicID: 't1', payload: fromUTF('hello') })
 
     expect(a).toEqual(['hello'])
     expect(b).toEqual(['hello'])
@@ -20,9 +20,9 @@ describe('createMemoryBus', () => {
   test('does not deliver across topics', () => {
     const bus = createMemoryBus()
     const received: Array<string> = []
-    bus.subscribe('t1', (p) => received.push(new TextDecoder().decode(p)))
+    bus.subscribe({ topicID: 't1', onMessage: (p) => received.push(new TextDecoder().decode(p)) })
 
-    bus.publish('t2', fromUTF('nope'))
+    bus.publish({ topicID: 't2', payload: fromUTF('nope') })
 
     expect(received).toEqual([])
   })
@@ -30,11 +30,14 @@ describe('createMemoryBus', () => {
   test('unsubscribe stops delivery', () => {
     const bus = createMemoryBus()
     const received: Array<string> = []
-    const unsub = bus.subscribe('t1', (p) => received.push(new TextDecoder().decode(p)))
+    const unsub = bus.subscribe({
+      topicID: 't1',
+      onMessage: (p) => received.push(new TextDecoder().decode(p)),
+    })
 
-    bus.publish('t1', fromUTF('first'))
+    bus.publish({ topicID: 't1', payload: fromUTF('first') })
     unsub()
-    bus.publish('t1', fromUTF('second'))
+    bus.publish({ topicID: 't1', payload: fromUTF('second') })
 
     expect(received).toEqual(['first'])
   })

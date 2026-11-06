@@ -164,23 +164,28 @@ describe('createHub dispose', () => {
       purge: false,
     })
 
-    const capability = await createCapability(delegator, {
-      sub: delegator.id,
-      aud: client.id,
-      act: '*',
-      res: '*',
+    const capability = await createCapability({
+      signer: delegator,
+      payload: {
+        sub: delegator.id,
+        aud: client.id,
+        act: '*',
+        res: '*',
+      },
     })
     const topicID = toB64U(new Uint8Array(32).fill(1))
     const message = await client.signToken({
-      typ: 'request',
-      prc: 'hub/v1/publish',
-      rid: 'r1',
-      prm: { topicID, payload: toB64(fromUTF('hello')) },
-      aud: hubIdentity.id,
-      sub: delegator.id,
-      cap: stringifyToken(capability),
-      iat: Math.floor(Date.now() / 1000),
-    } as const)
+      payload: {
+        typ: 'request',
+        prc: 'hub/v1/publish',
+        rid: 'r1',
+        prm: { topicID, payload: toB64(fromUTF('hello')) },
+        aud: hubIdentity.id,
+        sub: delegator.id,
+        cap: stringifyToken(capability),
+        iat: Math.floor(Date.now() / 1000),
+      } as const,
+    })
     await transports.client.write(message as unknown as AnyClientMessageOf<HubProtocol>)
     const response = await transports.client.read()
 

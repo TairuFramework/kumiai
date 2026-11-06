@@ -1,3 +1,8 @@
+export type DetectRosterChangeParams = {
+  before: Array<string>
+  after: Array<string>
+}
+
 /**
  * Detect a roster CHANGE by diffing the roster around a Commit's application: the DIDs a handle
  * held before applying against the DIDs it holds after. `true` iff the two sets differ at all —
@@ -21,7 +26,7 @@
  * a stale-leaf replacement (a Remove and an Add of the same DID in one Commit), which
  * {@link detectLeafAdmission} sees.
  */
-export function detectRosterChange(before: Array<string>, after: Array<string>): boolean {
+export function detectRosterChange({ before, after }: DetectRosterChangeParams): boolean {
   const held = new Set(before)
   const present = new Set(after)
   if (held.size !== present.size) return true
@@ -29,6 +34,11 @@ export function detectRosterChange(before: Array<string>, after: Array<string>):
     if (!present.has(did)) return true
   }
   return false
+}
+
+export type DetectLeafAdmissionParams = {
+  before: Array<string>
+  after: Array<string>
 }
 
 /**
@@ -42,7 +52,7 @@ export function detectRosterChange(before: Array<string>, after: Array<string>):
  * replacing the leaf node it was Added with, or a Remove — neither is an Add, and the first must
  * not rotate.
  */
-export function detectLeafAdmission(before: Array<string>, after: Array<string>): boolean {
+export function detectLeafAdmission({ before, after }: DetectLeafAdmissionParams): boolean {
   const held = new Set(before)
   for (const admission of after) {
     if (!held.has(admission)) return true

@@ -10,14 +10,14 @@ describe('fake crypto', () => {
   test('wrap then unwrap round-trips and recovers the sender', async () => {
     const crypto = createFakeCrypto({ localDID: 'did:key:alice' })
     const plain = fromUTF('hello group')
-    const wrapped = await crypto.wrap(plain)
+    const wrapped = await crypto.wrap({ bytes: plain })
     // Lenient decode (never throws): the sealed frame now carries a keyed tag, which is
     // high-entropy bytes and not guaranteed to be valid UTF-8 — `toUTF`'s strict decode would
     // throw on it. What this asserts is unchanged: the sealed bytes are not readable plaintext.
     expect(new TextDecoder('utf-8', { fatal: false }).decode(wrapped)).not.toContain('hello group')
     // `unwrap` returns `GroupUnwrapResult` directly — `senderDID` is REQUIRED, so no
     // Uint8Array-shortcut normalization is needed here anymore.
-    const out = await crypto.unwrap(wrapped)
+    const out = await crypto.unwrap({ bytes: wrapped })
     expect(toUTF(out.payload)).toBe('hello group')
     expect(out.senderDID).toBe('did:key:alice')
   })
@@ -25,7 +25,7 @@ describe('fake crypto', () => {
   test('exposes epoch and exportSecret, epoch mutable for resync tests', async () => {
     const crypto = createFakeCrypto({ epoch: 1 })
     expect(crypto.epoch()).toBe(1)
-    const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
     expect(secret).toBeInstanceOf(Uint8Array)
     crypto.setEpoch(2)
     expect(crypto.epoch()).toBe(2)
@@ -33,18 +33,18 @@ describe('fake crypto', () => {
 
   test('exportSecret is bound to the epoch: a different epoch is different bytes', async () => {
     const crypto = createFakeCrypto({ epoch: 1 })
-    const { secret: atOne } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret: atOne } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
     crypto.setEpoch(2)
-    const { secret: atTwo } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret: atTwo } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
     // The property the port contract asks for and the app-lane topic rests on. A fake exporting a
     // fixed value would be a lifelong secret plus a guessable epoch number — the one thing a
     // topic derivation must not be, and it would look identical to a correct one from here.
     expect(atTwo).not.toEqual(atOne)
     // Every member is the same function of the epoch, so members AT an epoch agree — and one
     // stuck behind does not follow.
-    expect((await createFakeCrypto({ epoch: 2 }).exportSecret(APP_TOPIC_LABEL)).secret).toEqual(
-      atTwo,
-    )
+    expect(
+      (await createFakeCrypto({ epoch: 2 }).exportSecret({ label: APP_TOPIC_LABEL })).secret,
+    ).toEqual(atTwo)
     expect(fakeEpochSecret(1, APP_TOPIC_LABEL)).toEqual(atOne)
   })
 
@@ -57,8 +57,10 @@ describe('fake crypto', () => {
 
   test('exportSecret is bound to the label: two labels at the same epoch are different bytes', async () => {
     const crypto = createFakeCrypto({ epoch: 1 })
-    const { secret: appSecret } = await crypto.exportSecret(APP_TOPIC_LABEL)
-    const { secret: otherSecret } = await crypto.exportSecret('kumiai/fixtures-test/other-label')
+    const { secret: appSecret } = await crypto.exportSecret({ label: APP_TOPIC_LABEL })
+    const { secret: otherSecret } = await crypto.exportSecret({
+      label: 'kumiai/fixtures-test/other-label',
+    })
     expect(otherSecret).not.toEqual(appSecret)
   })
 
@@ -78,7 +80,7 @@ describe('fake crypto', () => {
     // Same default key/secret (members share both by default), different epochs.
     const sealer = createFakeCrypto({ epoch: epochAtSeal, localDID: 'did:key:alice' })
     const victim = createFakeCrypto({ epoch: epochAtVictim })
-    const sealed = await sealer.wrap(fromUTF('hello group'))
+    const sealed = await sealer.wrap({ bytes: fromUTF('hello group') })
     // The attacker's transform: rewrite the cleartext epoch prefix to the victim's epoch, then
     // XOR every byte AFTER it by the epoch delta — undoing exactly the keystream shift between
     // the two epochs' XOR keys, so the body and its (unbound) tag would de-XOR unchanged.
@@ -91,12 +93,12 @@ describe('fake crypto', () => {
     // Refused by the tag — NOT by the epoch-mismatch branch, which the rewritten prefix already
     // satisfies (`sealedAt === victim.epoch()`), so reaching this throw proves the tag is what
     // caught it. `unwrap` throws synchronously here, so this is `.toThrow`, not `.rejects`.
-    expect(() => victim.unwrap(translated)).toThrow(/authentication tag/)
+    expect(() => victim.unwrap({ bytes: translated })).toThrow(/authentication tag/)
     // And the refusal must not have cost the victim's ratchet: a frame genuinely sealed at the
     // victim's own epoch, same sender, same generation, still opens afterwards.
     const legitAtVictim = createFakeCrypto({ epoch: epochAtVictim, localDID: 'did:key:alice' })
-    const legit = await legitAtVictim.wrap(fromUTF('hello group'))
-    const out = await victim.unwrap(legit)
+    const legit = await legitAtVictim.wrap({ bytes: fromUTF('hello group') })
+    const out = await victim.unwrap({ bytes: legit })
     expect(out.senderDID).toBe('did:key:alice')
   })
 })
@@ -104,7 +106,7 @@ describe('fake crypto', () => {
 describe('fake crypto reads a frame’s epoch, and refuses to read one out of bytes that are not a frame', () => {
   test('a sealed frame answers with the epoch it was sealed at', async () => {
     const crypto = createFakeCrypto({ epoch: 4, localDID: 'did:key:alice' })
-    const sealed = await crypto.wrap(fromUTF('hello group'))
+    const sealed = await crypto.wrap({ bytes: fromUTF('hello group') })
     // Asked by a member at a DIFFERENT epoch, which is the only interesting case: the answer is
     // read from the frame's cleartext, so it does not need the key that opens it.
     expect(createFakeCrypto({ epoch: 9 }).frameEpoch(sealed)).toBe(4)
@@ -123,15 +125,17 @@ describe('fake crypto reads a frame’s epoch, and refuses to read one out of by
 describe('the durable app-cursor double refuses what the real store must', () => {
   test('a position older than the one it holds is refused', async () => {
     const store = createMemoryAppCursorStore()
-    await store.save('t', '000000000005')
-    await expect(store.save('t', '000000000004')).rejects.toThrow(/may not move back/)
+    await store.save({ topicID: 't', position: '000000000005' })
+    await expect(store.save({ topicID: 't', position: '000000000004' })).rejects.toThrow(
+      /may not move back/,
+    )
     // Refused, not silently ignored, and nothing was written: the guard exists so that a peer
     // that regressed its advance rule cannot leave a store that looks correct.
     expect(store.stored('t')).toBe('000000000005')
     expect(store.history('t')).toEqual(['000000000005'])
     // Forward, and standing still, are both fine.
-    await store.save('t', '000000000005')
-    await store.save('t', '000000000006')
+    await store.save({ topicID: 't', position: '000000000005' })
+    await store.save({ topicID: 't', position: '000000000006' })
     expect(store.stored('t')).toBe('000000000006')
   })
 })
@@ -140,9 +144,10 @@ describe('fake hub', () => {
   test('delivers published payloads to topic subscribers, excluding the sender', async () => {
     const hub = new FakeHub()
     const received: Array<string> = []
-    hub.subscribe('bob', 'topic:1')
+    hub.subscribe({ subscriberDID: 'bob', topicID: 'topic:1' })
     void (async () => {
-      for await (const msg of hub.receive('bob')) received.push(toUTF(msg.payload))
+      for await (const msg of hub.receive({ subscriberDID: 'bob' }))
+        received.push(toUTF(msg.payload))
     })()
     await hub.publish({ senderDID: 'alice', topicID: 'topic:1', payload: fromUTF('hi') })
     await new Promise((r) => setTimeout(r, 10))
@@ -152,9 +157,10 @@ describe('fake hub', () => {
   test('does not deliver to the sender even if subscribed', async () => {
     const hub = new FakeHub()
     const received: Array<string> = []
-    hub.subscribe('alice', 'topic:1')
+    hub.subscribe({ subscriberDID: 'alice', topicID: 'topic:1' })
     void (async () => {
-      for await (const msg of hub.receive('alice')) received.push(toUTF(msg.payload))
+      for await (const msg of hub.receive({ subscriberDID: 'alice' }))
+        received.push(toUTF(msg.payload))
     })()
     await hub.publish({ senderDID: 'alice', topicID: 'topic:1', payload: fromUTF('hi') })
     await new Promise((r) => setTimeout(r, 10))
@@ -164,10 +170,10 @@ describe('fake hub', () => {
   test('subscriberCount reflects subscribe/unsubscribe', () => {
     const hub = new FakeHub()
     expect(hub.subscriberCount('t')).toBe(0)
-    hub.subscribe('a', 't')
-    hub.subscribe('b', 't')
+    hub.subscribe({ subscriberDID: 'a', topicID: 't' })
+    hub.subscribe({ subscriberDID: 'b', topicID: 't' })
     expect(hub.subscriberCount('t')).toBe(2)
-    hub.unsubscribe('a', 't')
+    hub.unsubscribe({ subscriberDID: 'a', topicID: 't' })
     expect(hub.subscriberCount('t')).toBe(1)
   })
 })
@@ -180,20 +186,26 @@ test('memory recovery retains verdict keys after GroupInfo until their bounded l
     const members = ['did:key:alice', 'did:key:bob']
     const alice = createMemoryGroupMLS({ localDID: members[0], members })
     const bob = createMemoryGroupMLS({ localDID: members[1], members })
-    const request = await bob.createRecoveryRequest('expiry')
-    const pending = await bob.applyRecovery(await alice.sealGroupInfo(request), 'expiry')
-    expect(pending).not.toBeNull()
-    const sealed = await alice.sealRecoveryVerdict(request, {
-      groupID: 'memory-group',
+    const request = await bob.createRecoveryRequest({ requestID: 'expiry' })
+    const pending = await bob.applyRecovery({
+      sealed: await alice.sealGroupInfo(request),
       requestID: 'expiry',
-      position: 'position',
-      commitDigest: 'digest',
-      verdict: 'superseded',
     })
-    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).not.toBeNull()
-    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).not.toBeNull()
+    expect(pending).not.toBeNull()
+    const sealed = await alice.sealRecoveryVerdict({
+      request,
+      verdict: {
+        groupID: 'memory-group',
+        requestID: 'expiry',
+        position: 'position',
+        commitDigest: 'digest',
+        verdict: 'superseded',
+      },
+    })
+    expect(await bob.openRecoveryVerdict({ sealed, requestID: 'expiry' })).not.toBeNull()
+    expect(await bob.openRecoveryVerdict({ sealed, requestID: 'expiry' })).not.toBeNull()
     clock.mockReturnValue(270_000)
-    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).toBeNull()
+    expect(await bob.openRecoveryVerdict({ sealed, requestID: 'expiry' })).toBeNull()
   } finally {
     clock.mockRestore()
   }

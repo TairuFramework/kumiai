@@ -58,7 +58,9 @@ async function inviteWith(recipientDID: string, keyPackage: string): Promise<Inv
       return token
     })
 
-  const { group } = await createGroup(inviter, `group:join-test-${recipientDID}`, {
+  const { group } = await createGroup({
+    identity: inviter,
+    groupID: `group:join-test-${recipientDID}`,
     resolveLedgerEntries,
   })
   const { invite } = await createInvite({
@@ -69,7 +71,7 @@ async function inviteWith(recipientDID: string, keyPackage: string): Promise<Inv
   })
   for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
 
-  const added = await commitInvite(group, publicPackage, invite)
+  const added = await commitInvite({ group, keyPackage: publicPackage, invite })
   return {
     welcome: added.welcomeMessage,
     invite,
@@ -84,7 +86,7 @@ async function inviteFromPool(): Promise<InviteAndCommit & { usedRef: string }> 
   if (keyPackage == null) throw new Error('test setup: the pool has nothing to fetch')
   const publicPackage = decodeKeyPackage(keyPackage)
   if (publicPackage == null) throw new Error('test setup: fetched key package did not decode')
-  const usedRef = await keyPackageRef(publicPackage)
+  const usedRef = await keyPackageRef({ keyPackage: publicPackage })
 
   const { welcome, invite, ratchetTree } = await inviteWith(hub.identity.id, keyPackage)
   return { welcome, invite, ratchetTree, usedRef }
@@ -100,7 +102,7 @@ async function inviteFromLastResortSlot(): Promise<InviteAndCommit> {
 /** An invite for someone else entirely, so none of `hub.identity`'s retained bundles match it. */
 async function inviteAStranger(): Promise<InviteAndCommit> {
   const stranger = randomIdentity()
-  const bundle = await createKeyPackageBundle(stranger)
+  const bundle = await createKeyPackageBundle({ identity: stranger })
   return await inviteWith(stranger.id, encodeKeyPackage(bundle.publicPackage))
 }
 
@@ -293,12 +295,15 @@ describe('processWelcomeFromSources', () => {
     const poolStore = createMemoryKeyPackagePoolStore()
     // A record that fails to round-trip: `pool.bundles()` throws loudly for it, same as
     // `pool.test.ts`'s "throws on a record that does not round-trip" case.
-    await poolStore.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'corrupt',
-      keyPackage: 'not-a-key-package',
-      privatePackage: 'not-a-private-package',
-      notAfter: Math.floor(Date.now() / 1000) + 86_400,
+    await poolStore.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'corrupt',
+        keyPackage: 'not-a-key-package',
+        privatePackage: 'not-a-private-package',
+        notAfter: Math.floor(Date.now() / 1000) + 86_400,
+      },
     })
     const pool = createKeyPackagePool({
       identity: hub.identity,
@@ -334,12 +339,15 @@ describe('processWelcomeFromSources', () => {
 
   test('names a source that could not be read when nothing matches at all', async () => {
     const poolStore = createMemoryKeyPackagePoolStore()
-    await poolStore.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'corrupt',
-      keyPackage: 'not-a-key-package',
-      privatePackage: 'not-a-private-package',
-      notAfter: Math.floor(Date.now() / 1000) + 86_400,
+    await poolStore.put({
+      ownerDID: hub.identity.id,
+      record: {
+        kind: 'ordinary',
+        ref: 'corrupt',
+        keyPackage: 'not-a-key-package',
+        privatePackage: 'not-a-private-package',
+        notAfter: Math.floor(Date.now() / 1000) + 86_400,
+      },
     })
     const pool = createKeyPackagePool({
       identity: hub.identity,

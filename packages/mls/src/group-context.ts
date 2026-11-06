@@ -1,3 +1,4 @@
+import type { CryptoOptions } from '@kokuin/token'
 import {
   type Capabilities,
   type CiphersuiteName,
@@ -81,7 +82,7 @@ export function copyClientConfig(config: ClientConfig): ClientConfig {
 }
 
 /** Late-bound provider of a context's device deny set, pointed at the live handle after construction. */
-export type DeviceDenyHolder = {
+export type DeviceDenyHolder = CryptoOptions & {
   provider: () => ReadonlySet<string>
   judging?: () => JudgingContext
   leafLifetime?: number
@@ -116,6 +117,9 @@ export async function withJudging<T>(
 
 function authenticationFor(holder: DeviceDenyHolder): MlsContext['authService'] {
   return createDIDAuthenticationService({
+    get crypto() {
+      return holder.crypto
+    },
     deviceDenySet: () => holder.provider(),
     judging: () => holder.judging?.() ?? { stage: 'full', mode: 'admit' },
     mayKeepDeniedIssuer: () => holder.judging?.().mode === 'retain',
@@ -130,17 +134,19 @@ export async function resolveMlsContext(
 ): Promise<MlsContext> {
   const name = (options?.ciphersuiteName ?? DEFAULT_CIPHERSUITE) as CiphersuiteName
   const cipherSuite = await getCiphersuiteImpl(name, options?.cryptoProvider ?? nobleCryptoProvider)
-  return createMlsContext(cipherSuite, anchor)
+  return createMlsContext(cipherSuite, anchor, undefined, options)
 }
 
 export function createMlsContext(
   cipherSuite: MlsContext['cipherSuite'],
   anchor?: GroupAnchor,
   clientConfig?: ClientConfig,
+  options?: CryptoOptions,
 ): MlsContext {
   // The deny set cannot be known here — the handle that folds it does not exist yet. Bind a mutable
   // holder the auth service reads; the GroupHandle constructor points it at its own currentDenySet().
   const holder: DeviceDenyHolder = {
+    crypto: options?.crypto,
     provider: () => EMPTY_DENY,
     leafLifetime: anchor?.controller == null ? undefined : (anchor.leafLifetime ?? 86_400),
     trustedGrantLifetime:
