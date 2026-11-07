@@ -12,6 +12,7 @@ import {
   createHubTunnelTransport,
   decodeFrame,
   encodeFrame,
+  type HubFrame,
   type MailboxHub,
 } from '@kumiai/hub-tunnel'
 import { createRuntime, type Runtime } from '@sozai/runtime'
@@ -128,6 +129,9 @@ export type DirectedClientParams = {
   requestTimeoutMs?: number
 }
 
+const CALL_TYPES = new Set(['request', 'stream', 'channel', 'event', 'send', 'abort'])
+const REPLY_TYPES = new Set(['result', 'receive', 'error'])
+
 /**
  * Directed 1:1 RPC client to a single member, over a hub-tunnel transport whose
  * send/receive topics are the two members' inbox topics for the current epoch.
@@ -142,6 +146,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
   const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap, protocol } = params
   const requestTimeoutMs = params.requestTimeoutMs ?? DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS
   const { getRandomID } = params.runtime ?? createRuntime()
+  const sessionID = getRandomID()
   let unsubscribe: (() => void) | undefined
   const hub: MailboxHub = {
     async publish(publishParams) {
@@ -179,6 +184,14 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
           message.senderDID !== memberDID
         )
           return
+        let frame: HubFrame
+        try {
+          frame = decodeFrame(message.payload)
+        } catch {
+          return
+        }
+        if (frame.sessionID !== sessionID) return
+        if (frame.kind === 'message' && !REPLY_TYPES.has(frame.body.payload.typ)) return
         if (resolveNext != null) {
           const resolve = resolveNext
           resolveNext = undefined
@@ -212,7 +225,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
   }
   const transport = createHubTunnelTransport({
     hub,
-    sessionID: getRandomID(),
+    sessionID,
     localDID,
     sendTopicID,
     receiveTopicID,
@@ -428,7 +441,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   const unsubscribe = inbound((message) => {
     if (message.topicID !== selfInboxTopic || message.protocol !== protocolName) return
     const senderDID = message.senderDID
-    let frame: ReturnType<typeof decodeFrame>
+    let frame: HubFrame
     try {
       frame = decodeFrame(message.payload)
     } catch {
@@ -442,7 +455,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
       }
       return
     }
-    if (frame.kind !== 'message') return
+    if (frame.kind !== 'message' || !CALL_TYPES.has(frame.body.payload.typ)) return
     // Drop a sender mismatch on an established session (splice attempt) BEFORE re-encoding, so a
     // hostile member cannot make us serialise a large frame per rejected splice.
     if (existing != null && existing.senderDID !== senderDID) return
