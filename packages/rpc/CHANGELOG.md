@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.13.1
+
+### Patch Changes
+
+- Filter directed inbox frames by Enkaku payload direction and client session so calls and replies reach only their intended consumer.
+
 ## 0.13.0
 
 ### Minor Changes

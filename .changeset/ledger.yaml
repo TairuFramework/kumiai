@@ -620,6 +620,10 @@
   intents:
     - kokuin-0-7
     - params-object
+"@kumiai/rpc@0.13.1":
+  dir: packages/rpc
+  intents:
+    - directed-frame-direction
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:
