@@ -140,6 +140,10 @@
   intents:
     - kokuin-0-7
     - stack-align
+"@kumiai/hub-http@0.13.1":
+  dir: packages/hub-http
+  intents:
+    - relay-attribution
 "@kumiai/hub-protocol@0.10.0":
   dir: packages/hub-protocol
   intents:
@@ -165,6 +169,10 @@
   intents:
     - kokuin-0-7
     - params-object
+"@kumiai/hub-protocol@0.13.1":
+  dir: packages/hub-protocol
+  intents:
+    - relay-attribution
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -228,6 +236,10 @@
   dir: packages/hub-server
   intents:
     - kokuin-0-7
+"@kumiai/hub-server@0.13.1":
+  dir: packages/hub-server
+  intents:
+    - relay-attribution
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -268,6 +280,10 @@
   intents:
     - kokuin-0-7
     - stack-align
+"@kumiai/hub-store@0.13.1":
+  dir: packages/hub-store
+  intents:
+    - relay-attribution
 "@kumiai/hub-tunnel@0.10.0":
   dir: packages/hub-tunnel
   intents:
