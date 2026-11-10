@@ -1,8 +1,8 @@
 ---
-"@kumiai/hub-protocol": minor
-"@kumiai/hub-store": minor
-"@kumiai/hub-server": minor
-"@kumiai/hub-http": minor
+"@kumiai/hub-protocol": patch
+"@kumiai/hub-store": patch
+"@kumiai/hub-server": patch
+"@kumiai/hub-http": patch
 ---
 
 Add optional publish attribution, invocation hooks and SQL occupancy reporting for relay accounting.
