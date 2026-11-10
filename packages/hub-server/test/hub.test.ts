@@ -1,6 +1,7 @@
 import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
-import { type InvocationContext, MemoryReplayCache } from '@enkaku/server'
+import type { InvocationContext } from '@enkaku/server'
+import { MemoryReplayCache } from '@enkaku/server'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import type { HubAttribution, HubProtocol, HubStore } from '@kumiai/hub-protocol'
@@ -614,7 +615,6 @@ describe('hub invocation and attribution', () => {
       },
     })
     try {
-      // Exercise both the initial transport and a subsequently attached transport.
       const first = ctx.connect()
       const second = ctx.connect()
       for (const { client, identity } of [first, second]) {

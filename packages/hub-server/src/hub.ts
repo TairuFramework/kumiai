@@ -12,15 +12,14 @@ import type { CryptoOptions, Identity } from '@kokuin/token'
 import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
 import { hubProtocol } from '@kumiai/hub-protocol'
 
-import {
-  type AuthorizeHook,
-  type CreateHandlersParams,
-  createHandlers,
-  createStoreErrorReporter,
-  type HubRateLimits,
-  type HubStoreErrorHook,
-  type KeyPackageFetchLimits,
+import type {
+  AuthorizeHook,
+  CreateHandlersParams,
+  HubRateLimits,
+  HubStoreErrorHook,
+  KeyPackageFetchLimits,
 } from './handlers.js'
+import { createHandlers, createStoreErrorReporter } from './handlers.js'
 import { HubClientRegistry } from './registry.js'
 import { createWakeDispatcher } from './wake.js'
 
@@ -81,9 +80,8 @@ export type CreateHubParams = CryptoOptions & {
    * delegated capabilities.
    */
   verifyToken?: VerifyTokenHook
-  /** Called before handlers with the verified invocation context. Forwarded to `serve()`. */
   onInvocation?: InvocationHook
-  /** Resolves publish attribution. An absent result attributes directly to the sender. */
+  /** An absent result attributes directly to the sender. */
   resolveAttribution?: CreateHandlersParams['resolveAttribution']
   /** Publish rate limits. Merged over {@link DEFAULT_RATE_LIMITS}. */
   rateLimits?: Partial<HubRateLimits>

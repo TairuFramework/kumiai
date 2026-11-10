@@ -1,32 +1,35 @@
 import type { Adapter } from '@hozon/adapter'
-import { type Kysely, sql, withStoreTransaction } from '@hozon/db'
+import type { Kysely } from '@hozon/db'
+import { sql, withStoreTransaction } from '@hozon/db'
+import type {
+  AckParams,
+  CountKeyPackagesParams,
+  FetchKeyPackagesParams,
+  FetchLastResortKeyPackageParams,
+  FetchParams,
+  FetchResult,
+  FetchTopicParams,
+  FetchTopicResult,
+  GetSubscribersParams,
+  HubStore,
+  HubStoreEvents,
+  OccupancyRow,
+  PublishParams,
+  PublishResult,
+  PurgeParams,
+  StoredMessage,
+  StoreKeyPackageParams,
+  StoreLastResortKeyPackageParams,
+  SubscribeParams,
+  TrimParams,
+  UnsubscribeParams,
+} from '@kumiai/hub-protocol'
 import {
-  type AckParams,
-  type CountKeyPackagesParams,
-  type FetchKeyPackagesParams,
-  type FetchLastResortKeyPackageParams,
-  type FetchParams,
-  type FetchResult,
-  type FetchTopicParams,
-  type FetchTopicResult,
-  type GetSubscribersParams,
   HeadMismatchError,
-  type HubStore,
-  type HubStoreEvents,
   KeyPackageQuotaExceededError,
   NotSubscribedError,
-  type OccupancyRow,
-  type PublishParams,
-  type PublishResult,
-  type PurgeParams,
   RetentionExceededError,
-  type StoredMessage,
-  type StoreKeyPackageParams,
-  type StoreLastResortKeyPackageParams,
-  type SubscribeParams,
   SubscriptionQuotaExceededError,
-  type TrimParams,
-  type UnsubscribeParams,
 } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
@@ -814,18 +817,22 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
   async function occupancy(): Promise<Array<OccupancyRow>> {
     const rows = await db
       .selectFrom('hub_messages')
-      .select((eb) => [
-        eb.fn.coalesce('account', 'sender_did').as('account'),
-        eb.fn.coalesce('actor', 'sender_did').as('actor'),
-        eb.fn.coalesce(eb.ref('via'), sql<'direct'>`'direct'`).as('via'),
-        eb.fn.sum<number>('payload_size').as('bytes'),
-        eb.fn.countAll<number>().as('frames'),
-      ])
-      .groupBy((eb) => [
-        eb.fn.coalesce('account', 'sender_did'),
-        eb.fn.coalesce('actor', 'sender_did'),
-        eb.fn.coalesce(eb.ref('via'), sql<'direct'>`'direct'`),
-      ])
+      .select((eb) => {
+        return [
+          eb.fn.coalesce('account', 'sender_did').as('account'),
+          eb.fn.coalesce('actor', 'sender_did').as('actor'),
+          eb.fn.coalesce(eb.ref('via'), sql<'direct'>`'direct'`).as('via'),
+          eb.fn.sum<number>('payload_size').as('bytes'),
+          eb.fn.countAll<number>().as('frames'),
+        ]
+      })
+      .groupBy((eb) => {
+        return [
+          eb.fn.coalesce('account', 'sender_did'),
+          eb.fn.coalesce('actor', 'sender_did'),
+          eb.fn.coalesce(eb.ref('via'), sql<'direct'>`'direct'`),
+        ]
+      })
       .execute()
     return rows.map((row) => ({ ...row, bytes: Number(row.bytes), frames: Number(row.frames) }))
   }

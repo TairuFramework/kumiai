@@ -124,10 +124,11 @@ describe.each(backends())('hub attribution ($name)', (backend) => {
     const definition = createHubStoreDefinition()
     db.register({
       ...definition,
-      migrations: (ctx) =>
-        Object.fromEntries(
+      migrations: (ctx) => {
+        return Object.fromEntries(
           Object.entries(hubStoreMigrations(ctx)).filter(([name]) => name === '0-init'),
-        ),
+        )
+      },
     })
     await getHubStore(db)
     const tables = await hubTables(db)

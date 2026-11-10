@@ -9,7 +9,8 @@ Add optional publish attribution, invocation hooks and SQL occupancy reporting f
 Attribution uses `{ account, actor, via: 'direct' | 'delegated' | 'group' }`.
 The default is direct attribution to the authenticated sender. Only a verified delegation yields delegated attribution.
 
-Breaking: custom `HubStore` implementations must return required `PublishResult.outcome` and `storedBytes` fields.
+WARNING: return `PublishResult.outcome` and `storedBytes` from custom `HubStore` implementations.
+These fields are now required for storage accounting.
 Outcomes are `inserted`, `deduplicated` and `no-recipients`. Only inserted frames contribute stored bytes.
 The development memory store also returns these outcomes.
 

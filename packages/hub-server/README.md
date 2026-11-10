@@ -5,8 +5,8 @@ client registry for push fan-out, and an in-memory `HubStore` for development an
 
 ## Exports
 
-- `createHub({ transport, store, identity, ... })` — the whole server: handlers, registry, access
-  rules, rate limits, and an optional scheduled purge. Returns `{ registry, server, dispose }`.
+- `createHub({ transport, store, identity, ... })` -- handlers, registry, access rules, rate limits and an optional scheduled purge.
+  Returns `{ registry, server, dispose }`.
 - `createHandlers({ registry, store, ... })` — the handlers alone, for a host assembling its own
   server.
 - `createMemoryStore({ maxDepth?, retention? })` — an in-memory `HubStore`. For testing and
