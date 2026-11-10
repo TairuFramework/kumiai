@@ -215,7 +215,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       if (params.publishID != null) {
         const accepted = publishRecords.get(params.publishID)
         if (accepted !== undefined) {
-          return { sequenceID: accepted, deduped: true }
+          return { sequenceID: accepted, deduped: true, outcome: 'deduplicated', storedBytes: 0 }
         }
       }
 
@@ -256,7 +256,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       // A mailbox frame with no recipients has already been read by everyone who was going to
       // read it. A log frame is kept regardless: its reader may not exist yet.
       if (retain === 'mailbox' && recipients.size === 0) {
-        return { sequenceID, deduped: false }
+        return { sequenceID, deduped: false, outcome: 'no-recipients', storedBytes: 0 }
       }
 
       const entry: LogEntry = {
@@ -303,7 +303,12 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         }
       }
 
-      return { sequenceID, deduped: false }
+      return {
+        sequenceID,
+        deduped: false,
+        outcome: 'inserted',
+        storedBytes: params.payload.byteLength,
+      }
     },
 
     async fetch(params: FetchParams): Promise<FetchResult> {

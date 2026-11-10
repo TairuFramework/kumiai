@@ -4,7 +4,13 @@ import {
   type ProcedureHandlers,
   type RequestHandler,
 } from '@enkaku/server'
-import type { HubProtocol, HubStore, StoredMessage, WakeRegistry } from '@kumiai/hub-protocol'
+import type {
+  HubAttribution,
+  HubProtocol,
+  HubStore,
+  StoredMessage,
+  WakeRegistry,
+} from '@kumiai/hub-protocol'
 import {
   HUB_ERROR_CODES,
   hubErrorCodeOf,
@@ -263,6 +269,10 @@ export type CreateHandlersParams = {
   registry: HubClientRegistry
   store: HubStore
   authorize?: AuthorizeHook
+  resolveAttribution?: (params: {
+    message: unknown
+    senderDID: string
+  }) => HubAttribution | undefined | Promise<HubAttribution | undefined>
   rateLimits?: Partial<HubRateLimits>
   keyPackageFetchLimits?: Partial<KeyPackageFetchLimits>
   /** Max frames queued-but-unflushed on a receive channel. See {@link DEFAULT_RECEIVE_BUFFER_LIMIT}
@@ -482,8 +492,17 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       let sequenceID: string
       let deduped: boolean
       try {
+        const attribution = (await params.resolveAttribution?.({
+          message: ctx.message,
+          senderDID,
+        })) ?? {
+          account: senderDID,
+          actor: senderDID,
+          via: 'direct',
+        }
         const result = await store.publish({
           senderDID,
+          attribution,
           topicID,
           payload: payloadBytes,
           retain: ctx.param.retain,

@@ -1,5 +1,11 @@
 import type { ServerTransportOf } from '@enkaku/protocol'
-import type { AccessRules, ReplayOptions, ResourceLimits, Server } from '@enkaku/server'
+import type {
+  AccessRules,
+  InvocationHook,
+  ReplayOptions,
+  ResourceLimits,
+  Server,
+} from '@enkaku/server'
 import { serve } from '@enkaku/server'
 import type { VerifyTokenHook } from '@kokuin/capability'
 import type { CryptoOptions, Identity } from '@kokuin/token'
@@ -8,6 +14,7 @@ import { hubProtocol } from '@kumiai/hub-protocol'
 
 import {
   type AuthorizeHook,
+  type CreateHandlersParams,
   createHandlers,
   createStoreErrorReporter,
   type HubRateLimits,
@@ -74,6 +81,10 @@ export type CreateHubParams = CryptoOptions & {
    * delegated capabilities.
    */
   verifyToken?: VerifyTokenHook
+  /** Called before handlers with the verified invocation context. Forwarded to `serve()`. */
+  onInvocation?: InvocationHook
+  /** Resolves publish attribution. An absent result attributes directly to the sender. */
+  resolveAttribution?: CreateHandlersParams['resolveAttribution']
   /** Publish rate limits. Merged over {@link DEFAULT_RATE_LIMITS}. */
   rateLimits?: Partial<HubRateLimits>
   /**
@@ -141,6 +152,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     registry,
     store: params.store,
     authorize: params.authorize,
+    resolveAttribution: params.resolveAttribution,
     rateLimits: params.rateLimits,
     keyPackageFetchLimits: params.keyPackageFetchLimits,
     receiveAuthCacheTTL: params.receiveAuthCacheTTL,
@@ -164,6 +176,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     crypto: params.crypto,
     accessRules: params.accessRules ?? DEFAULT_HUB_ACCESS_RULES,
     verifyToken: params.verifyToken,
+    onInvocation: params.onInvocation,
     replay: { ...params.replay, enabled: true, rejectStale: true },
     limits,
   })

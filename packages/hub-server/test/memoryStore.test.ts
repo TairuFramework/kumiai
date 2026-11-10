@@ -9,6 +9,47 @@ const CAROL = 'did:key:carol'
 const TOPIC = 'topic:1'
 
 describe('createMemoryStore pub/sub', () => {
+  test.each(['mailbox', 'log'] as const)(
+    'reports inserted bytes and deduplicated zero bytes for %s',
+    async (retain) => {
+      const store = createMemoryStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      const params = {
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: new Uint8Array([1, 2, 3]),
+        retain,
+        publishID: 'publish-1',
+      }
+      const inserted = await store.publish(params)
+      expect(inserted).toMatchObject({ deduped: false, outcome: 'inserted', storedBytes: 3 })
+      await expect(store.publish(params)).resolves.toEqual({
+        sequenceID: inserted.sequenceID,
+        deduped: true,
+        outcome: 'deduplicated',
+        storedBytes: 0,
+      })
+    },
+  )
+
+  test.each([
+    { retain: 'mailbox', outcome: 'no-recipients', storedBytes: 0 },
+    { retain: 'log', outcome: 'inserted', storedBytes: 3 },
+  ] as const)(
+    'reports $outcome with no recipients for $retain',
+    async ({ retain, outcome, storedBytes }) => {
+      const store = createMemoryStore()
+      await expect(
+        store.publish({
+          senderDID: ALICE,
+          topicID: TOPIC,
+          payload: new Uint8Array([1, 2, 3]),
+          retain,
+        }),
+      ).resolves.toMatchObject({ deduped: false, outcome, storedBytes })
+    },
+  )
+
   test('a mailbox publish with no subscribers is dropped: nobody was ever going to read it', async () => {
     const store = createMemoryStore()
     const { sequenceID: id } = await store.publish({
