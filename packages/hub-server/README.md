@@ -6,7 +6,7 @@ client registry for push fan-out, and an in-memory `HubStore` for development an
 ## Exports
 
 - `createHub({ transport, store, identity, ... })` — the whole server: handlers, registry, access
-  rules, rate limits, and an optional scheduled purge. Returns `{ registry, server }`.
+  rules, rate limits, and an optional scheduled purge. Returns `{ registry, server, dispose }`.
 - `createHandlers({ registry, store, ... })` — the handlers alone, for a host assembling its own
   server.
 - `createMemoryStore({ maxDepth?, retention? })` — an in-memory `HubStore`. For testing and
@@ -160,3 +160,19 @@ rather than passing silently. Pass an empty handler to silence it deliberately.
 There is no throttling: a permanently broken store reports per request. logtape ships
 `getThrottlingFilter`, so rate control belongs in the app's sink configuration where an operator
 can tune it.
+
+## Invocation hooks and attribution
+
+`createHub` accepts optional `onInvocation`, forwarded to the Enkaku server for authenticated invocation context and delegation verification.
+`createHub` and `createHandlers` accept optional `resolveAttribution({ message, senderDID })`.
+The resolver can return `HubAttribution`, `undefined`, or a promise of either.
+
+Without a resolver result, publishes use `{ account: senderDID, actor: senderDID, via: 'direct' }`.
+The sender DID still comes from the verified signature.
+A resolver supplies host accounting metadata rather than changing the authenticated sender or authorisation rules.
+Only a verified delegation yields `via: 'delegated'`. A claimed subject alone does not prove delegation.
+Hosts can use `onInvocation` to verify delegation before resolving attribution.
+
+The store receives the resolved attribution with the publish.
+The SQL stores persist it. The development memory store reports publish outcomes but does not implement occupancy sampling.
+Unconfigured hooks preserve existing routing, retention and delivery behaviour.
