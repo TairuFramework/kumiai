@@ -47,6 +47,36 @@ function connect(url: string, serverID: string) {
 }
 
 describe('hub HTTP server', () => {
+  test('forwards invocation, attribution and transport hooks', async () => {
+    const identity = randomIdentity()
+    const calls: Array<string> = []
+    const writtenBytes: Array<number> = []
+    let invocationMessage: unknown
+    const server = await start({
+      db: ':memory:',
+      identity,
+      onInvocation: (ctx) => {
+        calls.push('invocation')
+        invocationMessage = ctx.message
+      },
+      resolveAttribution: ({ message, senderDID }) => {
+        expect(message).toBe(invocationMessage)
+        calls.push('attribution')
+        return { account: senderDID, actor: senderDID, via: 'direct' }
+      },
+      transport: {
+        enforceSessionOwner: true,
+        onFrameWritten: ({ bytes }) => {
+          writtenBytes.push(bytes)
+        },
+      },
+    })
+    const { client } = connect(server.url, identity.id)
+    await client.request('hub/v1/publish', { param: { topicID: TOPIC, payload: PAYLOAD } })
+    expect(calls).toEqual(['invocation', 'attribution'])
+    expect(writtenBytes.some((bytes) => bytes > 0)).toBe(true)
+  })
+
   test('publishes and fetches over HTTP', async () => {
     const identity = randomIdentity()
     const server = await start({ db: ':memory:', identity })
@@ -79,7 +109,7 @@ describe('hub HTTP server', () => {
       await expect(
         client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
       ).resolves.toEqual({ subscribed: true })
-      await grants.store.revoke({ subject: caller.id, pattern: 'hub/*' })
+      await grants.store.revoke({ subject: caller.id, pattern: 'hub/*', createdBy: identity.id })
       await expect(
         client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
       ).rejects.toThrow('Access denied')

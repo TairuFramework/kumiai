@@ -1,10 +1,23 @@
 import type { ColumnType } from '@hozon/db'
+import type { HubAttribution } from '@kumiai/hub-protocol'
 
 export type HubTables = {
+  hub_meta: {
+    key: string
+    value: string
+  }
   hub_messages: {
     sequence_id: string
     sender_did: string
     topic_id: string
+    payload_size: ColumnType<number, number | undefined, number>
+    account: ColumnType<string | null, string | null | undefined, string | null>
+    actor: ColumnType<string | null, string | null | undefined, string | null>
+    via: ColumnType<
+      HubAttribution['via'] | null,
+      HubAttribution['via'] | null | undefined,
+      HubAttribution['via'] | null
+    >
     payload: Uint8Array
     stored_at: number
     // Retention class: 'log' (removed only by trim, depth or age) or 'mailbox'

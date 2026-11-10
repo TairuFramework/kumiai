@@ -79,3 +79,25 @@ It is present exactly when the frame is log-class and absent otherwise. A mailbo
 in any log, so an empty string or a zero would be a lie a cursor acts on — and a cursor moved to a
 position the log does not contain skips every frame between it and the real one, permanently and
 silently. The store is the one party that can report it, because it assigned both.
+
+## Attribution and publish outcomes
+
+`HubAttribution` is `{ account, actor, via: 'direct' | 'delegated' | 'group' }`.
+`PublishParams.attribution` is optional host metadata, never a caller-controlled wire field.
+Only a verified delegation yields `via: 'delegated'`.
+
+`PublishOutcome` is `'inserted' | 'deduplicated' | 'no-recipients'`.
+`PublishResult` requires `outcome` and `storedBytes`, alongside `sequenceID` and `deduped`.
+Custom `HubStore` implementations must add these fields when upgrading.
+
+- `inserted`: a new frame was stored. `storedBytes` is its payload byte length, counted once regardless of delivery fan-out.
+- `deduplicated`: the publish ID already exists. `storedBytes` is `0`, even if the original frame still exists.
+- `no-recipients`: a mailbox publish had no recipients and stored no frame. `storedBytes` is `0`.
+
+Log publishes can be inserted without subscribers. Deduplicated publishes are never counted as stored bytes.
+These result fields describe storage effects without changing retention or deduplication semantics.
+
+`HubStore.occupancy?()` returns `Array<OccupancyRow>` grouped by account, actor and via.
+`OccupancyRow` extends `HubAttribution` with `bytes` and `frames`, counting retained physical frames rather than delivery rows.
+`HubStore.storeID?()` returns a persistent store identifier for occupancy sample deduplication.
+Both methods are optional, so existing stores can omit occupancy reporting.

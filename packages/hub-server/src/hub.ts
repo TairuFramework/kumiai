@@ -1,19 +1,25 @@
 import type { ServerTransportOf } from '@enkaku/protocol'
-import type { AccessRules, ReplayOptions, ResourceLimits, Server } from '@enkaku/server'
+import type {
+  AccessRules,
+  InvocationHook,
+  ReplayOptions,
+  ResourceLimits,
+  Server,
+} from '@enkaku/server'
 import { serve } from '@enkaku/server'
 import type { VerifyTokenHook } from '@kokuin/capability'
 import type { CryptoOptions, Identity } from '@kokuin/token'
 import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
 import { hubProtocol } from '@kumiai/hub-protocol'
 
-import {
-  type AuthorizeHook,
-  createHandlers,
-  createStoreErrorReporter,
-  type HubRateLimits,
-  type HubStoreErrorHook,
-  type KeyPackageFetchLimits,
+import type {
+  AuthorizeHook,
+  CreateHandlersParams,
+  HubRateLimits,
+  HubStoreErrorHook,
+  KeyPackageFetchLimits,
 } from './handlers.js'
+import { createHandlers, createStoreErrorReporter } from './handlers.js'
 import { HubClientRegistry } from './registry.js'
 import { createWakeDispatcher } from './wake.js'
 
@@ -74,6 +80,9 @@ export type CreateHubParams = CryptoOptions & {
    * delegated capabilities.
    */
   verifyToken?: VerifyTokenHook
+  onInvocation?: InvocationHook
+  /** An absent result attributes directly to the sender. */
+  resolveAttribution?: CreateHandlersParams['resolveAttribution']
   /** Publish rate limits. Merged over {@link DEFAULT_RATE_LIMITS}. */
   rateLimits?: Partial<HubRateLimits>
   /**
@@ -141,6 +150,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     registry,
     store: params.store,
     authorize: params.authorize,
+    resolveAttribution: params.resolveAttribution,
     rateLimits: params.rateLimits,
     keyPackageFetchLimits: params.keyPackageFetchLimits,
     receiveAuthCacheTTL: params.receiveAuthCacheTTL,
@@ -164,6 +174,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     crypto: params.crypto,
     accessRules: params.accessRules ?? DEFAULT_HUB_ACCESS_RULES,
     verifyToken: params.verifyToken,
+    onInvocation: params.onInvocation,
     replay: { ...params.replay, enabled: true, rejectStale: true },
     limits,
   })

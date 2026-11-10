@@ -1,9 +1,10 @@
 import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
+import type { InvocationContext } from '@enkaku/server'
 import { MemoryReplayCache } from '@enkaku/server'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
-import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
+import type { HubAttribution, HubProtocol, HubStore } from '@kumiai/hub-protocol'
 import { fromB64, fromUTF, toB64, toB64U } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -596,6 +597,101 @@ describe('hub pub/sub', () => {
     await delay(20)
     await ctx.dispose()
   })
+})
+
+describe('hub invocation and attribution', () => {
+  test('onInvocation is called before handler with verified caller', async () => {
+    const calls: Array<string> = []
+    const seen: Array<InvocationContext> = []
+    const ctx = createTestHub({
+      onInvocation: async (invocation) => {
+        await Promise.resolve()
+        seen.push(invocation)
+        calls.push('invocation')
+      },
+      authorize: () => {
+        calls.push('handler')
+        return true
+      },
+    })
+    try {
+      const first = ctx.connect()
+      const second = ctx.connect()
+      for (const { client, identity } of [first, second]) {
+        await client.request('hub/v1/publish', {
+          param: { topicID: TOPIC, payload: encodePayload('hook') },
+        })
+        expect(seen.at(-1)).toMatchObject({
+          type: 'request',
+          procedure: 'hub/v1/publish',
+          caller: { iss: identity.id },
+          message: { payload: { iss: identity.id } },
+        })
+      }
+      expect(calls).toEqual(['invocation', 'handler', 'invocation', 'handler'])
+    } finally {
+      await ctx.dispose()
+    }
+  })
+
+  test('publish passes resolved attribution to store', async () => {
+    const store = createMemoryStore()
+    const publish = vi.spyOn(store, 'publish')
+    const attribution: HubAttribution = { account: 'account-1', actor: 'actor-1', via: 'group' }
+    let message: unknown
+    const resolveAttribution = vi.fn(async () => attribution)
+    const ctx = createTestHub({
+      store,
+      onInvocation: (invocation) => {
+        message = invocation.message
+      },
+      resolveAttribution,
+    })
+    try {
+      const { client, identity } = ctx.connect()
+      await client.request('hub/v1/publish', {
+        param: { topicID: TOPIC, payload: encodePayload('attributed') },
+      })
+      expect(resolveAttribution).toHaveBeenCalledExactlyOnceWith({
+        message,
+        senderDID: identity.id,
+      })
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          senderDID: identity.id,
+          attribution,
+        }),
+      )
+    } finally {
+      await ctx.dispose()
+    }
+  })
+
+  test.each([false, true])(
+    'default attribution is sender (resolver configured: %s)',
+    async (configured) => {
+      const store = createMemoryStore()
+      const publish = vi.spyOn(store, 'publish')
+      const ctx = createTestHub({
+        store,
+        ...(configured ? { resolveAttribution: () => undefined } : {}),
+      })
+      try {
+        const { client, identity } = ctx.connect()
+        await client.request('hub/v1/publish', {
+          param: { topicID: TOPIC, payload: encodePayload('default') },
+        })
+        expect(publish).toHaveBeenCalledWith(
+          expect.objectContaining({
+            senderDID: identity.id,
+            attribution: { account: identity.id, actor: identity.id, via: 'direct' },
+          }),
+        )
+      } finally {
+        await ctx.dispose()
+      }
+    },
+  )
 })
 
 describe('hub authorization', () => {

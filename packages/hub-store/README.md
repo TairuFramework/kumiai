@@ -11,7 +11,7 @@ server with a custom transport or when you need the store API separately.
 - `createHubStoreDefinition(options?)` -- the Hozon `StoreDefinition`, named `'kumiai-hub'`
   (`HUB_STORE`).
 - `getHubStore(provider)` -- the `SQLHubStore` from a `HozonDB` or any Hozon `StoreProvider`.
-- `HubStoreOptions`, `HubSubscriptionReaper`, and `SQLHubStore` (`HubStore & HubSubscriptionReaper`).
+- `HubStoreOptions`, `HubSubscriptionReaper`, and `SQLHubStore` (the hub contract, subscription reaping, occupancy and persistent store identity).
 
 ```ts
 import { HozonDB } from '@hozon/db'
@@ -56,3 +56,21 @@ Concurrent retries of one publish ID wait for the accepting transaction and retu
 It returns exactly the deleted `{ topicID, subscriberDID }` pairs. A subscription refreshed at the boundary survives.
 The delete and return happen atomically, so a refreshed subscription is neither removed nor reported.
 This operation emits no event. `createHub` calls it after scheduled message purge when the store supports it.
+
+## Attribution migration and occupancy
+
+Migration `1-attribution` adds `payload_size`, nullable `account`, `actor` and `via` columns, plus the `hub_meta` table.
+It backfills payload sizes and persists a generated `storeID` in `hub_meta`.
+Existing message, retention and delivery semantics remain unchanged.
+
+`publish({ ..., attribution? })` accepts `{ account, actor, via: 'direct' | 'delegated' | 'group' }`.
+Without attribution, these columns remain null.
+Legacy and unattributed rows fall back to `sender_did` for both account and actor, with `via: 'direct'`.
+
+`store.occupancy()` returns retained payload bytes and frame counts grouped by account, actor and via.
+Each physical frame counts once, regardless of recipient count.
+Ack, trim, purge and unsubscribe affect occupancy through their existing frame deletion rules.
+`store.storeID()` returns the persistent identifier shared by processes using the same store.
+
+Publish results include `outcome` and `storedBytes`.
+Only `outcome: 'inserted'` contributes payload bytes. Deduplicated and no-recipient publishes report zero stored bytes.

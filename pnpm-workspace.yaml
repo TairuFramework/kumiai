@@ -17,12 +17,12 @@ catalog:
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^5.1.0
-  '@enkaku/client': ^0.23.0
-  '@enkaku/http-fetch': ^0.23.0
-  '@enkaku/http-serve': ^0.23.0
-  '@enkaku/protocol': ^0.23.0
-  '@enkaku/server': ^0.23.0
-  '@enkaku/transport': ^0.23.0
+  '@enkaku/client': ^0.23.1
+  '@enkaku/http-fetch': ^0.23.1
+  '@enkaku/http-serve': ^0.23.1
+  '@enkaku/protocol': ^0.23.1
+  '@enkaku/server': ^0.23.1
+  '@enkaku/transport': ^0.23.1
   '@kokuin/capability': ^0.7.0
   '@kokuin/controller': ^0.7.0
   '@kokuin/crypto': ^0.7.0
@@ -50,8 +50,8 @@ catalog:
   '@hozon/node-sqlite': ^0.3.0
   '@hozon/postgres': ^0.2.1
   '@hozon/provider': ^0.3.1
-  '@teikyo/access': ^0.5.0
-  '@teikyo/enkaku': ^0.5.0
+  '@teikyo/access': ^0.6.0
+  '@teikyo/enkaku': ^0.6.0
   '@teikyo/hozon': ^0.4.0
   '@teikyo/rate-limit': ^0.2.0
   '@testcontainers/postgresql': ^12.2.1
@@ -75,8 +75,8 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.2 || 58.0.13
   - expo-modules-autolinking@57.0.2 || 58.0.14
   - expo@57.0.0 || 58.0.17
-  - '@teikyo/access@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0 || 0.5.0'
-  - '@teikyo/enkaku@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0 || 0.5.0'
+  - '@teikyo/access@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0 || 0.5.0 || 0.6.0'
+  - '@teikyo/enkaku@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0 || 0.5.0 || 0.6.0'
   - '@teikyo/hozon@0.1.0 || 0.2.0 || 0.3.0 || 0.4.0'
   - '@teikyo/rate-limit@0.1.0 || 0.2.0'
   - '@expo/config-plugins@58.0.10'

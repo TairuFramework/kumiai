@@ -125,3 +125,19 @@ Bounds this design has, on purpose, rather than hides:
   endpoint) is still reachable and its 404/410-vs-anything-else outcome is still readable back
   through `unregisterWake()`. A host on a network with internal HTTPS services must narrow
   `allowEndpoint` to an origin allowlist rather than rely on the default.
+
+## Hub attribution and storage accounting
+
+`@kumiai/hub-protocol` exports `HubAttribution`, `PublishOutcome` and `OccupancyRow` alongside the `HubStore` contract.
+Custom stores must return `PublishResult.outcome` and `storedBytes`.
+Only inserted frames contribute stored bytes. Deduplicated and no-recipient publishes report zero.
+Optional `occupancy()` and `storeID()` hooks support host accounting without changing delivery semantics.
+
+`@kumiai/hub-server` accepts optional `onInvocation` and `resolveAttribution` hooks.
+Without a resolver result, attribution is `{ account: senderDID, actor: senderDID, via: 'direct' }`.
+Only a verified delegation yields delegated attribution.
+`@kumiai/hub-http` forwards these hooks and accepts transport accounting options.
+
+`@kumiai/hub-store` applies migration `1-attribution` for payload sizes, nullable attribution and persistent store identity.
+Legacy and unattributed rows attribute occupancy to `sender_did`.
+See the [storage README](../../packages/hub-store/README.md) and [server README](../../packages/hub-server/README.md).

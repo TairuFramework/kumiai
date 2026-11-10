@@ -94,3 +94,18 @@ With multiple instances on one database, live push is per process.
 A publish on one instance does not push to receive streams on another; clients must fetch or reconnect to discover those frames.
 The default replay cache is also per process and resets on restart.
 Use `replay.cache` with a shared backend when replay protection must span instances and restarts.
+
+## Optional accounting hooks
+
+`createHubServer` and `hubPlugin` accept `onInvocation` and `resolveAttribution`, forwarded to `@kumiai/hub-server`.
+`resolveAttribution({ message, senderDID })` supplies `{ account, actor, via: 'direct' | 'delegated' | 'group' }` for publishes.
+Without a resolver result, attribution defaults to `{ account: senderDID, actor: senderDID, via: 'direct' }`.
+Only a verified delegation yields `via: 'delegated'`.
+
+Transport options accept `transport.onFrameWritten` and `transport.enforceSessionOwner` from `@enkaku/http-serve`.
+Hosts can observe output bytes and enforce authenticated session ownership through these optional hooks.
+This package does not enable relay metering automatically.
+
+The SQL store applies migration `1-attribution`, adding payload sizes, optional attribution columns and a persistent store identifier.
+Legacy rows retain their existing delivery semantics and attribute occupancy to `sender_did`.
+Extra plugins can call `occupancy()` and `storeID()` on the store returned by `getHubStore`.
