@@ -1,4 +1,4 @@
-import type { Kysely, Migration, MigrationContext } from '@hozon/db'
+import { type Kysely, type Migration, type MigrationContext, sql } from '@hozon/db'
 
 import type { HubTables } from './tables.js'
 
@@ -6,6 +6,36 @@ export function hubStoreMigrations(ctx: MigrationContext): Record<string, Migrat
   const t = ctx.types
   const p = ctx.tablePrefix
   return {
+    '1-attribution': {
+      async up(db) {
+        await db.schema
+          .alterTable('hub_messages')
+          .addColumn('payload_size', 'integer', (col) => col.notNull().defaultTo(0))
+          .execute()
+        for (const column of ['account', 'actor', 'via']) {
+          await db.schema.alterTable('hub_messages').addColumn(column, t.text).execute()
+        }
+        await (db as Kysely<HubTables>)
+          .updateTable('hub_messages')
+          .set({ payload_size: sql<number>`length(${sql.ref('payload')})` })
+          .execute()
+        await db.schema
+          .createTable('hub_meta')
+          .addColumn('key', t.text, (col) => col.notNull().primaryKey())
+          .addColumn('value', t.text, (col) => col.notNull())
+          .execute()
+        await (db as Kysely<HubTables>)
+          .insertInto('hub_meta')
+          .values({ key: 'storeID', value: crypto.randomUUID() })
+          .execute()
+      },
+      async down(db) {
+        await db.schema.dropTable('hub_meta').execute()
+        for (const column of ['via', 'actor', 'account', 'payload_size']) {
+          await db.schema.alterTable('hub_messages').dropColumn(column).execute()
+        }
+      },
+    },
     '0-init': {
       async up(db) {
         await db.schema

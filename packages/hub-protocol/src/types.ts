@@ -26,7 +26,18 @@ export type StoredMessage = {
   logPosition?: string
 }
 
+export type HubAttribution = {
+  account: string
+  actor: string
+  via: 'direct' | 'delegated' | 'group'
+}
+
+export type PublishOutcome = 'inserted' | 'deduplicated' | 'no-recipients'
+
+export type OccupancyRow = HubAttribution & { bytes: number; frames: number }
+
 export type PublishParams = {
+  attribution?: HubAttribution
   senderDID: string
   topicID: string
   payload: Uint8Array
@@ -75,6 +86,8 @@ export type PublishResult = {
    * already saw the original, and its sequenceID may already be acked and gone.
    */
   deduped: boolean
+  outcome: PublishOutcome
+  storedBytes: number
 }
 
 export type SubscribeParams = {
@@ -245,6 +258,8 @@ export type HubStoreEvents = {
  * Verified by the conformance suite in `@kumiai/hub-conformance`.
  */
 export type HubStore = {
+  occupancy?(): Promise<Array<OccupancyRow>>
+  storeID?(): Promise<string>
   events: EventEmitter<HubStoreEvents>
   publish(params: PublishParams): Promise<PublishResult>
   fetch(params: FetchParams): Promise<FetchResult>

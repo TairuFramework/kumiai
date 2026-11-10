@@ -15,7 +15,7 @@ async function migrated(): Promise<{ db: HozonDB; tables: Kysely<HubTables> }> {
 }
 
 describe('hub migrations', () => {
-  test('the whole schema is one migration', () => {
+  test('attribution extends the initial schema with a new migration', () => {
     const adapter = new NodeSQLiteAdapter({ database: ':memory:' })
     const migrations = hubStoreMigrations({
       tablePrefix: 'hozon',
@@ -23,7 +23,7 @@ describe('hub migrations', () => {
       types: adapter.types,
       functions: adapter.functions,
     })
-    expect(Object.keys(migrations)).toEqual(['0-init'])
+    expect(Object.keys(migrations).sort()).toEqual(['0-init', '1-attribution'])
   })
 
   test('a fresh database carries the columns the folded migrations used to add', async () => {

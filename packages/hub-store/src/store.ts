@@ -1,5 +1,5 @@
 import type { Adapter } from '@hozon/adapter'
-import { type Kysely, withStoreTransaction } from '@hozon/db'
+import { type Kysely, sql, withStoreTransaction } from '@hozon/db'
 import {
   type AckParams,
   type CountKeyPackagesParams,
@@ -15,6 +15,7 @@ import {
   type HubStoreEvents,
   KeyPackageQuotaExceededError,
   NotSubscribedError,
+  type OccupancyRow,
   type PublishParams,
   type PublishResult,
   type PurgeParams,
@@ -91,7 +92,11 @@ export type HubSubscriptionReaper = {
   }): Promise<Array<{ topicID: string; subscriberDID: string }>>
 }
 
-export type SQLHubStore = HubStore & HubSubscriptionReaper
+export type SQLHubStore = HubStore &
+  HubSubscriptionReaper & {
+    occupancy(): Promise<Array<OccupancyRow>>
+    storeID(): Promise<string>
+  }
 
 export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
   const { db, adapter, options = {} } = params
@@ -220,7 +225,12 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
             .where('publish_id', '=', publishParams.publishID)
             .executeTakeFirstOrThrow()
           if (existing.sequence_id == null) throw new Error('Incomplete publish-id record')
-          return { sequenceID: existing.sequence_id, deduped: true }
+          return {
+            sequenceID: existing.sequence_id,
+            deduped: true,
+            outcome: 'deduplicated',
+            storedBytes: 0,
+          }
         }
       }
 
@@ -254,14 +264,22 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
 
       // 6. Append. A log frame is stored unconditionally (its reader may not exist yet). A mailbox
       // frame with zero recipients is not stored, but the sequenceID is still consumed.
-      if (retain === 'log' || recipients.length > 0) {
+      let storedBytes = 0
+      const inserted = retain === 'log' || recipients.length > 0
+      if (inserted) {
+        const payload = adapter.encodeBinary(publishParams.payload) as Uint8Array
+        storedBytes = payload.byteLength
         await trx
           .insertInto('hub_messages')
           .values({
             sequence_id: sequenceID,
             sender_did: senderDID,
             topic_id: topicID,
-            payload: adapter.encodeBinary(publishParams.payload) as Uint8Array,
+            payload,
+            payload_size: storedBytes,
+            account: publishParams.attribution?.account ?? null,
+            actor: publishParams.attribution?.actor ?? null,
+            via: publishParams.attribution?.via ?? null,
             stored_at: Date.now(),
             retain,
           })
@@ -326,7 +344,12 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
           .execute()
       }
 
-      return { sequenceID, deduped: false }
+      return {
+        sequenceID,
+        deduped: false,
+        outcome: inserted ? 'inserted' : 'no-recipients',
+        storedBytes,
+      }
     })
   }
 
@@ -788,7 +811,37 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
     return rows.map((r) => r.subscriber_did)
   }
 
+  async function occupancy(): Promise<Array<OccupancyRow>> {
+    const rows = await db
+      .selectFrom('hub_messages')
+      .select((eb) => [
+        eb.fn.coalesce('account', 'sender_did').as('account'),
+        eb.fn.coalesce('actor', 'sender_did').as('actor'),
+        eb.fn.coalesce(eb.ref('via'), sql<'direct'>`'direct'`).as('via'),
+        eb.fn.sum<number>('payload_size').as('bytes'),
+        eb.fn.countAll<number>().as('frames'),
+      ])
+      .groupBy((eb) => [
+        eb.fn.coalesce('account', 'sender_did'),
+        eb.fn.coalesce('actor', 'sender_did'),
+        eb.fn.coalesce(eb.ref('via'), sql<'direct'>`'direct'`),
+      ])
+      .execute()
+    return rows.map((row) => ({ ...row, bytes: Number(row.bytes), frames: Number(row.frames) }))
+  }
+
+  async function storeID(): Promise<string> {
+    const row = await db
+      .selectFrom('hub_meta')
+      .select('value')
+      .where('key', '=', 'storeID')
+      .executeTakeFirstOrThrow()
+    return row.value
+  }
+
   return {
+    occupancy,
+    storeID,
     events,
     publish,
     fetch,
