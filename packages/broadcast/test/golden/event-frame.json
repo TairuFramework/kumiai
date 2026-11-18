@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "default empty data",
+      "input": {
+        "prc": "chat/posted"
+      },
+      "expected": {
+        "JSON": "{\"payload\":{\"typ\":\"event\",\"prc\":\"chat/posted\",\"data\":{}},\"v\":2}",
+        "bytes": "7b227061796c6f6164223a7b22747970223a226576656e74222c22707263223a22636861742f706f73746564222c2264617461223a7b7d7d2c2276223a327d"
+      }
+    },
+    {
+      "name": "explicit empty data",
+      "input": {
+        "prc": "chat/posted",
+        "data": {}
+      },
+      "expected": {
+        "JSON": "{\"payload\":{\"typ\":\"event\",\"prc\":\"chat/posted\",\"data\":{}},\"v\":2}",
+        "bytes": "7b227061796c6f6164223a7b22747970223a226576656e74222c22707263223a22636861742f706f73746564222c2264617461223a7b7d7d2c2276223a327d"
+      }
+    },
+    {
+      "name": "nested Unicode and escaped data",
+      "input": {
+        "prc": "chat/posted",
+        "data": {
+          "text": "組合 🔑\n\"hello\"",
+          "kind": "app",
+          "nested": {
+            "z": [
+              null,
+              true,
+              false,
+              42,
+              -1.5
+            ],
+            "a": {}
+          }
+        }
+      },
+      "expected": {
+        "JSON": "{\"payload\":{\"typ\":\"event\",\"prc\":\"chat/posted\",\"data\":{\"text\":\"組合 🔑\\n\\\"hello\\\"\",\"kind\":\"app\",\"nested\":{\"z\":[null,true,false,42,-1.5],\"a\":{}}}},\"v\":2}",
+        "bytes": "7b227061796c6f6164223a7b22747970223a226576656e74222c22707263223a22636861742f706f73746564222c2264617461223a7b2274657874223a22e7b584e5908820f09f94915c6e5c2268656c6c6f5c22222c226b696e64223a22617070222c226e6573746564223a7b227a223a5b6e756c6c2c747275652c66616c73652c34322c2d312e355d2c2261223a7b7d7d7d7d2c2276223a327d"
+      }
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty halves",
+      "input": {
+        "commit": "",
+        "sealedEntries": ""
+      },
+      "expected": {
+        "frame": "0100000000",
+        "decoded": {
+          "commit": "",
+          "sealedEntries": ""
+        }
+      }
+    },
+    {
+      "name": "binary halves",
+      "input": {
+        "commit": "00017f80ff",
+        "sealedEntries": "deadbeef00"
+      },
+      "expected": {
+        "frame": "010500000000017f80ffdeadbeef00",
+        "decoded": {
+          "commit": "00017f80ff",
+          "sealedEntries": "deadbeef00"
+        }
+      }
+    },
+    {
+      "name": "empty sealed entries",
+      "input": {
+        "commit": "ff",
+        "sealedEntries": ""
+      },
+      "expected": {
+        "frame": "0101000000ff",
+        "decoded": {
+          "commit": "ff",
+          "sealedEntries": ""
+        }
+      }
+    },
+    {
+      "name": "empty commit",
+      "input": {
+        "commit": "",
+        "sealedEntries": "00ff"
+      },
+      "expected": {
+        "frame": "010000000000ff",
+        "decoded": {
+          "commit": "",
+          "sealedEntries": "00ff"
+        }
+      }
+    },
+    {
+      "name": "multi-byte little-endian length",
+      "input": {
+        "commit": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+        "sealedEntries": "cd"
+      },
+      "expected": {
+        "frame": "0100010000ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababcd",
+        "decoded": {
+          "commit": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+          "sealedEntries": "cd"
+        }
+      }
+    },
+    {
+      "name": "version 2",
+      "input": {
+        "frame": "0200000000"
+      },
+      "expected": {
+        "error": "UnsupportedCommitFrameVersionError",
+        "message": "unsupported commit frame version: 2"
+      }
+    },
+    {
+      "name": "truncated length field",
+      "input": {
+        "frame": "01010000"
+      },
+      "expected": {
+        "error": "Error",
+        "message": "commit frame is too short"
+      }
+    },
+    {
+      "name": "truncated commit",
+      "input": {
+        "frame": "0104000000aabb"
+      },
+      "expected": {
+        "error": "Error",
+        "message": "commit frame is truncated: the commit runs past the end of the frame"
+      }
+    },
+    {
+      "name": "frame size 786432",
+      "input": {
+        "rawBytes": 786432
+      },
+      "expected": {
+        "base64Chars": 1048576,
+        "accepted": true
+      }
+    },
+    {
+      "name": "frame size 786433",
+      "input": {
+        "rawBytes": 786433
+      },
+      "expected": {
+        "base64Chars": 1048580,
+        "error": "FrameTooLargeError",
+        "message": "Frame of 786433 raw bytes exceeds the 1,048,576-character base64 limit"
+      }
+    }
+  ]
+}
