@@ -16,13 +16,13 @@ catalog:
   '@noble/curves': ^2.4.0
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
-  'vitest': ^5.1.0
-  '@enkaku/client': ^0.23.1
-  '@enkaku/http-fetch': ^0.23.1
-  '@enkaku/http-serve': ^0.23.1
-  '@enkaku/protocol': ^0.23.1
-  '@enkaku/server': ^0.23.1
-  '@enkaku/transport': ^0.23.1
+  'vitest': ^5.1.1
+  '@enkaku/client': ^0.23.5
+  '@enkaku/http-fetch': ^0.23.3
+  '@enkaku/http-serve': ^0.23.3
+  '@enkaku/protocol': ^0.23.3
+  '@enkaku/server': ^0.23.3
+  '@enkaku/transport': ^0.23.3
   '@kokuin/capability': ^0.7.1
   '@kokuin/controller': ^0.7.1
   '@kokuin/crypto': ^0.7.1
@@ -31,7 +31,7 @@ catalog:
   '@sozai/async': ^0.4.3
   '@sozai/codec': ^0.4.4
   '@sozai/event': ^0.1.6
-  '@sozai/http-server': ^0.2.1
+  '@sozai/http-server': ^0.2.2
   '@sozai/log': ^0.4.0
   '@sozai/result': ^0.2.2
   '@sozai/runtime': ^0.1.0
@@ -45,16 +45,16 @@ catalog:
   'react-native': ^0.88.1
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
-  '@hozon/adapter': ^0.3.0
-  '@hozon/db': ^0.5.1
+  '@hozon/adapter': ^0.3.4
+  '@hozon/db': ^0.5.4
   '@hozon/node-sqlite': ^0.3.0
-  '@hozon/postgres': ^0.2.1
-  '@hozon/provider': ^0.3.1
+  '@hozon/postgres': ^0.3.0
+  '@hozon/provider': ^0.3.2
   '@teikyo/access': ^0.6.0
   '@teikyo/enkaku': ^0.6.0
   '@teikyo/hozon': ^0.4.0
-  '@teikyo/rate-limit': ^0.2.0
-  '@testcontainers/postgresql': ^12.2.1
+  '@teikyo/rate-limit': ^0.3.1
+  '@testcontainers/postgresql': ^12.2.2
   'testcontainers': ^12.1.0
 
 minimumReleaseAgeExclude:
