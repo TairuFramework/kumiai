@@ -1,5 +1,7 @@
+import { audienceConfirmation } from '@kokuin/capability'
+import { createRemove, epochHeads } from '@kokuin/controller'
 import { nobleCrypto } from '@kokuin/crypto'
-import { randomIdentity } from '@kokuin/token'
+import { randomIdentity, stringifyToken } from '@kokuin/token'
 import type * as SozaiAsync from '@sozai/async'
 import { encode, mlsMessageEncoder } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
@@ -8,12 +10,15 @@ import { commitInvite, commitLedgerEntries, createInvite } from '../src/group-co
 import { createGroup, restoreGroup } from '../src/group-create.js'
 import { createKeyPackageBundle } from '../src/group-credential.js'
 import { CommitRejectedError, deriveGroup } from '../src/group-handle.js'
-import { renewLeaf } from '../src/group-lifecycle.js'
+import { renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
 import { removeMember } from '../src/group-membership.js'
 import { processWelcome } from '../src/group-welcome.js'
 import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
 import { MissingLedgerEntriesError } from '../src/policy.js'
+import { buildEpoch } from './fixtures/controller-epoch.js'
 import {
+  agent,
+  belowGateWelcome,
   inception,
   lowLevelExternal,
   pipelineGroup,
@@ -32,6 +37,85 @@ vi.mock('@sozai/async', async (importOriginal) => {
   return {
     ...original,
     maybeYield: original.createYielder({ budgetMs: 0, schedule: timers }).maybeYield,
+  }
+})
+
+test('cold survivor proof verification preserves the per-call yield policy and build results', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  try {
+    const epoch = await buildEpoch({ members: 2, renewEvery: 2000 })
+    const [removed, survivor] = epoch.members
+    if (removed == null || survivor == null) throw new Error('Missing members')
+    const setup = await pipelineGroup({ controllerLog: epoch.log })
+    const device = agent(61)
+    const grant = async (member: typeof removed) =>
+      stringifyToken(
+        await member.identity.signToken({
+          payload: {
+            sub: epoch.did,
+            aud: device.id,
+            act: 'authenticate',
+            res: 'kumiai/mls-leaf',
+            cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
+            iat: 100,
+            exp: 900,
+            mbr: { add: member.add, g: 0 },
+          },
+          embedLongForm: true,
+        }),
+      )
+    const joined = await belowGateWelcome(setup.group, device, {
+      id: epoch.did,
+      prefix: epoch.log.chain,
+      capability: await grant(removed),
+    })
+    const removal = await createRemove({
+      did: epoch.did,
+      head: epoch.head,
+      parents: await epochHeads({ did: epoch.did, log: epoch.log }),
+      signer: { member: survivor },
+      add: removed.add,
+    })
+    const survivorGrant = await grant(survivor)
+    const results = []
+    for (const policy of [{ yield: false }, {}, { yield: true }]) {
+      const group = await restoreGroup({
+        state: structuredClone(joined.author.state),
+        credential: joined.author.credential,
+        ledgerEntries: joined.author.ledgerTokens,
+        options: { crypto: { ...nobleCrypto } },
+        yield: false,
+      })
+      timers.mockClear()
+      const built = await revokeWithProof({
+        group,
+        log: { chain: epoch.log.chain, events: [...epoch.log.events, removal] },
+        remove: [{ did: removed.identity.id, add: removed.add }],
+        survivors: [survivorGrant],
+        ...policy,
+      })
+      expect
+        .soft(timers.mock.calls.length > 0, `yield=${policy.yield}`)
+        .toBe(policy.yield !== false)
+      expect(built.status).toBe('built')
+      if (built.status !== 'built') throw new Error('Missing proof')
+      expect(built.result.epoch).toBe(group.epoch + 1n)
+      expect(built.result.newGroup.findMemberLeafIndex(device.id)).toBeDefined()
+      expect(
+        built.result.newGroup.registry.controllers.get(epoch.did)?.survivorGrants.get(device.id),
+      ).toBe(survivorGrant)
+      results.push({
+        effects: built.effects,
+        epoch: built.result.epoch,
+        roster: built.result.newGroup.roster,
+        ledger: built.result.newGroup.ledgerTokens,
+        registry: built.result.newGroup.registry,
+      })
+    }
+    expect(results[1]).toEqual(results[0])
+    expect(results[2]).toEqual(results[0])
+  } finally {
+    clock.mockRestore()
   }
 })
 

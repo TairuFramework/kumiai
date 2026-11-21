@@ -676,7 +676,7 @@ export async function revokeWithProof({
       value.removed = derived.removed
       if (derived.removeLeafIndices.includes(group.state.privatePath.leafIndex))
         return { status: 'self-affected', subject: group.credential.id }
-      await verifyLifecycleProof(group, verified)
+      await verifyLifecycleProof(group, verified, group.registry, params)
       const proposals: Array<DefaultProposal> = derived.removeLeafIndices.map((removed) => ({
         proposalType: defaultProposalTypes.remove,
         remove: { removed },
