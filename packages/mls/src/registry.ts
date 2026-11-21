@@ -31,6 +31,7 @@ import {
   type RosterState,
   roleReducer,
 } from './roster.js'
+import type { YieldOptions } from './types.js'
 
 /** The reserved control type carrying a device-registry mutation. One branch, one namespace slot. */
 export const DEVICE_ENTRY_TYPE = 'kumiai.device'
@@ -270,7 +271,7 @@ export async function registryApply(
   verified: VerifiedLedgerEntry<DeviceValue>,
   state: DeviceRegistry,
   controllerID?: string,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<DeviceRegistry> {
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
@@ -449,7 +450,7 @@ export function isResetOnly(record: DeviceRecord): boolean {
 export async function mayReadmitResetDevice(
   registry: DeviceRegistry,
   parsed: MLSCredentialIdentity,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<boolean> {
   const record = registry.devices.get(normalizeDID(parsed.id))
   const binding = parsed.controller
@@ -506,7 +507,8 @@ export type AssertRetainsKnownEffectsParams = {
   controller: string
   known: DeviceRegistry
   candidate: DeviceRegistry
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function assertRetainsKnownEffects({
   controller,
@@ -577,7 +579,8 @@ export async function assertRetainsKnownEffects({
 export type RegistryForLogParams = {
   controller: string
   log: ControllerLog
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function registryForLog({
   controller,
@@ -611,7 +614,7 @@ async function seedEffects(
   controller: string,
   devices: Map<string, DeviceRecord>,
   projection: ControllerProjection & { recordedLog: ControllerLog },
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<ControllerProjection & { recordedLog: ControllerLog }> {
   const log = projection.recordedLog
   const folded = await foldControllerLog(controller, log, options)
@@ -679,7 +682,8 @@ export type FoldControlParams = {
   anchor: GroupAnchor
   groupID: string
   onDrop?: (drop: FoldDrop) => void
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 /**
  * Fold the whole control ledger into BOTH projections in one ordered pass, so a role entry's

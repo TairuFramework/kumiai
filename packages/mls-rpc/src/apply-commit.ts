@@ -5,6 +5,7 @@ import {
   MissingLedgerEntriesError,
   readMessageEpoch,
   type VerifiedLedgerEntry,
+  type YieldOptions,
 } from '@kumiai/mls'
 import type { CommitContext, RecoveryRefusalReason, RosterEntry } from '@kumiai/rpc'
 
@@ -13,15 +14,16 @@ import type { LedgerEntrySlot } from './mls.js'
 /** Reserved by `@kumiai/mls` for its own control entries; never surfaced to a host. */
 const CONTROL_TYPE_PREFIX = 'kumiai.'
 
-export type ApplyCommitParams = CommitContext & {
-  handle: GroupHandle
-  commit: Uint8Array
-  entrySlot: LedgerEntrySlot
-  /** This member's DID: its own authenticated commit is never applied as received. */
-  ownDID: string
-  /** Runs before the handle adopts the new state. */
-  persist?: ((handle: GroupHandle) => Promise<void>) | undefined
-}
+export type ApplyCommitParams = CommitContext &
+  YieldOptions & {
+    handle: GroupHandle
+    commit: Uint8Array
+    entrySlot: LedgerEntrySlot
+    /** This member's DID: its own authenticated commit is never applied as received. */
+    ownDID: string
+    /** Runs before the handle adopts the new state. */
+    persist?: ((handle: GroupHandle) => Promise<void>) | undefined
+  }
 
 export type ApplyCommitResult = {
   refusal?: RecoveryRefusalReason
@@ -113,6 +115,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   try {
     await handle.processMessage({
       message: commit,
+      yield: params.yield,
       ...(persist != null && {
         persist: async (current: GroupHandle) => {
           try {

@@ -40,14 +40,14 @@ import { ledgerEntryDigest, verifyLedgerEntry } from './ledger.js'
 import { prepareLifecycleGate, validateWelcomeTree } from './lifecycle.js'
 import type { DeviceRegistry } from './registry.js'
 import { ROLE_ENTRY_TYPE } from './roster.js'
-import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
+import type { GroupOptions, Invite, KeyPackageBundle, YieldOptions } from './types.js'
 
 export type ProcessWelcomeResult = {
   group: GroupHandle
   credential: MemberCredential
 }
 
-export type ProcessWelcomeParams = {
+export type ProcessWelcomeParams = YieldOptions & {
   identity: OwnIdentity
   invite: Invite
   /** Wire-form framed MLSMessage(Welcome) bytes (preferred), or a pre-decoded
@@ -88,6 +88,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
         async validateCredential(credential: Credential, signaturePublicKey: Uint8Array) {
           await verifyLeafCredential(credential, signaturePublicKey, {
             crypto: options?.crypto,
+            yield: params.yield,
             judging: () => ({ stage: 'structural', mode: 'rejudge' }),
           })
           return true
@@ -120,6 +121,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
 
   const group = await GroupHandle.create({
     crypto: options?.crypto,
+    yield: params.yield,
     state,
     credential,
     context,
@@ -149,7 +151,11 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   if (group.anchor.controller == null) {
     let namesSelf = false
     for (const token of invite.ledgerEntries) {
-      const verified = await verifyLedgerEntry({ token, crypto: options?.crypto })
+      const verified = await verifyLedgerEntry({
+        token,
+        crypto: options?.crypto,
+        yield: params.yield,
+      })
       if (
         verified?.entry.type === ROLE_ENTRY_TYPE &&
         verified.entry.groupID === invite.groupID &&
@@ -160,8 +166,13 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     if (!namesSelf)
       throw new Error('processWelcome: the invite carries no role entry naming this identity')
   }
-  await group.applyLedgerEntries(invite.ledgerEntries)
-  await validateWelcomeTree(group)
+  await group.applyLedgerEntries(invite.ledgerEntries, params)
+  await validateWelcomeTree(group, {
+    registry: group.registry,
+    stage: 'full',
+    mode: 'rejudge',
+    yield: params.yield,
+  })
 
   return { group, credential }
 }
@@ -212,7 +223,7 @@ export type JoinGroupExternalParamsBeforeBindingParams = {
   source: GroupHandle
 }
 
-export type JoinGroupExternalParams = {
+export type JoinGroupExternalParams = YieldOptions & {
   identity: OwnIdentity
   /** Framed MLSMessage(GroupInfo) bytes from exportGroupInfo. */
   groupInfo: Uint8Array
@@ -321,6 +332,7 @@ export async function joinGroupExternal(
           throw new LeafBindingError('controller-mismatch')
         await verifyLeafCredential(leafCredential, signaturePublicKey, {
           crypto: options?.crypto,
+          yield: params.yield,
           judging: () => ({ stage: 'structural', mode: 'rejudge' }),
           leafLifetime: () =>
             anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400),
@@ -361,6 +373,7 @@ export async function joinGroupExternal(
 
   const group = await GroupHandle.create({
     crypto: options?.crypto,
+    yield: params.yield,
     state: newState,
     credential,
     context,
@@ -402,19 +415,21 @@ export async function joinGroupExternal(
   beforeTree[removed.remove.removed * 2] = { ...own, leaf: { ...own.leaf, ...previous } }
   const before = await GroupHandle.create({
     crypto: options?.crypto,
+    yield: params.yield,
     state: { ...newState, ratchetTree: beforeTree, groupContext: groupInfo.groupContext },
     credential,
     context: await resolveMlsContext(options, anchor),
   })
   if (ledgerEntries != null) {
-    await before.bootstrapLedger({ tokens: ledgerEntries })
-    await group.bootstrapLedger({ tokens: ledgerEntries })
+    await before.bootstrapLedger({ tokens: ledgerEntries, yield: params.yield })
+    await group.bootstrapLedger({ tokens: ledgerEntries, yield: params.yield })
   }
   await params.beforeBinding?.({ pending: group, source: before })
   if (anchor.controller != null && controller == null)
     throw new LeafBindingError('floating-refused')
   assertBindingAuthorTime(controller)
   const gate = await prepareLifecycleGate({
+    yield: params.yield,
     group: before,
     entries: [],
     candidateRegistry: before.registry,
@@ -428,6 +443,11 @@ export async function joinGroupExternal(
   })
   await gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
   await gate.postApply(newState)
-  await validateWelcomeTree(group)
+  await validateWelcomeTree(group, {
+    registry: group.registry,
+    stage: 'full',
+    mode: 'rejudge',
+    yield: params.yield,
+  })
   return { commitMessage, group, sourceTree: beforeTree, sourceRegistry: before.registry }
 }

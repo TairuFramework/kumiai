@@ -2,6 +2,7 @@ import { type DefaultProposal, defaultProposalTypes, encode, mlsMessageEncoder }
 
 import { commitWithEntries } from './group-commit.js'
 import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
+import type { YieldOptions } from './types.js'
 
 export type RemoveMemberResult = {
   /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
@@ -14,7 +15,7 @@ export type RemoveMemberResult = {
   epoch: bigint
 }
 
-export type RemoveMemberParams = {
+export type RemoveMemberParams = YieldOptions & {
   group: GroupHandle
   leafIndex: number
   ledgerEntries?: Array<string>
@@ -37,6 +38,7 @@ export async function removeMember({
   group,
   leafIndex,
   ledgerEntries,
+  ...options
 }: RemoveMemberParams): Promise<RemoveMemberResult> {
   return mutexFor(group).run(async () => {
     const removeProposal: DefaultProposal = {
@@ -45,10 +47,15 @@ export async function removeMember({
     }
 
     const enacted = ledgerEntries ?? []
-    const result = await commitWithEntries({ group, extraProposals: [removeProposal], enacted })
+    const result = await commitWithEntries({
+      yield: options.yield,
+      group,
+      extraProposals: [removeProposal],
+      enacted,
+    })
 
-    const newGroup = await deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(result.enacted)
+    const newGroup = await deriveGroup(group, result.newState, options)
+    await newGroup.applyLedgerEntries(result.enacted, options)
 
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),

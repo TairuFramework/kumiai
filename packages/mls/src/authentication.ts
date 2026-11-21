@@ -43,6 +43,7 @@ import { LeafBindingError } from './errors.js'
 import { epochEventCount, MAX_EPOCH_EVENTS_FOR_LEAVES } from './history.js'
 import { effectiveAuthorityOf, memberRootStatus, memberRootsOf } from './member-root.js'
 import { type DeviceRegistry, denySetOf, mayReadmitResetDevice, recordedLogOf } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 export { MLS_LEAF_ACT, MLS_LEAF_RES } from './capability.js'
 
@@ -113,7 +114,7 @@ function matchesLeafKey(parsed: MLSCredentialIdentity, signaturePublicKey: Uint8
   }
 }
 
-export type JudgingContext = {
+export type JudgingContext = YieldOptions & {
   registry?: DeviceRegistry
   stage: 'structural' | 'full'
   mode: 'admit' | 'retain' | 'rejudge'
@@ -124,46 +125,55 @@ export type DIDAuthenticationDependenciesMayKeepDeniedIssuerParams = {
   signaturePublicKey: Uint8Array
 }
 
-export type DIDAuthenticationDependencies = CryptoOptions & {
-  deviceDenySet?: () => ReadonlySet<string>
-  judging?: () => JudgingContext
-  leafLifetime?: () => number | undefined
-  trustedGrantLifetime?: () => number | undefined
-  /**
-   * Whether this leaf may keep an issuer the deny set names, on its holder evidence. The caller
-   * answers for the group (its anchor names a controller) and for the leaf (it is the credential
-   * already in the tree at that index, or it arrives in a Welcome tree). Absent: never.
-   */
-  mayKeepDeniedIssuer?: (params: DIDAuthenticationDependenciesMayKeepDeniedIssuerParams) => boolean
-}
+export type DIDAuthenticationDependencies = CryptoOptions &
+  YieldOptions & {
+    deviceDenySet?: () => ReadonlySet<string>
+    judging?: () => JudgingContext
+    leafLifetime?: () => number | undefined
+    trustedGrantLifetime?: () => number | undefined
+    /**
+     * Whether this leaf may keep an issuer the deny set names, on its holder evidence. The caller
+     * answers for the group (its anchor names a controller) and for the leaf (it is the credential
+     * already in the tree at that index, or it arrives in a Welcome tree). Absent: never.
+     */
+    mayKeepDeniedIssuer?: (
+      params: DIDAuthenticationDependenciesMayKeepDeniedIssuerParams,
+    ) => boolean
+  }
 
 function isDenied(denied: ReadonlySet<string>, did: string): boolean {
   return denied.has(did) || denied.has(normalizeDID(did))
 }
 
-type VerifyPinnedCapabilityParams = CryptoOptions & {
-  capability: string
-  resolver?: DIDMethodResolver
-  stage?: JudgingContext['stage']
-  prefix: Array<SignedEvent>
-  controllerID: string
-  audience: string
-  permission: Permission
-  leafKey: Uint8Array
-  denySet?: ReadonlySet<string>
-  leafLifetime?: number
-  trustedGrantLifetime?: number
-  /** Refuse a delegated (chained) capability. */
-  directOnly?: boolean
-  /** Verify as a trusted grant, using its configured lifetime and maximum. */
-  trustedGrant?: boolean
-}
+type VerifyPinnedCapabilityParams = CryptoOptions &
+  YieldOptions & {
+    capability: string
+    resolver?: DIDMethodResolver
+    stage?: JudgingContext['stage']
+    prefix: Array<SignedEvent>
+    controllerID: string
+    audience: string
+    permission: Permission
+    leafKey: Uint8Array
+    denySet?: ReadonlySet<string>
+    leafLifetime?: number
+    trustedGrantLifetime?: number
+    /** Refuse a delegated (chained) capability. */
+    directOnly?: boolean
+    /** Verify as a trusted grant, using its configured lifetime and maximum. */
+    trustedGrant?: boolean
+  }
 
 /** Authenticate only embedded proof, using the token's issuance as its reference time. */
 async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Promise<void> {
   if (
     !params.controllerID.startsWith('did:kokuin:') ||
-    !(await foldChain(params.controllerID, params.prefix, { crypto: params.crypto })).ok
+    !(
+      await foldChain(params.controllerID, params.prefix, {
+        yield: params.yield,
+        crypto: params.crypto,
+      })
+    ).ok
   ) {
     throw new LeafBindingError('controller-mismatch')
   }
@@ -190,6 +200,7 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
     createRegistryControllerResolver({
       controllerID: params.controllerID,
       prefix: params.prefix,
+      yield: params.yield,
       crypto: params.crypto,
     }).frozen()
   const resolver = {
@@ -202,6 +213,7 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   const check = async (claims: typeof payload) => {
     if (params.stage === 'structural') return
     await checkCapability({
+      yield: params.yield,
       crypto: params.crypto,
       permission: params.permission,
       payload: claims,
@@ -215,6 +227,7 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   if (payload.cap === undefined) {
     assertControllerGrant(payload, params.controllerID)
     const verified = await verifyToken({
+      yield: params.yield,
       crypto: params.crypto,
       token: params.capability,
       methods: [resolver],
@@ -249,7 +262,11 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   const issuerKey = capabilityKey(parent.payload)
   if (token.header.alg !== issuerKey.alg) throw new LeafBindingError('signature-invalid')
   if (
-    !(await getVerifier({ algorithm: token.header.alg, crypto: params.crypto })({
+    !(await getVerifier({
+      algorithm: token.header.alg,
+      yield: params.yield,
+      crypto: params.crypto,
+    })({
       signature: fromB64U(token.signature),
       message: fromUTF(token.data),
       publicKey: issuerKey.publicKey,
@@ -261,6 +278,7 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   assertValidIssuedAt({ payload: payload, atTime: payload.iat })
   assertValidNotBefore({ payload: payload, atTime: payload.iat })
   const verifiedParent = await verifyToken({
+    yield: params.yield,
     crypto: params.crypto,
     token: parentRaw,
     atTime: payload.iat,
@@ -360,7 +378,7 @@ export async function verifyLeafCredential(
   const judging: JudgingContext = deps.judging?.() ?? { stage: 'full', mode: 'admit' }
   const registry = judging.registry
   const structural = judging.stage === 'structural'
-  const options: CryptoOptions = { crypto: deps.crypto }
+  const options: CryptoOptions & YieldOptions = { yield: deps.yield, crypto: deps.crypto }
   const denied = structural
     ? EMPTY_DENY
     : (deps.deviceDenySet?.() ?? (registry == null ? EMPTY_DENY : denySetOf(registry)))
@@ -399,6 +417,7 @@ export async function verifyLeafCredential(
       controllerID: binding.id,
       prefix: binding.prefix,
       registry: structural ? undefined : registry,
+      yield: deps.yield,
       crypto: deps.crypto,
     }).frozen()
     if (binding.member != null) {
@@ -429,6 +448,7 @@ export async function verifyLeafCredential(
                 ?.survivorGrants.get(normalizeDID(parsed.id))
         if (substitute == null) throw new LeafBindingError('member-removed')
         await verifyPinnedCapability({
+          yield: deps.yield,
           crypto: deps.crypto,
           capability: substitute,
           resolver: frozen,
@@ -477,6 +497,7 @@ export async function verifyLeafCredential(
     }
     if (binding.capability == null) throw new LeafBindingError('controller-mismatch')
     const common = {
+      yield: deps.yield,
       crypto: deps.crypto,
       prefix: binding.prefix,
       controllerID: binding.id,
@@ -602,13 +623,14 @@ export async function verifyLeafCredential(
 
 /** Management grants are direct controller grants, verified at their issuance time. */
 export async function verifyManagementCapability(
-  params: CryptoOptions & {
-    capability?: string
-    prefix: Array<SignedEvent>
-    controllerID: string
-    audience: string
-    leafKey: Uint8Array
-  },
+  params: CryptoOptions &
+    YieldOptions & {
+      capability?: string
+      prefix: Array<SignedEvent>
+      controllerID: string
+      audience: string
+      leafKey: Uint8Array
+    },
 ): Promise<boolean> {
   if (params.capability == null) return false
   try {

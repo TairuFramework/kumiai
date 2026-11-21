@@ -20,6 +20,7 @@ import {
   type RosterState,
   roleReducer,
 } from './roster.js'
+import type { YieldOptions } from './types.js'
 
 /**
  * The outcome of folding an envelope's control entries. On accept: the candidate
@@ -46,13 +47,14 @@ export type FoldEnvelopeContext = {
   memberController: (did: string) => string | undefined
 }
 
-export type FoldEnvelopeParams = CryptoOptions & {
-  baseRoster: RosterState
-  baseRegistry: DeviceRegistry
-  entries: Array<FoldInput>
-  groupID: string
-  context?: FoldEnvelopeContext
-}
+export type FoldEnvelopeParams = CryptoOptions &
+  YieldOptions & {
+    baseRoster: RosterState
+    baseRegistry: DeviceRegistry
+    entries: Array<FoldInput>
+    groupID: string
+    context?: FoldEnvelopeContext
+  }
 
 function isRoleValue(value: unknown): value is GroupPermission {
   return value === 'admin' || value === 'member'
@@ -111,7 +113,7 @@ export async function foldEnvelope(params: FoldEnvelopeParams): Promise<Envelope
           { issuer, entry: { ...entry, value } },
           workingRegistry,
           context?.controllerID,
-          { crypto },
+          { crypto, yield: params.yield },
         )
       } catch (error) {
         return {

@@ -4,6 +4,7 @@ import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 import { verifyManagementCapability } from './authentication.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import type { DeviceValue } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 /** What the tree yields about a leaf for the device-proof gate: its binding, prefix, and leaf key. */
 export type LeafBinding = {
@@ -43,7 +44,7 @@ export type DeviceProofContext = {
 export async function verifyDeviceEntry(
   verified: VerifiedLedgerEntry<DeviceValue>,
   ctx: DeviceProofContext,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<boolean> {
   const issuer = normalizeDID(verified.issuer)
   const subject = normalizeDID(verified.entry.subject)

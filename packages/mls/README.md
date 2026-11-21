@@ -163,3 +163,22 @@ The follow-up revocation work will introduce a ledger entry that removes a DID's
 A last-resort key package carries an MLS lifetime of `LAST_RESORT_LIFETIME_DAYS` (90). The inviter validates that lifetime when building the Add, so an expired package is refused at the far end with `Current time not within Lifetime` — and refused _no matter what the hub does_, because the hub stores opaque bytes and cannot see the expiry.
 
 That makes the failure worse than an empty slot: the hub goes on reporting the slot as full and serving the dead package, so the availability floor looks healthy while every join through it fails. A host must generate and upload a fresh last-resort bundle before the window elapses, and keep the new private half. Uploading once at enrolment buys 90 days, not forever.
+
+### Cooperative yielding
+
+Pass `yield: false` for calls inside a host write transaction to skip cooperative timer pauses.
+Omitting `yield`, or passing `true`, preserves the existing behaviour. The option applies only to that call.
+Crypto, ledger validation, commit policy, head checks and persist ordering are unchanged.
+
+The option is a top-level field on the parameter object for `processMessage`, `bootstrapLedger`,
+`createGroup`, `restoreGroup`, `processWelcome`, `processWelcomeOnce`, `joinGroupExternal`,
+`createInvite`, `commitInvite`, `commitLedgerEntries`, `removeMember`, `registerDevice`, `labelDevice`, `addDevice`,
+`revokeDevice`, `announceControllerBeacon`, `publishControllerLog`, `attestTreeTime`, `renewLeaf`
+and `revokeWithProof`.
+Positional APIs accept a second options argument: `handle.applyLedgerEntries(tokens, { yield: false })`,
+`handle.proposeSelfRemoval({ yield: false })`, `proposeSelfRemoval(group, { yield: false })`,
+`commitSelfRemovals(group, { yield: false })` and `removeLapsedLeaves(group, { yield: false })`.
+`YieldOptions` is exported for callers. The option does not become a default on the returned handle.
+
+The policy also reaches token signing, verification and lifecycle authentication, including cold caches.
+`signLedgerEntry` and `verifyLedgerEntry` accept the same top-level option.

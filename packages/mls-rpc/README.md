@@ -259,3 +259,7 @@ one. The ones a host is most likely to trip on:
   Anyone who has seen a `GroupInfo` for the group can compute the rendezvous topic. That is tolerable
   for what the topic is for — a stranded peer, and a removed one, must both be able to name it — but
   a host must put nothing on it that confidentiality depends on.
+
+`applyCommit({ ..., yield: false })` forwards the per-call yield policy to `GroupHandle.processMessage`.
+This skips cooperative timer pauses during commit preparation inside a host write transaction.
+Omitting `yield`, or passing `true`, preserves the existing behaviour, including validation and refusal handling.

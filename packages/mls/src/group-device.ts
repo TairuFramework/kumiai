@@ -14,6 +14,7 @@ import { commitWithEntries } from './group-commit.js'
 import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
 import { signLedgerEntry } from './ledger.js'
 import { DEVICE_ENTRY_TYPE } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 export type DeviceWriteResult = {
   /** Framed MLSMessage bytes. The caller (kubun) broadcasts to existing members via its DS. */
@@ -23,7 +24,7 @@ export type DeviceWriteResult = {
   epoch: bigint
 }
 
-type GroupSigner = {
+type GroupSigner = YieldOptions & {
   group: GroupHandle
   identity: SigningIdentity
 }
@@ -47,6 +48,7 @@ export async function registerDevice({
 }: RegisterDeviceParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
     const token = await signLedgerEntry({
+      yield: params.yield,
       identity,
       entry: {
         type: DEVICE_ENTRY_TYPE,
@@ -60,13 +62,14 @@ export async function registerDevice({
       },
     })
     const result = await commitWithEntries({
+      yield: params.yield,
       group,
       extraProposals: [],
       enacted: [token],
       requireAdmin: false,
     })
-    const newGroup = await deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(result.enacted)
+    const newGroup = await deriveGroup(group, result.newState, params)
+    await newGroup.applyLedgerEntries(result.enacted, params)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -92,6 +95,7 @@ export async function labelDevice({
 }: LabelDeviceParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
     const token = await signLedgerEntry({
+      yield: params.yield,
       identity,
       entry: {
         type: DEVICE_ENTRY_TYPE,
@@ -101,13 +105,14 @@ export async function labelDevice({
       },
     })
     const result = await commitWithEntries({
+      yield: params.yield,
       group,
       extraProposals: [],
       enacted: [token],
       requireAdmin: false,
     })
-    const newGroup = await deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(result.enacted)
+    const newGroup = await deriveGroup(group, result.newState, params)
+    await newGroup.applyLedgerEntries(result.enacted, params)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -153,6 +158,7 @@ export async function addDevice({
     }
 
     const token = await signLedgerEntry({
+      yield: params.yield,
       identity,
       entry: {
         type: DEVICE_ENTRY_TYPE,
@@ -166,6 +172,7 @@ export async function addDevice({
       add: { keyPackage: params.keyPackage },
     }
     const result = await commitWithEntries({
+      yield: params.yield,
       group,
       extraProposals: [addProposal],
       enacted: [token],
@@ -175,8 +182,8 @@ export async function addDevice({
     if (result.welcome == null) {
       throw new Error('addDevice: expected a Welcome message for the add proposal')
     }
-    const newGroup = await deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(result.enacted)
+    const newGroup = await deriveGroup(group, result.newState, params)
+    await newGroup.applyLedgerEntries(result.enacted, params)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       welcomeMessage: encode(mlsMessageEncoder, result.welcome),
@@ -206,6 +213,7 @@ export async function revokeDevice({
 }: RevokeDeviceParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
     const token = await signLedgerEntry({
+      yield: params.yield,
       identity,
       entry: {
         type: DEVICE_ENTRY_TYPE,
@@ -220,13 +228,14 @@ export async function revokeDevice({
         ? []
         : [{ proposalType: defaultProposalTypes.remove, remove: { removed: leafIndex } }]
     const result = await commitWithEntries({
+      yield: params.yield,
       group,
       extraProposals: proposals,
       enacted: [token],
       requireAdmin: false,
     })
-    const newGroup = await deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(result.enacted)
+    const newGroup = await deriveGroup(group, result.newState, params)
+    await newGroup.applyLedgerEntries(result.enacted, params)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -254,6 +263,7 @@ export async function announceControllerBeacon({
 }: AnnounceControllerBeaconParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
     const token = await signLedgerEntry({
+      yield: params.yield,
       identity,
       entry: {
         type: DEVICE_ENTRY_TYPE,
@@ -263,13 +273,14 @@ export async function announceControllerBeacon({
       },
     })
     const result = await commitWithEntries({
+      yield: params.yield,
       group,
       extraProposals: [],
       enacted: [token],
       requireAdmin: false,
     })
-    const newGroup = await deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(result.enacted)
+    const newGroup = await deriveGroup(group, result.newState, params)
+    await newGroup.applyLedgerEntries(result.enacted, params)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,

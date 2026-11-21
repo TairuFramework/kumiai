@@ -23,11 +23,11 @@ catalog:
   '@enkaku/protocol': ^0.23.1
   '@enkaku/server': ^0.23.1
   '@enkaku/transport': ^0.23.1
-  '@kokuin/capability': ^0.7.0
+  '@kokuin/capability': ^0.7.1
   '@kokuin/controller': ^0.7.1
   '@kokuin/crypto': ^0.7.1
   '@kokuin/crypto-napi': ^0.7.4
-  '@kokuin/token': ^0.7.0
+  '@kokuin/token': ^0.7.1
   '@sozai/async': ^0.4.3
   '@sozai/codec': ^0.4.4
   '@sozai/event': ^0.1.6

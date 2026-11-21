@@ -18,6 +18,7 @@ import { foldControllerLog } from './controller-log.js'
 import type { ControllerBinding } from './credential.js'
 import { LeafBindingError, RevokeProofError } from './errors.js'
 import type { ControllerProjection, DeviceRegistry, RevokedEffect } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 export type MemberRoot =
   | { kind: 'root'; controller: string }
@@ -78,7 +79,11 @@ export function memberRootsOf({
   return roots
 }
 
-async function foldedLog(controller: string, log: ControllerLog, options?: CryptoOptions) {
+async function foldedLog(
+  controller: string,
+  log: ControllerLog,
+  options?: CryptoOptions & YieldOptions,
+) {
   const folded = await foldControllerLog(controller, log, options)
   if (!folded.ok) throw new RevokeProofError('effects-mismatch')
   return folded
@@ -103,7 +108,7 @@ type EffectProofs = {
 async function effectProofs(
   did: string,
   log: ControllerLog,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<EffectProofs> {
   const folded = await foldedLog(did, log, options)
   const events = new Map(log.events.map((signed) => [digestOf(signed.event), signed]))
@@ -228,7 +233,8 @@ export type EffectOfParams = {
   log: ControllerLog
   claim: EffectClaim
   genFloor: number
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function effectOf({
   controller,
@@ -248,7 +254,7 @@ export async function effectOf({
 export async function effectProofContext(
   controller: string,
   log: ControllerLog,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ) {
   const did = normalizeDID(controller)
   const proofs = await effectProofs(did, log, options)
@@ -265,7 +271,8 @@ export type ClaimsForParams = {
   recorded: ControllerLog | undefined
   merged: ControllerLog
   genFloor: number
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function claimsFor({
   controller,
@@ -283,7 +290,7 @@ async function claimsWithProofs(
   merged: ControllerLog,
   genFloor: number,
   proofs: EffectProofs,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<Array<EffectClaim>> {
   const before = recorded == null ? undefined : await foldedLog(did, recorded, options)
   const after = proofs.folded
@@ -404,7 +411,7 @@ const projectionFolds = new WeakMap<
 export async function projectionFold(
   controller: string,
   projection: ControllerProjection | undefined,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ) {
   const log = projection?.recordedLog
   if (projection == null || log == null) return undefined
@@ -450,7 +457,8 @@ export type MemberRootStatusParams = {
   registry: DeviceRegistry
   controller: string
   root: MemberRoot
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function memberRootStatus({
   registry,
@@ -499,7 +507,8 @@ export type EffectiveAuthorityOfParams = {
   leaf: LeafRef
   registry: DeviceRegistry
   controller: string
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function effectiveAuthorityOf({
   leaf,
@@ -567,7 +576,8 @@ export type CascadeOfParams = {
   before: DeviceRegistry
   after: DeviceRegistry
   controller: string
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function cascadeOf({
   leaves,
