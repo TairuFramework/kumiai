@@ -17,7 +17,7 @@ import type { GroupAnchor } from './anchor.js'
 import { createDIDAuthenticationService, type JudgingContext } from './authentication.js'
 import { createNobleCryptoProvider } from './crypto.js'
 import { denySetOf } from './registry.js'
-import type { GroupOptions } from './types.js'
+import type { GroupOptions, YieldOptions } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
 
@@ -82,12 +82,13 @@ export function copyClientConfig(config: ClientConfig): ClientConfig {
 }
 
 /** Late-bound provider of a context's device deny set, pointed at the live handle after construction. */
-export type DeviceDenyHolder = CryptoOptions & {
-  provider: () => ReadonlySet<string>
-  judging?: () => JudgingContext
-  leafLifetime?: number
-  trustedGrantLifetime?: number
-}
+export type DeviceDenyHolder = CryptoOptions &
+  YieldOptions & {
+    provider: () => ReadonlySet<string>
+    judging?: () => JudgingContext
+    leafLifetime?: number
+    trustedGrantLifetime?: number
+  }
 
 const DENY_HOLDERS = new WeakMap<MlsContext, DeviceDenyHolder>()
 
@@ -107,6 +108,7 @@ export async function withJudging<T>(
   const registry = judging.registry
   const scopedHolder: DeviceDenyHolder = {
     ...holder,
+    yield: judging.yield,
     provider: registry == null ? holder.provider : () => denySetOf(registry),
     judging: () => judging,
   }
@@ -119,6 +121,9 @@ function authenticationFor(holder: DeviceDenyHolder): MlsContext['authService'] 
   return createDIDAuthenticationService({
     get crypto() {
       return holder.crypto
+    },
+    get yield() {
+      return holder.yield
     },
     deviceDenySet: () => holder.provider(),
     judging: () => holder.judging?.() ?? { stage: 'full', mode: 'admit' },

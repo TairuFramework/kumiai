@@ -17,6 +17,7 @@ import { type CryptoOptions, normalizeDID } from '@kokuin/token'
 import { foldControllerLog, isDetachedFoldReason } from './controller-log.js'
 import { RevokeProofError } from './errors.js'
 import type { ControllerProjection } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 export type FoldOk = Extract<FoldResult, { ok: true }>
 
@@ -37,7 +38,8 @@ export type IngestControllerLogParams = {
   recorded: ControllerLog | undefined
   proof: ControllerLog
   previous?: ControllerProjection
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function ingestControllerLog({
   controller,

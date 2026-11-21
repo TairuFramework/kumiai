@@ -12,6 +12,8 @@ import type {
 import type { ControllerBinding } from './credential.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 
+export type { YieldOptions } from '@kokuin/token'
+
 export type GroupOptions = {
   /** Creator or key-package leaf binding. Creates a lifecycle group when passed to createGroup. */
   controller?: ControllerBinding

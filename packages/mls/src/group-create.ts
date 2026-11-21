@@ -19,7 +19,7 @@ import { GroupHandle } from './group-handle.js'
 import { buildLedgerHeadExtension, extendHead, genesisHead } from './head.js'
 import { ledgerEntryDigest, signLedgerEntry } from './ledger.js'
 import { DEVICE_ENTRY_TYPE, registryForLog } from './registry.js'
-import type { GroupOptions } from './types.js'
+import type { GroupOptions, YieldOptions } from './types.js'
 
 export type CreateGroupResult = {
   group: GroupHandle
@@ -29,7 +29,8 @@ export type CreateGroupResult = {
 export type CreateGroupParams = {
   identity: OwnIdentity
   groupID: string
-} & GroupOptions
+} & GroupOptions &
+  YieldOptions
 
 /** Create a new MLS group. The identity becomes the sole member and admin. */
 export async function createGroup({
@@ -126,11 +127,13 @@ export async function createGroup({
           controller: anchor.controller,
           log: options.controllerLog,
           crypto: options.crypto,
+          yield: options.yield,
         })
   const tokens: Array<string> = []
   if (anchor.controller != null && options?.controllerLog != null) {
     tokens.push(
       await signLedgerEntry({
+        yield: options.yield,
         identity,
         entry: {
           type: DEVICE_ENTRY_TYPE,
@@ -153,7 +156,8 @@ export async function createGroup({
   if (options?.controller != null) {
     await verifyLeafCredential(mlsCredential, identity.publicKey, {
       crypto: options.crypto,
-      judging: () => ({ registry, stage: 'full', mode: 'admit' }),
+      yield: options.yield,
+      judging: () => ({ registry, stage: 'full', mode: 'admit', yield: options.yield }),
       leafLifetime: () => anchor.leafLifetime ?? 86_400,
       trustedGrantLifetime: () => anchor.trustedGrantLifetime ?? 2_592_000,
     })
@@ -166,7 +170,7 @@ export async function createGroup({
   else if (headIndex < 0) extensions.push(head)
   const state = await withJudging(
     context,
-    { registry, stage: 'full', mode: 'admit' },
+    { registry, stage: 'full', mode: 'admit', yield: options.yield },
     async (judgedContext) => {
       const keyPackage = await generateKeyPackageWithKey({
         credential: mlsCredential,
@@ -190,6 +194,7 @@ export async function createGroup({
   }
   const group = await GroupHandle.create({
     crypto: options?.crypto,
+    yield: options.yield,
     state,
     credential,
     context,
@@ -198,11 +203,11 @@ export async function createGroup({
     onLedgerEntries: options?.onLedgerEntries,
   })
 
-  await group.applyLedgerEntries(tokens)
+  await group.applyLedgerEntries(tokens, options)
   return { group, credential }
 }
 
-export type RestoreGroupParams = {
+export type RestoreGroupParams = YieldOptions & {
   state: ClientState
   credential: MemberCredential
   /** Signed ledger tokens the host persisted, replayed to rebuild the roster. */
@@ -215,6 +220,7 @@ export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHan
   // an anchorless state throws (the same fail-closed guard).
   const group = await GroupHandle.create({
     crypto: params.options?.crypto,
+    yield: params.yield,
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),
@@ -222,6 +228,6 @@ export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHan
     resolveLedgerEntries: params.options?.resolveLedgerEntries,
     onLedgerEntries: params.options?.onLedgerEntries,
   })
-  await group.applyLedgerEntries(params.ledgerEntries ?? [])
+  await group.applyLedgerEntries(params.ledgerEntries ?? [], params)
   return group
 }

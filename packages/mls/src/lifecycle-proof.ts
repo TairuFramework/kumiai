@@ -40,6 +40,7 @@ import {
   type RevokedEffect,
   registryApply,
 } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 export { controllerLogSize, HISTORY_HORIZON } from './history.js'
 
@@ -65,7 +66,7 @@ export async function mergeLifecycleProofLogs(
   controller: string,
   first: ControllerLog,
   second: ControllerLog,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<ControllerLog> {
   try {
     return await mergeLogs({ ...options, did: controller, left: first, right: second })
@@ -82,7 +83,7 @@ export async function lifecycleProofLog(
   controller: string,
   ingested: IngestedControllerLog,
   proof: ControllerLog,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<ControllerLog> {
   return await mergeLifecycleProofLogs(
     controller,
@@ -100,7 +101,7 @@ export async function authenticateLifecycleProof(
   controllerID: string,
   verified: VerifiedLedgerEntry<DeviceValue>,
   registry: DeviceRegistry,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<AuthenticatedProof> {
   const controller = normalizeDID(controllerID)
   const subject = normalizeDID(verified.entry.subject)
@@ -253,11 +254,12 @@ export async function lifecycleProofEffects(
   group: GroupHandle,
   verified: VerifiedLedgerEntry<DeviceValue>,
   registry: DeviceRegistry = group.registry,
+  policy?: YieldOptions,
 ): Promise<LifecycleProofEffects> {
   const controllerID = group.anchor.controller
   if (controllerID == null) throw new RevokeProofError('wrong-controller')
   const controller = normalizeDID(controllerID)
-  const options = { crypto: group.crypto }
+  const options = { crypto: group.crypto, yield: policy?.yield }
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
   const issuerController = group.bindingOfDID(verified.issuer)?.controller
@@ -339,7 +341,7 @@ export async function lifecycleProofEffects(
     if (leaf == null) throw new RevokeProofError('wrong-controller')
     if (denySetOf(registry).has(normalizeDID(verified.issuer)))
       throw new LeafBindingError('denied-id')
-    if (await isLapsed(group, leaf, registry)) throw new LeafLapsedError('lapsed')
+    if (await isLapsed(group, leaf, registry, options)) throw new LeafLapsedError('lapsed')
     const before = historySize({
       tree: group.state.ratchetTree,
       entries: group.ledger.map(({ verified }) => verified),
@@ -394,6 +396,7 @@ export async function lifecycleProofEffects(
       prefix: candidate.controllers.get(controller)?.recordedLog?.chain ?? [],
       registry: candidate,
       crypto: group.crypto,
+      yield: options.yield,
     }).frozen()
     const token = await verifyToken({
       ...options,
@@ -478,8 +481,9 @@ export async function verifyLifecycleProof(
   group: GroupHandle,
   verified: VerifiedLedgerEntry<DeviceValue>,
   registry: DeviceRegistry = group.registry,
+  policy?: YieldOptions,
 ): Promise<LifecycleProofEffects> {
-  const effects = await lifecycleProofEffects(group, verified, registry)
+  const effects = await lifecycleProofEffects(group, verified, registry, policy)
   const value = verified.entry.value
   if (
     (value.op === 'revoke' || value.op === 'reset') &&

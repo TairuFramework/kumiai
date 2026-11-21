@@ -14,6 +14,7 @@ import {
 
 import { asControllerLog, hasChainRevoke } from './controller-log.js'
 import { type DeviceRegistry, denySetOf, recordedLogOf } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 const EMPTY: ReadonlySet<string> = new Set()
 
@@ -37,11 +38,12 @@ export function prefixRelation({
 
 /** Root keys come from the leaf prefix; member authority comes from the recorded epoch. */
 export function createRegistryControllerResolver(
-  params: CryptoOptions & {
-    controllerID: string
-    prefix: ReadonlyArray<SignedEvent>
-    registry?: DeviceRegistry
-  },
+  params: CryptoOptions &
+    YieldOptions & {
+      controllerID: string
+      prefix: ReadonlyArray<SignedEvent>
+      registry?: DeviceRegistry
+    },
 ): ControllerResolver {
   const controller = normalizeDID(params.controllerID)
   const recorded =

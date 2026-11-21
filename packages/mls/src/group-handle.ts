@@ -114,6 +114,7 @@ import {
 import type { RosterState } from './roster.js'
 import { advanceSendingRatchet } from './secret-tree.js'
 import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
+import type { YieldOptions } from './types.js'
 
 /** One serializer per live handle, so its state-mutating operations run one at a
  *  time in issue order. Keyed weakly: the entry is collected with the handle, and
@@ -133,12 +134,12 @@ type FoldedControl = {
 type FoldedGroupHandleParams = GroupHandleParams & { [FOLDED_CONTROL]: FoldedControl }
 
 async function computeAdmission(
-  view: Pick<GroupHandle, 'state' | 'anchor' | 'registry'> & CryptoOptions,
+  view: Pick<GroupHandle, 'state' | 'anchor' | 'registry'> & CryptoOptions & YieldOptions,
 ): Promise<SendAdmission> {
   const leaf = leafAt(view.state.ratchetTree, view.state.privatePath.leafIndex)
   const epoch = Number(view.state.groupContext.epoch)
   return Object.freeze(
-    leaf != null && (await isLapsed(view, leaf))
+    leaf != null && (await isLapsed(view, leaf, view.registry, view))
       ? { epoch, admissible: false, reason: 'lapsed' }
       : { epoch, admissible: true },
   )
@@ -146,12 +147,16 @@ async function computeAdmission(
 
 const HISTORICAL_REGISTRIES = new WeakMap<GroupHandle, Map<string, DeviceRegistry>>()
 
-export type RegistryAtParams = {
+export type RegistryAtParams = YieldOptions & {
   group: GroupHandle
   head: Uint8Array
 }
 
-export async function registryAt({ group, head }: RegistryAtParams): Promise<DeviceRegistry> {
+export async function registryAt({
+  group,
+  head,
+  ...options
+}: RegistryAtParams): Promise<DeviceRegistry> {
   let cache = HISTORICAL_REGISTRIES.get(group)
   if (cache == null) {
     cache = new Map()
@@ -171,6 +176,7 @@ export async function registryAt({ group, head }: RegistryAtParams): Promise<Dev
   const registry = (
     await foldLedgerControl(group.ledger.slice(0, length), group.anchor, group.groupID, {
       crypto: group.crypto,
+      yield: options?.yield,
     })
   ).registry
   cache.set(key, registry)
@@ -519,7 +525,7 @@ function cacheLedgerEntry(
 
 async function verifyCachedLedgerEntry(
   token: string,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<VerifiedLedgerEntry | null> {
   const cached = cachedLedgerEntry(token, options)
   if (cached !== undefined) return cached
@@ -549,7 +555,7 @@ async function registryWithTreeBindings(
   registry: DeviceRegistry,
   tree: ClientState['ratchetTree'],
   anchor: GroupAnchor,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<DeviceRegistry> {
   if (anchor.controller == null) return registry
   const devices = new Map(registry.devices)
@@ -589,33 +595,34 @@ async function foldLedgerControl(
   ledger: ReadonlyArray<LedgerLogEntry>,
   anchor: GroupAnchor,
   groupID: string,
-  options?: CryptoOptions,
+  options?: CryptoOptions & YieldOptions,
 ): Promise<{ roster: RosterState; registry: DeviceRegistry }> {
   const entries = ledger.map(({ verified, entryID }) => ({ verified, entryID }) as FoldInput)
   return await foldControl({ entries, anchor, groupID, ...options })
 }
 
-export type GroupHandleParams = CryptoOptions & {
-  state: ClientState
-  credential: MemberCredential
-  context: MlsContext
-  /** The control-ledger log this handle starts from, in enactment order. A handle
-   *  derived from another (commitInvite/removeMember) inherits the parent's, so the
-   *  roster it folds does not revert to the anchor alone. */
-  ledger?: ReadonlyArray<LedgerLogEntry>
-  /** Default commit policy applied by processMessage. */
-  commitPolicy?: IncomingMessageCallback
-  /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
-  resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
-  /** Surface an accepted commit's notarized non-`kumiai.role` entries to the consumer. */
-  onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
-  /** Shared event emitter; a derived handle inherits its parent's so subscriptions persist. */
-  events?: EventEmitter<GroupHandleEvents>
-  /** Defer authored control notifications until adoption. */
-  speculative?: boolean
-}
+export type GroupHandleParams = CryptoOptions &
+  YieldOptions & {
+    state: ClientState
+    credential: MemberCredential
+    context: MlsContext
+    /** The control-ledger log this handle starts from, in enactment order. A handle
+     *  derived from another (commitInvite/removeMember) inherits the parent's, so the
+     *  roster it folds does not revert to the anchor alone. */
+    ledger?: ReadonlyArray<LedgerLogEntry>
+    /** Default commit policy applied by processMessage. */
+    commitPolicy?: IncomingMessageCallback
+    /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
+    resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
+    /** Surface an accepted commit's notarized non-`kumiai.role` entries to the consumer. */
+    onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
+    /** Shared event emitter; a derived handle inherits its parent's so subscriptions persist. */
+    events?: EventEmitter<GroupHandleEvents>
+    /** Defer authored control notifications until adoption. */
+    speculative?: boolean
+  }
 
-export type GroupHandleBootstrapLedgerParams = {
+export type GroupHandleBootstrapLedgerParams = YieldOptions & {
   tokens: Array<string>
   persist?: (handle: GroupHandle) => Promise<void> | void
 }
@@ -650,7 +657,7 @@ export type GroupHandleDecryptStagedParams = {
   ) => Promise<void>
 }
 
-export type GroupHandleProcessMessageParams = {
+export type GroupHandleProcessMessageParams = YieldOptions & {
   message: Uint8Array | MlsFramedMessage
   commitPolicy?: IncomingMessageCallback
   persist?: (handle: GroupHandle) => Promise<void> | void
@@ -693,15 +700,21 @@ export class GroupHandle {
       [...(params.ledger ?? [])],
       anchor,
       params.credential.groupID,
-      { crypto },
+      { crypto, yield: params.yield },
     )
     const registry = await registryWithTreeBindings(
       folded.registry,
       params.state.ratchetTree,
       anchor,
-      { crypto },
+      { crypto, yield: params.yield },
     )
-    const admission = await computeAdmission({ state: params.state, anchor, registry, crypto })
+    const admission = await computeAdmission({
+      state: params.state,
+      anchor,
+      registry,
+      crypto,
+      yield: params.yield,
+    })
     const seeded: FoldedGroupHandleParams = {
       ...params,
       crypto,
@@ -1034,7 +1047,10 @@ export class GroupHandle {
    * it (MLS applies each once, restoreGroup replays a token list once, processWelcome
    * folds an invite once). Serialized on the handle's mutex.
    */
-  async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
+  async applyLedgerEntries(
+    tokens: Array<string>,
+    options?: YieldOptions,
+  ): Promise<Array<VerifiedLedgerEntry>> {
     return mutexFor(this).run(async () => {
       const appended: Array<VerifiedLedgerEntry> = []
       const candidates: Array<LedgerLogEntry> = []
@@ -1043,7 +1059,7 @@ export class GroupHandle {
         remembered != null && remembered.crypto === this.#crypto ? remembered.held : undefined
       const nextMemo: Array<HeldLedgerEntry | undefined> = []
       for (const [index, token] of tokens.entries()) {
-        await maybeYield()
+        if (options?.yield !== false) await maybeYield()
         const held = memo?.[index]
         let verified: VerifiedLedgerEntry | null
         if (held?.token === token) {
@@ -1054,7 +1070,10 @@ export class GroupHandle {
           }
           verified = structuredClone(held.verified)
         } else {
-          verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
+          verified = await verifyCachedLedgerEntry(token, {
+            crypto: this.#crypto,
+            yield: options?.yield,
+          })
         }
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
@@ -1066,18 +1085,20 @@ export class GroupHandle {
       const ledger = [...this.#ledger, ...candidates]
       const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID, {
         crypto: this.#crypto,
+        yield: options?.yield,
       })
       const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
-        { crypto: this.#crypto },
+        { crypto: this.#crypto, yield: options?.yield },
       )
       const admission = await computeAdmission({
         state: this.#state,
         anchor: this.#anchor,
         registry,
         crypto: this.#crypto,
+        yield: options?.yield,
       })
       this.#ledger = ledger
       for (const { entryID, token, verified } of candidates) {
@@ -1176,9 +1197,12 @@ export class GroupHandle {
 
       const log: Array<LedgerLogEntry> = []
       for (let index = 0; index < tokens.length; index++) {
-        await maybeYield()
+        if (opts?.yield !== false) await maybeYield()
         const token = tokens[index] as string
-        const verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
+        const verified = await verifyCachedLedgerEntry(token, {
+          crypto: this.#crypto,
+          yield: opts?.yield,
+        })
         if (verified == null || verified.entry.groupID !== this.groupID) {
           // Unreachable past the gate — the chain digests the token bytes, so an
           // unverifiable or cross-group token cannot sit at a position the head
@@ -1218,18 +1242,20 @@ export class GroupHandle {
       }
       const folded = await foldLedgerControl(log, this.#anchor, this.groupID, {
         crypto: this.#crypto,
+        yield: opts?.yield,
       })
       const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
-        { crypto: this.#crypto },
+        { crypto: this.#crypto, yield: opts?.yield },
       )
       const admission = await computeAdmission({
         state: this.#state,
         anchor: this.#anchor,
         registry,
         crypto: this.#crypto,
+        yield: opts?.yield,
       })
       this.#ledger = log
       this.#entryBodies = new Map(
@@ -1400,7 +1426,7 @@ export class GroupHandle {
    * Once a member processes a pending self-removal, application encrypt throws until
    * a commit lands. Callers should commit pending self-removals promptly.
    */
-  async proposeSelfRemoval(): Promise<{ frame: Uint8Array; epoch: bigint }> {
+  async proposeSelfRemoval(options?: YieldOptions): Promise<{ frame: Uint8Array; epoch: bigint }> {
     return mutexFor(this).run(async () => {
       const senderLeafIndex = this.#state.privatePath.leafIndex
       const proposal = {
@@ -1409,6 +1435,7 @@ export class GroupHandle {
       }
       const gate = await prepareLifecycleGate({
         group: this,
+        yield: options?.yield,
         entries: [],
         candidateRegistry: this.#registry,
         context: buildCommitPolicyContext(this, {
@@ -1781,7 +1808,7 @@ export class GroupHandle {
   /** Resolve ledger inputs before MLS, then run mandatory gates before caller role policy. */
   async #prepareCommitPipeline(
     decoded: unknown,
-    opts?: { commitPolicy?: IncomingMessageCallback },
+    opts?: YieldOptions & { commitPolicy?: IncomingMessageCallback },
   ): Promise<CommitPipeline> {
     const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
     const capture: CommitCapture = {}
@@ -1840,11 +1867,14 @@ export class GroupHandle {
             }
             const tokens = await this.#resolveLedgerEntries(missing)
             for (const token of tokens) {
-              await maybeYield()
+              if (opts?.yield !== false) await maybeYield()
               const id = ledgerEntryDigest(token)
               // Content-addressing binds the untrusted body to the requested id.
               if (resolved.has(id) || !missing.includes(id)) continue
-              const verified = await verifyCachedLedgerEntry(token, { crypto: this.#crypto })
+              const verified = await verifyCachedLedgerEntry(token, {
+                crypto: this.#crypto,
+                yield: opts?.yield,
+              })
               if (verified == null) continue
               resolved.set(id, ledgerLogEntry(id, token, verified))
             }
@@ -1861,6 +1891,7 @@ export class GroupHandle {
 
           const foldResult = await foldEnvelope({
             crypto: this.#crypto,
+            yield: opts?.yield,
             baseRoster: this.#roster,
             baseRegistry: this.#registry,
             entries: ordered,
@@ -1897,7 +1928,7 @@ export class GroupHandle {
               const ok = await verifyDeviceEntry(
                 verified as VerifiedLedgerEntry<DeviceValue>,
                 proofCtx,
-                { crypto: this.#crypto },
+                { crypto: this.#crypto, yield: opts?.yield },
               )
               if (!ok) {
                 precomputedReject = true
@@ -1934,6 +1965,7 @@ export class GroupHandle {
           : undefined
       gate = await prepareLifecycleGate({
         group: this,
+        yield: opts?.yield,
         entries: acceptedEntries.map(({ verified }) => verified),
         candidateRegistry,
         context,
@@ -1990,18 +2022,20 @@ export class GroupHandle {
       }
       const folded = await foldLedgerControl(ledger, this.#anchor, this.groupID, {
         crypto: this.#crypto,
+        yield: opts?.yield,
       })
       const registry = await registryWithTreeBindings(
         folded.registry,
         this.#state.ratchetTree,
         this.#anchor,
-        { crypto: this.#crypto },
+        { crypto: this.#crypto, yield: opts?.yield },
       )
       const admission = await computeAdmission({
         state: this.#state,
         anchor: this.#anchor,
         registry,
         crypto: this.#crypto,
+        yield: opts?.yield,
       })
       // Published together: readers between the folds still see the previous epoch's control state.
       this.#ledger = ledger
@@ -2275,6 +2309,7 @@ export class GroupHandle {
         )
         await assertSenderNotLapsed({
           group: this,
+          yield: opts.yield,
           tree: historical?.ratchetTree ?? this.#state.ratchetTree,
           leafIndex: index,
           extensions: (historical?.groupContext ?? this.#state.groupContext).extensions,
@@ -2319,6 +2354,7 @@ export class GroupHandle {
                       })
                     await verifyLeafCredential(credential, key, {
                       crypto: this.#crypto,
+                      yield: opts?.yield,
                       deviceDenySet: () => denySetOf(candidateRegistry),
                       judging: () => ({
                         registry: this.#anchor.controller == null ? undefined : candidateRegistry,
@@ -2479,7 +2515,11 @@ export function buildCommitPolicyContext(
 }
 
 /** Build the handle a commit hands back: the post-commit state, everything else inherited. */
-export async function deriveGroup(group: GroupHandle, state: ClientState): Promise<GroupHandle> {
+export async function deriveGroup(
+  group: GroupHandle,
+  state: ClientState,
+  options?: YieldOptions,
+): Promise<GroupHandle> {
   return await GroupHandle.create({
     state,
     credential: group.credential,
@@ -2488,6 +2528,7 @@ export async function deriveGroup(group: GroupHandle, state: ClientState): Promi
       crypto: group.crypto,
     }),
     crypto: group.crypto,
+    yield: options?.yield,
     ledger: group.ledger,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,

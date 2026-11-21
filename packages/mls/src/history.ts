@@ -11,6 +11,7 @@ import { foldControllerLog } from './controller-log.js'
 import { parseMLSCredentialIdentity } from './credential.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import { DEVICE_ENTRY_TYPE } from './registry.js'
+import type { YieldOptions } from './types.js'
 
 export const HISTORY_HORIZON = 393_216
 export const MAX_EPOCH_EVENTS_FOR_LEAVES = 32
@@ -18,7 +19,8 @@ export const SETTLE_PROMPT_EPOCH_EVENTS = 24
 
 export type EpochEventCountParams = {
   log: ControllerLog
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function epochEventCount({ log, ...options }: EpochEventCountParams): Promise<number> {
   const inception = log.chain[0]?.event
@@ -34,7 +36,8 @@ export async function epochEventCount({ log, ...options }: EpochEventCountParams
 
 export type SettleAdvisoryParams = {
   log: ControllerLog
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 export async function settleAdvisory({
   log,

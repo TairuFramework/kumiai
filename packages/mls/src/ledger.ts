@@ -11,6 +11,8 @@ import {
   verifyToken,
 } from '@kokuin/token'
 
+import type { YieldOptions } from './types.js'
+
 const textEncoder = new TextEncoder()
 export const LEDGER_ENTRY_DIGEST_CACHE_SIZE = 4096
 const LEDGER_ENTRY_DIGEST_CACHE = new Map<string, string>()
@@ -47,7 +49,7 @@ export type VerifiedLedgerEntry<TValue = unknown> = {
   entry: LedgerEntry<TValue>
 }
 
-export type SignLedgerEntryParams = {
+export type SignLedgerEntryParams = YieldOptions & {
   identity: SigningIdentity
   entry: LedgerEntry
 }
@@ -58,7 +60,11 @@ export type SignLedgerEntryParams = {
  * author. `ord` is signed only when present, so a claim without it never signs
  * an `ord: undefined` key. Returns the stringified token.
  */
-export async function signLedgerEntry({ identity, entry }: SignLedgerEntryParams): Promise<string> {
+export async function signLedgerEntry({
+  identity,
+  entry,
+  ...options
+}: SignLedgerEntryParams): Promise<string> {
   const signed = await identity.signToken({
     payload: {
       type: entry.type,
@@ -68,6 +74,7 @@ export async function signLedgerEntry({ identity, entry }: SignLedgerEntryParams
       ...(entry.ord === undefined ? {} : { ord: entry.ord }),
     },
     embedLongForm: true,
+    yield: options.yield,
   })
   return stringifyToken(signed)
 }
@@ -105,7 +112,8 @@ function observedProvider(crypto: CryptoProvider): CryptoProvider {
 
 export type VerifyLedgerEntryParams = {
   token: string
-} & CryptoOptions
+} & CryptoOptions &
+  YieldOptions
 
 /**
  * Verify a signed ledger token and extract its claim. Returns `null` when the

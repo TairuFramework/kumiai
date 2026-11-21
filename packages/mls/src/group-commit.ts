@@ -50,7 +50,7 @@ import {
 import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import { staleLeafIndex } from './stale-leaf.js'
-import type { Invite } from './types.js'
+import type { Invite, YieldOptions } from './types.js'
 
 export type InviteRecipientMismatchErrorParams = {
   groupID: string
@@ -89,15 +89,15 @@ export class InviteRecipientMismatchError extends Error {
   }
 }
 
-export type CreateInviteParams = {
+export type CreateInviteParams = YieldOptions & {
   group: GroupHandle
   identity: SigningIdentity
   recipientDID: string
   controllerLog?: ControllerLog
 } & (
-  | { permission: GroupPermission; entries?: never }
-  | { permission?: never; entries?: Array<string> }
-)
+    | { permission: GroupPermission; entries?: never }
+    | { permission?: never; entries?: Array<string> }
+  )
 
 export type CreateInviteResult = {
   invite: Invite
@@ -118,7 +118,7 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     }
     appended = [...(params.entries ?? [])]
     for (const token of appended) {
-      const verified = await verifyLedgerEntry({ token, crypto: group.crypto })
+      const verified = await verifyLedgerEntry({ token, crypto: group.crypto, yield: params.yield })
       if (
         verified == null ||
         verified.entry.groupID !== group.groupID ||
@@ -128,10 +128,15 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
         throw new Error('createInvite: entries must be consumer entries signed by the inviter')
     }
     if (params.controllerLog != null) {
-      const delta = await controllerLogDelta({ group, log: params.controllerLog })
+      const delta = await controllerLogDelta({
+        group,
+        log: params.controllerLog,
+        yield: params.yield,
+      })
       if (delta != null)
         appended.unshift(
           await signLedgerEntry({
+            yield: params.yield,
             identity,
             entry: {
               type: DEVICE_ENTRY_TYPE,
@@ -153,6 +158,7 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     }
     appended = [
       await signLedgerEntry({
+        yield: params.yield,
         identity,
         entry: {
           type: ROLE_ENTRY_TYPE,
@@ -217,7 +223,7 @@ export function proposedTree(
   return tree
 }
 
-export type CommitWithEntriesParams = {
+export type CommitWithEntriesParams = YieldOptions & {
   group: GroupHandle
   extraProposals: Array<DefaultProposal>
   /** Pending proposals to commit by reference, retaining their authenticated senders. */
@@ -280,7 +286,7 @@ export async function commitWithEntries(
   // dead paper no matter who commits it.
   const inputs: Array<FoldInput> = []
   for (const token of enacted) {
-    const verified = await verifyLedgerEntry({ token, crypto: group.crypto })
+    const verified = await verifyLedgerEntry({ token, crypto: group.crypto, yield: params.yield })
     if (verified == null) {
       throw new Error('cannot enact a ledger entry whose signature does not verify')
     }
@@ -289,6 +295,7 @@ export async function commitWithEntries(
   const foldEntries = async () =>
     await foldEnvelope({
       crypto: group.crypto,
+      yield: params.yield,
       baseRoster: group.roster,
       baseRegistry: group.registry,
       entries: inputs,
@@ -316,12 +323,17 @@ export async function commitWithEntries(
     })),
   ])
   const clocks = await preservationClock({
+    yield: params.yield,
     group,
     candidateTree: tree,
     candidateRegistry: fold.registry,
   })
   for (const clock of clocks) {
-    const verified = await verifyLedgerEntry({ token: clock, crypto: group.crypto })
+    const verified = await verifyLedgerEntry({
+      token: clock,
+      crypto: group.crypto,
+      yield: params.yield,
+    })
     if (verified == null) throw new Error('Invalid preservation clock')
     enacted.push(clock)
     inputs.push({ verified, entryID: ledgerEntryDigest(clock) })
@@ -348,6 +360,7 @@ export async function commitWithEntries(
       proofCtx,
       {
         crypto: group.crypto,
+        yield: params.yield,
       },
     )
     if (!ok) {
@@ -383,6 +396,7 @@ export async function commitWithEntries(
   }
 
   const gate = await prepareLifecycleGate({
+    yield: params.yield,
     group,
     entries: inputs.map(({ verified }) => verified),
     candidateRegistry: fold.registry,
@@ -424,6 +438,7 @@ export async function commitWithEntries(
         registry: fold.registry,
         stage: 'full',
         mode: 'admit',
+        yield: params.yield,
       })
     }
   }
@@ -434,6 +449,7 @@ export async function commitWithEntries(
       registry: group.anchor.controller == null ? undefined : candidateRegistry,
       stage: 'full',
       mode: 'admit',
+      yield: params.yield,
     },
     (context) =>
       createCommit({
@@ -461,6 +477,7 @@ export async function commitWithEntries(
                     })
                       ? 'retain'
                       : 'admit',
+                  yield: params.yield,
                 },
                 (judgedContext) => judgedContext.authService.validateCredential(credential, key),
               )
@@ -508,7 +525,7 @@ export type CommitLedgerEntriesResult = {
   epoch: bigint
 }
 
-export type CommitLedgerEntriesParams = {
+export type CommitLedgerEntriesParams = YieldOptions & {
   group: GroupHandle
   tokens: Array<string>
 }
@@ -535,14 +552,20 @@ export type CommitLedgerEntriesParams = {
 export async function commitLedgerEntries({
   group,
   tokens,
+  ...options
 }: CommitLedgerEntriesParams): Promise<CommitLedgerEntriesResult> {
   return mutexFor(group).run(async () => {
     if (tokens.length === 0) {
       throw new Error('commitLedgerEntries: no ledger entries to commit')
     }
-    const result = await commitWithEntries({ group, extraProposals: [], enacted: tokens })
-    const newGroup = await deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries(result.enacted)
+    const result = await commitWithEntries({
+      yield: options.yield,
+      group,
+      extraProposals: [],
+      enacted: tokens,
+    })
+    const newGroup = await deriveGroup(group, result.newState, options)
+    await newGroup.applyLedgerEntries(result.enacted, options)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -566,7 +589,7 @@ export type CommitInviteResult = {
   epoch: bigint
 }
 
-export type CommitInviteParams = {
+export type CommitInviteParams = YieldOptions & {
   group: GroupHandle
   keyPackage: KeyPackage
   invite: Invite
@@ -598,6 +621,7 @@ export async function commitInvite({
   group,
   keyPackage,
   invite,
+  ...options
 }: CommitInviteParams): Promise<CommitInviteResult> {
   return mutexFor(group).run(async () => {
     if (invite.groupID !== group.groupID) {
@@ -610,7 +634,11 @@ export async function commitInvite({
     if (group.anchor.controller == null) {
       let grantedTo: string | null = null
       for (const token of enacted) {
-        const verified = await verifyLedgerEntry({ token, crypto: group.crypto })
+        const verified = await verifyLedgerEntry({
+          token,
+          crypto: group.crypto,
+          yield: options.yield,
+        })
         if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
           grantedTo = verified.entry.subject
         }
@@ -665,6 +693,7 @@ export async function commitInvite({
         ? undefined
         : staleLeafIndex(group.state.ratchetTree, keyPackage.leafNode)
     const result = await commitWithEntries({
+      yield: options.yield,
       group,
       extraProposals:
         stale == null
@@ -677,13 +706,13 @@ export async function commitInvite({
       ratchetTreeExtension: true,
     })
 
-    const newGroup = await deriveGroup(group, result.newState)
+    const newGroup = await deriveGroup(group, result.newState, options)
 
     if (result.welcome == null) {
       throw new Error('commitInvite: expected a Welcome message for the add proposal')
     }
     // Preservation may append a clock after the invite was prepared.
-    await newGroup.applyLedgerEntries(result.enacted)
+    await newGroup.applyLedgerEntries(result.enacted, options)
     const commitMessage = encode(mlsMessageEncoder, result.commit)
     const welcomeMessage = encode(mlsMessageEncoder, result.welcome)
     invite.ledgerEntries = newGroup.ledgerTokens

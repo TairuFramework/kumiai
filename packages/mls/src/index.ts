@@ -388,5 +388,5 @@ export {
 export type { MergeReceiveSecretTreeParams } from './secret-tree.js'
 export { mergeReceiveSecretTree } from './secret-tree.js'
 export { bindingIssuedAt, DuplicateMemberLeafError } from './stale-leaf.js'
-export type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
+export type { GroupOptions, Invite, KeyPackageBundle, YieldOptions } from './types.js'
 export { welcomeKeyPackageRefs } from './welcome-refs.js'
