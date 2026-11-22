@@ -761,6 +761,7 @@ describe('hub authorization', () => {
     await expect(alice.request('hub/v1/subscribe', { param: { topicID: TOPIC } })).resolves.toEqual(
       {
         subscribed: true,
+        generation: expect.any(String),
       },
     )
 
@@ -915,5 +916,62 @@ describe('a store failure the hub declines to turn into a request failure is rep
     ])
 
     await ctx.dispose()
+  })
+})
+
+describe('subscription fencing at the signed wire boundary', () => {
+  test('unfenced unsubscribe preserves its legacy success response for absent membership', async () => {
+    const ctx = createTestHub()
+    const { client } = ctx.connect()
+    const topicID = fixtureTopic('unfenced-no-op')
+    try {
+      expect(await client.request('hub/v1/unsubscribe', { param: { topicID } })).toEqual({
+        unsubscribed: true,
+      })
+      const { generation } = await client.request('hub/v1/subscribe', { param: { topicID } })
+      await client.request('hub/v1/unsubscribe', {
+        param: { topicID, expectedGeneration: generation },
+      })
+      expect(await client.request('hub/v1/unsubscribe', { param: { topicID } })).toEqual({
+        unsubscribed: true,
+      })
+    } finally {
+      await ctx.dispose()
+    }
+  })
+
+  test('returns the generation and accepts only canonical decimal fences', async () => {
+    const ctx = createTestHub()
+    const { client } = ctx.connect()
+    const topicID = fixtureTopic('fenced-subscription')
+    try {
+      const first = await client.request('hub/v1/subscribe', { param: { topicID } })
+      expect(first).toMatchObject({
+        subscribed: true,
+        generation: expect.stringMatching(/^[1-9][0-9]*$/),
+      })
+      for (const expectedGeneration of ['', '-1', '01', '1.5', '1e3', 1, null]) {
+        await expect(
+          client.request('hub/v1/unsubscribe', { param: { topicID, expectedGeneration } as never }),
+        ).rejects.toThrow('Invalid protocol message')
+      }
+      const newer = await client.request('hub/v1/subscribe', { param: { topicID } })
+      expect(
+        await client.request('hub/v1/unsubscribe', {
+          param: { topicID, expectedGeneration: first.generation },
+        }),
+      ).toEqual({ unsubscribed: false })
+      expect(
+        await client.request('hub/v1/unsubscribe', {
+          param: { topicID, expectedGeneration: newer.generation },
+        }),
+      ).toEqual({ unsubscribed: true })
+      // Migration's legacy generation is a valid fence, but no subscription remains.
+      expect(
+        await client.request('hub/v1/unsubscribe', { param: { topicID, expectedGeneration: '0' } }),
+      ).toEqual({ unsubscribed: false })
+    } finally {
+      await ctx.dispose()
+    }
   })
 })

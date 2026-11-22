@@ -135,7 +135,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
    */
   const publishRecords = new Map<string, string>()
   /** Per topic: the subscribers, each with the retention it asked for. */
-  const subscriptions = new Map<string, Map<string, number>>()
+  const subscriptions = new Map<string, Map<string, { retention: number; generation: string }>>()
+  let subscriptionCounter = 0n
   // Reverse index for an O(1) per-DID subscription count. Kept in lockstep with `subscriptions`.
   const subsByDID = new Map<string, Set<string>>()
   const keyPackages = new Map<string, Array<StoredKeyPackage>>()
@@ -152,7 +153,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     const subscribers = subscriptions.get(topicID)
     if (subscribers != null) {
       for (const requested of subscribers.values()) {
-        if (requested > retention) retention = requested
+        if (requested.retention > retention) retention = requested.retention
       }
     }
     return retention
@@ -446,7 +447,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       return purgedIDs
     },
 
-    async subscribe(params: SubscribeParams): Promise<void> {
+    async subscribe(params: SubscribeParams): Promise<string> {
       const requested = params.retention ?? defaultRetention
       if (requested > maxRetention) {
         throw new RetentionExceededError(
@@ -467,7 +468,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         subscribers = new Map()
         subscriptions.set(params.topicID, subscribers)
       }
-      subscribers.set(params.subscriberDID, requested)
+      const generation = String(++subscriptionCounter)
+      subscribers.set(params.subscriberDID, { retention: requested, generation })
 
       let ownTopics = subsByDID.get(params.subscriberDID)
       if (ownTopics == null) {
@@ -475,10 +477,18 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         subsByDID.set(params.subscriberDID, ownTopics)
       }
       ownTopics.add(params.topicID)
+      return generation
     },
 
-    async unsubscribe({ subscriberDID, topicID }: UnsubscribeParams): Promise<void> {
+    async unsubscribe({
+      subscriberDID,
+      topicID,
+      expectedGeneration,
+    }: UnsubscribeParams): Promise<boolean> {
       const subscribers = subscriptions.get(topicID)
+      const current = subscribers?.get(subscriberDID)
+      if (expectedGeneration != null && current?.generation !== expectedGeneration) return false
+      const removed = current != null
       if (subscribers != null) {
         subscribers.delete(subscriberDID)
         if (subscribers.size === 0) {
@@ -500,6 +510,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
           }
         }
       }
+      return removed
     },
 
     async getSubscribers({ topicID }: GetSubscribersParams): Promise<Array<string>> {

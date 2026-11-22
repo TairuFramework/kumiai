@@ -132,6 +132,33 @@ describe('HubClient', () => {
     await bobT.dispose()
   })
 
+  test('fenced unsubscribe keeps a newer subscription and its pending delivery', async () => {
+    const testHub = createTestHub()
+    const { client, identity, transports } = createTestClient(testHub)
+    try {
+      const older = await client.subscribe({ topicID: TOPIC })
+      const newer = await client.subscribe({ topicID: TOPIC })
+      expect(older.generation).toEqual(expect.any(String))
+      await testHub.store.publish({
+        senderDID: 'did:test:sender',
+        topicID: TOPIC,
+        payload: fromUTF('keep'),
+      })
+      expect(
+        await client.unsubscribe({ topicID: TOPIC, expectedGeneration: older.generation }),
+      ).toEqual({ unsubscribed: false })
+      expect((await testHub.store.fetch({ recipientDID: identity.id })).messages).toHaveLength(1)
+      expect(
+        await client.unsubscribe({ topicID: TOPIC, expectedGeneration: newer.generation }),
+      ).toEqual({ unsubscribed: true })
+      expect((await testHub.store.fetch({ recipientDID: identity.id })).messages).toEqual([])
+    } finally {
+      await testHub.hub.server.dispose()
+      await transports.dispose()
+      await testHub.transports.dispose()
+    }
+  })
+
   test('subscribe then unsubscribe stops delivery', async () => {
     const testHub = createTestHub()
     const { client: alice, transports: aliceT } = createTestClient(testHub)

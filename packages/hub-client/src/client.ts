@@ -25,7 +25,7 @@ export type SubscribeParams = {
   /** Requested retention in seconds. Above the hub's maximum the subscribe is refused. */
   retention?: number
 }
-export type UnsubscribeParams = { topicID: string }
+export type UnsubscribeParams = { topicID: string; expectedGeneration?: string }
 export type UploadKeyPackagesParams = { keyPackages: Array<string>; notAfter?: number }
 export type UploadLastResortKeyPackageParams = { keyPackage: string }
 export type FetchKeyPackagesParams = { did: string; count?: number }
@@ -107,7 +107,7 @@ export class HubClient {
     })
   }
 
-  subscribe(params: SubscribeParams): RequestCall<{ subscribed: boolean }> {
+  subscribe(params: SubscribeParams): RequestCall<{ subscribed: boolean; generation: string }> {
     return this.#client.request('hub/v1/subscribe', {
       param: { topicID: params.topicID, retention: params.retention },
     })
@@ -135,7 +135,7 @@ export class HubClient {
 
   unsubscribe(params: UnsubscribeParams): RequestCall<{ unsubscribed: boolean }> {
     return this.#client.request('hub/v1/unsubscribe', {
-      param: { topicID: params.topicID },
+      param: { topicID: params.topicID, expectedGeneration: params.expectedGeneration },
     })
   }
 

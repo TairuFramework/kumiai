@@ -101,3 +101,23 @@ These result fields describe storage effects without changing retention or dedup
 `OccupancyRow` extends `HubAttribution` with `bytes` and `frames`, counting retained physical frames rather than delivery rows.
 `HubStore.storeID?()` returns a persistent store identifier for occupancy sample deduplication.
 Both methods are optional, so existing stores can omit occupancy reporting.
+
+## Subscription generations
+
+`hub/v1/subscribe` returns `{ subscribed: true, generation: string }`.
+Every accepted subscribe creates a new generation, including a refresh on an existing subscription.
+Generations are canonical decimal strings. Clients should treat them as opaque fences.
+
+`hub/v1/unsubscribe` accepts `{ topicID, expectedGeneration?: string }`.
+With a fence, the store atomically removes membership and pending deliveries only if the current generation matches.
+With a fence, `{ unsubscribed: boolean }` indicates whether membership was removed.
+With a fence, a stale or absent subscription returns `false` without deleting deliveries.
+Without a fence, unsubscribe unconditionally cleans up membership and pending deliveries, as before.
+Unfenced wire calls retain the legacy `{ unsubscribed: true }` success response, including no-op removals.
+The store API always returns whether it removed membership.
+
+A client subscribing twice must retain the latest generation.
+Removing the first generation cannot cancel the second subscription, even when both use the same connection.
+After reconnecting, a client must use the generation returned by its replacement subscribe.
+A delayed removal must retain its original generation, even if a newer subscribe has completed.
+Custom `HubStore` implementations must implement the same return values and atomicity contract.
