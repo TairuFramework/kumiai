@@ -50,9 +50,12 @@ function createStoreAsLogHub(options: {
     retention: { max: options.maxRetention },
   })
   return {
-    subscribe: ({ subscriberDID, topicID, ...subscribeOptions }) =>
-      store.subscribe({ subscriberDID, topicID, retention: subscribeOptions?.retention }),
-    unsubscribe: ({ subscriberDID, topicID }) => store.unsubscribe({ subscriberDID, topicID }),
+    subscribe: async ({ subscriberDID, topicID, ...subscribeOptions }) => {
+      await store.subscribe({ subscriberDID, topicID, retention: subscribeOptions?.retention })
+    },
+    unsubscribe: async ({ subscriberDID, topicID }) => {
+      await store.unsubscribe({ subscriberDID, topicID })
+    },
     publish: (params) => store.publish(params),
     fetchTopic: (params) => store.fetchTopic(params),
     receive: ({ subscriberDID }) => pollingReceive(store, subscriberDID),

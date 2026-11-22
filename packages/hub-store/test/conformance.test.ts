@@ -81,11 +81,11 @@ function logHubOver(store: HubStore): ConformanceLogHub {
   }
 
   return {
-    subscribe: ({ subscriberDID, topicID, ...options }) => {
-      return chain(() => store.subscribe({ subscriberDID, topicID, retention: options?.retention }))
+    subscribe: async ({ subscriberDID, topicID, ...options }) => {
+      await chain(() => store.subscribe({ subscriberDID, topicID, retention: options?.retention }))
     },
-    unsubscribe: ({ subscriberDID, topicID }) => {
-      return chain(() => store.unsubscribe({ subscriberDID, topicID }))
+    unsubscribe: async ({ subscriberDID, topicID }) => {
+      await chain(() => store.unsubscribe({ subscriberDID, topicID }))
     },
     receive,
     // Passed straight through: an absent `expectedHead` is an unconditional publish and a null one

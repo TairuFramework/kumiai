@@ -7,6 +7,27 @@ export function hubStoreMigrations(ctx: MigrationContext): Record<string, Migrat
   const t = ctx.types
   const p = ctx.tablePrefix
   return {
+    '2-subscription-generation': {
+      async up(db) {
+        await db.schema
+          .alterTable('hub_subscriptions')
+          .addColumn('generation', t.text, (col) => col.notNull().defaultTo('0'))
+          .execute()
+        await db.schema
+          .createTable('hub_subscription_sequence')
+          .addColumn('id', t.bigint, (col) => col.notNull().primaryKey())
+          .addColumn('counter', t.bigint, (col) => col.notNull())
+          .execute()
+        await (db as Kysely<HubTables>)
+          .insertInto('hub_subscription_sequence')
+          .values({ id: 0, counter: 0 })
+          .execute()
+      },
+      async down(db) {
+        await db.schema.dropTable('hub_subscription_sequence').execute()
+        await db.schema.alterTable('hub_subscriptions').dropColumn('generation').execute()
+      },
+    },
     '1-attribution': {
       async up(db) {
         await db.schema

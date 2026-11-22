@@ -75,8 +75,9 @@ export const hubProtocol = {
       type: 'object',
       properties: {
         subscribed: { type: 'boolean' },
+        generation: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
       },
-      required: ['subscribed'],
+      required: ['subscribed', 'generation'],
       additionalProperties: false,
     },
   },
@@ -87,6 +88,7 @@ export const hubProtocol = {
       type: 'object',
       properties: {
         topicID: topicIDSchema,
+        expectedGeneration: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
       },
       required: ['topicID'],
       additionalProperties: false,

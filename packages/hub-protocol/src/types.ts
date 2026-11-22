@@ -173,6 +173,8 @@ export type AckParams = {
 export type UnsubscribeParams = {
   subscriberDID: string
   topicID: string
+  /** Remove only this generation. Omitted: unconditional removal, including pending deliveries. */
+  expectedGeneration?: string
 }
 
 export type GetSubscribersParams = {
@@ -270,8 +272,11 @@ export type HubStore = {
   /** Record a subscription. A store MAY cap the distinct topics one DID may subscribe to and
    * reject a subscribe past its cap with `SubscriptionQuotaExceededError`. A re-subscribe to a
    * topic the DID already holds never counts against the cap. */
-  subscribe(params: SubscribeParams): Promise<void>
-  unsubscribe(params: UnsubscribeParams): Promise<void>
+  // Every successful subscribe, including refreshes, returns a new canonical decimal generation.
+  // Generations increase per DID/topic and survive deletion and restart. Treat them as opaque fences.
+  subscribe(params: SubscribeParams): Promise<string>
+  /** Atomically remove membership and deliveries on a match. Returns whether membership was removed. */
+  unsubscribe(params: UnsubscribeParams): Promise<boolean>
   getSubscribers(params: GetSubscribersParams): Promise<Array<string>>
   /**
    * Store one key package for later retrieval.

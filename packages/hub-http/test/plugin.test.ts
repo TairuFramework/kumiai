@@ -108,7 +108,7 @@ describe('hub HTTP server', () => {
       await grants.store.grant({ subject: caller.id, pattern: 'hub/*', createdBy: identity.id })
       await expect(
         client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
-      ).resolves.toEqual({ subscribed: true })
+      ).resolves.toEqual({ subscribed: true, generation: expect.any(String) })
       await grants.store.revoke({ subject: caller.id, pattern: 'hub/*', createdBy: identity.id })
       await expect(
         client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
@@ -218,7 +218,7 @@ describe('hub HTTP server', () => {
     await grant()
     await expect(
       client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
-    ).resolves.toEqual({ subscribed: true })
+    ).resolves.toEqual({ subscribed: true, generation: expect.any(String) })
   })
 
   test('denies a revoked delegated capability', async () => {
@@ -350,7 +350,7 @@ describe('hub HTTP server', () => {
     })
     await expect(
       client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
-    ).resolves.toEqual({ subscribed: true })
+    ).resolves.toEqual({ subscribed: true, generation: expect.any(String) })
     const limited = await fetch(`${server.url}/custom-hub`, { method: 'POST' })
     expect(limited.status).toBe(429)
     expect(limited.headers.get('Retry-After')).not.toBeNull()

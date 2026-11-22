@@ -589,11 +589,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         })
       }
       try {
-        await store.subscribe({ subscriberDID: clientDID, topicID, retention })
+        const generation = await store.subscribe({ subscriberDID: clientDID, topicID, retention })
+        return { subscribed: true, generation }
       } catch (error) {
         rethrowAsHandlerError(error)
       }
-      return { subscribed: true }
     }) as RequestHandler<HubProtocol, 'hub/v1/subscribe'>,
 
     'hub/v1/topic/fetch': (async (ctx) => {
@@ -629,7 +629,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     }) as RequestHandler<HubProtocol, 'hub/v1/topic/fetch'>,
 
     'hub/v1/unsubscribe': (async (ctx) => {
-      const { topicID } = ctx.param
+      const { topicID, expectedGeneration } = ctx.param
       const clientDID = getClientDID(ctx)
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({
@@ -638,11 +638,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         })
       }
       try {
-        await store.unsubscribe({ subscriberDID: clientDID, topicID })
+        const unsubscribed = await store.unsubscribe({
+          subscriberDID: clientDID,
+          topicID,
+          expectedGeneration,
+        })
+        // Unfenced callers retain the legacy success response, including no-op removals.
+        return { unsubscribed: expectedGeneration == null || unsubscribed }
       } catch (error) {
         rethrowAsHandlerError(error)
       }
-      return { unsubscribed: true }
     }) as RequestHandler<HubProtocol, 'hub/v1/unsubscribe'>,
 
     'hub/v1/receive': (async (ctx) => {

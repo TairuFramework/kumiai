@@ -716,7 +716,7 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
     return row?.key_package ?? null
   }
 
-  async function subscribe(subscribeParams: SubscribeParams): Promise<void> {
+  async function subscribe(subscribeParams: SubscribeParams): Promise<string> {
     const { subscriberDID, topicID } = subscribeParams
     // Refused, never clamped: a peer that believed it had asked for more would be stranded.
     if (
@@ -730,79 +730,104 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
     }
     const retention = subscribeParams.retention ?? defaultRetention
 
-    // Charged on NEW rows only: refusing a refresh would strand a subscriber at the cap on every
-    // reconnect.
-    const held = await db
-      .selectFrom('hub_subscriptions')
-      .select('topic_id')
-      .where('subscriber_did', '=', subscriberDID)
-      .execute()
-    if (!held.some((row) => row.topic_id === topicID) && held.length >= maxSubscriptionsPerDID) {
-      throw new SubscriptionQuotaExceededError(
-        `DID ${subscriberDID} exceeds the maximum of ${maxSubscriptionsPerDID} subscriptions`,
-      )
-    }
-    // Upsert, so re-subscribing refreshes the activity timestamp and retention rather than failing
-    // or duplicating.
-    await db
-      .insertInto('hub_subscriptions')
-      .values({
-        topic_id: topicID,
-        subscriber_did: subscriberDID,
-        last_active_at: Date.now(),
-        retention,
-      })
-      .onConflict((oc) => {
-        return oc.columns(['topic_id', 'subscriber_did']).doUpdateSet({
-          last_active_at: (eb) => eb.ref('excluded.last_active_at'),
-          retention: (eb) => eb.ref('excluded.retention'),
+    return await withStoreTransaction(db, async (trx) => {
+      // First write acquires SQLite's writer before any snapshot reads. A persistent counter
+      // prevents ABA after unsubscribe/reaping, without retaining a tombstone per DID/topic.
+      const row = await trx
+        .updateTable('hub_subscription_sequence')
+        .set((eb) => ({ counter: eb('counter', '+', 1) }))
+        .where('id', '=', 0)
+        .returning(sql<string>`cast(${sql.ref('counter')} as text)`.as('generation'))
+        .executeTakeFirstOrThrow()
+
+      // Charged on new rows only. Refreshes must still work at the cap.
+      const held = await trx
+        .selectFrom('hub_subscriptions')
+        .select('topic_id')
+        .where('subscriber_did', '=', subscriberDID)
+        .execute()
+      if (!held.some((row) => row.topic_id === topicID) && held.length >= maxSubscriptionsPerDID) {
+        throw new SubscriptionQuotaExceededError(
+          `DID ${subscriberDID} exceeds the maximum of ${maxSubscriptionsPerDID} subscriptions`,
+        )
+      }
+      await trx
+        .insertInto('hub_subscriptions')
+        .values({
+          topic_id: topicID,
+          subscriber_did: subscriberDID,
+          last_active_at: Date.now(),
+          retention,
+          generation: row.generation,
         })
-      })
-      .execute()
+        .onConflict((oc) => {
+          return oc.columns(['topic_id', 'subscriber_did']).doUpdateSet({
+            last_active_at: (eb) => eb.ref('excluded.last_active_at'),
+            retention: (eb) => eb.ref('excluded.retention'),
+            generation: (eb) => eb.ref('excluded.generation'),
+          })
+        })
+        .execute()
+      return row.generation
+    })
   }
 
-  async function unsubscribe({ subscriberDID, topicID }: UnsubscribeParams): Promise<void> {
-    await db
-      .deleteFrom('hub_subscriptions')
-      .where('topic_id', '=', topicID)
-      .where('subscriber_did', '=', subscriberDID)
-      .execute()
+  async function unsubscribe({
+    subscriberDID,
+    topicID,
+    expectedGeneration,
+  }: UnsubscribeParams): Promise<boolean> {
+    return await withStoreTransaction(db, async (trx) => {
+      // DELETE is the atomic generation check and holds the unique key until delivery cleanup
+      // commits. A competing subscribe cannot refresh or re-create this membership before then.
+      let deletion = trx
+        .deleteFrom('hub_subscriptions')
+        .where('topic_id', '=', topicID)
+        .where('subscriber_did', '=', subscriberDID)
+      if (expectedGeneration != null) {
+        deletion = deletion.where('generation', '=', expectedGeneration)
+      }
+      const deleted = await deletion.returning('generation').executeTakeFirst()
+      const removed = deleted != null
+      if (!removed && expectedGeneration != null) return false
 
-    // A delivery operation, not a trim: drop this subscriber's pending deliveries for the topic and
-    // GC any MAILBOX frame left without a recipient. Log frames and the head are never touched.
-    const pending = await db
-      .selectFrom('hub_deliveries')
-      .innerJoin('hub_messages', 'hub_messages.sequence_id', 'hub_deliveries.sequence_id')
-      .select('hub_deliveries.sequence_id')
-      .where('hub_deliveries.recipient_did', '=', subscriberDID)
-      .where('hub_messages.topic_id', '=', topicID)
-      .execute()
-
-    if (pending.length === 0) return
-    const sequenceIDs = pending.map((r) => r.sequence_id)
-
-    await db
-      .deleteFrom('hub_deliveries')
-      .where('recipient_did', '=', subscriberDID)
-      .where('sequence_id', 'in', sequenceIDs)
-      .execute()
-
-    const remaining = await db
-      .selectFrom('hub_deliveries')
-      .select('sequence_id')
-      .where('sequence_id', 'in', sequenceIDs)
-      .execute()
-
-    const stillDelivered = new Set(remaining.map((r) => r.sequence_id))
-    const orphaned = sequenceIDs.filter((id) => !stillDelivered.has(id))
-
-    if (orphaned.length > 0) {
-      await db
-        .deleteFrom('hub_messages')
-        .where('sequence_id', 'in', orphaned)
-        .where('retain', '=', 'mailbox')
+      // A delivery operation, not a trim: drop this subscriber's pending deliveries for the topic and
+      // GC any MAILBOX frame left without a recipient. Log frames and the head are never touched.
+      const pending = await trx
+        .selectFrom('hub_deliveries')
+        .innerJoin('hub_messages', 'hub_messages.sequence_id', 'hub_deliveries.sequence_id')
+        .select('hub_deliveries.sequence_id')
+        .where('hub_deliveries.recipient_did', '=', subscriberDID)
+        .where('hub_messages.topic_id', '=', topicID)
         .execute()
-    }
+
+      if (pending.length === 0) return removed
+      const sequenceIDs = pending.map((r) => r.sequence_id)
+
+      await trx
+        .deleteFrom('hub_deliveries')
+        .where('recipient_did', '=', subscriberDID)
+        .where('sequence_id', 'in', sequenceIDs)
+        .execute()
+
+      const remaining = await trx
+        .selectFrom('hub_deliveries')
+        .select('sequence_id')
+        .where('sequence_id', 'in', sequenceIDs)
+        .execute()
+
+      const stillDelivered = new Set(remaining.map((r) => r.sequence_id))
+      const orphaned = sequenceIDs.filter((id) => !stillDelivered.has(id))
+
+      if (orphaned.length > 0) {
+        await trx
+          .deleteFrom('hub_messages')
+          .where('sequence_id', 'in', orphaned)
+          .where('retain', '=', 'mailbox')
+          .execute()
+      }
+      return removed
+    })
   }
 
   async function getSubscribers({ topicID }: GetSubscribersParams): Promise<Array<string>> {

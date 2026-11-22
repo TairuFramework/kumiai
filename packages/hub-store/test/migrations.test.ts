@@ -1,11 +1,11 @@
 import { HozonDB, type Kysely, sql } from '@hozon/db'
 import { NodeSQLiteAdapter } from '@hozon/node-sqlite'
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test } from 'vitest'
 
 import { createHubStoreDefinition, getHubStore } from '../src/index.js'
 import { hubStoreMigrations } from '../src/migrations.js'
 import type { HubTables } from '../src/tables.js'
-import { hubTables } from './databases.js'
+import { backends, hubTables } from './databases.js'
 
 async function migrated(): Promise<{ db: HozonDB; tables: Kysely<HubTables> }> {
   const db = new HozonDB({ adapter: new NodeSQLiteAdapter({ database: ':memory:' }) })
@@ -23,7 +23,11 @@ describe('hub migrations', () => {
       types: adapter.types,
       functions: adapter.functions,
     })
-    expect(Object.keys(migrations).sort()).toEqual(['0-init', '1-attribution'])
+    expect(Object.keys(migrations).sort()).toEqual([
+      '0-init',
+      '1-attribution',
+      '2-subscription-generation',
+    ])
   })
 
   test('a fresh database carries the columns the folded migrations used to add', async () => {
@@ -79,5 +83,61 @@ describe('hub migrations', () => {
         .execute(),
     ).rejects.toThrow()
     await db.close()
+  })
+})
+
+// Apply only the old migrations first, using Hozon's real migration ledger and prefixing.
+describe.each(backends())('subscription migration ($name)', (backend) => {
+  afterEach(() => backend.cleanup())
+  test('upgrades existing subscriptions without losing deliveries or reusing their generation', async () => {
+    const open = await backend.createReopenable()
+    const legacy = open()
+    const definition = createHubStoreDefinition()
+    legacy.register({
+      ...definition,
+      migrations(ctx) {
+        const migrations = hubStoreMigrations(ctx)
+        delete migrations['2-subscription-generation']
+        return migrations
+      },
+    })
+    const tables = await hubTables(legacy)
+    await tables
+      .insertInto('hub_subscriptions')
+      .values({ topic_id: 't', subscriber_did: 'did:test:reader', last_active_at: 1 })
+      .execute()
+    await tables
+      .insertInto('hub_messages')
+      .values({
+        sequence_id: '000000000001',
+        sender_did: 'did:test:sender',
+        topic_id: 't',
+        payload: new Uint8Array([1]),
+        stored_at: 1,
+        retain: 'mailbox',
+      })
+      .execute()
+    await tables
+      .insertInto('hub_deliveries')
+      .values({ sequence_id: '000000000001', recipient_did: 'did:test:reader' })
+      .execute()
+    await legacy.close()
+    const db = open()
+    db.register(definition)
+    const store = await getHubStore(db)
+    const upgraded = await hubTables(db)
+    const row = await upgraded.selectFrom('hub_subscriptions').selectAll().executeTakeFirstOrThrow()
+    expect(row.generation).toBe('0')
+    expect((await store.fetch({ recipientDID: 'did:test:reader' })).messages).toHaveLength(1)
+    const generation = await store.subscribe({ topicID: 't', subscriberDID: 'did:test:reader' })
+    expect(
+      await store.unsubscribe({
+        topicID: 't',
+        subscriberDID: 'did:test:reader',
+        expectedGeneration: '0',
+      }),
+    ).toBe(false)
+    expect((await store.fetch({ recipientDID: 'did:test:reader' })).messages).toHaveLength(1)
+    expect(BigInt(generation)).toBeGreaterThan(0n)
   })
 })

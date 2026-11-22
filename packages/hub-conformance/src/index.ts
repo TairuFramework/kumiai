@@ -94,6 +94,70 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     params
 
   describe('HubStore conformance', () => {
+    test('stale unsubscribe preserves a refreshed subscription and its deliveries', async () => {
+      const store = await createStore()
+      const subscription = { subscriberDID: BOB, topicID: TOPIC }
+      const older = await store.subscribe(subscription)
+      const newer = await store.subscribe(subscription)
+      const published = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+      })
+      expect(await store.unsubscribe({ ...subscription, expectedGeneration: older })).toBe(false)
+      expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([BOB])
+      expect(
+        (await store.fetch({ recipientDID: BOB })).messages.map((message) => message.sequenceID),
+      ).toEqual([published.sequenceID])
+      expect(typeof older).toBe('string')
+      expect(BigInt(newer)).toBeGreaterThan(BigInt(older))
+    })
+
+    test('matching unsubscribe removes membership and deliveries, preserving other recipients and logs', async () => {
+      const store = await createStore()
+      const subscription = { subscriberDID: BOB, topicID: TOPIC }
+      const generation = await store.subscribe(subscription)
+      await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC })
+      for (const retain of ['mailbox', 'log'] as const) {
+        await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1), retain })
+      }
+      expect(await store.unsubscribe({ ...subscription, expectedGeneration: generation })).toBe(
+        true,
+      )
+      expect(await store.unsubscribe({ ...subscription, expectedGeneration: generation })).toBe(
+        false,
+      )
+      expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([CAROL])
+      expect((await store.fetch({ recipientDID: BOB })).messages).toEqual([])
+      expect((await store.fetch({ recipientDID: CAROL })).messages).toHaveLength(2)
+      expect(
+        (await store.fetchTopic({ subscriberDID: CAROL, topicID: TOPIC })).messages,
+      ).toHaveLength(1)
+    })
+
+    test('generation is never reused after unsubscribe and re-creation', async () => {
+      const store = await createStore()
+      const subscription = { subscriberDID: BOB, topicID: TOPIC }
+      const older = await store.subscribe(subscription)
+      await store.unsubscribe(subscription)
+      const newer = await store.subscribe(subscription)
+      expect(await store.unsubscribe({ ...subscription, expectedGeneration: older })).toBe(false)
+      expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([BOB])
+      expect(BigInt(newer)).toBeGreaterThan(BigInt(older))
+    })
+
+    test('unfenced unsubscribe removes the latest subscription and pending deliveries', async () => {
+      const store = await createStore()
+      const subscription = { subscriberDID: BOB, topicID: TOPIC }
+      await store.subscribe(subscription)
+      await store.subscribe(subscription)
+      await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
+      expect(await store.unsubscribe(subscription)).toBe(true)
+      expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([])
+      expect((await store.fetch({ recipientDID: BOB })).messages).toEqual([])
+      expect(await store.unsubscribe(subscription)).toBe(false)
+    })
+
     test.skipIf(params.setTime == null)(
       'age purge retains a log suffix when the clock moves backwards',
       async () => {
@@ -1277,11 +1341,11 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         // Re-subscribing to a topic ALICE already holds does not count against the cap.
         await expect(
           store.subscribe({ subscriberDID: ALICE, topicID: 'topic:0' }),
-        ).resolves.toBeUndefined()
+        ).resolves.toEqual(expect.any(String))
         // The cap is per DID.
         await expect(
           store.subscribe({ subscriberDID: BOB, topicID: 'topic:overflow' }),
-        ).resolves.toBeUndefined()
+        ).resolves.toEqual(expect.any(String))
       })
     }
   })

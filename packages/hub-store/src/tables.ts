@@ -44,6 +44,7 @@ export type HubTables = {
   hub_subscriptions: {
     topic_id: string
     subscriber_did: string
+    generation: ColumnType<string, string | undefined, string>
     last_active_at: number
     // Requested retention in seconds. Insert-optional: the column defaults to 0.
     retention: ColumnType<number, number | undefined, number>
@@ -55,6 +56,11 @@ export type HubTables = {
     head: string
     // The highest log sequenceID ever removed, or null. Monotonic.
     removed_through: ColumnType<string | null, string | null | undefined, string | null>
+  }
+  // Independent of the publish sequence counter.
+  hub_subscription_sequence: {
+    id: number
+    counter: number
   }
   // Persistent global monotonic sequence counter (singleton row id=0).
   hub_sequence: {
