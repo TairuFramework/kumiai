@@ -467,6 +467,38 @@ describe('nobleCryptoProvider', () => {
     customImpl.rng.randomBytes(16)
     expect(callCount).toBe(1)
   })
+
+  // Recorded sessions replay byte-exact only if every key and encapsulation draws from this source.
+  test.each([
+    'signature keygen',
+    'HPKE generateKeyPair',
+    'HPKE seal',
+  ] as const)('custom randomBytes drives %s', async (operation) => {
+    const reads: Array<number> = []
+    const provider = createNobleCryptoProvider({
+      randomBytes: (n) => {
+        reads.push(n)
+        return new Uint8Array(n).fill(42)
+      },
+    })
+    const impl = await getImpl(CIPHERSUITE_NAME, provider)
+    const recipient = await impl.hpke.deriveKeyPair(new Uint8Array(32).fill(1))
+    const input = new TextEncoder().encode('fixed input')
+    const generate = async (): Promise<Uint8Array> => {
+      switch (operation) {
+        case 'signature keygen':
+          return (await impl.signature.keygen()).publicKey
+        case 'HPKE generateKeyPair':
+          return impl.hpke.exportPublicKey((await impl.hpke.generateKeyPair()).publicKey)
+        case 'HPKE seal':
+          return (await impl.hpke.seal(recipient.publicKey, input, input)).enc
+      }
+    }
+    const first = await generate()
+    const second = await generate()
+    expect(reads).toEqual([32, 32])
+    expect(second).toEqual(first)
+  })
 })
 
 describe('nobleCryptoProvider ChaCha20-Poly1305 suite (ID 3)', () => {
