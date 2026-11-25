@@ -1,4 +1,5 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
+import type { Runtime } from '@sozai/runtime'
 
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
@@ -66,6 +67,7 @@ export type TestPeer = {
 }
 
 export type MakeMLSPeerOptions = {
+  runtime?: Partial<Runtime>
   appOutbox?: AppOutbox
   appOutboxLimit?: number
   onAppOutboxCleared?: (notice: AppOutboxCleared) => void | Promise<void>
@@ -164,6 +166,7 @@ export function makeMLSPeer(
   const appOutbox = options.appOutbox ?? restartOf?.appOutbox ?? createMemoryAppOutbox()
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const peer = createGroupPeer<Protocols>({
+    runtime: options.runtime,
     hub,
     crypto,
     mls,

@@ -87,3 +87,21 @@ describe('recovery ordering', { concurrent: false }, () => {
     },
   )
 })
+
+test('injected clock expires cached secrets without advancing global time', () => {
+  let time = 100
+  const secret = new Uint8Array([7])
+  const cache = createRecoveryCache<Uint8Array>(
+    (key) => key.fill(0),
+    () => time,
+  )
+  try {
+    cache.set('clock', secret, 200)
+    expect(cache.get('clock')?.value).toBe(secret)
+    time = 201
+    expect(cache.get('clock')).toBeUndefined()
+    expect(secret).toEqual(new Uint8Array([0]))
+  } finally {
+    cache.clear()
+  }
+})

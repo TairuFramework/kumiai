@@ -1,6 +1,7 @@
 import { encodeMultibase } from '@kokuin/token'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { createRuntime, type Now } from '@sozai/runtime'
 
 import type {
   GroupMLS,
@@ -22,7 +23,10 @@ export function confirmationTag(key: Uint8Array, requestID: string): string {
 export type RecoveryCacheEntry<TValue> = { value: TValue; expiresAt: number }
 
 /** Expiry releases exporter keys even when the peer receives no further traffic. */
-export function createRecoveryCache<TValue>(release: (value: TValue) => void = () => {}) {
+export function createRecoveryCache<TValue>(
+  release: (value: TValue) => void = () => {},
+  now: Now = createRuntime().now,
+) {
   const entries = new Map<
     string,
     RecoveryCacheEntry<TValue> & { timer: ReturnType<typeof setTimeout> }
@@ -38,7 +42,7 @@ export function createRecoveryCache<TValue>(release: (value: TValue) => void = (
     delete: remove,
     get(key: string): RecoveryCacheEntry<TValue> | undefined {
       const held = entries.get(key)
-      if (held != null && held.expiresAt <= Date.now()) {
+      if (held != null && held.expiresAt <= now()) {
         remove(key)
         return
       }
@@ -46,14 +50,14 @@ export function createRecoveryCache<TValue>(release: (value: TValue) => void = (
     },
     set(key: string, value: TValue, expiresAt: number): void {
       remove(key)
-      if (expiresAt <= Date.now()) {
+      if (expiresAt <= now()) {
         release(value)
         return
       }
       entries.set(key, {
         value,
         expiresAt,
-        timer: setTimeout(() => remove(key), expiresAt - Date.now()),
+        timer: setTimeout(() => remove(key), expiresAt - now()),
       })
       while (entries.size > 1024) {
         const oldest = entries.keys().next().value
@@ -78,6 +82,7 @@ export type ConfirmationOutcome =
 export type ConfirmationWaiter = { receive: (sealed: Uint8Array) => void; dispose: () => void }
 
 export type WaitForRecoveryConfirmationParams = {
+  now?: Now
   port: GroupMLS
   pending: PendingRecovery
   groupID: string
@@ -96,6 +101,7 @@ export function waitForRecoveryConfirmation(
 ): Promise<ConfirmationOutcome> {
   const {
     port,
+    now = createRuntime().now,
     pending,
     groupID,
     requestID,
@@ -130,7 +136,7 @@ export function waitForRecoveryConfirmation(
     const finishWithBest = (): void => {
       finish(best ?? { kind: 'unconfirmed', advisory: [...advisory.values()] })
     }
-    const end = setTimeout(finishWithBest, Math.max(0, deadline - Date.now()))
+    const end = setTimeout(finishWithBest, Math.max(0, deadline - now()))
     const repeat = setInterval(ask, timeoutMs)
     waiters.set(requestID, {
       dispose: () => finish({ kind: 'disposed' }),
@@ -173,7 +179,7 @@ export function waitForRecoveryConfirmation(
               clearInterval(repeat)
               settle = setTimeout(
                 finishWithBest,
-                Math.min(timeoutMs, Math.max(0, deadline - Date.now())),
+                Math.min(timeoutMs, Math.max(0, deadline - now())),
               )
               ask()
             }

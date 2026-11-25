@@ -24,3 +24,12 @@ describe('ordinary key package lifetime', () => {
     expect(Number(lifetime.notBefore)).toBeLessThan(nowSeconds - 86_400 + 3600)
   })
 })
+
+test('injected clock stamps the key package lifetime', async () => {
+  const bundle = await createKeyPackageBundle({
+    identity: randomIdentity(),
+    nowSeconds: 1_700_000_000,
+  })
+  expect(bundle.publicPackage.leafNode.lifetime.notBefore).toBe(BigInt(1_700_000_000 - 86_400))
+  expect(bundle.publicPackage.leafNode.lifetime.notAfter).toBe(BigInt(1_700_000_000 + 30 * 86_400))
+})

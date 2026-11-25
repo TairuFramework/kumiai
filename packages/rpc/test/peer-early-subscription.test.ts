@@ -1,5 +1,5 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
-import { expect, type MockInstance, test, vi } from 'vitest'
+import { expect, test } from 'vitest'
 
 import { APP_TOPIC_LABEL, inboxTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
@@ -55,13 +55,14 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
     }
     const deliveries: Array<unknown> = []
     const members = ['alice', 'bob', 'carol']
+    let clock = 0
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      runtime: { monotonicNow: () => clock },
       members,
       anchorStore: store,
       handlers: { 'chat/changed': (event: { data: unknown }) => void deliveries.push(event.data) },
     })
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members })
-    let clock: MockInstance | undefined
     try {
       await Promise.all([alice.peer.replay(), bob.peer.replay()])
       fake.detach('bob')
@@ -90,7 +91,7 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
         await flush()
       }
       if (scenario === 'expired') {
-        clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_001)
+        clock += 60_001
       }
       release()
       await bob.peer.replay()
@@ -106,7 +107,6 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
         expect(deliveries).toEqual([{ text: scenario === 'delayed' ? 'after ack' : 'during save' }])
       }
     } finally {
-      clock?.mockRestore()
       acknowledge()
       release()
       await bob.peer.replay()

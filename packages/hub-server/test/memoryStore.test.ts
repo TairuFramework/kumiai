@@ -621,3 +621,18 @@ describe('createMemoryStore pub/sub', () => {
     expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-lr')
   })
 })
+
+test('injected clock stamps memory messages at the retention boundary', async () => {
+  let time = 1_700_000_000_000
+  const store = createMemoryStore({ now: () => time })
+  const { sequenceID } = await store.publish({
+    senderDID: ALICE,
+    topicID: TOPIC,
+    payload: new Uint8Array([1]),
+    retain: 'log',
+  })
+  time += 999
+  expect(await store.purge({ olderThan: 1 })).toEqual([])
+  time += 1
+  expect(await store.purge({ olderThan: 1 })).toEqual([sequenceID])
+})

@@ -1,3 +1,5 @@
+type Now = () => number
+
 export type RateLimitConfig = {
   /** Sustained refill rate in tokens per second. */
   rate: number
@@ -29,7 +31,10 @@ function refilledTokens(bucket: Bucket, now: number, rate: number, burst: number
 }
 
 /** Per-key token-bucket rate limiter. */
-export function createRateLimiter(config: RateLimitConfig): RateLimiter {
+export function createRateLimiter(
+  config: RateLimitConfig,
+  monotonicNow: Now = () => performance.now(),
+): RateLimiter {
   const buckets = new Map<string, Bucket>()
   const ttlMs = config.ttlMs ?? 300_000
 
@@ -51,7 +56,7 @@ export function createRateLimiter(config: RateLimitConfig): RateLimiter {
 
   return {
     tryConsume(key: string): boolean {
-      const now = Date.now()
+      const now = monotonicNow()
       let bucket = buckets.get(key)
       if (bucket == null) {
         if (buckets.size >= PRUNE_AT) prune(now)

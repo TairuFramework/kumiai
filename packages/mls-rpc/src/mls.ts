@@ -27,6 +27,7 @@ import type {
   RecoveryRefusalReason,
   RosterEntry,
 } from '@kumiai/rpc'
+import { createRuntime, type Now, type Runtime } from '@sozai/runtime'
 
 import { guardedReplace, type HandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
@@ -91,6 +92,7 @@ export function createLedgerEntrySlot(): LedgerEntrySlot {
 }
 
 export type GroupMLSParams = {
+  runtime?: Partial<Runtime>
   access: HandleAccess
   /** This member's signing identity: recovery requests and attestations are signed with it. */
   identity: OwnIdentity
@@ -135,7 +137,8 @@ export type RecoveryPending = {
   delete(requestID: string): void
 }
 
-export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPending {
+export function createRecoveryPending(options?: { ttlMS?: number; now?: Now }): RecoveryPending {
+  const wallNow = options?.now ?? createRuntime().now
   const ttlMS = options?.ttlMS ?? REQUEST_TTL_MS
   const requests = new Map<string, PendingRequest>()
   const remove = (requestID: string, request: PendingRequest): void => {
@@ -144,7 +147,7 @@ export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPen
     requests.delete(requestID)
   }
   const sweep = (): void => {
-    const now = Date.now()
+    const now = wallNow()
     for (const [id, request] of requests) {
       if (request.expiresAt <= now) remove(id, request)
     }
@@ -165,7 +168,11 @@ export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPen
       }, retentionMs)
       const nodeTimer = timer as unknown as { unref?: () => void }
       nodeTimer.unref?.()
-      requests.set(requestID, { ephemeralPrivateKey, expiresAt: Date.now() + retentionMs, timer })
+      requests.set(requestID, {
+        ephemeralPrivateKey,
+        expiresAt: wallNow() + retentionMs,
+        timer,
+      })
     },
     delete: (requestID) => {
       sweep()
@@ -211,8 +218,9 @@ export async function deriveRecoverySecret(handle: GroupHandle): Promise<Uint8Ar
  */
 export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const { access, identity, entrySlot } = params
-  const pending = createRecoveryPending()
-  const recovery = createRecoveryBindingState(identity, params.recoveryBinding)
+  const runtime = createRuntime(params.runtime)
+  const pending = createRecoveryPending({ now: runtime.now })
+  const recovery = createRecoveryBindingState(identity, params.recoveryBinding, runtime.now)
 
   const port: GroupMLS = {
     async verifyRecoveryRequest(request: Uint8Array) {
@@ -421,10 +429,12 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           group: rejoined.group,
           registry: rejoined.knownRegistry,
           signer: reply.signer,
+          now: Math.floor(runtime.now() / 1000),
         }))
       )
         return null
       const judge = createVerdictJudge({
+        now: runtime.now,
         group: rejoined.group,
         sourceTree: rejoined.sourceTree,
         known: rejoined.knownRegistry,

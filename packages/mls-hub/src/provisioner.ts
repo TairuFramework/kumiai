@@ -16,11 +16,14 @@ import { attempt, type HubRetryableError } from './errors.js'
 import { assertKind, toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
 
+type Now = () => number
+
 const DAY_SECONDS = 86_400
 const DEFAULT_ROTATE_WITHIN_DAYS = 30
 const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 
 export type LastResortProvisionerParams = {
+  now?: Now
   /** The identity the package is minted for; also the store's owner key. */
   identity: OwnIdentity
   client: Pick<HubClient, 'uploadLastResortKeyPackage' | 'keyPackageStatus'>
@@ -75,6 +78,7 @@ export function createLastResortProvisioner(
 ): LastResortProvisioner {
   const {
     identity,
+    now = () => Date.now(),
     client,
     store,
     options,
@@ -125,7 +129,11 @@ export function createLastResortProvisioner(
   }
 
   const mint = async (): Promise<LastResortRecord> => {
-    const bundle = await createLastResortKeyPackageBundle({ identity, ...options })
+    const bundle = await createLastResortKeyPackageBundle({
+      identity,
+      ...options,
+      nowSeconds: Math.floor(now() / 1000),
+    })
     const record: LastResortRecord = {
       kind: 'last-resort',
       ref: await keyPackageRef({ keyPackage: bundle.publicPackage, ...options }),
@@ -148,7 +156,7 @@ export function createLastResortProvisioner(
   }
 
   const markUploaded = async (record: LastResortRecord): Promise<void> => {
-    await store.put({ ownerDID, record: { ...record, uploadedAt: Date.now() } })
+    await store.put({ ownerDID, record: { ...record, uploadedAt: now() } })
   }
 
   /**
@@ -159,7 +167,7 @@ export function createLastResortProvisioner(
    * deleting it would strand the hub serving a package whose private half is gone.
    */
   const prune = async (records: Array<LastResortRecord>, keepRef: string): Promise<void> => {
-    const cutoff = Math.floor(Date.now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
+    const cutoff = Math.floor(now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
     for (const record of records) {
       if (record.ref !== keepRef && record.notAfter < cutoff) {
         await store.delete({ ownerDID, ref: record.ref })
@@ -170,7 +178,7 @@ export function createLastResortProvisioner(
   const run = async (): Promise<ProvisionResult> => {
     const records = await listRecords()
     const candidate = pickCandidate(records)
-    const nowSeconds = Math.floor(Date.now() / 1000)
+    const nowSeconds = Math.floor(now() / 1000)
 
     // Resume an interrupted provision rather than minting, which would orphan the pending record on
     // every retry. Only while it is still worth uploading: one already inside the rotation window

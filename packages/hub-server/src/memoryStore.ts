@@ -29,6 +29,8 @@ import {
 } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
+type Now = () => number
+
 type RetentionClass = 'log' | 'mailbox'
 
 type LogEntry = {
@@ -55,6 +57,7 @@ export type MemoryStoreRetention = {
 }
 
 export type MemoryStoreOptions = {
+  now?: Now
   /** Per-topic max retained entries; oldest are trimmed beyond this. Default 1000. */
   maxDepth?: number
   retention?: MemoryStoreRetention
@@ -116,6 +119,7 @@ function asStoredMessage(entry: LogEntry): StoredMessage {
  * winning.
  */
 export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
+  const wallNow = options.now ?? (() => Date.now())
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   const defaultRetention = options.retention?.default ?? 0
   const maxRetention = options.retention?.max ?? DEFAULT_MAX_RETENTION
@@ -265,7 +269,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         senderDID: params.senderDID,
         topicID: params.topicID,
         payload: params.payload,
-        storedAt: Date.now(),
+        storedAt: wallNow(),
         retain,
         pendingFor: recipients,
       }
@@ -425,7 +429,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     },
 
     async purge(params: PurgeParams): Promise<Array<string>> {
-      const now = Date.now()
+      const now = wallNow()
       const purgedIDs: Array<string> = []
       const retainedTopics = new Set<string>()
       // Insertion order is log-position order, even if the clock moves backwards.
@@ -531,7 +535,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       // Drop the dead before charging the cap, or a pool that filled with expired entries could
       // never be replenished: the cap rejects rather than evicts, by design, so nothing else would
       // ever remove them.
-      const nowSeconds = Math.floor(Date.now() / 1000)
+      const nowSeconds = Math.floor(wallNow() / 1000)
       const live = packages.filter((entry) => isLive(entry, nowSeconds))
       if (live.length !== packages.length) {
         packages.length = 0
@@ -548,7 +552,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     async fetchKeyPackages({ ownerDID, count }: FetchKeyPackagesParams): Promise<Array<string>> {
       const packages = keyPackages.get(ownerDID)
       if (packages == null || packages.length === 0) return []
-      const nowSeconds = Math.floor(Date.now() / 1000)
+      const nowSeconds = Math.floor(wallNow() / 1000)
       const served: Array<string> = []
       const n = count ?? 1
       // One pass, consuming as it goes: an expired entry is dropped rather than skipped, so FIFO
@@ -564,7 +568,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     async countKeyPackages({ ownerDID }: CountKeyPackagesParams): Promise<number> {
       const packages = keyPackages.get(ownerDID)
       if (packages == null) return 0
-      const nowSeconds = Math.floor(Date.now() / 1000)
+      const nowSeconds = Math.floor(wallNow() / 1000)
       return packages.filter((entry) => isLive(entry, nowSeconds)).length
     },
 

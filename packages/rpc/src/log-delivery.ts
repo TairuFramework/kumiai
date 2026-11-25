@@ -1,4 +1,5 @@
 import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
+import { createRuntime, type Now } from '@sozai/runtime'
 
 import type { AppOutboxAcceptance, AppOutboxEntry } from './app-outbox.js'
 import type { LogPosition } from './cursor.js'
@@ -21,6 +22,7 @@ type LogFrame = { topicID: string; payload: Uint8Array }
 /** A sealed frame with the floor snapshot its admission was checked against. */
 type SealedLogFrame = LogFrame & { floor: EpochFloor }
 export type LogDeliveryParams = {
+  monotonicNow?: Now
   queue: AppOutboxAcceptance
   ready: () => Promise<void>
   floor: () => EpochFloor
@@ -42,6 +44,7 @@ export type LogDeliveryParams = {
 
 /** Publication evidence stays in memory. A prepared durable attempt proves nothing. */
 export function createLogDelivery(params: LogDeliveryParams) {
+  const monotonicNow = params.monotonicNow ?? createRuntime().monotonicNow
   const publications = new Map<number, Publication>()
   const proven = new Set<number>()
   const delivered: Array<Delivered> = []
@@ -60,7 +63,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     head != null && (floor.position == null || head > floor.position)
 
   const pruneDelivered = (): void => {
-    const oldest = Date.now() - params.deliveredWindowMs
+    const oldest = monotonicNow() - params.deliveredWindowMs
     while (
       delivered.length > 0 &&
       ((delivered[0]?.at ?? 0) < oldest || delivered.length > params.deliveredLimit)
@@ -73,7 +76,7 @@ export function createLogDelivery(params: LogDeliveryParams) {
     const epoch = publications.get(seq)?.epoch
     if (entry == null || epoch == null) return
     const { protocol, prc, data } = entry
-    delivered.push({ protocol, prc, data, epoch, at: Date.now() })
+    delivered.push({ protocol, prc, data, epoch, at: monotonicNow() })
     pruneDelivered()
   }
 

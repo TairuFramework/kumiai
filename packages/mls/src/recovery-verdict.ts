@@ -182,7 +182,7 @@ export type RecoverySignerEligibleParams = {
 export async function recoverySignerEligible(
   params: RecoverySignerEligibleParams,
 ): Promise<boolean> {
-  const { group, registry, signer, now = Date.now() / 1000 } = params
+  const { group, registry, signer, now = Math.floor(Date.now() / 1000) } = params
   const controller = group.anchor.controller
   if (controller == null) return false
   const options = { crypto: group.crypto }

@@ -12,6 +12,8 @@ import {
 import type { ObservabilityEventListener } from './events.js'
 import { decodeFrame, encodeFrame, type HubFrame } from './frame.js'
 
+type Now = () => number
+
 export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
   return?: () => void
   /**
@@ -174,6 +176,7 @@ export type HubTunnelTransportParams = {
   /** Topic this transport subscribes to and accepts inbound frames from. */
   receiveTopicID: string
   inboxCapacity?: number
+  monotonicNow?: Now
   idleTimeoutMs?: number
   reconnectTimeoutMs?: number
   signal?: AbortSignal
@@ -211,6 +214,7 @@ export function createHubTunnelTransport<R, W>(
 ): TransportType<R, W> {
   const {
     hub,
+    monotonicNow = () => performance.now(),
     sessionID,
     localDID,
     sendTopicID,
@@ -244,7 +248,7 @@ export function createHubTunnelTransport<R, W>(
   let abortHandler: (() => void) | undefined
   let torndown = false
   let readableController: ReadableStreamDefaultController<R> | undefined
-  let lastActivity = Date.now()
+  let lastActivity = monotonicNow()
   let idleTimer: ReturnType<typeof setTimeout> | undefined
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   let unsubscribeEvents: (() => void) | undefined
@@ -336,13 +340,13 @@ export function createHubTunnelTransport<R, W>(
   const scheduleIdleTimer = (): void => {
     if (idleTimeoutMs == null || torndown) return
     clearIdleTimer()
-    const elapsed = Date.now() - lastActivity
+    const elapsed = monotonicNow() - lastActivity
     const remaining = idleTimeoutMs - elapsed
     const delay = Math.max(remaining, 0)
     idleTimer = setTimeout(() => {
       idleTimer = undefined
       if (torndown) return
-      const sinceActivity = Date.now() - lastActivity
+      const sinceActivity = monotonicNow() - lastActivity
       if (sinceActivity >= idleTimeoutMs) {
         teardown(new TimeoutInterruption({ message: 'idle timeout' }))
       } else {
@@ -352,7 +356,7 @@ export function createHubTunnelTransport<R, W>(
   }
 
   const markActivity = (): void => {
-    lastActivity = Date.now()
+    lastActivity = monotonicNow()
   }
 
   // A hub's ack may be synchronous and throw synchronously, before `Promise.resolve` sees it — so

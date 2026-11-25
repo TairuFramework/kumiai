@@ -173,7 +173,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   handlers: { [K in keyof Protocols]: GroupProcedureHandlers<Protocols[K]> }
   suppress?: SuppressConfig
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
-  runtime?: Runtime
+  runtime?: Partial<Runtime>
   /**
    * Recovery rendezvous tuning. `timeoutMs`: how long one request waits for a reply. `getDelayMs`:
    * responder reply jitter. `deadlineMs`: how long `recover()` keeps re-requesting and rebuilding

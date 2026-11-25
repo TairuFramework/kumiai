@@ -1,4 +1,4 @@
-import { isPeer4, now, type OwnIdentity } from '@kokuin/token'
+import { isPeer4, type OwnIdentity } from '@kokuin/token'
 import {
   type Credential,
   type CustomExtension,
@@ -18,6 +18,8 @@ import { resolveMlsContext } from './group-context.js'
 import { memberRootsOf } from './member-root.js'
 import { registryForLog } from './registry.js'
 import type { GroupOptions, KeyPackageBundle } from './types.js'
+
+const currentSeconds = (): number => Math.floor(Date.now() / 1000)
 
 export type MakeMLSCredentialParams = {
   identity: OwnIdentity
@@ -46,17 +48,20 @@ export function makeMLSCredential({ identity, controller }: MakeMLSCredentialPar
   }
 }
 
-export function assertBindingAuthorTime(controller?: ControllerBinding): void {
+export function assertBindingAuthorTime(
+  controller?: ControllerBinding,
+  nowSeconds = currentSeconds(),
+): void {
   if (controller == null) return
   if (controller.member != null) {
-    if (controller.iat == null || !Number.isFinite(controller.iat) || controller.iat > now()) {
+    if (controller.iat == null || !Number.isFinite(controller.iat) || controller.iat > nowSeconds) {
       throw new Error('Membership binding is not valid at authoring time')
     }
     return
   }
   if (controller.capability == null) throw new LeafBindingError('controller-mismatch')
   const { iat, exp } = readCapability(controller.capability).payload
-  const timestamp = now()
+  const timestamp = nowSeconds
   if (exp <= timestamp || iat > timestamp) {
     throw new Error('Leaf capability is not valid at authoring time')
   }
@@ -75,8 +80,9 @@ async function buildBundle(
   identity: OwnIdentity,
   options?: GroupOptions,
   overrides: { extensions?: Array<CustomExtension>; lifetime?: Lifetime } = {},
+  nowSeconds?: number,
 ): Promise<KeyPackageBundle> {
-  assertBindingAuthorTime(options?.controller)
+  assertBindingAuthorTime(options?.controller, nowSeconds)
   const credential = makeMLSCredential({ identity, controller: options?.controller })
   if (options?.controller != null) {
     const memberRooted = memberRootsOf({ binding: options.controller, leafDID: identity.id }).some(
@@ -121,8 +127,7 @@ async function buildBundle(
 export const ORDINARY_KEY_PACKAGE_LIFETIME_DAYS = 30
 
 /** Back-dated a day, as ts-mls's own default is, so peer clock skew cannot invalidate a fresh package. */
-function ordinaryLifetime(): Lifetime {
-  const nowSeconds = Math.floor(Date.now() / 1000)
+function ordinaryLifetime(nowSeconds: number): Lifetime {
   return {
     notBefore: BigInt(nowSeconds - 86_400),
     notAfter: BigInt(nowSeconds + ORDINARY_KEY_PACKAGE_LIFETIME_DAYS * 86_400),
@@ -131,14 +136,16 @@ function ordinaryLifetime(): Lifetime {
 
 export type CreateKeyPackageBundleParams = {
   identity: OwnIdentity
+  nowSeconds?: number
 } & GroupOptions
 
 /** Generate a key package for joining groups. */
 export async function createKeyPackageBundle({
   identity,
+  nowSeconds = currentSeconds(),
   ...options
 }: CreateKeyPackageBundleParams): Promise<KeyPackageBundle> {
-  return buildBundle(identity, options, { lifetime: ordinaryLifetime() })
+  return buildBundle(identity, options, { lifetime: ordinaryLifetime(nowSeconds) }, nowSeconds)
 }
 
 /**
@@ -173,8 +180,7 @@ export const LAST_RESORT_EXTENSION_TYPE = 0x000a
 export const LAST_RESORT_LIFETIME_DAYS = 90
 
 /** Back-dated a day, as ts-mls's own default is, so peer clock skew cannot invalidate a fresh package. */
-function lastResortLifetime(): Lifetime {
-  const nowSeconds = Math.floor(Date.now() / 1000)
+function lastResortLifetime(nowSeconds: number): Lifetime {
   return {
     notBefore: BigInt(nowSeconds - 86_400),
     notAfter: BigInt(nowSeconds + LAST_RESORT_LIFETIME_DAYS * 86_400),
@@ -183,6 +189,7 @@ function lastResortLifetime(): Lifetime {
 
 export type CreateLastResortKeyPackageBundleParams = {
   identity: OwnIdentity
+  nowSeconds?: number
 } & GroupOptions
 
 /**
@@ -204,19 +211,25 @@ export type CreateLastResortKeyPackageBundleParams = {
  */
 export async function createLastResortKeyPackageBundle({
   identity,
+  nowSeconds = currentSeconds(),
   ...options
 }: CreateLastResortKeyPackageBundleParams): Promise<KeyPackageBundle> {
-  return buildBundle(identity, options, {
-    // Supplying `extensions` at all suppresses ts-mls's own default of
-    // `greaseExtensions(defaultGreaseConfig)`. `defaultGreaseConfig` is not exported, so its 0.1
-    // probability is restated here — dropping the spread would silently cost the stack its GREASE.
-    extensions: [
-      ...greaseExtensions({ probabilityPerGreaseValue: 0.1 }),
-      makeCustomExtension({
-        extensionType: LAST_RESORT_EXTENSION_TYPE,
-        extensionData: new Uint8Array(0),
-      }),
-    ],
-    lifetime: lastResortLifetime(),
-  })
+  return buildBundle(
+    identity,
+    options,
+    {
+      // Supplying `extensions` at all suppresses ts-mls's own default of
+      // `greaseExtensions(defaultGreaseConfig)`. `defaultGreaseConfig` is not exported, so its 0.1
+      // probability is restated here — dropping the spread would silently cost the stack its GREASE.
+      extensions: [
+        ...greaseExtensions({ probabilityPerGreaseValue: 0.1 }),
+        makeCustomExtension({
+          extensionType: LAST_RESORT_EXTENSION_TYPE,
+          extensionData: new Uint8Array(0),
+        }),
+      ],
+      lifetime: lastResortLifetime(nowSeconds),
+    },
+    nowSeconds,
+  )
 }

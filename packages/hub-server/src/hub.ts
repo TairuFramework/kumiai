@@ -56,6 +56,7 @@ type SubscriptionReapingStore = HubStore & {
 export type HubReplayOptions = Omit<ReplayOptions, 'enabled' | 'rejectStale'>
 
 export type CreateHubParams = CryptoOptions & {
+  monotonicNow?: CreateHandlersParams['monotonicNow']
   transport: ServerTransportOf<HubProtocol>
   store: HubStore
   /**
@@ -147,6 +148,7 @@ export function createHub(params: CreateHubParams): HubInstance {
           onError: ({ did, error }) => storeErrorReporter({ method: 'wake', did, error }),
         })
   const handlers = createHandlers({
+    monotonicNow: params.monotonicNow,
     registry,
     store: params.store,
     authorize: params.authorize,

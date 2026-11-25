@@ -195,3 +195,18 @@ test('a request key remains usable throughout a longer recovery deadline', () =>
   expect(pending.get('long-recovery')).toBeNull()
   expect(key[0]).toBe(0)
 })
+
+test('injected clock expires pending keys without advancing global time', () => {
+  let time = 0
+  const pending = createRecoveryPending({ ttlMS: 100, now: () => time })
+  const secret = new Uint8Array([7])
+  pending.put({ requestID: 'clock', ephemeralPrivateKey: secret })
+  try {
+    expect(pending.get('clock')).toBe(secret)
+    time = 101
+    expect(pending.get('clock')).toBeNull()
+    expect(secret).toEqual(new Uint8Array([0]))
+  } finally {
+    pending.delete('clock')
+  }
+})

@@ -1243,3 +1243,15 @@ describe('ensureProvisioned failure paths', () => {
     }
   })
 })
+
+test('injected clock records the upload wall timestamp', async () => {
+  const store = createMemoryLastResortStore()
+  const provisioner = createLastResortProvisioner({
+    identity: hub.identity,
+    client: hub.client,
+    store,
+    now: () => 1_700_000_000_000,
+  })
+  await provisioner.ensureProvisioned().value
+  expect((await store.list(hub.identity.id))[0]?.uploadedAt).toBe(1_700_000_000_000)
+})
