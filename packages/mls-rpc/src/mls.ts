@@ -137,8 +137,11 @@ export type RecoveryPending = {
   delete(requestID: string): void
 }
 
-export function createRecoveryPending(options?: { ttlMS?: number; now?: Now }): RecoveryPending {
-  const wallNow = options?.now ?? createRuntime().now
+export function createRecoveryPending(options?: {
+  ttlMS?: number
+  monotonicNow?: Now
+}): RecoveryPending {
+  const monotonicNow = options?.monotonicNow ?? createRuntime().monotonicNow
   const ttlMS = options?.ttlMS ?? REQUEST_TTL_MS
   const requests = new Map<string, PendingRequest>()
   const remove = (requestID: string, request: PendingRequest): void => {
@@ -147,7 +150,7 @@ export function createRecoveryPending(options?: { ttlMS?: number; now?: Now }): 
     requests.delete(requestID)
   }
   const sweep = (): void => {
-    const now = wallNow()
+    const now = monotonicNow()
     for (const [id, request] of requests) {
       if (request.expiresAt <= now) remove(id, request)
     }
@@ -170,7 +173,7 @@ export function createRecoveryPending(options?: { ttlMS?: number; now?: Now }): 
       nodeTimer.unref?.()
       requests.set(requestID, {
         ephemeralPrivateKey,
-        expiresAt: wallNow() + retentionMs,
+        expiresAt: monotonicNow() + retentionMs,
         timer,
       })
     },
@@ -219,7 +222,7 @@ export async function deriveRecoverySecret(handle: GroupHandle): Promise<Uint8Ar
 export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const { access, identity, entrySlot } = params
   const runtime = createRuntime(params.runtime)
-  const pending = createRecoveryPending({ now: runtime.now })
+  const pending = createRecoveryPending({ monotonicNow: runtime.monotonicNow })
   const recovery = createRecoveryBindingState(identity, params.recoveryBinding, runtime.now)
 
   const port: GroupMLS = {
@@ -429,7 +432,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           group: rejoined.group,
           registry: rejoined.knownRegistry,
           signer: reply.signer,
-          now: Math.floor(runtime.now() / 1000),
+          now: runtime.now() / 1000,
         }))
       )
         return null

@@ -149,10 +149,11 @@ test('pending recovery keys expire at 120,000 ms and sweep on access', () => {
   expect(pending.get('a')).toBeNull()
   expect(key).toEqual(new Uint8Array(3))
 
-  const custom = createRecoveryPending({ ttlMS: 10 })
+  let time = 0
+  const custom = createRecoveryPending({ ttlMS: 10, monotonicNow: () => time })
   const stale = new Uint8Array([9])
   custom.put({ requestID: 'stale', ephemeralPrivateKey: stale })
-  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11)
+  time = 11
   expect(custom.get('stale')).toBeNull()
   expect(stale[0]).toBe(0)
 })
@@ -197,13 +198,13 @@ test('a request key remains usable throughout a longer recovery deadline', () =>
 })
 
 test('injected clock expires pending keys without advancing global time', () => {
-  let time = 0
-  const pending = createRecoveryPending({ ttlMS: 100, now: () => time })
+  let monotonicTime = 0
+  const pending = createRecoveryPending({ ttlMS: 100, monotonicNow: () => monotonicTime })
   const secret = new Uint8Array([7])
   pending.put({ requestID: 'clock', ephemeralPrivateKey: secret })
   try {
     expect(pending.get('clock')).toBe(secret)
-    time = 101
+    monotonicTime = 101
     expect(pending.get('clock')).toBeNull()
     expect(secret).toEqual(new Uint8Array([0]))
   } finally {

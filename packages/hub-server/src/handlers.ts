@@ -22,6 +22,7 @@ import {
 import { fromB64, toB64 } from '@sozai/codec'
 import { getLogger, getReporter } from '@sozai/log'
 
+import type { Now } from './clock.js'
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
 import type { WakeDispatcher } from './wake.js'
@@ -264,8 +265,6 @@ export const DEFAULT_RECEIVE_WINDOW_BYTES = 512 * 1024
  * is the delay a window of never-acked frames costs per connect.
  */
 export const DEFAULT_RECEIVE_ACK_TIMEOUT = 15_000
-
-type Now = () => number
 
 export type CreateHandlersParams = {
   monotonicNow?: Now

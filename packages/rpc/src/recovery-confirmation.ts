@@ -25,7 +25,7 @@ export type RecoveryCacheEntry<TValue> = { value: TValue; expiresAt: number }
 /** Expiry releases exporter keys even when the peer receives no further traffic. */
 export function createRecoveryCache<TValue>(
   release: (value: TValue) => void = () => {},
-  now: Now = createRuntime().now,
+  monotonicNow: Now = createRuntime().monotonicNow,
 ) {
   const entries = new Map<
     string,
@@ -42,7 +42,7 @@ export function createRecoveryCache<TValue>(
     delete: remove,
     get(key: string): RecoveryCacheEntry<TValue> | undefined {
       const held = entries.get(key)
-      if (held != null && held.expiresAt <= now()) {
+      if (held != null && held.expiresAt <= monotonicNow()) {
         remove(key)
         return
       }
@@ -50,14 +50,14 @@ export function createRecoveryCache<TValue>(
     },
     set(key: string, value: TValue, expiresAt: number): void {
       remove(key)
-      if (expiresAt <= now()) {
+      if (expiresAt <= monotonicNow()) {
         release(value)
         return
       }
       entries.set(key, {
         value,
         expiresAt,
-        timer: setTimeout(() => remove(key), expiresAt - now()),
+        timer: setTimeout(() => remove(key), expiresAt - monotonicNow()),
       })
       while (entries.size > 1024) {
         const oldest = entries.keys().next().value
@@ -82,7 +82,7 @@ export type ConfirmationOutcome =
 export type ConfirmationWaiter = { receive: (sealed: Uint8Array) => void; dispose: () => void }
 
 export type WaitForRecoveryConfirmationParams = {
-  now?: Now
+  monotonicNow?: Now
   port: GroupMLS
   pending: PendingRecovery
   groupID: string
@@ -101,7 +101,7 @@ export function waitForRecoveryConfirmation(
 ): Promise<ConfirmationOutcome> {
   const {
     port,
-    now = createRuntime().now,
+    monotonicNow = createRuntime().monotonicNow,
     pending,
     groupID,
     requestID,
@@ -136,7 +136,7 @@ export function waitForRecoveryConfirmation(
     const finishWithBest = (): void => {
       finish(best ?? { kind: 'unconfirmed', advisory: [...advisory.values()] })
     }
-    const end = setTimeout(finishWithBest, Math.max(0, deadline - now()))
+    const end = setTimeout(finishWithBest, Math.max(0, deadline - monotonicNow()))
     const repeat = setInterval(ask, timeoutMs)
     waiters.set(requestID, {
       dispose: () => finish({ kind: 'disposed' }),
@@ -179,7 +179,7 @@ export function waitForRecoveryConfirmation(
               clearInterval(repeat)
               settle = setTimeout(
                 finishWithBest,
-                Math.min(timeoutMs, Math.max(0, deadline - now())),
+                Math.min(timeoutMs, Math.max(0, deadline - monotonicNow())),
               )
               ask()
             }

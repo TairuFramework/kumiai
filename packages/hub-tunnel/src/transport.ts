@@ -12,7 +12,7 @@ import {
 import type { ObservabilityEventListener } from './events.js'
 import { decodeFrame, encodeFrame, type HubFrame } from './frame.js'
 
-type Now = () => number
+export type Now = () => number
 
 export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
   return?: () => void

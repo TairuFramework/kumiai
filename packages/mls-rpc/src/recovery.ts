@@ -153,7 +153,7 @@ export function createRecoveryBindingState(
                 group: pending,
                 registry: source.registry,
                 signer: reply.signer,
-                now: Math.floor(now() / 1000),
+                now: now() / 1000,
               }))
             )
               throw new Error('Ineligible recovery attestation signer')
@@ -241,7 +241,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
           group,
           registry: known,
           signer,
-          now: Math.floor(now() / 1000),
+          now: now() / 1000,
         }))
           ? 'authoritative'
           : 'advisory'

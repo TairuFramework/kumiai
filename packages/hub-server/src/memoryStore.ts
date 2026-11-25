@@ -29,7 +29,7 @@ import {
 } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
-type Now = () => number
+import type { Now } from './clock.js'
 
 type RetentionClass = 'log' | 'mailbox'
 

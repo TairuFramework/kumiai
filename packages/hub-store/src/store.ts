@@ -35,7 +35,7 @@ import { EventEmitter } from '@sozai/event'
 
 import type { HubTables } from './tables.js'
 
-type Now = () => number
+export type Now = () => number
 
 export type HubStoreOptions = {
   now?: Now

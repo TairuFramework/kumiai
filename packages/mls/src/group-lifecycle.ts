@@ -282,7 +282,7 @@ export type AttestTreeTimeParams = YieldOptions & {
 
 export async function attestTreeTime({
   group,
-  time = Math.floor(Date.now() / 1000),
+  time = Date.now() / 1000,
   ...options
 }: AttestTreeTimeParams): Promise<DeviceWriteResult | null> {
   return mutexFor(group).run(async () => {

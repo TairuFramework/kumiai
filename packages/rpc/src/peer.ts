@@ -275,7 +275,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // Destructured rather than held as `runtime`: that name is taken in this scope by
   // {@link ProtocolRuntime}, which is a different thing entirely.
   const platformRuntime = createRuntime(params.runtime)
-  const { getRandomID, now, monotonicNow } = platformRuntime
+  const { getRandomID, monotonicNow } = platformRuntime
   const newPublishID = getRandomID
   const recoveryTimeoutMs = params.recovery?.timeoutMs ?? DEFAULT_RECOVERY_TIMEOUT_MS
   const recoveryDeadlineMs = params.recovery?.deadlineMs ?? DEFAULT_RECOVERY_DEADLINE_MS
@@ -973,15 +973,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const confirmationWaiters = new Map<string, ConfirmationWaiter>()
   const commitOutcomes = createRecoveryCache<RecoveryCommitOutcome>((outcome) => {
     if (outcome.kind === 'applied') outcome.key.fill(0)
-  }, now)
+  }, monotonicNow)
   const recordCommitOutcome = (position: string, outcome: RecoveryCommitOutcome): void => {
     if (commitOutcomes.get(position) != null) {
       if (outcome.kind === 'applied') outcome.key.fill(0)
       return
     }
-    commitOutcomes.set(position, outcome, now() + recoveryDeadlineMs)
+    commitOutcomes.set(position, outcome, monotonicNow() + recoveryDeadlineMs)
   }
-  const verdictCache = createRecoveryCache<Promise<Uint8Array>>(undefined, now)
+  const verdictCache = createRecoveryCache<Promise<Uint8Array>>(undefined, monotonicNow)
   const verdictTimers = new Set<ReturnType<typeof setTimeout>>()
   /**
    * Ledger-gather waiters, keyed by requestID. Called for EVERY reply, not just the first: a
@@ -1049,11 +1049,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       }
       const sealed = await cached.value
       const expiresAt = cached.expiresAt
-      if (disposed || blocked() || expiresAt <= now()) return
+      if (disposed || blocked() || expiresAt <= monotonicNow()) return
       const timer = setTimeout(
         () => {
           verdictTimers.delete(timer)
-          if (disposed || blocked() || expiresAt <= now()) return
+          if (disposed || blocked() || expiresAt <= monotonicNow()) return
           void mux
             .publish({
               topicID,
@@ -1064,7 +1064,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             })
             .catch(() => {})
         },
-        Math.max(0, Math.min(getReplyDelayMs(), recoveryTimeoutMs, expiresAt - now())),
+        Math.max(0, Math.min(getReplyDelayMs(), recoveryTimeoutMs, expiresAt - monotonicNow())),
       )
       verdictTimers.add(timer)
     })().catch(() => {})
@@ -2566,7 +2566,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           inFlight,
         } = publication
         const confirmation = await waitForRecoveryConfirmation({
-          now,
+          monotonicNow,
           port,
           pending,
           groupID,
@@ -2574,7 +2574,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           position: sequenceID,
           commitDigest,
           key,
-          deadline: now() + Math.max(0, deadline - monotonicNow()),
+          deadline,
           timeoutMs: recoveryTimeoutMs,
           waiters: confirmationWaiters,
           send: () =>

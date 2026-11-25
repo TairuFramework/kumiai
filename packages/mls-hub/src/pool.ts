@@ -10,11 +10,10 @@ import {
 } from '@kumiai/mls'
 import { AsyncResult, Result } from '@sozai/result'
 
+import type { Now } from './clock.js'
 import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
 import { assertKind, toBundles } from './records.js'
-
-type Now = () => number
 
 const DAY_SECONDS = 86_400
 const DEFAULT_TARGET = 20

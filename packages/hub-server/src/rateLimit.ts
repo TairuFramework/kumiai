@@ -1,4 +1,4 @@
-type Now = () => number
+import type { Now } from './clock.js'
 
 export type RateLimitConfig = {
   /** Sustained refill rate in tokens per second. */

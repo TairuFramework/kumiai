@@ -12,11 +12,10 @@ import {
 } from '@kumiai/mls'
 import { AsyncResult, Result } from '@sozai/result'
 
+import type { Now } from './clock.js'
 import { attempt, type HubRetryableError } from './errors.js'
 import { assertKind, toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
-
-type Now = () => number
 
 const DAY_SECONDS = 86_400
 const DEFAULT_ROTATE_WITHIN_DAYS = 30
