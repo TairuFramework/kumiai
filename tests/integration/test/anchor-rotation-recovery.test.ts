@@ -73,6 +73,7 @@ async function setup({
     bodies,
   })
   const added = await commitInvite({
+    now: Date.now,
     group,
     keyPackage: bobInvite.bundle.publicPackage,
     invite: bobInvite.invite,
@@ -93,6 +94,7 @@ async function setup({
     bodies,
   })
   const third = await commitInvite({
+    now: Date.now,
     group,
     keyPackage: carolInvite.bundle.publicPackage,
     invite: carolInvite.invite,

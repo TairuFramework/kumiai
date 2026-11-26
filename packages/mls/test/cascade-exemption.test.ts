@@ -54,6 +54,7 @@ async function revoke(log: Array<SignedEvent>, subject: string): Promise<SignedE
 async function parentGrant(identity: OwnIdentity, iat: number): Promise<string> {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const grant = await mintTrustedGrant({
+    now: Date.now,
     signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
@@ -414,7 +415,9 @@ describe('commit authentication of evidenced children', () => {
   test('deniedIssuerCannotRenewAfterProof', async () => {
     const { publisher, childHandle, child, issuer, parent } = await afterIssuerProof()
     const fresh = await timedBinding({ identity: child, iat: 120, exp: 200, issuer, parent })
-    await expect(renewLeaf({ group: childHandle, binding: fresh })).rejects.toMatchObject({
+    await expect(
+      renewLeaf({ now: Date.now, group: childHandle, binding: fresh }),
+    ).rejects.toMatchObject({
       reason: 'denied-issuer',
     })
     await expectRejected(
@@ -569,7 +572,7 @@ describe('renewal order', () => {
     expect(readCapability(current).payload.iat).toBe(110)
     const direct = await timedBinding({ identity: child, iat: 105, exp: 200 })
     expect(childHandle.registry.devices.get(issuer.id)?.status).toBe('revoked')
-    const renewal = await renewLeaf({ group: childHandle, binding: direct })
+    const renewal = await renewLeaf({ now: Date.now, group: childHandle, binding: direct })
     await publishLedger(tokens, renewal.newGroup)
     await publisher.processMessage({ message: renewal.commitMessage })
     expect(publisher.epoch).toBe(renewal.epoch)
@@ -585,7 +588,9 @@ describe('renewal order', () => {
     if (childHandle == null) throw new Error('Missing child handle')
     expect(childHandle.registry.devices.get(setup.issuer.id)?.status).not.toBe('revoked')
     const direct = await timedBinding({ identity: setup.child, iat: 105, exp: 200 })
-    await expect(renewLeaf({ group: childHandle, binding: direct })).rejects.toMatchObject({
+    await expect(
+      renewLeaf({ now: Date.now, group: childHandle, binding: direct }),
+    ).rejects.toMatchObject({
       reason: 'renewal-order',
     })
     await expectRejected(
@@ -605,7 +610,9 @@ describe('renewal order', () => {
       exp: 200,
       prefix: setup.log,
     })
-    await expect(renewLeaf({ group: childHandle, binding: afterRev })).rejects.toMatchObject({
+    await expect(
+      renewLeaf({ now: Date.now, group: childHandle, binding: afterRev }),
+    ).rejects.toMatchObject({
       reason: 'renewal-order',
     })
     await expectRejected(
@@ -644,7 +651,9 @@ describe('renewal order', () => {
         }),
       ),
     }
-    await expect(renewLeaf({ group: childHandle, binding: wrongKey })).rejects.toMatchObject({
+    await expect(
+      renewLeaf({ now: Date.now, group: childHandle, binding: wrongKey }),
+    ).rejects.toMatchObject({
       reason: 'confirmation-invalid',
     })
 
@@ -673,14 +682,16 @@ describe('renewal order', () => {
         }),
       ),
     }
-    await expect(renewLeaf({ group: childHandle, binding: otherController })).rejects.toMatchObject(
-      {
-        reason: 'controller-mismatch',
-      },
-    )
+    await expect(
+      renewLeaf({ now: Date.now, group: childHandle, binding: otherController }),
+    ).rejects.toMatchObject({
+      reason: 'controller-mismatch',
+    })
 
     const overlong = await timedBinding({ identity: child, iat: 105, exp: 105 + 86_401 })
-    await expect(renewLeaf({ group: childHandle, binding: overlong })).rejects.toMatchObject({
+    await expect(
+      renewLeaf({ now: Date.now, group: childHandle, binding: overlong }),
+    ).rejects.toMatchObject({
       reason: 'lifetime-cap',
     })
 

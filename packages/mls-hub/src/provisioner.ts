@@ -11,8 +11,8 @@ import {
   LAST_RESORT_LIFETIME_DAYS,
 } from '@kumiai/mls'
 import { AsyncResult, Result } from '@sozai/result'
+import type { Now } from '@sozai/runtime'
 
-import type { Now } from './clock.js'
 import { attempt, type HubRetryableError } from './errors.js'
 import { assertKind, toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
@@ -22,7 +22,7 @@ const DEFAULT_ROTATE_WITHIN_DAYS = 30
 const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 
 export type LastResortProvisionerParams = {
-  now?: Now
+  now: Now
   /** The identity the package is minted for; also the store's owner key. */
   identity: OwnIdentity
   client: Pick<HubClient, 'uploadLastResortKeyPackage' | 'keyPackageStatus'>
@@ -77,7 +77,7 @@ export function createLastResortProvisioner(
 ): LastResortProvisioner {
   const {
     identity,
-    now = () => Date.now(),
+    now,
     client,
     store,
     options,
@@ -131,7 +131,7 @@ export function createLastResortProvisioner(
     const bundle = await createLastResortKeyPackageBundle({
       identity,
       ...options,
-      nowSeconds: Math.floor(now() / 1000),
+      now,
     })
     const record: LastResortRecord = {
       kind: 'last-resort',

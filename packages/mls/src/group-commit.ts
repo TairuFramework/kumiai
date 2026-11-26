@@ -1,5 +1,6 @@
 import type { ControllerLog } from '@kokuin/controller'
 import { normalizeDID, type SigningIdentity } from '@kokuin/token'
+import type { Now } from '@sozai/runtime'
 import {
   type ClientState,
   createCommit,
@@ -428,12 +429,6 @@ export async function commitWithEntries(
   for (const proposal of proposals) {
     if (proposal.proposalType === defaultProposalTypes.add) {
       const leaf = proposal.add.keyPackage.leafNode
-      if (
-        isDefaultCredential(leaf.credential) &&
-        leaf.credential.credentialType === defaultCredentialTypes.basic
-      ) {
-        assertBindingAuthorTime(parseMLSCredentialIdentity(leaf.credential.identity).controller)
-      }
       await validateEntry(group, leaf, undefined, {
         registry: fold.registry,
         stage: 'full',
@@ -590,6 +585,8 @@ export type CommitInviteResult = {
 }
 
 export type CommitInviteParams = YieldOptions & {
+  /** Clock for the author-time check of the invitee's binding, read once. */
+  now: Now
   group: GroupHandle
   keyPackage: KeyPackage
   invite: Invite
@@ -618,6 +615,7 @@ export type CommitInviteParams = YieldOptions & {
  * second commit from a superseded handle safe.
  */
 export async function commitInvite({
+  now,
   group,
   keyPackage,
   invite,
@@ -687,6 +685,10 @@ export async function commitInvite({
       proposalType: defaultProposalTypes.add,
       add: { keyPackage },
     }
+    assertBindingAuthorTime({
+      controller: parseMLSCredentialIdentity(credential.identity).controller,
+      nowSeconds: Math.floor(now() / 1000),
+    })
     // A lifecycle group re-admitting a device replaces the leaf it still holds for that DID.
     const stale =
       group.anchor.controller == null

@@ -67,8 +67,13 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: invitee })
-  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: invitee })
+  const commit = await commitInvite({
+    now: Date.now,
+    group: admin,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   for (const other of others) {
     await other.processMessage({ message: commit.commitMessage })
   }
@@ -120,6 +125,7 @@ async function rejoin(
 ): Promise<GroupHandle> {
   const { groupInfo } = await exportGroupInfo({ group: live })
   const { commitMessage, group } = await joinGroupExternal({
+    now: Date.now,
     identity,
     groupInfo,
     credential: stale.credential,
@@ -150,6 +156,7 @@ async function demotedAdminGroup(groupID: string) {
   const carol = randomIdentity()
 
   const { group: created } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -307,6 +314,7 @@ describe('bootstrapLedger surfaces what it brought in', () => {
     const groupID = 'bootstrap-surfaces'
 
     const { group: created } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID,
       resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -421,6 +429,7 @@ async function promotedAdminWorld(groupID: string) {
   const carol = randomIdentity()
 
   const { group: created } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -499,6 +508,7 @@ describe('the ledger-completeness invariant', () => {
   test('a genesis-only group is complete against a real, group-bound head', async () => {
     const dave = randomIdentity()
     const { group } = await createGroup({
+      now: Date.now,
       identity: dave,
       groupID: 'bootstrap-genesis-only',
       resolveLedgerEntries: async () => {
@@ -536,6 +546,7 @@ describe('the ledger-completeness invariant', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const { group: created } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'bootstrap-invariant',
       resolveLedgerEntries: spied.resolveLedgerEntries,

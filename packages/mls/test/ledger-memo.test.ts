@@ -16,7 +16,7 @@ import * as ledger from '../src/ledger.js'
 
 async function fixture(groupID = 'ledger-memo') {
   const identity = randomIdentity()
-  const { group } = await createGroup({ identity, groupID })
+  const { group } = await createGroup({ now: Date.now, identity, groupID })
   const restore = (tokens: Array<string>) => {
     const state = decodeClientState(encodeClientState(group.state))
     if (state == null) throw new Error('invalid stored state')
@@ -192,8 +192,13 @@ describe('verified ledger replay', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bundle = await createKeyPackageBundle({ identity: bob })
-    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+    const added = await commitInvite({
+      now: Date.now,
+      group,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const bodies = new Map<string, string>()
     const { group: receiver } = await processWelcome({
       identity: bob,

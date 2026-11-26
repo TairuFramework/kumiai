@@ -57,6 +57,7 @@ test('the app-lane invite build publishes its preservation clock and delivers th
   const carolSlot = createLedgerEntrySlot()
   const bobSlot = createLedgerEntrySlot()
   const { group } = await createGroup({
+    now: Date.now,
     identity: aliceID,
     groupID: 'app-lane-preservation-clock',
     controller: creatorBinding,
@@ -64,16 +65,19 @@ test('the app-lane invite build publishes its preservation clock and delivers th
     resolveLedgerEntries: aliceSlot.resolve,
   })
   const staleBundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: bobID,
     controller: await lifecycle.timedBinding({ identity: bobID, iat: now - 10, exp: now + 1000 }),
   })
   const stale = await createInvite({ group, identity: aliceID, recipientDID: bobID.id })
   const withBob = await commitInvite({
+    now: Date.now,
     group,
     keyPackage: staleBundle.publicPackage,
     invite: stale.invite,
   })
   const carolBundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: carolID,
     controller: await lifecycle.timedBinding({ identity: carolID, iat: now - 20, exp: now + 1000 }),
   })
@@ -83,6 +87,7 @@ test('the app-lane invite build publishes its preservation clock and delivers th
     recipientDID: carolID.id,
   })
   const withCarol = await commitInvite({
+    now: Date.now,
     group: withBob.newGroup,
     keyPackage: carolBundle.publicPackage,
     invite: carolInvite.invite,
@@ -114,6 +119,7 @@ test('the app-lane invite build publishes its preservation clock and delivers th
       recipientDID: bobID.id,
     })
     const bundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: bobID,
       controller: await lifecycle.timedBinding({
         identity: bobID,
@@ -222,6 +228,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     })
     const { commitInvite } = await import('@kumiai/mls')
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: bobMaterial.bundle.publicPackage,
       invite: bobMaterial.invite,
@@ -243,6 +250,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: carolMaterial.bundle.publicPackage,
       invite: carolMaterial.invite,
@@ -389,6 +397,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     const added = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,
@@ -504,6 +513,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     const added = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,
@@ -618,6 +628,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     const added = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,
@@ -714,6 +725,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     const added = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,
@@ -860,6 +872,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       bodies,
     })
     const added = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,

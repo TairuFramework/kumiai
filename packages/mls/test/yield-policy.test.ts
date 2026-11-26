@@ -122,14 +122,19 @@ test('cold survivor proof verification preserves the per-call yield policy and b
 async function fixture() {
   const { group, identity, tokens } = await pipelineGroup({ standard: true })
   const recipient = randomIdentity()
-  const bundle = await createKeyPackageBundle({ identity: recipient })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: recipient })
   const { invite } = await createInvite({
     group,
     identity,
     recipientDID: recipient.id,
     permission: 'member',
   })
-  const added = await commitInvite({ group, invite, keyPackage: bundle.publicPackage })
+  const added = await commitInvite({
+    now: Date.now,
+    group,
+    invite,
+    keyPackage: bundle.publicPackage,
+  })
   const welcome = {
     identity: recipient,
     invite,
@@ -226,6 +231,7 @@ for (const policy of [{ yield: false }, {}, { yield: true }]) {
     schedules()
     timers.mockClear()
     const added = await commitInvite({
+      now: Date.now,
       group: f.group.clone(),
       invite: structuredClone(f.invite),
       keyPackage: f.bundle.publicPackage,
@@ -275,6 +281,7 @@ for (const policy of [{ yield: false }, {}, { yield: true }]) {
     const controller = await timedBinding({ identity, iat: now - 1, exp: now + 100 })
     timers.mockClear()
     const { group } = await createGroup({
+      now: Date.now,
       identity,
       groupID: 'cold-lifecycle',
       controller,
@@ -305,7 +312,12 @@ for (const policy of [{ yield: false }, {}, { yield: true }]) {
     timers.mockClear()
     const renewedBinding = await timedBinding({ identity, iat: now, exp: now + 100 })
     timers.mockClear()
-    const renewed = await renewLeaf({ group: restored, binding: renewedBinding, ...policy })
+    const renewed = await renewLeaf({
+      now: Date.now,
+      group: restored,
+      binding: renewedBinding,
+      ...policy,
+    })
     expect(renewed.epoch).toBe(restored.epoch + 1n)
     expect(timers.mock.calls.length > 0).toBe(policy.yield !== false)
     timers.mockClear()

@@ -94,7 +94,7 @@ describe('GroupHandle device registry', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'key',
     })
-    const { group } = await createGroup({ identity: creator, groupID: GROUP })
+    const { group } = await createGroup({ now: Date.now, identity: creator, groupID: GROUP })
     expect(group.currentDenySet().size).toBe(0)
     expect(group.registry.devices.size).toBe(0)
   })

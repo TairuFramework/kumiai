@@ -1,4 +1,5 @@
 import { normalizeDID, type SigningIdentity } from '@kokuin/token'
+import type { Now } from '@sozai/runtime'
 import {
   type DefaultProposal,
   defaultCredentialTypes,
@@ -11,6 +12,7 @@ import {
 
 import { parseMLSCredentialIdentity } from './credential.js'
 import { commitWithEntries } from './group-commit.js'
+import { assertBindingAuthorTime } from './group-credential.js'
 import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
 import { signLedgerEntry } from './ledger.js'
 import { DEVICE_ENTRY_TYPE } from './registry.js'
@@ -122,6 +124,8 @@ export async function labelDevice({
 }
 
 export type AddDeviceParams = GroupSigner & {
+  /** Clock for the author-time check of the added leaf's binding, read once. */
+  now: Now
   keyPackage: KeyPackage
   device: string
   controller: string
@@ -135,6 +139,7 @@ export type AddDeviceParams = GroupSigner & {
  * Returns the Commit + Welcome bytes.
  */
 export async function addDevice({
+  now,
   group,
   identity,
   ...params
@@ -166,6 +171,10 @@ export async function addDevice({
         subject: params.device,
         value: { op: 'add', controller: params.controller, capability: params.capability },
       },
+    })
+    assertBindingAuthorTime({
+      controller: parseMLSCredentialIdentity(credential.identity).controller,
+      nowSeconds: Math.floor(now() / 1000),
     })
     const addProposal: DefaultProposal = {
       proposalType: defaultProposalTypes.add,

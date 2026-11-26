@@ -14,7 +14,11 @@ import {
 
 describe('readMessageAAD', () => {
   test('reads an application frame before opening and without a receiving key', async () => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'read-aad' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'read-aad',
+    })
     const aad = new Uint8Array([1, 1, 0, 255])
     const sealed = await group.encrypt({ plaintext: new Uint8Array([42]), aad })
     expect(readMessageAAD(sealed)).toEqual(aad)
@@ -46,6 +50,7 @@ describe('readMessageAAD', () => {
         return token
       })
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'rewrite-aad',
       resolveLedgerEntries,
@@ -57,8 +62,13 @@ describe('readMessageAAD', () => {
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle({ identity: bob })
-    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+    const added = await commitInvite({
+      now: Date.now,
+      group,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     expect(readMessageAAD(added.commitMessage)).toBeNull()
     const { group: receiver } = await processWelcome({
       identity: bob,

@@ -178,6 +178,7 @@ export async function pipelineGroup(options: PipelineGroupOptions = {}) {
   const identity = agent(41)
   const tokens = new Map<string, string>()
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'lifecycle-pipeline',
     ...(options.standard

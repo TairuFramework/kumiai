@@ -47,6 +47,7 @@ describe('a Welcome delivered a second time', () => {
     const tokens = new Map<string, string>()
 
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'welcome-redelivery',
     })
@@ -57,8 +58,9 @@ describe('a Welcome delivered a second time', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,
@@ -83,8 +85,9 @@ describe('a Welcome delivered a second time', () => {
       permission: 'member',
     })
     publishInvite(tokens, carolInvite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { commitMessage: addCarol, newGroup: groupWithCarol } = await commitInvite({
+      now: Date.now,
       group: groupWithBob,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,
@@ -143,6 +146,7 @@ describe('a Welcome delivered a second time', () => {
     const tokens = new Map<string, string>()
 
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'welcome-redelivery-same-epoch',
     })
@@ -153,8 +157,9 @@ describe('a Welcome delivered a second time', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,
@@ -188,7 +193,11 @@ describe('the safe join path', () => {
     const carol = randomIdentity()
     const tokens = new Map<string, string>()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'join-once' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'join-once',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -196,8 +205,9 @@ describe('the safe join path', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,
@@ -228,8 +238,9 @@ describe('the safe join path', () => {
       permission: 'member',
     })
     publishInvite(tokens, carolInvite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { commitMessage: addCarol, newGroup: groupWithCarol } = await commitInvite({
+      now: Date.now,
       group: groupWithBob,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,
@@ -259,7 +270,11 @@ describe('the safe join path', () => {
     const bob = randomIdentity()
     const tokens = new Map<string, string>()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'second-group' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'second-group',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -267,8 +282,9 @@ describe('the safe join path', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,

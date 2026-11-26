@@ -17,11 +17,13 @@ async function twoMemberGroup() {
   const alice = randomIdentity()
   const bob = randomIdentity()
   const { group: aliceGroup } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID: 'g',
     capabilities: controlCapabilities(),
   })
   const bobBundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: bob,
     capabilities: controlCapabilities(),
   })
@@ -35,7 +37,12 @@ async function twoMemberGroup() {
     welcomeMessage,
     commitMessage,
     newGroup: aliceAfterBob,
-  } = await commitInvite({ group: aliceGroup, keyPackage: bobBundle.publicPackage, invite })
+  } = await commitInvite({
+    now: Date.now,
+    group: aliceGroup,
+    keyPackage: bobBundle.publicPackage,
+    invite,
+  })
   const { group: bobGroup, credential: bobCred } = await processWelcome({
     identity: bob,
     invite,
@@ -55,6 +62,7 @@ async function addSomeone(
 ) {
   const newcomer = randomIdentity()
   const bundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: newcomer,
     capabilities: controlCapabilities(),
   })
@@ -64,7 +72,7 @@ async function addSomeone(
     recipientDID: newcomer.id,
     permission: 'member',
   })
-  return await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  return await commitInvite({ now: Date.now, group, keyPackage: bundle.publicPackage, invite })
 }
 
 /**
@@ -111,6 +119,7 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
     const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
     const carol = randomIdentity()
     const carolBundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: carol,
       capabilities: controlCapabilities(),
     })
@@ -122,6 +131,7 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
     })
     // Alice authors this commit at the epoch Bob is at, so Bob can read it.
     const { commitMessage } = await commitInvite({
+      now: Date.now,
       group: aliceAfterBob,
       keyPackage: carolBundle.publicPackage,
       invite: carolInvite,
@@ -141,6 +151,7 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
     const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
     const carol = randomIdentity()
     const carolBundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: carol,
       capabilities: controlCapabilities(),
     })
@@ -151,6 +162,7 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
       permission: 'member',
     })
     const { commitMessage } = await commitInvite({
+      now: Date.now,
       group: aliceAfterBob,
       keyPackage: carolBundle.publicPackage,
       invite: carolInvite,
@@ -206,6 +218,7 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     // exercises the external-join commit path without needing to advance Alice first.
     const { groupInfo } = await exportGroupInfo({ group: aliceAfterBob })
     const { commitMessage } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobCred,
@@ -228,6 +241,7 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     const { alice, bob, aliceAfterBob, bobCred } = await twoMemberGroup()
     const { groupInfo } = await exportGroupInfo({ group: aliceAfterBob })
     const { commitMessage } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobCred,
@@ -256,6 +270,7 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     const { alice, bob, aliceAfterBob, bobCred } = await twoMemberGroup()
     const { groupInfo } = await exportGroupInfo({ group: aliceAfterBob })
     const { commitMessage } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobCred,
@@ -287,6 +302,7 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
     const carol = randomIdentity()
     const carolBundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: carol,
       capabilities: controlCapabilities(),
     })
@@ -297,6 +313,7 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
       permission: 'member',
     })
     const { commitMessage } = await commitInvite({
+      now: Date.now,
       group: aliceAfterBob,
       keyPackage: carolBundle.publicPackage,
       invite: carolInvite,

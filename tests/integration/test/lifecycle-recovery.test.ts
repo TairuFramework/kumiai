@@ -93,6 +93,7 @@ async function setup(
   const bob = fixture.agent(61)
   let aliceGroup = (
     await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'lifecycle-recovery',
       controllerLog: { chain: [fixture.inception], events: [] },
@@ -104,13 +105,18 @@ async function setup(
     })
   ).group
   const cached = await fixture.timedBinding({ identity: bob, iat: options.bobIat ?? 100, exp: 200 })
-  const bundle = await createKeyPackageBundle({ identity: bob, controller: cached })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob, controller: cached })
   const { invite } = await createInvite({
     group: aliceGroup,
     identity: alice,
     recipientDID: bob.id,
   })
-  const added = await commitInvite({ group: aliceGroup, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group: aliceGroup,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   aliceGroup = added.newGroup
   const slot = createLedgerEntrySlot()
   let bobGroup = (
@@ -156,6 +162,7 @@ async function setup(
 
 async function installFloor(s: Setup, time: number): Promise<GroupHandle> {
   const elevated = await renewLeaf({
+    now: Date.now,
     group: s.aliceGroup(),
     binding: await fixture.timedBinding({ identity: s.alice, iat: time, exp: time + 100 }),
   })
@@ -168,7 +175,7 @@ async function installFloor(s: Setup, time: number): Promise<GroupHandle> {
     parent: parent.capability,
     issuer: trusted,
   })
-  const lowered = await renewLeaf({ group: elevated.newGroup, binding: delegated })
+  const lowered = await renewLeaf({ now: Date.now, group: elevated.newGroup, binding: delegated })
   expect(lowered.newGroup.registry.controllers.get(fixture.controllerID)?.timeFloor).toBe(time)
   return lowered.newGroup
 }
@@ -317,6 +324,7 @@ test('a tree-lapsed present leaf can external-renew with a fresh binding', async
   const s = await setup(host)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
   const renewed = await renewLeaf({
+    now: Date.now,
     group: s.aliceGroup(),
     binding: await fixture.timedBinding({ identity: s.alice, iat: 250, exp: 350 }),
   })
@@ -594,7 +602,7 @@ test('a correctly signed reply with a ledger that misses the GroupInfo head retu
 
 test('standard group preparation never calls the lifecycle binding host', async () => {
   const identity = fixture.agent(44)
-  const group = (await createGroup({ identity, groupID: 'standard-recovery' })).group
+  const group = (await createGroup({ now: Date.now, identity, groupID: 'standard-recovery' })).group
   const host = vi.fn(async () => null)
   const mls = createGroupMLS({
     access: simpleHandleAccess({ handle: () => group, adopt: () => {} }),
@@ -657,6 +665,7 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
   const s = await setup(host)
   const prefix = await fixture.resetPrefix()
   const replacement = await joinGroupExternal({
+    now: Date.now,
     identity: s.bob,
     groupInfo: (await exportGroupInfo({ group: s.aliceGroup() })).groupInfo,
     credential: s.bobGroup().credential,
@@ -667,6 +676,7 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
   s.installAlice(
     (
       await renewLeaf({
+        now: Date.now,
         group: s.aliceGroup(),
         binding: await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
       })
@@ -711,6 +721,7 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
   const outsider = fixture.agent(66)
   const group = (
     await createGroup({
+      now: Date.now,
       identity: outsider,
       groupID: 'lifecycle-recovery',
       controllerLog: { chain: [fixture.inception], events: [] },

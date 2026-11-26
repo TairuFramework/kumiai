@@ -21,6 +21,7 @@ async function group(size: number): Promise<Array<GroupHandle>> {
   const resolveLedgerEntries = async (ids: Array<string>) =>
     ids.map((id) => tokens.get(id) as string)
   let { group: adminGroup } = await createGroup({
+    now: Date.now,
     identity: admin,
     groupID: `measure-${size}`,
     resolveLedgerEntries,
@@ -35,8 +36,9 @@ async function group(size: number): Promise<Array<GroupHandle>> {
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle({ identity })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity })
     const added = await commitInvite({
+      now: Date.now,
       group: adminGroup,
       keyPackage: bundle.publicPackage,
       invite,

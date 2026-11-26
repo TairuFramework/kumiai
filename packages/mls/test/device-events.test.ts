@@ -219,6 +219,7 @@ test('admission is an epoch snapshot of lapse, independent of the wall clock', a
     expect(fixture.joined.sendAdmission()).toEqual(before)
     clock.mockReturnValue(150_000)
     const renewed = await renewLeaf({
+      now: Date.now,
       group: fixture.author,
       binding: await timedBinding({ identity, iat: 150, exp: 250 }),
     })
@@ -238,6 +239,7 @@ test('admission is an epoch snapshot of lapse, independent of the wall clock', a
       reason: 'lapsed',
     })
     const own = await renewLeaf({
+      now: Date.now,
       group: fixture.joined,
       binding: await timedBinding({ identity: peer, iat: 150, exp: 250 }),
     })
@@ -254,6 +256,7 @@ test('an adopted reset reports its reason and proof reference only once', async 
   const fixture = await lowLevelWelcome(group, peer, await bindingFor(peer))
   const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
   const renewed = await renewLeaf({
+    now: Date.now,
     group: fixture.author,
     binding: await bindingFor(identity, log),
   })

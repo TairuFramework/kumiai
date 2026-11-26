@@ -28,8 +28,7 @@ import {
   SubscriptionQuotaExceededError,
 } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
-
-import type { Now } from './clock.js'
+import type { Now } from '@sozai/runtime'
 
 type RetentionClass = 'log' | 'mailbox'
 

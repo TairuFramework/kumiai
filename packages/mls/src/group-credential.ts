@@ -1,4 +1,5 @@
 import { isPeer4, type OwnIdentity } from '@kokuin/token'
+import type { Now } from '@sozai/runtime'
 import {
   type Credential,
   type CustomExtension,
@@ -18,8 +19,6 @@ import { resolveMlsContext } from './group-context.js'
 import { memberRootsOf } from './member-root.js'
 import { registryForLog } from './registry.js'
 import type { GroupOptions, KeyPackageBundle } from './types.js'
-
-const currentSeconds = (): number => Math.floor(Date.now() / 1000)
 
 export type MakeMLSCredentialParams = {
   identity: OwnIdentity
@@ -48,10 +47,15 @@ export function makeMLSCredential({ identity, controller }: MakeMLSCredentialPar
   }
 }
 
-export function assertBindingAuthorTime(
-  controller?: ControllerBinding,
-  nowSeconds = currentSeconds(),
-): void {
+export type AssertBindingAuthorTimeParams = {
+  controller?: ControllerBinding
+  nowSeconds: number
+}
+
+export function assertBindingAuthorTime({
+  controller,
+  nowSeconds,
+}: AssertBindingAuthorTimeParams): void {
   if (controller == null) return
   if (controller.member != null) {
     if (controller.iat == null || !Number.isFinite(controller.iat) || controller.iat > nowSeconds) {
@@ -78,11 +82,11 @@ export function assertBindingAuthorTime(
  */
 async function buildBundle(
   identity: OwnIdentity,
-  options?: GroupOptions,
-  overrides: { extensions?: Array<CustomExtension>; lifetime?: Lifetime } = {},
-  nowSeconds?: number,
+  options: GroupOptions,
+  overrides: { extensions?: Array<CustomExtension>; lifetime?: Lifetime },
+  nowSeconds: number,
 ): Promise<KeyPackageBundle> {
-  assertBindingAuthorTime(options?.controller, nowSeconds)
+  assertBindingAuthorTime({ controller: options?.controller, nowSeconds })
   const credential = makeMLSCredential({ identity, controller: options?.controller })
   if (options?.controller != null) {
     const memberRooted = memberRootsOf({ binding: options.controller, leafDID: identity.id }).some(
@@ -136,15 +140,16 @@ function ordinaryLifetime(nowSeconds: number): Lifetime {
 
 export type CreateKeyPackageBundleParams = {
   identity: OwnIdentity
-  nowSeconds?: number
+  now: Now
 } & GroupOptions
 
 /** Generate a key package for joining groups. */
 export async function createKeyPackageBundle({
   identity,
-  nowSeconds = currentSeconds(),
+  now,
   ...options
 }: CreateKeyPackageBundleParams): Promise<KeyPackageBundle> {
+  const nowSeconds = Math.floor(now() / 1000)
   return buildBundle(identity, options, { lifetime: ordinaryLifetime(nowSeconds) }, nowSeconds)
 }
 
@@ -189,7 +194,7 @@ function lastResortLifetime(nowSeconds: number): Lifetime {
 
 export type CreateLastResortKeyPackageBundleParams = {
   identity: OwnIdentity
-  nowSeconds?: number
+  now: Now
 } & GroupOptions
 
 /**
@@ -211,9 +216,10 @@ export type CreateLastResortKeyPackageBundleParams = {
  */
 export async function createLastResortKeyPackageBundle({
   identity,
-  nowSeconds = currentSeconds(),
+  now,
   ...options
 }: CreateLastResortKeyPackageBundleParams): Promise<KeyPackageBundle> {
+  const nowSeconds = Math.floor(now() / 1000)
   return buildBundle(
     identity,
     options,

@@ -124,7 +124,11 @@ test('historyCountsUtf8AndEveryCopy', async () => {
   expect(
     history.historySize({ tree: renewed.group.state.ratchetTree, entries: [...entries, consumer] }),
   ).toBe(historyBytes(resetPrefix) * 2 + proofUtf8Bytes)
-  const floating = await createGroup({ identity: agent(71), groupID: 'floating-history' })
+  const floating = await createGroup({
+    now: Date.now,
+    identity: agent(71),
+    groupID: 'floating-history',
+  })
   expect(history.historySize({ tree: floating.group.state.ratchetTree, entries: [consumer] })).toBe(
     0,
   )
@@ -222,6 +226,7 @@ test('P2 workload fits the horizon held once', async () => {
   for (let index = 0; index < 50; index++) {
     const identity = agent(80 + index)
     const bundle = await createKeyPackageBundle({
+      now: Date.now,
       identity,
       controller: await bindingFor(identity, log.chain),
     })

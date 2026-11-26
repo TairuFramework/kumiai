@@ -196,6 +196,7 @@ test('staleEpochProposalIgnored', async () => {
     },
   })
   const advanced = await renewLeaf({
+    now: Date.now,
     group: author,
     binding: await timedBinding({ identity, iat: 150, exp: 250 }),
   })

@@ -66,6 +66,7 @@ describe('received commit persistence boundary', () => {
         return token
       })
     const { group: created } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'persist-received',
       resolveLedgerEntries,
@@ -77,8 +78,9 @@ describe('received commit persistence boundary', () => {
       permission: 'member',
     })
     for (const token of bobInvite.invite.ledgerEntries) bodies.set(ledgerEntryDigest(token), token)
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const addedBob = await commitInvite({
+      now: Date.now,
       group: created,
       keyPackage: bobBundle.publicPackage,
       invite: bobInvite.invite,
@@ -150,6 +152,7 @@ describe('received commit persistence boundary', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const { group: original } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'persist-public-member',
     })
@@ -159,8 +162,13 @@ describe('received commit persistence boundary', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bundle = await createKeyPackageBundle({ identity: bob })
-    const added = await commitInvite({ group: original, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+    const added = await commitInvite({
+      now: Date.now,
+      group: original,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const { group: receiver } = await processWelcome({
       identity: bob,
       invite,
@@ -191,15 +199,24 @@ describe('received commit persistence boundary', () => {
   test('persists an accepted standalone proposal and rolls it back on failure', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group: original } = await createGroup({ identity: alice, groupID: 'persist-proposal' })
+    const { group: original } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'persist-proposal',
+    })
     const { invite } = await createInvite({
       group: original,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bundle = await createKeyPackageBundle({ identity: bob })
-    const added = await commitInvite({ group: original, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+    const added = await commitInvite({
+      now: Date.now,
+      group: original,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const { group: receiver } = await processWelcome({
       identity: bob,
       invite,
@@ -236,6 +253,7 @@ describe('received commit persistence boundary', () => {
         return body == null ? [] : [body]
       })
     const { group: original } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'persist-body-rollback',
       resolveLedgerEntries,
@@ -247,8 +265,13 @@ describe('received commit persistence boundary', () => {
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) bodies.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle({ identity: bob })
-    const added = await commitInvite({ group: original, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+    const added = await commitInvite({
+      now: Date.now,
+      group: original,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const { group: receiver } = await processWelcome({
       identity: bob,
       invite,

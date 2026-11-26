@@ -8,6 +8,7 @@ import {
 } from '@kokuin/token'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import type { Now } from '@sozai/runtime'
 
 import { readCapability } from './capability.js'
 import { foldChain } from './controller-log.js'
@@ -175,14 +176,15 @@ export type RecoverySignerEligibleParams = {
   group: GroupHandle
   registry: DeviceRegistry
   signer: string
-  /** Seconds since epoch; defaults to the current time. */
-  now?: number
+  /** Clock read once for the current time, epoch milliseconds. */
+  now: Now
 }
 
 export async function recoverySignerEligible(
   params: RecoverySignerEligibleParams,
 ): Promise<boolean> {
-  const { group, registry, signer, now = Date.now() / 1000 } = params
+  const { group, registry, signer } = params
+  const nowSeconds = params.now() / 1000
   const controller = group.anchor.controller
   if (controller == null) return false
   const options = { crypto: group.crypto }
@@ -237,7 +239,7 @@ export async function recoverySignerEligible(
       controllerID: controller,
       ...options,
     })
-    return expiry >= Math.max(time, now - 300)
+    return expiry >= Math.max(time, nowSeconds - 300)
   } catch {
     return false
   }

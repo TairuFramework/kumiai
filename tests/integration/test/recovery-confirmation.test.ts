@@ -108,15 +108,22 @@ async function setup(options: { third?: boolean; deadlineMs?: number; timeoutMs?
   }
   const aliceID = randomIdentity({ crypto })
   const bobID = randomIdentity({ crypto })
-  let aliceGroup = (await createGroup({ identity: aliceID, groupID: 'confirmation', crypto })).group
-  const bundle = await createKeyPackageBundle({ identity: bobID })
+  let aliceGroup = (
+    await createGroup({ now: Date.now, identity: aliceID, groupID: 'confirmation', crypto })
+  ).group
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bobID })
   const { invite } = await createInvite({
     group: aliceGroup,
     identity: aliceID,
     recipientDID: bobID.id,
     permission: 'member',
   })
-  const added = await commitInvite({ group: aliceGroup, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group: aliceGroup,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   aliceGroup = added.newGroup
   const bobSlot = createLedgerEntrySlot()
   bobSlot.install(async (ids) =>
@@ -138,7 +145,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number; timeoutMs?
   const carolID = randomIdentity({ crypto })
   let carolGroup: GroupHandle | undefined
   if (options.third) {
-    const material = await createKeyPackageBundle({ identity: carolID })
+    const material = await createKeyPackageBundle({ now: Date.now, identity: carolID })
     const offered = await createInvite({
       group: aliceGroup,
       identity: aliceID,
@@ -146,6 +153,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number; timeoutMs?
       permission: 'member',
     })
     const commit = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: material.publicPackage,
       invite: offered.invite,
@@ -441,7 +449,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     entrySlot: createLedgerEntrySlot(),
   })
   const carol = randomIdentity({ crypto })
-  const material = await createKeyPackageBundle({ identity: carol })
+  const material = await createKeyPackageBundle({ now: Date.now, identity: carol })
   const offered = await createInvite({
     group: source,
     identity: s.aliceID,
@@ -453,6 +461,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
   await s.alice.commit({
     build: async () => {
       const rotated = await commitInvite({
+        now: Date.now,
         group: source,
         keyPackage: material.publicPackage,
         invite: offered.invite,
@@ -640,7 +649,7 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const carol = randomIdentity({ crypto })
-  const bundle = await createKeyPackageBundle({ identity: carol })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: carol })
   const offered = await createInvite({
     group: source,
     identity: s.aliceID,
@@ -648,6 +657,7 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
     permission: 'member',
   })
   const alternative = await commitInvite({
+    now: Date.now,
     group: source,
     keyPackage: bundle.publicPackage,
     invite: offered.invite,

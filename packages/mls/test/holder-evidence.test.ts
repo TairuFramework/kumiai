@@ -78,9 +78,12 @@ test.each(['build', 'receipt', 'Welcome'] as const)(
         recipientDID: f.device.id,
       })
       await expect(
-        commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }).then(
-          () => undefined,
-        ),
+        commitInvite({
+          now: Date.now,
+          group: f.group,
+          keyPackage: bundle.publicPackage,
+          invite,
+        }).then(() => undefined),
       ).rejects.toMatchObject({
         reason: 'missing-holder-evidence',
       })
@@ -100,13 +103,22 @@ test.each(['build', 'receipt', 'Welcome'] as const)(
 
 test('boundDeviceRenewedByPeerAccepted', async () => {
   const f = await fixture()
-  const bundle = await createKeyPackageBundle({ identity: f.device, controller: f.evidenced })
+  const bundle = await createKeyPackageBundle({
+    now: Date.now,
+    identity: f.device,
+    controller: f.evidenced,
+  })
   const { invite } = await createInvite({
     group: f.group,
     identity: f.identity,
     recipientDID: f.device.id,
   })
-  const added = await commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group: f.group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: joined } = await processWelcome({
     identity: f.device,
     invite,
@@ -127,7 +139,7 @@ test('boundDeviceRenewedByPeerAccepted', async () => {
     })),
     holderGrant: f.evidenced.holderGrant,
   }
-  const renewed = await renewLeaf({ group: joined, binding: updatedBinding })
+  const renewed = await renewLeaf({ now: Date.now, group: joined, binding: updatedBinding })
   await added.newGroup.processMessage({ message: renewed.commitMessage })
   expect(added.newGroup.bindingOfDID(f.device.id)).toMatchObject({
     capability: updatedBinding.capability,
@@ -190,7 +202,7 @@ test('deniedHolderGrantRefused', async () => {
   const bundle = await rawBundle(group, f.device, f.evidenced)
   const { invite } = await createInvite({ group, identity: f.identity, recipientDID: f.device.id })
   await expect(
-    commitInvite({ group, keyPackage: bundle.publicPackage, invite }),
+    commitInvite({ now: Date.now, group, keyPackage: bundle.publicPackage, invite }),
   ).rejects.toMatchObject({
     reason: 'denied-id',
   })
@@ -261,7 +273,9 @@ test('missing evidence refused on a forged update', async () => {
 test('public key package builder refuses missing evidence', async () => {
   const f = await fixture()
   await expect(
-    createKeyPackageBundle({ identity: f.device, controller: f.binding }).then(() => undefined),
+    createKeyPackageBundle({ now: Date.now, identity: f.device, controller: f.binding }).then(
+      () => undefined,
+    ),
   ).rejects.toMatchObject({
     reason: 'missing-holder-evidence',
   })
@@ -276,6 +290,7 @@ test('external replacement refuses missing evidence', async () => {
     recipientDID: f.device.id,
   })
   const { newGroup: author } = await commitInvite({
+    now: Date.now,
     group: f.group,
     keyPackage: bundle.publicPackage,
     invite,
@@ -315,7 +330,9 @@ test.each(
   const binding = { ...f.binding, holderGrant: grant.capability }
   if (path === 'key-package build') {
     await expect(
-      createKeyPackageBundle({ identity: f.device, controller: binding }).then(() => undefined),
+      createKeyPackageBundle({ now: Date.now, identity: f.device, controller: binding }).then(
+        () => undefined,
+      ),
     ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
   } else if (path === 'Add build') {
     const bundle = await rawBundle(f.group, f.device, binding)
@@ -325,9 +342,12 @@ test.each(
       recipientDID: f.device.id,
     })
     await expect(
-      commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }).then(
-        () => undefined,
-      ),
+      commitInvite({
+        now: Date.now,
+        group: f.group,
+        keyPackage: bundle.publicPackage,
+        invite,
+      }).then(() => undefined),
     ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
   } else if (path === 'Add receipt') {
     const forged = await rawAdd(f.group, f.device, binding)
@@ -352,6 +372,7 @@ test.each([
   const grant = await timedBinding({ identity: f.device, iat, exp })
   await expect(
     createKeyPackageBundle({
+      now: Date.now,
       identity: f.device,
       controller: { ...f.binding, holderGrant: grant.capability },
     }),
@@ -383,7 +404,11 @@ test.each(['key-package build', 'Add receipt'] as const)(
     )
     const binding = { ...f.binding, holderGrant }
     if (path === 'key-package build') {
-      const building = createKeyPackageBundle({ identity: f.device, controller: binding })
+      const building = createKeyPackageBundle({
+        now: Date.now,
+        identity: f.device,
+        controller: binding,
+      })
       await expect(building).rejects.toBeInstanceOf(LeafBindingError)
       await expect(building).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
       // Pinned verification also refuses nbf; this cause proves the structural gate ran.
@@ -423,7 +448,7 @@ test('expired holder grant refused on renewal', async () => {
     holderGrant: grant.capability,
   }
   const epoch = f.group.epoch
-  const renewing = renewLeaf({ group: f.group, binding })
+  const renewing = renewLeaf({ now: Date.now, group: f.group, binding })
   await expect(renewing).rejects.toBeInstanceOf(LeafBindingError)
   await expect(renewing).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
   expect(f.group.epoch).toBe(epoch)
@@ -438,6 +463,7 @@ test('expired holder grant refused on external replacement', async () => {
     recipientDID: f.device.id,
   })
   const { newGroup: author } = await commitInvite({
+    now: Date.now,
     group: f.group,
     keyPackage: bundle.publicPackage,
     invite,
@@ -562,6 +588,7 @@ test('leaf minting accepts a well-formed member-rooted parent', async () => {
   const f = await memberHolderFixture()
   vi.spyOn(Date, 'now').mockReturnValue(200_000)
   const parent = await mintTrustedGrant({
+    now: Date.now,
     signer: f.member.identity,
     controllerID: f.did,
     audience: f.f.trusted.id,
@@ -571,6 +598,7 @@ test('leaf minting accepts a well-formed member-rooted parent', async () => {
   })
   await expect(
     mintLeafCapability({
+      now: Date.now,
       signer: f.f.trusted,
       controllerID: f.did,
       audience: f.f.device.id,

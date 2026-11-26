@@ -109,10 +109,16 @@ describe('controller fold', () => {
       controllerLog: asControllerLog([inception]),
     }
     await expect(
-      createGroup({ identity, groupID: 'fold-default', ...options }),
+      createGroup({ now: Date.now, identity, groupID: 'fold-default', ...options }),
     ).resolves.toBeDefined()
     await expect(
-      createGroup({ identity, groupID: 'fold-refused', ...options, crypto: refusing() }),
+      createGroup({
+        now: Date.now,
+        identity,
+        groupID: 'fold-refused',
+        ...options,
+        crypto: refusing(),
+      }),
     ).rejects.toThrow()
   })
 })
@@ -174,6 +180,7 @@ describe('ledger entry verification', () => {
     test('applyLedgerEntries keeps an authentic entry through the failure', async () => {
       const identity = randomIdentity()
       const { group, credential } = await createGroup({
+        now: Date.now,
         identity,
         groupID: 'ledger-provider-failure',
       })
@@ -194,7 +201,11 @@ describe('ledger entry verification', () => {
 
   test('a token another provider accepted is not reused from either ledger cache', async () => {
     const identity = randomIdentity()
-    const { group, credential } = await createGroup({ identity, groupID: 'ledger-cache' })
+    const { group, credential } = await createGroup({
+      now: Date.now,
+      identity,
+      groupID: 'ledger-cache',
+    })
     const token = await signLedgerEntry({ identity, entry: entry(group.groupID) })
     expect(await group.applyLedgerEntries([token])).toHaveLength(1)
     const exported = group.ledgerTokens
@@ -315,9 +326,11 @@ describe('leaf authentication', () => {
 
   test('createKeyPackageBundle refuses its own leaf under a refusing provider', async () => {
     const options = { controller: await bindingFor(leaf) }
-    await expect(createKeyPackageBundle({ identity: leaf, ...options })).resolves.toBeDefined()
     await expect(
-      createKeyPackageBundle({ identity: leaf, ...options, crypto: refusing() }),
+      createKeyPackageBundle({ now: Date.now, identity: leaf, ...options }),
+    ).resolves.toBeDefined()
+    await expect(
+      createKeyPackageBundle({ now: Date.now, identity: leaf, ...options, crypto: refusing() }),
     ).rejects.toBeInstanceOf(LeafBindingError)
   })
 })
@@ -349,6 +362,7 @@ describe('lifecycle proof', () => {
       const identity = agent(87)
       const { state, provider } = switchable()
       const { group } = await createGroup({
+        now: Date.now,
         identity,
         groupID: `lifecycle-handle-${refuse}`,
         controller: await bindingFor(identity),
@@ -381,7 +395,7 @@ describe('lifecycle proof', () => {
 describe('recovery', () => {
   test('a request is verified with the given provider, and the handle provider when sealing', async () => {
     const identity = randomIdentity()
-    const { group } = await createGroup({ identity, groupID: 'recovery-request' })
+    const { group } = await createGroup({ now: Date.now, identity, groupID: 'recovery-request' })
     const held = await createRecoveryRequest({ group, identity, requestID: 'request' })
     await expect(verifyRecoveryRequest({ token: held.request })).resolves.toBeDefined()
     await expect(
@@ -389,7 +403,12 @@ describe('recovery', () => {
     ).rejects.toHaveProperty('reason', 'unverified')
     await expect(sealGroupInfo({ group, identity, request: held.request })).resolves.toBeDefined()
 
-    const refused = await createGroup({ identity, groupID: 'recovery-request', crypto: refusing() })
+    const refused = await createGroup({
+      now: Date.now,
+      identity,
+      groupID: 'recovery-request',
+      crypto: refusing(),
+    })
     const request = await createRecoveryRequest({
       group: refused.group,
       identity,
@@ -404,6 +423,7 @@ describe('recovery', () => {
     const identity = randomIdentity()
     const { state, provider } = switchable()
     const { group } = await createGroup({
+      now: Date.now,
       identity,
       groupID: `recovery-verdict-${refuse}`,
       crypto: provider,
@@ -441,6 +461,7 @@ describe('recovery', () => {
     const identity = randomIdentity()
     const { state, provider } = switchable()
     const { group } = await createGroup({
+      now: Date.now,
       identity,
       groupID: `recovery-attestation-${refuse}`,
       crypto: provider,
@@ -506,6 +527,7 @@ describe('default provider', () => {
       })
       const grant = async (identity: OwnIdentity) =>
         await mintTrustedGrant({
+          now: Date.now,
           signer,
           controllerID: did,
           audience: identity.id,
@@ -523,6 +545,7 @@ describe('default provider', () => {
         resolveLedgerEntries: async (ids: Array<string>) => ids.map((id) => tokens.get(id) ?? ''),
       }
       const { group } = await createGroup({
+        now: Date.now,
         identity: author,
         groupID: 'default-provider',
         ...shared,
@@ -530,6 +553,7 @@ describe('default provider', () => {
           id: did,
           prefix: [first],
           capability: await mintLeafCapability({
+            now: Date.now,
             signer,
             controllerID: did,
             audience: author.id,
@@ -542,12 +566,14 @@ describe('default provider', () => {
 
       // A delegated leaf: raw signature check, parent token, capability walk and holder grant.
       const bundle = await createKeyPackageBundle({
+        now: Date.now,
         identity: joiner,
         crypto,
         controller: {
           id: did,
           prefix: [first],
           capability: await mintLeafCapability({
+            now: Date.now,
             signer: issuer,
             controllerID: did,
             audience: joiner.id,
@@ -563,7 +589,12 @@ describe('default provider', () => {
         identity: author,
         recipientDID: joiner.id,
       })
-      const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+      const added = await commitInvite({
+        now: Date.now,
+        group,
+        keyPackage: bundle.publicPackage,
+        invite,
+      })
       const joined = await processWelcome({
         identity: joiner,
         invite,

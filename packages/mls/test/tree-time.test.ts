@@ -38,6 +38,7 @@ async function memberLeaf(
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const identity = agent(70 + index)
   const capability = await mintLeafCapability({
+    now: Date.now,
     signer: options.issuer ?? member.identity,
     controllerID: options.controllerID ?? f.did,
     audience: identity.id,

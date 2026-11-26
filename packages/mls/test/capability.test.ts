@@ -22,6 +22,7 @@ describe('capability issuing', () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     const params = {
+      now: Date.now,
       signer: f.trusted,
       controllerID: f.controller.id,
       audience: f.device.id,
@@ -49,6 +50,7 @@ describe('capability issuing', () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     const token = await mls.mintLeafCapability({
+      now: Date.now,
       signer: f.controller,
       controllerID: f.controller.id,
       audience: f.device.id,
@@ -85,6 +87,7 @@ describe('capability issuing', () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     const parent = await mls.mintTrustedGrant({
+      now: Date.now,
       signer: f.controller,
       controllerID: f.controller.id,
       audience: f.trusted.id,
@@ -108,6 +111,7 @@ describe('capability issuing', () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     const token = await mls.mintLeafCapability({
+      now: Date.now,
       signer: f.trusted,
       controllerID: f.controller.id,
       audience: f.device.id,
@@ -145,6 +149,7 @@ describe('capability issuing', () => {
     const mint = kind === 'leaf' ? mls.mintLeafCapability : mls.mintTrustedGrant
     await expect(
       mint({
+        now: Date.now,
         signer: f.controller,
         controllerID: f.controller.id,
         audience: f.device.id,
@@ -161,6 +166,7 @@ describe('capability issuing', () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     const params = {
+      now: Date.now,
       signer: f.trusted,
       controllerID: f.controller.id,
       audience: f.device.id,
@@ -180,6 +186,7 @@ describe('capability issuing', () => {
     const f = await leafCapabilityFixture()
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     const params = {
+      now: Date.now,
       signer: f.trusted,
       controllerID: f.controller.id,
       audience: f.device.id,
@@ -208,6 +215,7 @@ describe('capability issuing', () => {
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     await expect(
       mls.mintLeafCapability({
+        now: Date.now,
         signer: f.trusted,
         controllerID: f.controller.id,
         audience: f.device.id,
@@ -226,6 +234,7 @@ describe('capability issuing', () => {
     })
     vi.spyOn(Date, 'now').mockReturnValue(2000000)
     const parent = await mls.mintTrustedGrant({
+      now: Date.now,
       signer: f.controller,
       controllerID: f.controller.id,
       audience: trusted.id,
@@ -234,6 +243,7 @@ describe('capability issuing', () => {
     })
     for (let i = 0; i < 2; i++) {
       const token = await mls.mintLeafCapability({
+        now: Date.now,
         signer: trusted,
         controllerID: f.controller.id,
         audience: f.device.id,
@@ -255,7 +265,7 @@ test('injected clock stamps signed capability issuance', async () => {
     controllerID: f.controller.id,
     audience: f.device.id,
     leafKey: f.device.publicKey,
-    nowSeconds: 1_700_000_000,
+    now: () => 1_700_000_000 * 1000,
     exp: 1_700_000_100,
   })
   expect(payloadOf(token).iat).toBe(1_700_000_000)

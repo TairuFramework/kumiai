@@ -35,7 +35,12 @@ async function threeMemberGroup(groupID: string) {
       return token
     })
 
-  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
+  const { group: created } = await createGroup({
+    now: Date.now,
+    identity: alice,
+    groupID,
+    resolveLedgerEntries,
+  })
 
   const join = async (
     admin: GroupHandle,
@@ -48,8 +53,13 @@ async function threeMemberGroup(groupID: string) {
       permission: 'member',
     })
     publish(invite)
-    const bundle = await createKeyPackageBundle({ identity })
-    const added = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity })
+    const added = await commitInvite({
+      now: Date.now,
+      group: admin,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const { group: joined } = await processWelcome({
       identity,
       invite,

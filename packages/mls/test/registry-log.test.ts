@@ -753,7 +753,7 @@ test('attestTreeTime does not author a clock beyond the member lease', async () 
   })
   const state = joined.state
   const ledger = joined.ledgerTokens
-  await expect(attestTreeTime({ group: joined, time: 1001 })).resolves.toBeNull()
+  await expect(attestTreeTime({ group: joined, now: () => 1001000 })).resolves.toBeNull()
   expect(joined.state).toBe(state)
   expect(joined.ledgerTokens).toEqual(ledger)
 })

@@ -47,6 +47,7 @@ export async function bindingFor(
     }))
   const holderGrant = issuer == null ? undefined : await trustedGrant(identity, prefix)
   const capability = await mintLeafCapability({
+    now: Date.now,
     signer,
     controllerID,
     audience: identity.id,
@@ -67,6 +68,7 @@ export async function trustedGrant(
   prefix: Array<SignedEvent> = [inception],
 ) {
   return mintTrustedGrant({
+    now: Date.now,
     signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
@@ -86,6 +88,7 @@ export async function lifecycleGroup(
   const identity = agent(41)
   const tokens = new Map<string, string>()
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'lifecycle-ledger',
     controller: await bindingFor(identity, prefix),
@@ -108,7 +111,7 @@ export async function addMember(
   identity: OwnIdentity,
   binding: ControllerBinding,
 ) {
-  const bundle = await createKeyPackageBundle({ identity, controller: binding })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity, controller: binding })
   const result = await createCommit({
     context: group.context,
     state: group.state,

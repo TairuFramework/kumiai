@@ -51,6 +51,7 @@ async function setup() {
   const entrySlot = createLedgerEntrySlot()
   let group = (
     await createGroup({
+      now: Date.now,
       identity,
       groupID: 'proven-revoke',
       controllerLog: { chain: [fixture.inception], events: [] },
@@ -59,12 +60,14 @@ async function setup() {
     })
   ).group
   const subjectBundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: subjectIdentity,
     controller: await fixture.timedBinding({ identity: subjectIdentity, iat: 100, exp: 200 }),
   })
   const subjectInvite = await createInvite({ group, identity, recipientDID: subject })
   group = (
     await commitInvite({
+      now: Date.now,
       group,
       keyPackage: subjectBundle.publicPackage,
       invite: subjectInvite.invite,
@@ -72,11 +75,17 @@ async function setup() {
   ).newGroup
   const carol = fixture.agent(81)
   const bundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: carol,
     controller: await fixture.timedBinding({ identity: carol, iat: 100, exp: 200 }),
   })
   const { invite } = await createInvite({ group, identity, recipientDID: carol.id })
-  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   group = added.newGroup
   const carolSlot = createLedgerEntrySlot()
   const joined = await processWelcome({

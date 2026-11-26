@@ -15,7 +15,7 @@ import {
 describe('inspectGroupInfo', () => {
   test('round-trips epoch and treeHash matching the source handle', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'inspect-rt' })
+    const { group } = await createGroup({ now: Date.now, identity: alice, groupID: 'inspect-rt' })
 
     const { groupInfo } = await exportGroupInfo({ group })
     const result = inspectGroupInfo(groupInfo)
@@ -29,7 +29,11 @@ describe('inspectGroupInfo', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'inspect-advance' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'inspect-advance',
+    })
     const before = inspectGroupInfo((await exportGroupInfo({ group: aliceGroup })).groupInfo)
 
     // Add Bob → new epoch, new tree.
@@ -39,8 +43,9 @@ describe('inspectGroupInfo', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { newGroup: aliceAfterBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -60,15 +65,20 @@ describe('inspectGroupInfo', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'inspect-wf' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'inspect-wf',
+    })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -85,6 +95,7 @@ describe('inspectGroupInfo', () => {
     // mls_public_message) — a valid MLSMessage that is not a GroupInfo.
     const { groupInfo } = await exportGroupInfo({ group: aliceAfterBob })
     const { commitMessage } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobCred,

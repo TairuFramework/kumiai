@@ -46,7 +46,12 @@ async function twoMemberGroup(
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
 
-  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
+  const { group: created } = await createGroup({
+    now: Date.now,
+    identity: alice,
+    groupID,
+    resolveLedgerEntries,
+  })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -54,8 +59,13 @@ async function twoMemberGroup(
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: bob })
-  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+  const added = await commitInvite({
+    now: Date.now,
+    group: created,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -97,7 +107,7 @@ describe('CommitRejectedError carries the rejected commit', () => {
   test('the default policy path captures proposals and the sender leaf index', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('rejected-payload-default')
     const carol = randomIdentity()
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const bobCommit = await addCommitBytes(bobGroup, carolKP.publicPackage)
 
     // `rejects.toThrow` cannot reach the fields — the whole point here is the caught object.
@@ -129,7 +139,7 @@ describe('CommitRejectedError carries the rejected commit', () => {
     )
 
     const carol = randomIdentity()
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     // A REAL invite, not `addCommitBytes`'s bare raw commit (that's Task 1's shape, for a
     // commit `defaultCommitPolicy` also rejects — admin-valid but unrostered). Carol's role
     // grant rides this commit and folds into `candidateRoster`, so `defaultCommitPolicy`
@@ -144,6 +154,7 @@ describe('CommitRejectedError carries the rejected commit', () => {
     })
     publish(carolInvite)
     const addedCarol = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,

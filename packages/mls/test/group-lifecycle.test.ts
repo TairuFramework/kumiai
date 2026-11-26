@@ -127,6 +127,7 @@ describe('leaf renewal', () => {
     const snapshot = structuredClone(group.state)
     vi.spyOn(Date, 'now').mockReturnValue(250_000)
     const result = await renewLeaf({
+      now: Date.now,
       group,
       binding: await timedBinding({ identity, iat: 250, exp: 350 }),
     })
@@ -143,15 +144,27 @@ describe('leaf renewal', () => {
   test('rejects a decreasing child issuance time and author-time invalid grants', async () => {
     const { group, identity } = await pipelineGroup()
     await expect(
-      renewLeaf({ group, binding: await timedBinding({ identity, iat: 99, exp: 200 }) }),
+      renewLeaf({
+        now: Date.now,
+        group,
+        binding: await timedBinding({ identity, iat: 99, exp: 200 }),
+      }),
     ).rejects.toMatchObject({
       reason: 'renewal-order',
     })
     await expect(
-      renewLeaf({ group, binding: await timedBinding({ identity, iat: 151, exp: 201 }) }),
+      renewLeaf({
+        now: Date.now,
+        group,
+        binding: await timedBinding({ identity, iat: 151, exp: 201 }),
+      }),
     ).rejects.toThrow('authoring time')
     await expect(
-      renewLeaf({ group, binding: await timedBinding({ identity, iat: 100, exp: 150 }) }),
+      renewLeaf({
+        now: Date.now,
+        group,
+        binding: await timedBinding({ identity, iat: 100, exp: 150 }),
+      }),
     ).rejects.toThrow('authoring time')
   })
 
@@ -165,6 +178,7 @@ describe('leaf renewal', () => {
     )
     const delayed = await rawApplication(fixture.joined)
     const result = await renewLeaf({
+      now: Date.now,
       group: fixture.author,
       binding: await timedBinding({ identity, iat: 150, exp: 250 }),
     })
@@ -187,6 +201,7 @@ describe('lapse removal', () => {
       await timedBinding({ identity: peer, iat: 90, exp: 110 }),
     )
     const advanced = await renewLeaf({
+      now: Date.now,
       group: fixture.author,
       binding: await timedBinding({ identity, iat: 150, exp: 250 }),
     })
@@ -284,6 +299,7 @@ describe('proof builders', () => {
     const { group, identity } = await pipelineGroup()
     const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
     const renewal = await renewLeaf({
+      now: Date.now,
       group,
       binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: log }),
     })
@@ -311,6 +327,7 @@ test('renewal and proof growth fail one byte above the exact history horizon, wh
   const room = 2_048
   const large = [inception, await rotation([inception], HISTORY_HORIZON - room - base)]
   const near = await renewLeaf({
+    now: Date.now,
     group,
     binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: large }),
   })
@@ -319,6 +336,7 @@ test('renewal and proof growth fail one byte above the exact history horizon, wh
   )
   const atBoundary = [...large, await rotation(large, room)]
   const accepted = await renewLeaf({
+    now: Date.now,
     group: near.newGroup,
     binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: atBoundary }),
   })
@@ -326,6 +344,7 @@ test('renewal and proof growth fail one byte above the exact history horizon, wh
   const overBoundary = [...large, await rotation(large, room + 1)]
   await expect(
     renewLeaf({
+      now: Date.now,
       group: near.newGroup,
       binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: overBoundary }),
     }),
@@ -386,6 +405,7 @@ test('renewal and proof growth fail one byte above the exact history horizon, wh
   })
   const resetLog = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
   const shrunk = await renewLeaf({
+    now: Date.now,
     group: near.newGroup,
     binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: resetLog }),
   })
@@ -419,6 +439,7 @@ test('renewal and proof growth fail one byte above the exact history horizon, wh
 async function parentGrant(identity: OwnIdentity, prefix: Array<SignedEvent>, iat: number) {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const grant = await mintTrustedGrant({
+    now: Date.now,
     signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
@@ -443,6 +464,7 @@ test('direct-to-chain renewal installs a clock and child renewal cannot lower ia
   )
   const parent = await parentGrant(trusted, [inception], 90)
   const renewal = await renewLeaf({
+    now: Date.now,
     group: fixture.author,
     binding: await timedBinding({ identity, iat: 110, exp: 210, issuer: trusted, parent }),
   })
@@ -453,6 +475,7 @@ test('direct-to-chain renewal installs a clock and child renewal cannot lower ia
   expect(fixture.joined.registry).toEqual(renewal.newGroup.registry)
   await expect(
     renewLeaf({
+      now: Date.now,
       group: renewal.newGroup,
       binding: await timedBinding({ identity, iat: 109, exp: 220, issuer: trusted, parent }),
     }),
@@ -471,6 +494,7 @@ test('a lapsed member can renew itself and resume sending', async () => {
   if (old == null) throw new Error('Missing own leaf')
   expect(await isLapsed(fixture.joined, old)).toBe(true)
   const renewal = await renewLeaf({
+    now: Date.now,
     group: fixture.joined,
     binding: await timedBinding({ identity: child, iat: 100, exp: 200 }),
   })
@@ -570,6 +594,7 @@ test('exact-size Add and external replacement growth reject on author and receiv
   const prefix = [inception, await rotation([inception], HISTORY_HORIZON - 1_024 - base)]
   const near = (
     await renewLeaf({
+      now: Date.now,
       group: fixture.author,
       binding: await timedBinding({ identity, iat: 150, exp: 250, prefix }),
     })
@@ -647,6 +672,7 @@ test('renewal can shorten history while the group is already above the horizon',
     HISTORY_HORIZON,
   )
   const shrunk = await renewLeaf({
+    now: Date.now,
     group: oversized,
     binding: await timedBinding({ identity, iat: 150, exp: 250 }),
   })
@@ -664,6 +690,7 @@ test('a deny after a recorded reset uses an attached suffix', async () => {
   const target = agent(61).id
 
   const renewed = await renewLeaf({
+    now: Date.now,
     group,
     binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
   })
@@ -710,6 +737,7 @@ test('invalid signatures, missing resets and old generations return proof reason
   })
   const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
   const renewed = await renewLeaf({
+    now: Date.now,
     group,
     binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: log }),
   })
@@ -787,6 +815,7 @@ test('peer:4 members sign self-verifying proof entries using their leaf long for
     keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(121) }],
   })
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'peer-proof',
     controller: await timedBinding({ identity, iat: 100, exp: 200 }),
@@ -814,6 +843,7 @@ test.each(['revoke', 'reset'] as const)(
     const currentRevoke = await revoke(current, target)
     const log = [inception, oldRevoke, reset, currentRevoke]
     const renewed = await renewLeaf({
+      now: Date.now,
       group,
       binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
     })
@@ -1056,6 +1086,7 @@ test('re-revoke after reset accepted at gen 2', async () => {
   if (first.status !== 'built') throw new Error('Missing first denial')
   const prefix = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 2 })]
   const renewed = await renewLeaf({
+    now: Date.now,
     group: first.result.newGroup,
     binding: await timedBinding({ identity, iat: 150, exp: 250, prefix }),
   })
@@ -1108,6 +1139,7 @@ async function clockGroup(members = 2, onlyFirst = false) {
   const tokens = new Map<string, string>()
   const log = onlyFirst ? { chain: f.log.chain, events: [a.event] } : f.log
   const { group } = await createGroup({
+    now: Date.now,
     identity: a.identity,
     groupID: 'membership-clocks',
     controller: { id: f.did, prefix: f.log.chain, member: { add: a.add, g: 0 }, iat: 100 },
@@ -1136,8 +1168,8 @@ test('membership-only group advances through attest clocks from two members', as
     member: { add: b.add, g: 0 },
     iat: 100,
   })
-  expect(await attestTreeTime({ group: peer.author, time: 0 })).toBeNull()
-  const first = await attestTreeTime({ group: peer.author, time: 100 })
+  expect(await attestTreeTime({ group: peer.author, now: () => 0 })).toBeNull()
+  const first = await attestTreeTime({ group: peer.author, now: () => 100000 })
   if (first == null) throw new Error('Missing attestation')
   expect(await treeTime(first.newGroup, f.did)).toBe(0)
   expect(first.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(0)
@@ -1148,21 +1180,21 @@ test('membership-only group advances through attest clocks from two members', as
   ).toBe(100)
   rememberClocks(first.newGroup, f.tokens)
   await peer.joined.processMessage({ message: first.commitMessage })
-  const second = await attestTreeTime({ group: peer.joined, time: 120 })
+  const second = await attestTreeTime({ group: peer.joined, now: () => 120000 })
   if (second == null) throw new Error('Missing second attestation')
   expect(await treeTime(second.newGroup, f.did)).toBe(100)
   rememberClocks(second.newGroup, f.tokens)
   await first.newGroup.processMessage({ message: second.commitMessage })
   expect(first.newGroup.registry).toEqual(second.newGroup.registry)
-  expect(await attestTreeTime({ group: first.newGroup, time: 100 })).toBeNull()
-  const fractional = await attestTreeTime({ group: first.newGroup, time: 100.25 })
+  expect(await attestTreeTime({ group: first.newGroup, now: () => 100000 })).toBeNull()
+  const fractional = await attestTreeTime({ group: first.newGroup, now: () => 100250 })
   expect(
     fractional?.newGroup.registry.controllers
       .get(f.did)
       ?.attestations.get(encodeKey({ publicKey: f.a.identity.publicKey, alg: 'EdDSA' })),
   ).toBe(100.25)
   vi.spyOn(Date, 'now').mockReturnValue(150_125)
-  const newer = await attestTreeTime({ group: first.newGroup })
+  const newer = await attestTreeTime({ group: first.newGroup, now: Date.now })
   expect(
     newer?.newGroup.registry.controllers
       .get(f.did)
@@ -1188,7 +1220,7 @@ test('preservation clock cannot exceed attestedTreeTime', async () => {
 test('attest clock from a non-member device is refused', async () => {
   const f = await buildEpoch({ members: 2 })
   const { group, identity } = await pipelineGroup({ controllerLog: f.log })
-  expect(await attestTreeTime({ group, time: 100 })).toBeNull()
+  expect(await attestTreeTime({ group, now: () => 100000 })).toBeNull()
   await expect(
     verifyLifecycleProof(group, {
       issuer: identity.id,
@@ -1206,7 +1238,7 @@ test("attest clock past the member's lease is refused", async () => {
   const f = await clockGroup(1)
   const state = f.group.state
   const ledger = f.group.ledgerTokens
-  await expect(attestTreeTime({ group: f.group, time: 1001 })).resolves.toBeNull()
+  await expect(attestTreeTime({ group: f.group, now: () => 1001000 })).resolves.toBeNull()
   expect(f.group.state).toBe(state)
   expect(f.group.ledgerTokens).toEqual(ledger)
   await expect(
@@ -1224,7 +1256,7 @@ test("attest clock past the member's lease is refused", async () => {
 
 test('adding a second effective key keeps tree time', async () => {
   const f = await clockGroup(2, true)
-  const attested = await attestTreeTime({ group: f.group, time: 100 })
+  const attested = await attestTreeTime({ group: f.group, now: () => 100000 })
   if (attested == null) throw new Error('Missing attestation')
   const published = await publishControllerLog({ group: attested.newGroup, log: f.log })
   if (published == null) throw new Error('Missing log commit')
@@ -1241,7 +1273,7 @@ test("commitInvite bundling a second member's add keeps tree time", async () => 
   const f = await clockGroup(2, true)
   const b = f.members[1]
   if (b == null) throw new Error('Missing member')
-  const attested = await attestTreeTime({ group: f.group, time: 100 })
+  const attested = await attestTreeTime({ group: f.group, now: () => 100000 })
   if (attested == null) throw new Error('Missing attestation')
   const group = attested.newGroup
   const { invite } = await createInvite({
@@ -1257,7 +1289,12 @@ test("commitInvite bundling a second member's add keeps tree time", async () => 
     member: { add: b.add, g: 0 },
     iat: 100,
   })
-  const result = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const result = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   expect(invite.ledgerEntries).toHaveLength(original.length + 1)
   expect(result.newGroup.ledger.at(-1)?.verified.entry.value).toEqual({ op: 'clock', time: 100 })
   expect(await treeTime(result.newGroup, f.did)).toBe(100)
@@ -1282,11 +1319,11 @@ test('removing an attestor keeps tree time', async () => {
     member: { add: b.add, g: 0 },
     iat: 100,
   })
-  const first = await attestTreeTime({ group: peer.author, time: 100 })
+  const first = await attestTreeTime({ group: peer.author, now: () => 100000 })
   if (first == null) throw new Error('Missing attestation')
   rememberClocks(first.newGroup, f.tokens)
   await peer.joined.processMessage({ message: first.commitMessage })
-  const second = await attestTreeTime({ group: peer.joined, time: 120 })
+  const second = await attestTreeTime({ group: peer.joined, now: () => 120000 })
   if (second == null) throw new Error('Missing attestation')
   rememberClocks(second.newGroup, f.tokens)
   await first.newGroup.processMessage({ message: second.commitMessage })

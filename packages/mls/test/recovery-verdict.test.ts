@@ -105,7 +105,7 @@ test('member-rooted signer judged on the candidate registry', async () => {
   })
   own.leaf.signaturePublicKey = member.identity.publicKey
   const known = await registryForLog({ controller: f.did, log: f.log })
-  const params = { group, registry: known, signer: normalizeDID(member.did), now: 500 }
+  const params = { group, registry: known, signer: normalizeDID(member.did), now: () => 500000 }
   expect(await recoverySignerEligible(params)).toBe(true)
   const removed = await createRemove({
     did: f.did,
@@ -123,7 +123,7 @@ test('member-rooted signer judged on the candidate registry', async () => {
   })
   expect(await recoverySignerEligible({ ...params, registry: removedRegistry })).toBe(false)
 
-  expect(await recoverySignerEligible({ ...params, now: 1301 })).toBe(false)
+  expect(await recoverySignerEligible({ ...params, now: () => 1301000 })).toBe(false)
   expect(
     await recoverySignerEligible({ ...params, registry: { ...known, controllers: new Map() } }),
   ).toBe(false)
@@ -131,7 +131,7 @@ test('member-rooted signer judged on the candidate registry', async () => {
 
 test('verdicts authenticate the signer and bind the signed request without consuming its key', async () => {
   const identity = randomIdentity()
-  const { group } = await createGroup({ identity, groupID: 'verdict-crypto' })
+  const { group } = await createGroup({ now: Date.now, identity, groupID: 'verdict-crypto' })
   const held = await createRecoveryRequest({ group, identity, requestID: 'request' })
   const verdict = {
     groupID: group.groupID,
@@ -179,7 +179,7 @@ test('verdicts authenticate the signer and bind the signed request without consu
 
 test('exporter context frames every binding and tags authenticate the request', async () => {
   const identity = randomIdentity()
-  const { group } = await createGroup({ identity, groupID: 'verdict-exporter' })
+  const { group } = await createGroup({ now: Date.now, identity, groupID: 'verdict-exporter' })
   const key = await confirmationKey({ group, position: 'a', commitDigest: 'bc' })
   const fields = [group.groupID, 'a', 'bc'].map((value) => {
     const bytes = Buffer.from(value, 'utf8')
@@ -270,7 +270,7 @@ test('opening checks signature, token kind and signed bindings even inside a val
   const { stringifyToken } = await import('@kokuin/token')
   const { sealToRequest } = await import('../src/recovery.js')
   const identity = randomIdentity()
-  const { group } = await createGroup({ identity, groupID: 'verdict-open-bindings' })
+  const { group } = await createGroup({ now: Date.now, identity, groupID: 'verdict-open-bindings' })
   const held = await createRecoveryRequest({ group, identity, requestID: 'request' })
   const kind = {
     hpkeInfo: new TextEncoder().encode('kumiai/mls/recovery-verdict/v1'),
@@ -340,6 +340,7 @@ test('recovery eligibility uses attestedTreeTime over the known registry', async
   const b = f.members[1]
   if (a == null || b == null) throw new Error('Missing member')
   const { group } = await createGroup({
+    now: Date.now,
     identity: b.identity,
     groupID: 'known-clock',
     controller: { id: f.did, prefix: f.log.chain, member: { add: b.add, g: 0 }, iat: 100 },
@@ -355,7 +356,7 @@ test('recovery eligibility uses attestedTreeTime over the known registry', async
     group,
     registry: { ...known, controllers: new Map([[f.did, { ...projection, attestations }]]) },
     signer: b.identity.id,
-    now: 500,
+    now: () => 500000,
   }
   expect(await recoverySignerEligible(params)).toBe(true)
   attestations.set(encodeKey({ publicKey: b.identity.publicKey, alg: 'EdDSA' }), 1100)

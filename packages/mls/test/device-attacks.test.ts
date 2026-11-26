@@ -69,6 +69,7 @@ describe('attack: thief holds only an authenticate capability', () => {
     const attackerIdentity = createSigningIdentity({ privateKey: attackerSeed })
 
     const { newGroup: withAttacker } = await addDevice({
+      now: Date.now,
       group: managerGroup,
       identity: managerIdentity,
       keyPackage: attackerBundle.publicPackage,

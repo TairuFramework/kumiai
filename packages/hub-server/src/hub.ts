@@ -11,8 +11,8 @@ import type { VerifyTokenHook } from '@kokuin/capability'
 import type { CryptoOptions, Identity } from '@kokuin/token'
 import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
 import { hubProtocol } from '@kumiai/hub-protocol'
+import type { Now } from '@sozai/runtime'
 
-import type { Now } from './clock.js'
 import type {
   AuthorizeHook,
   CreateHandlersParams,

@@ -48,6 +48,7 @@ async function fixture() {
   const onLedgerEntries = vi.fn()
   const commitPolicy = vi.fn(() => 'accept' as const)
   const { group: created } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID: 'clone',
     resolveLedgerEntries,
@@ -61,8 +62,13 @@ async function fixture() {
     permission: 'member',
   })
   for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-  const bundle = await createKeyPackageBundle({ identity: bob })
-  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+  const added = await commitInvite({
+    now: Date.now,
+    group: created,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: receiver } = await processWelcome({
     identity: bob,
     invite,
@@ -244,7 +250,7 @@ describe('GroupHandle.clone', () => {
     expect(holder?.provider()).toBe(originalDeny)
     expect(deviceDenyHolderFor(clone.context)?.provider()).toBe(clonedDeny)
     if (clone.context.clientConfig == null) throw new Error('Missing config')
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const equality = clone.context.clientConfig.keyPackageEqualityConfig
     expect(equality.compareKeyPackages(bundle.publicPackage, bundle.publicPackage)).toBe(true)
     expect(
@@ -359,6 +365,7 @@ describe('GroupHandle.clone', () => {
     const { receiver, alice } = await fixture()
     // Evict the content cache so only the per-entry provenance can preserve this snapshot.
     const { group: filler } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'clone-cache-eviction',
     })

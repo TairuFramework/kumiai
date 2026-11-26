@@ -8,7 +8,7 @@ describe('ordinary key package lifetime', () => {
   })
 
   test('createKeyPackageBundle stamps the pinned lifetime, in SECONDS', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const lifetime = bundle.publicPackage.leafNode.lifetime
 
     // Pinned in seconds and at the real magnitude. A milliseconds regression here would make every
@@ -28,7 +28,7 @@ describe('ordinary key package lifetime', () => {
 test('injected clock stamps the key package lifetime', async () => {
   const bundle = await createKeyPackageBundle({
     identity: randomIdentity(),
-    nowSeconds: 1_700_000_000,
+    now: () => 1_700_000_000 * 1000,
   })
   expect(bundle.publicPackage.leafNode.lifetime.notBefore).toBe(BigInt(1_700_000_000 - 86_400))
   expect(bundle.publicPackage.leafNode.lifetime.notAfter).toBe(BigInt(1_700_000_000 + 30 * 86_400))

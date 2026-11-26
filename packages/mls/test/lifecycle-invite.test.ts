@@ -77,7 +77,12 @@ test('membership and Welcome require a recipient and no role token', async () =>
   expect(group.ledgerTokens).toEqual([seed.token])
   expect(invite.recipientDID).toBe(bob.id)
   expect(invite.ledgerEntries).toEqual([seed.token])
-  const result = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const result = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: joined } = await processWelcome({
     identity: bob,
     invite,
@@ -98,13 +103,18 @@ test('the recipient binds both commit and Welcome, independent of ledger entries
   const other = agent(62)
   const wrong = { ...invite, recipientDID: other.id }
   await expect(
-    commitInvite({ group, keyPackage: bundle.publicPackage, invite: wrong }),
+    commitInvite({ now: Date.now, group, keyPackage: bundle.publicPackage, invite: wrong }),
   ).rejects.toMatchObject({
     name: 'InviteRecipientMismatchError',
     expectedDID: other.id,
     actualDID: bob.id,
   })
-  const result = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const result = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   await expect(
     processWelcome({
       identity: bob,
@@ -146,8 +156,18 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
     recipientDID: bob.id,
     entries: [token],
   })
-  const first = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
-  const second = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const first = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
+  const second = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const consumer = await processWelcome({
     identity: bob,
     invite,
@@ -188,6 +208,7 @@ test('an inviter and consumer issuer need a pre-commit leaf', async () => {
   })
   await expect(
     commitInvite({
+      now: Date.now,
       group,
       keyPackage: bundle.publicPackage,
       invite: {
@@ -205,7 +226,7 @@ test('Add refuses floating and malformed bindings and expired author capability'
   const { group, bob, invite } = await admission()
   const floating = await rawAdd(group, bob)
   await expect(
-    commitInvite({ group, keyPackage: floating.bundle.publicPackage, invite }),
+    commitInvite({ now: Date.now, group, keyPackage: floating.bundle.publicPackage, invite }),
   ).rejects.toMatchObject({
     reason: 'floating-refused',
   })
@@ -214,7 +235,7 @@ test('Add refuses floating and malformed bindings and expired author capability'
     id: 'did:key:wrong',
   })
   await expect(
-    commitInvite({ group, keyPackage: malformed.bundle.publicPackage, invite }),
+    commitInvite({ now: Date.now, group, keyPackage: malformed.bundle.publicPackage, invite }),
   ).rejects.toThrow()
   const expired = await rawAdd(
     group,
@@ -222,7 +243,7 @@ test('Add refuses floating and malformed bindings and expired author capability'
     await timedBinding({ identity: bob, iat: 100, exp: 150 }),
   )
   await expect(
-    commitInvite({ group, keyPackage: expired.bundle.publicPackage, invite }),
+    commitInvite({ now: Date.now, group, keyPackage: expired.bundle.publicPackage, invite }),
   ).rejects.toThrow(/authoring time/)
 })
 
@@ -293,6 +314,7 @@ test.each([
       )
       const { groupInfo } = await exportGroupInfo({ group: author })
       const external = joinGroupExternal({
+        now: Date.now,
         identity: bob,
         groupInfo,
         credential: joined.credential,
@@ -346,6 +368,7 @@ test.each([
     )
     const { groupInfo } = await exportGroupInfo({ group: author })
     const external = joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: joined.credential,
@@ -397,6 +420,7 @@ test.each(['floating', 'foreign', 'malformed'] as const)(
     const { groupInfo } = await exportGroupInfo({ group: invalid })
     await expect(
       joinGroupExternal({
+        now: Date.now,
         identity,
         groupInfo,
         credential: group.credential,
@@ -443,6 +467,7 @@ test.each([
   const previous = setup.deviceGroup.state
   await expect(
     addDevice({
+      now: Date.now,
       group: setup.deviceGroup,
       identity: setup.deviceIdentity,
       keyPackage: bundle.publicPackage,
@@ -492,6 +517,7 @@ test('external replacement may shrink history while remaining above the horizon'
   const sizeBefore = historySize({ tree: group.state.ratchetTree, entries: [] })
   const { groupInfo } = await exportGroupInfo({ group })
   const result = await joinGroupExternal({
+    now: Date.now,
     identity: target,
     groupInfo,
     credential: { id: target.id, groupID: group.groupID },
@@ -900,11 +926,12 @@ test('membership key package needs controllerLog', async () => {
   const f = await stagedWelcome(true)
   for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
     await expect(
-      build({ identity: f.member.identity, controller: f.binding }),
+      build({ now: Date.now, identity: f.member.identity, controller: f.binding }),
     ).rejects.toMatchObject({
       reason: 'member-unavailable',
     })
     const bundle = await build({
+      now: Date.now,
       identity: f.member.identity,
       controller: f.binding,
       controllerLog: f.log,
@@ -917,11 +944,12 @@ test('mbr key package verifies against controllerLog', async () => {
   const f = await stagedWelcome()
   for (const build of [createKeyPackageBundle, createLastResortKeyPackageBundle]) {
     await expect(
-      build({ identity: f.params.identity, controller: f.binding }),
+      build({ now: Date.now, identity: f.params.identity, controller: f.binding }),
     ).rejects.toMatchObject({
       reason: 'member-unavailable',
     })
     const bundle = await build({
+      now: Date.now,
       identity: f.params.identity,
       controller: f.binding,
       controllerLog: f.log,
@@ -929,6 +957,7 @@ test('mbr key package verifies against controllerLog', async () => {
     expect(bundle.ownerDID).toBe(f.params.identity.id)
     await expect(
       build({
+        now: Date.now,
         identity: f.params.identity,
         controller: f.binding,
         controllerLog: { chain: f.log.chain, events: [] },

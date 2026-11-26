@@ -964,6 +964,7 @@ describe('consensus history and composition', () => {
     const bundle = await rawAdd(deviceGroup, target)
     await expect(
       addDevice({
+        now: Date.now,
         group: deviceGroup,
         identity: deviceIdentity,
         device: target.id,
@@ -1297,6 +1298,7 @@ test('delayed application frame gets the same verdict before and after a later r
   })
   vi.spyOn(Date, 'now').mockReturnValue(1_500_000)
   const advanced = await renewLeaf({
+    now: Date.now,
     group: peer.author,
     binding: await timedBinding({ identity, iat: 1500, exp: 2500 }),
   })

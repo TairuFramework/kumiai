@@ -11,6 +11,7 @@ import {
   type DIDString,
   normalizeDID,
 } from '@kokuin/token'
+import type { Now } from '@sozai/runtime'
 import {
   type ClientState,
   type DefaultProposal,
@@ -277,14 +278,15 @@ export async function preservationClock({
 
 export type AttestTreeTimeParams = YieldOptions & {
   group: GroupHandle
-  time?: number
+  now: Now
 }
 
 export async function attestTreeTime({
   group,
-  time = Date.now() / 1000,
+  now,
   ...options
 }: AttestTreeTimeParams): Promise<DeviceWriteResult | null> {
+  const time = now() / 1000
   return mutexFor(group).run(async () => {
     const controller = group.anchor.controller
     if (controller == null) return null
@@ -346,18 +348,24 @@ async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult
 }
 
 export type RenewLeafParams = YieldOptions & {
+  /** Clock for the author-time check of the new binding, read once. */
+  now: Now
   group: GroupHandle
   binding: ControllerBinding
   controllerLog?: ControllerLog
 }
 
 export async function renewLeaf({
+  now,
   group,
   binding,
   ...options
 }: RenewLeafParams): Promise<DeviceWriteResult> {
   return mutexFor(group).run(async () => {
-    assertBindingAuthorTime(binding)
+    assertBindingAuthorTime({
+      controller: binding,
+      nowSeconds: Math.floor(now() / 1000),
+    })
     const index = group.state.privatePath.leafIndex * 2
     const tree = group.state.ratchetTree.slice()
     const original = tree[index]

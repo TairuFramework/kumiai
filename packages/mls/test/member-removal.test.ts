@@ -788,7 +788,7 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
       group: result.newGroup,
       registry: result.newGroup.registry,
       signer: f.device.id,
-      now: 150,
+      now: () => 150000,
     }),
   ).toBe(true)
   const leaf = leafAt(
@@ -814,7 +814,7 @@ test("membership survivor lapses at its survivor grant's expiry", async () => {
       group,
       registry: group.registry,
       signer: f.device.id,
-      now: 252,
+      now: () => 252000,
     }),
   ).toBe(false)
   await expect(group.processMessage({ message: early })).resolves.toBeDefined()
@@ -965,6 +965,7 @@ test('a new denial after reset is not mistaken for an earlier-generation record'
     events: [],
   }
   const renewed = await api.renewLeaf({
+    now: Date.now,
     group: first.newGroup,
     binding: await timedBinding({ identity: f.identity, iat: 150, exp: 900, prefix: log.chain }),
   })

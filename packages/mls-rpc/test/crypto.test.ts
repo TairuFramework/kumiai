@@ -36,7 +36,12 @@ async function twoMemberGroup(groupID: string) {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
 
-  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
+  const { group: created } = await createGroup({
+    now: Date.now,
+    identity: alice,
+    groupID,
+    resolveLedgerEntries,
+  })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -44,8 +49,13 @@ async function twoMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: bob })
-  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+  const added = await commitInvite({
+    now: Date.now,
+    group: created,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -76,8 +86,9 @@ async function addMember(params: {
     permission: 'member',
   })
   params.publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: params.invitee })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: params.invitee })
   const added = await commitInvite({
+    now: Date.now,
     group: params.group,
     keyPackage: bundle.publicPackage,
     invite,
