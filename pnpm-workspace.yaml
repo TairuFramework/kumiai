@@ -16,7 +16,7 @@ catalog:
   '@noble/curves': ^2.4.0
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
-  'vitest': ^5.1.1
+  'vitest': ^5.1.2
   '@enkaku/client': ^0.23.7
   '@enkaku/http-fetch': ^0.23.3
   '@enkaku/http-serve': ^0.23.3
@@ -31,7 +31,7 @@ catalog:
   '@sozai/async': ^0.4.4
   '@sozai/codec': ^0.4.4
   '@sozai/event': ^0.1.6
-  '@sozai/http-server': ^0.2.2
+  '@sozai/http-server': ^0.2.3
   '@sozai/log': ^0.4.0
   '@sozai/result': ^0.2.2
   '@sozai/runtime': ^0.1.1

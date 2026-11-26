@@ -260,6 +260,10 @@
   dir: packages/hub-server
   intents:
     - runtime-clock
+"@kumiai/hub-server@0.13.4":
+  dir: packages/hub-server
+  intents:
+    - mls-required-now-clock
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -312,6 +316,10 @@
   dir: packages/hub-store
   intents:
     - runtime-clock
+"@kumiai/hub-store@0.13.4":
+  dir: packages/hub-store
+  intents:
+    - mls-required-now-clock
 "@kumiai/hub-tunnel@0.10.0":
   dir: packages/hub-tunnel
   intents:
@@ -353,6 +361,10 @@
   dir: packages/hub-tunnel
   intents:
     - runtime-clock
+"@kumiai/hub-tunnel@0.13.2":
+  dir: packages/hub-tunnel
+  intents:
+    - mls-required-now-clock
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -423,6 +435,10 @@
   dir: packages/mls-hub
   intents:
     - runtime-clock
+"@kumiai/mls-hub@0.13.2":
+  dir: packages/mls-hub
+  intents:
+    - mls-required-now-clock
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
@@ -481,6 +497,10 @@
   dir: packages/mls-rpc
   intents:
     - runtime-clock
+"@kumiai/mls-rpc@0.13.3":
+  dir: packages/mls-rpc
+  intents:
+    - mls-required-now-clock
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -567,6 +587,10 @@
   intents:
     - mls-injected-entropy
     - runtime-clock
+"@kumiai/mls@0.13.4":
+  dir: packages/mls
+  intents:
+    - mls-required-now-clock
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:

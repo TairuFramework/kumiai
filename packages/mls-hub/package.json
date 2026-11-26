@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/mls-hub",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "description": "Key-package provisioning between @kumiai/mls and a kumiai hub",
   "keywords": [
     "mls",
