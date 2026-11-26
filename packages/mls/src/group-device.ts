@@ -12,7 +12,6 @@ import {
 
 import { parseMLSCredentialIdentity } from './credential.js'
 import { commitWithEntries } from './group-commit.js'
-import { assertBindingAuthorTime } from './group-credential.js'
 import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
 import { signLedgerEntry } from './ledger.js'
 import { DEVICE_ENTRY_TYPE } from './registry.js'
@@ -172,10 +171,6 @@ export async function addDevice({
         value: { op: 'add', controller: params.controller, capability: params.capability },
       },
     })
-    assertBindingAuthorTime({
-      controller: parseMLSCredentialIdentity(credential.identity).controller,
-      nowSeconds: Math.floor(now() / 1000),
-    })
     const addProposal: DefaultProposal = {
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: params.keyPackage },
@@ -183,6 +178,7 @@ export async function addDevice({
     const result = await commitWithEntries({
       yield: params.yield,
       group,
+      now,
       extraProposals: [addProposal],
       enacted: [token],
       ratchetTreeExtension: true,
