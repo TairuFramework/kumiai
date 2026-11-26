@@ -14,14 +14,15 @@ describe('recovery ordering', { concurrent: false }, () => {
   test('outcome caches evict oldest records at the cap and release secrets on expiry', async () => {
     vi.useFakeTimers()
     const release = vi.fn((value: Uint8Array) => value.fill(0))
-    const cache = createRecoveryCache(release)
+    let time = 0
+    const cache = createRecoveryCache(release, () => time)
     const first = new Uint8Array([1])
-    cache.set('0', first, Date.now() + 100)
-    for (let index = 1; index <= 1024; index++)
-      cache.set(String(index), new Uint8Array([1]), Date.now() + 100)
+    cache.set('0', first, 100)
+    for (let index = 1; index <= 1024; index++) cache.set(String(index), new Uint8Array([1]), 100)
     expect(cache.get('0')).toBeUndefined()
     expect(first).toEqual(new Uint8Array([0]))
     expect(cache.get('1024')).toBeDefined()
+    time = 100
     await vi.advanceTimersByTimeAsync(100)
     expect(cache.get('1024')).toBeUndefined()
     expect(release).toHaveBeenCalledTimes(1025)
@@ -59,7 +60,8 @@ describe('recovery ordering', { concurrent: false }, () => {
         position,
         commitDigest,
         key,
-        deadline: Date.now() + 1000,
+        monotonicNow: () => 0,
+        deadline: 1000,
         timeoutMs: 100,
         send,
         waiters,
@@ -86,4 +88,22 @@ describe('recovery ordering', { concurrent: false }, () => {
       expect(key).toEqual(new Uint8Array(32))
     },
   )
+})
+
+test('injected clock expires cached secrets without advancing global time', () => {
+  let monotonicTime = 100
+  const secret = new Uint8Array([7])
+  const cache = createRecoveryCache<Uint8Array>(
+    (key) => key.fill(0),
+    () => monotonicTime,
+  )
+  try {
+    cache.set('clock', secret, 200)
+    expect(cache.get('clock')?.value).toBe(secret)
+    monotonicTime = 201
+    expect(cache.get('clock')).toBeUndefined()
+    expect(secret).toEqual(new Uint8Array([0]))
+  } finally {
+    cache.clear()
+  }
 })

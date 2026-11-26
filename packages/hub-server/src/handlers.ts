@@ -22,6 +22,7 @@ import {
 import { fromB64, toB64 } from '@sozai/codec'
 import { getLogger, getReporter } from '@sozai/log'
 
+import type { Now } from './clock.js'
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
 import type { WakeDispatcher } from './wake.js'
@@ -266,6 +267,7 @@ export const DEFAULT_RECEIVE_WINDOW_BYTES = 512 * 1024
 export const DEFAULT_RECEIVE_ACK_TIMEOUT = 15_000
 
 export type CreateHandlersParams = {
+  monotonicNow?: Now
   registry: HubClientRegistry
   store: HubStore
   authorize?: AuthorizeHook
@@ -365,13 +367,14 @@ function toReceiveFrame(message: StoredMessage): ReceiveFrame {
 
 export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<HubProtocol> {
   const { store, registry } = params
+  const monotonicNow = params.monotonicNow ?? (() => performance.now())
   const authorize: AuthorizeHook = params.authorize ?? (() => true)
   const rateLimits: HubRateLimits = {
     perDID: { ...DEFAULT_RATE_LIMITS.perDID, ...params.rateLimits?.perDID },
     perTopic: { ...DEFAULT_RATE_LIMITS.perTopic, ...params.rateLimits?.perTopic },
   }
-  const didLimiter = createRateLimiter(rateLimits.perDID)
-  const topicLimiter = createRateLimiter(rateLimits.perTopic)
+  const didLimiter = createRateLimiter(rateLimits.perDID, monotonicNow)
+  const topicLimiter = createRateLimiter(rateLimits.perTopic, monotonicNow)
   const receiveBufferLimit = params.receiveBufferLimit ?? DEFAULT_RECEIVE_BUFFER_LIMIT
   const receiveAuthCacheTTL = resolveReceiveAuthCacheTTL(params.receiveAuthCacheTTL)
   const receiveWindow = Math.max(1, params.receiveWindow ?? DEFAULT_RECEIVE_WINDOW)
@@ -388,7 +391,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   const fetchWindows = new Map<string, { count: number; resetAt: number }>()
 
   function assertKeyPackageFetchAllowed(requesterDID: string): void {
-    const now = Date.now()
+    const now = monotonicNow()
     if (fetchWindows.size > 1024) {
       for (const [did, window] of fetchWindows) {
         if (window.resetAt <= now) {
@@ -413,7 +416,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   /** Charge `amount` packages against the target DID's consumption window. Throws when the
    * window's budget is spent — this bounds how fast anyone, collectively, can drain a target. */
   function assertTargetConsumptionAllowed(targetDID: string, amount: number): void {
-    const now = Date.now()
+    const now = monotonicNow()
     if (targetWindows.size > 1024) {
       for (const [did, window] of targetWindows) {
         if (window.resetAt <= now) targetWindows.delete(did)
@@ -673,7 +676,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       const authCache = new Map<string, { allow: boolean; expiresAt: number }>()
       const gate = async (topicID: string): Promise<boolean> => {
         const key = `${clientDID} ${topicID}`
-        const now = Date.now()
+        const now = monotonicNow()
         const cached = authCache.get(key)
         if (cached != null && cached.expiresAt > now) return cached.allow
         const decision = normalizeAuthorizeDecision(
@@ -683,7 +686,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           // Expiry is measured from when the decision is stored, AFTER the hook resolves — so the
           // reuse window excludes the hook's own execution time. Re-read the clock here rather than
           // reusing `now` (captured before the await).
-          authCache.set(key, { allow: decision.allow, expiresAt: Date.now() + receiveAuthCacheTTL })
+          authCache.set(key, {
+            allow: decision.allow,
+            expiresAt: monotonicNow() + receiveAuthCacheTTL,
+          })
         }
         return decision.allow
       }

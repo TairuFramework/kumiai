@@ -116,6 +116,7 @@ export function assertControllerGrant(payload: CapabilityPayload, controllerID: 
 }
 
 export type MintLeafCapabilityParams = {
+  nowSeconds?: number
   signer: SigningIdentity
   controllerID: string
   audience: string
@@ -131,7 +132,7 @@ function issuingPayload(params: MintTrustedGrantParams, maximum: number) {
   if (!params.controllerID.startsWith('did:kokuin:')) {
     throw new LeafBindingError('controller-mismatch')
   }
-  const iat = now()
+  const { nowSeconds: iat = now() } = params
   assertCapabilityLifetime({ iat, exp: params.exp }, maximum)
   const cnf = audienceConfirmation({ alg: 'EdDSA', publicKey: params.leafKey })
   capabilityKey({

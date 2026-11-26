@@ -247,3 +247,16 @@ describe('capability issuing', () => {
     }
   })
 })
+
+test('injected clock stamps signed capability issuance', async () => {
+  const f = await leafCapabilityFixture()
+  const token = await mls.mintLeafCapability({
+    signer: f.controller,
+    controllerID: f.controller.id,
+    audience: f.device.id,
+    leafKey: f.device.publicKey,
+    nowSeconds: 1_700_000_000,
+    exp: 1_700_000_100,
+  })
+  expect(payloadOf(token).iat).toBe(1_700_000_000)
+})

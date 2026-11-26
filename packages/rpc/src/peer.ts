@@ -274,7 +274,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const onAppWindowPruned = params.onAppWindowPruned
   // Destructured rather than held as `runtime`: that name is taken in this scope by
   // {@link ProtocolRuntime}, which is a different thing entirely.
-  const { getRandomID } = params.runtime ?? createRuntime()
+  const platformRuntime = createRuntime(params.runtime)
+  const { getRandomID, monotonicNow } = platformRuntime
   const newPublishID = getRandomID
   const recoveryTimeoutMs = params.recovery?.timeoutMs ?? DEFAULT_RECOVERY_TIMEOUT_MS
   const recoveryDeadlineMs = params.recovery?.deadlineMs ?? DEFAULT_RECOVERY_DEADLINE_MS
@@ -285,6 +286,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const appLogRetentionSeconds = params.appLogRetentionSeconds ?? DEFAULT_APP_LOG_RETENTION_SECONDS
   const commitDeadlineMs = params.commitDeadlineMs ?? DEFAULT_COMMIT_DEADLINE_MS
   const mux: HubMux = createHubMux({
+    monotonicNow,
     hub,
     localDID,
     ...(params.onSubscribeFailed != null ? { onSubscribeFailed: params.onSubscribeFailed } : {}),
@@ -493,7 +495,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposed) return
           await runSerial(async () => {
             await replayJournal()
-            if (!(await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+            if (!(await ensureLedger(monotonicNow() + recoveryTimeoutMs))) {
               throw new Error('app pull is waiting for the ledger')
             }
             await reconcileCommits()
@@ -539,7 +541,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           return runSerial(async () => {
             if (disposed) return
             const replayed = await replayJournal()
-            if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+            if (mls != null && (await ensureLedger(monotonicNow() + recoveryTimeoutMs))) {
               ledgerReady = true
               await finalizeBootstrap(mls)
             }
@@ -577,7 +579,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     protocols,
     handlers,
     suppress,
-    runtime: params.runtime,
+    runtime: platformRuntime,
     appLogRetentionSeconds,
     anchor: () => anchor,
     sealBarrier: () => sealBarrier,
@@ -612,6 +614,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     appOutboxAcceptance == null || mls == null
       ? undefined
       : createLogDelivery({
+          monotonicNow,
           queue: appOutboxAcceptance,
           ready: async () => {
             await ready
@@ -646,7 +649,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           pull: async () => {
             await runSerial(async () => {
               await replayJournal()
-              await ensureLedger(Date.now() + recoveryTimeoutMs)
+              await ensureLedger(monotonicNow() + recoveryTimeoutMs)
               await reconcileCommits()
             })
             await healIfRequested()
@@ -970,15 +973,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const confirmationWaiters = new Map<string, ConfirmationWaiter>()
   const commitOutcomes = createRecoveryCache<RecoveryCommitOutcome>((outcome) => {
     if (outcome.kind === 'applied') outcome.key.fill(0)
-  })
+  }, monotonicNow)
   const recordCommitOutcome = (position: string, outcome: RecoveryCommitOutcome): void => {
     if (commitOutcomes.get(position) != null) {
       if (outcome.kind === 'applied') outcome.key.fill(0)
       return
     }
-    commitOutcomes.set(position, outcome, Date.now() + recoveryDeadlineMs)
+    commitOutcomes.set(position, outcome, monotonicNow() + recoveryDeadlineMs)
   }
-  const verdictCache = createRecoveryCache<Promise<Uint8Array>>()
+  const verdictCache = createRecoveryCache<Promise<Uint8Array>>(undefined, monotonicNow)
   const verdictTimers = new Set<ReturnType<typeof setTimeout>>()
   /**
    * Ledger-gather waiters, keyed by requestID. Called for EVERY reply, not just the first: a
@@ -1046,11 +1049,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       }
       const sealed = await cached.value
       const expiresAt = cached.expiresAt
-      if (disposed || blocked() || expiresAt <= Date.now()) return
+      if (disposed || blocked() || expiresAt <= monotonicNow()) return
       const timer = setTimeout(
         () => {
           verdictTimers.delete(timer)
-          if (disposed || blocked() || expiresAt <= Date.now()) return
+          if (disposed || blocked() || expiresAt <= monotonicNow()) return
           void mux
             .publish({
               topicID,
@@ -1061,7 +1064,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             })
             .catch(() => {})
         },
-        Math.max(0, Math.min(getReplyDelayMs(), recoveryTimeoutMs, expiresAt - Date.now())),
+        Math.max(0, Math.min(getReplyDelayMs(), recoveryTimeoutMs, expiresAt - monotonicNow())),
       )
       verdictTimers.add(timer)
     })().catch(() => {})
@@ -1705,7 +1708,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // A wakeup is a lane operation: step 0, the ledger invariant, then the pull. No return
           // value, so anything found is stashed for the next call that has one.
           const replayed = await replayJournal()
-          if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+          if (mls != null && (await ensureLedger(monotonicNow() + recoveryTimeoutMs))) {
             await finalizeBootstrap(mls)
           }
           if (disposed) return
@@ -1798,7 +1801,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // A peer restored with an incomplete ledger was killed between rejoining and bootstrapping.
       // The invariant finds it here and at every later lane operation, with no memory of how it
       // got there.
-      const ledgerReady = await ensureLedger(Date.now() + recoveryTimeoutMs)
+      const ledgerReady = await ensureLedger(monotonicNow() + recoveryTimeoutMs)
       if (disposed) return
       if (ledgerReady) {
         await finalizeBootstrap(mls)
@@ -2076,7 +2079,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           })
       }
       const finishOnDispose = () => finish(false)
-      const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()))
+      const timer = setTimeout(() => finish(false), Math.max(0, deadline - monotonicNow()))
       ledgerGatherFinishes.add(finishOnDispose)
       ledgerWaiters.set(requestID, (sealed) => {
         void (async () => {
@@ -2164,7 +2167,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       //      `commit()`'s does not. NO heal is scheduled: this peer holds its leaf, so a rejoin
       //      would rotate the tree for nothing — the gather that just failed IS the repair,
       //      re-running at the head of the next lane operation.
-      if (!(await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+      if (!(await ensureLedger(monotonicNow() + recoveryTimeoutMs))) {
         assertLive()
         throw new RecoveryRequiredError(
           'commit: the ledger is incomplete, so this handle rejoined the group and its bootstrap has not completed — its roster has reset, and a commit built now would be judged against a group whose admins it cannot see. It must finish bootstrapping its ledger before it can commit again.',
@@ -2173,7 +2176,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       await finalizeBootstrap(mls)
       assertLive()
 
-      const deadline = Date.now() + commitDeadlineMs
+      const deadline = monotonicNow() + commitDeadlineMs
       for (let attempt = 0; attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
         // 1. Pull the log to the end: every frame processed, and the tip to race at learned from
         //    the store's own reply.
@@ -2248,7 +2251,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           //    the pending commit untouched, clear the slot, and go back to step 1.
           await slot.clear(publishID)
           assertLive()
-          if (Date.now() >= deadline) {
+          if (monotonicNow() >= deadline) {
             // The last lost compare-and-set, carried: it is the proximate reason this attempt
             // restarted, and the deadline only names how many such losses ran out the clock.
             throw new CommitDeadlineError(
@@ -2315,7 +2318,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     return runSerial(async () => {
       if (await replayJournal()) await rebuildEpoch()
-      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+      if (mls != null && (await ensureLedger(monotonicNow() + recoveryTimeoutMs))) {
         await finalizeBootstrap(mls)
       }
       assertLive()
@@ -2333,7 +2336,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     topicID: string,
     deadline: number,
   ): Promise<RendezvousOutcome> => {
-    const remaining = deadline - Date.now()
+    const remaining = deadline - monotonicNow()
     const wait = Math.max(0, Math.min(recoveryTimeoutMs, remaining))
     const atDeadline = remaining <= recoveryTimeoutMs
     return await new Promise<RendezvousOutcome>((resolve) => {
@@ -2423,15 +2426,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         )
         if (await replayJournal()) await rebuildEpoch()
         assertLive()
-        if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
+        if (await ensureLedger(monotonicNow() + recoveryTimeoutMs)) await finalizeBootstrap(port)
         assertLive()
         return true
       })
       if (!started) return { advanced: true }
 
-      const deadline = Date.now() + recoveryDeadlineMs
+      const deadline = monotonicNow() + recoveryDeadlineMs
       let prepared = false
-      while (Date.now() < deadline) {
+      while (monotonicNow() < deadline) {
         const publication = await runSerial(async () => {
           if (await replayJournal()) await rebuildEpoch()
           // 1. Pull to the end. It may resolve the strand outright, and a heal it no longer needs
@@ -2459,7 +2462,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           const requestID = newPublishID()
           const request = await port.createRecoveryRequest({
             requestID,
-            deadlineMs: Math.max(0, deadline - Date.now()),
+            deadlineMs: Math.max(0, deadline - monotonicNow()),
           })
           assertLive()
           const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
@@ -2563,6 +2566,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           inFlight,
         } = publication
         const confirmation = await waitForRecoveryConfirmation({
+          monotonicNow,
           port,
           pending,
           groupID,
@@ -2856,7 +2860,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposed) return
           await replayJournal()
           if (disposed) return
-          await ensureLedger(Date.now() + recoveryTimeoutMs)
+          await ensureLedger(monotonicNow() + recoveryTimeoutMs)
           if (disposed) return
           await reconcileCommits()
         })
@@ -2962,7 +2966,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         await appLane.dropFrame(topicID, position)
         assertLive()
         await replayJournal()
-        await ensureLedger(Date.now() + recoveryTimeoutMs)
+        await ensureLedger(monotonicNow() + recoveryTimeoutMs)
         await reconcileCommits()
       })
       await healIfRequested()

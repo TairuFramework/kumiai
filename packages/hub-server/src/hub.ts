@@ -12,6 +12,7 @@ import type { CryptoOptions, Identity } from '@kokuin/token'
 import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
 import { hubProtocol } from '@kumiai/hub-protocol'
 
+import type { Now } from './clock.js'
 import type {
   AuthorizeHook,
   CreateHandlersParams,
@@ -56,6 +57,7 @@ type SubscriptionReapingStore = HubStore & {
 export type HubReplayOptions = Omit<ReplayOptions, 'enabled' | 'rejectStale'>
 
 export type CreateHubParams = CryptoOptions & {
+  monotonicNow?: Now
   transport: ServerTransportOf<HubProtocol>
   store: HubStore
   /**
@@ -147,6 +149,7 @@ export function createHub(params: CreateHubParams): HubInstance {
           onError: ({ did, error }) => storeErrorReporter({ method: 'wake', did, error }),
         })
   const handlers = createHandlers({
+    monotonicNow: params.monotonicNow,
     registry,
     store: params.store,
     authorize: params.authorize,

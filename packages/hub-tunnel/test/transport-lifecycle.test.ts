@@ -174,3 +174,30 @@ describe('createHubTunnelTransport lifecycle', () => {
     }
   })
 })
+
+test('injected clock alone crosses the idle limit', async () => {
+  let time = 0
+  const hub = new FakeHub()
+  const transport = createHubTunnelTransport<Msg, Msg>({
+    hub,
+    localDID: 'clock-local',
+    sessionID: 'clock',
+    sendTopicID: 'clock-send',
+    receiveTopicID: 'clock-receive',
+    idleTimeoutMs: 1000,
+    monotonicNow: () => {
+      const value = time
+      time = 1001
+      return value
+    },
+  })
+  const read = transport.read()
+  try {
+    await expect(Promise.race([read, sleep(100).then(() => 'still open')])).rejects.toBeInstanceOf(
+      TimeoutInterruption,
+    )
+  } finally {
+    await transport.dispose().catch(() => {})
+    hub.disconnect('clock-local')
+  }
+})

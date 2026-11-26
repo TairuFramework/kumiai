@@ -103,12 +103,18 @@ function makeKdf(kdfName: string): Kdf {
 // Signature (Ed25519)
 // ---------------------------------------------------------------------------
 
+// Ed25519 and X25519 secret keys are 32 random bytes, drawn from the suite RNG so an injected source
+// controls every key and encapsulation. X25519 takes them verbatim (noble clamps on use), and its
+// typed randomSecretKey() accepts no seed.
+const SECRET_KEY_SEED_LENGTH = 32
+
 type MakeSignatureParams = {
   name: string
   crypto: KokuinCryptoProvider
+  rng: Rng
 }
 
-function makeSignature({ name, crypto }: MakeSignatureParams): Signature {
+function makeSignature({ name, crypto, rng }: MakeSignatureParams): Signature {
   if (name !== 'Ed25519') {
     throw new Error(`Unsupported signature algorithm: ${name}. Only Ed25519 is supported.`)
   }
@@ -124,7 +130,7 @@ function makeSignature({ name, crypto }: MakeSignatureParams): Signature {
       return await crypto.verify({ alg: 'EdDSA', signature, message, publicKey })
     },
     async keygen(): Promise<{ publicKey: Uint8Array; signKey: Uint8Array }> {
-      const signKey = ed25519.utils.randomSecretKey()
+      const signKey = ed25519.utils.randomSecretKey(rng.randomBytes(SECRET_KEY_SEED_LENGTH))
       return { signKey, publicKey: ed25519.getPublicKey(signKey) }
     },
   }
@@ -238,7 +244,7 @@ type AEADCipher = (
 /** ts-mls expects CryptoKey-like objects; these wrap raw bytes to satisfy that shape. */
 type NobleKey = { raw: Uint8Array; type: string }
 
-function makeHpke(hpkeAlg: HpkeAlg): Hpke {
+function makeHpke(hpkeAlg: HpkeAlg, rng: Rng): Hpke {
   if (!hpkeAlg.kem.includes('X25519')) {
     throw new Error(`Unsupported KEM: ${hpkeAlg.kem}. Only DHKEM-X25519-HKDF-SHA256 is supported.`)
   }
@@ -300,7 +306,7 @@ function makeHpke(hpkeAlg: HpkeAlg): Hpke {
    * Encap (RFC 9180 §4.1) — generate ephemeral keypair and shared secret
    */
   function encap(recipientPublicKey: Uint8Array): { sharedSecret: Uint8Array; enc: Uint8Array } {
-    const ek = x25519.utils.randomSecretKey()
+    const ek = rng.randomBytes(SECRET_KEY_SEED_LENGTH)
     const enc = x25519.getPublicKey(ek)
     const dh = x25519.getSharedSecret(ek, recipientPublicKey)
     const kemContext = concatBytes(enc, recipientPublicKey)
@@ -473,7 +479,7 @@ function makeHpke(hpkeAlg: HpkeAlg): Hpke {
     },
 
     async generateKeyPair(): Promise<{ privateKey: unknown; publicKey: unknown }> {
-      const privateKey = x25519.utils.randomSecretKey()
+      const privateKey = rng.randomBytes(SECRET_KEY_SEED_LENGTH)
       const publicKey = x25519.getPublicKey(privateKey)
       return { privateKey: wrapPrivateKey(privateKey), publicKey: wrapPublicKey(publicKey) }
     },
@@ -537,8 +543,8 @@ export function createNobleCryptoProvider(options?: NobleCryptoProviderOptions):
       return {
         hash: makeHash(config.hash),
         kdf: makeKdf(config.hpke.kdf),
-        signature: makeSignature({ name: config.signature, crypto }),
-        hpke: makeHpke(config.hpke),
+        signature: makeSignature({ name: config.signature, crypto, rng }),
+        hpke: makeHpke(config.hpke, rng),
         rng,
         id,
       }

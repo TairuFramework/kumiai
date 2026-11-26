@@ -1155,12 +1155,19 @@ test('membership-only group advances through attest clocks from two members', as
   await first.newGroup.processMessage({ message: second.commitMessage })
   expect(first.newGroup.registry).toEqual(second.newGroup.registry)
   expect(await attestTreeTime({ group: first.newGroup, time: 100 })).toBeNull()
+  const fractional = await attestTreeTime({ group: first.newGroup, time: 100.25 })
+  expect(
+    fractional?.newGroup.registry.controllers
+      .get(f.did)
+      ?.attestations.get(encodeKey({ publicKey: f.a.identity.publicKey, alg: 'EdDSA' })),
+  ).toBe(100.25)
+  vi.spyOn(Date, 'now').mockReturnValue(150_125)
   const newer = await attestTreeTime({ group: first.newGroup })
   expect(
     newer?.newGroup.registry.controllers
       .get(f.did)
       ?.attestations.get(encodeKey({ publicKey: f.a.identity.publicKey, alg: 'EdDSA' })),
-  ).toBe(150)
+  ).toBe(150.125)
 })
 
 test('preservation clock cannot exceed attestedTreeTime', async () => {

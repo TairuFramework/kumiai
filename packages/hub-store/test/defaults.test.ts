@@ -2,10 +2,28 @@ import { RetentionExceededError } from '@kumiai/hub-protocol'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { createHubStoreDefinition, getHubStore } from '../src/index.js'
-import { backends } from './databases.js'
+import { backends, hubTables } from './databases.js'
 
 describe.each(backends())('store defaults ($name)', (backend) => {
   afterEach(() => backend.cleanup())
+
+  test('injected clock stamps a SQL message', async () => {
+    const db = await backend.open()
+    db.register(createHubStoreDefinition({ now: () => 1_700_000_000_000 }))
+    const store = await getHubStore(db)
+    await store.publish({
+      senderDID: 'sender',
+      topicID: 'clock',
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+    const tables = await hubTables(db)
+    const row = await tables
+      .selectFrom('hub_messages')
+      .select('stored_at')
+      .executeTakeFirstOrThrow()
+    expect(Number(row.stored_at)).toBe(1_700_000_000_000)
+  })
 
   test('rejects retention above 30 days', async () => {
     const db = await backend.open()

@@ -35,7 +35,10 @@ import { EventEmitter } from '@sozai/event'
 
 import type { HubTables } from './tables.js'
 
+export type Now = () => number
+
 export type HubStoreOptions = {
+  now?: Now
   /** Hub default retention in seconds: the floor for a topic's age bound. Default 0. */
   defaultRetention?: number
   /**
@@ -78,11 +81,6 @@ function toBytes(value: Uint8Array): Uint8Array {
   return new Uint8Array(value as unknown as ArrayLike<number>)
 }
 
-// `not_after` is seconds; every other timestamp here is milliseconds.
-function nowSeconds(): number {
-  return Math.floor(Date.now() / 1000)
-}
-
 export type CreateHubStoreParams = {
   db: Kysely<HubTables>
   adapter: Adapter
@@ -103,6 +101,8 @@ export type SQLHubStore = HubStore &
 
 export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
   const { db, adapter, options = {} } = params
+  const wallNow = options.now ?? (() => Date.now())
+  const nowSeconds = (): number => Math.floor(wallNow() / 1000)
   const defaultRetention = options.defaultRetention ?? 0
   const maxRetention = options.maxRetention ?? 30 * 24 * 60 * 60
   const maxDepth = options.maxDepth ?? 1000
@@ -216,7 +216,7 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
             topic_id: topicID,
             publish_id: publishParams.publishID,
             sequence_id: null,
-            recorded_at: Date.now(),
+            recorded_at: wallNow(),
           })
           .onConflict((oc) => oc.columns(['topic_id', 'publish_id']).doNothing())
           .executeTakeFirst()
@@ -283,7 +283,7 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
             account: publishParams.attribution?.account ?? null,
             actor: publishParams.attribution?.actor ?? null,
             via: publishParams.attribution?.via ?? null,
-            stored_at: Date.now(),
+            stored_at: wallNow(),
             retain,
           })
           .execute()
@@ -522,7 +522,7 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
   }
 
   async function purge(purgeParams: PurgeParams): Promise<Array<string>> {
-    const now = Date.now()
+    const now = wallNow()
     const olderThan = purgeParams.olderThan
 
     // Idempotency records outlive the frames they dedup, on their own clock. Without this sweep
@@ -612,7 +612,7 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
     // Strict boundary and atomic return: a refreshed subscriber is neither deleted nor reported.
     const rows = await db
       .deleteFrom('hub_subscriptions')
-      .where('last_active_at', '<', Date.now() - olderThan * 1000)
+      .where('last_active_at', '<', wallNow() - olderThan * 1000)
       .returning(['topic_id', 'subscriber_did'])
       .execute()
     return rows.map((row) => ({ topicID: row.topic_id, subscriberDID: row.subscriber_did }))
@@ -756,7 +756,7 @@ export function createHubStore(params: CreateHubStoreParams): SQLHubStore {
         .values({
           topic_id: topicID,
           subscriber_did: subscriberDID,
-          last_active_at: Date.now(),
+          last_active_at: wallNow(),
           retention,
           generation: row.generation,
         })

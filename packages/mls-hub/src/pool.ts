@@ -10,6 +10,7 @@ import {
 } from '@kumiai/mls'
 import { AsyncResult, Result } from '@sozai/result'
 
+import type { Now } from './clock.js'
 import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
 import { assertKind, toBundles } from './records.js'
@@ -20,6 +21,7 @@ const DEFAULT_LOW_WATER = 10
 const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 
 export type KeyPackagePoolParams = {
+  now?: Now
   /** The identity packages are minted for; also the store's owner key. */
   identity: OwnIdentity
   client: Pick<HubClient, 'uploadKeyPackages' | 'keyPackageStatus'>
@@ -69,6 +71,7 @@ export type KeyPackagePool = {
 export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePool {
   const {
     identity,
+    now = () => Date.now(),
     client,
     store,
     options,
@@ -107,7 +110,11 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     assertKind(await store.list(ownerDID), 'ordinary')
 
   const mint = async (): Promise<KeyPackageRecord> => {
-    const bundle = await createKeyPackageBundle({ identity, ...options })
+    const bundle = await createKeyPackageBundle({
+      identity,
+      ...options,
+      nowSeconds: Math.floor(now() / 1000),
+    })
     const record: KeyPackageRecord = {
       kind: 'ordinary',
       ref: await keyPackageRef({ keyPackage: bundle.publicPackage, ...options }),
@@ -134,7 +141,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     records: Array<KeyPackageRecord>,
     keepRefs: ReadonlySet<string>,
   ): Promise<void> => {
-    const cutoff = Math.floor(Date.now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
+    const cutoff = Math.floor(now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
     // Concurrent: each delete names a distinct ref, so they neither order nor conflict.
     await Promise.all(
       records

@@ -20,6 +20,7 @@ import type {
   PendingRecovery,
   PendingRecoveryConfirmationKeyParams,
 } from '@kumiai/rpc'
+import { createRuntime, type Now } from '@sozai/runtime'
 
 export type RecoveryBindingRequest = {
   groupID: string
@@ -32,6 +33,7 @@ export type RecoveryBinding = (request: RecoveryBindingRequest) => Promise<Contr
 export type RecoveryReply = { groupInfo: Uint8Array; ledger: Array<string>; signer: string }
 
 export type VerdictJudgeParams = {
+  now?: Now
   group: GroupHandle
   sourceTree: ClientState['ratchetTree']
   known: DeviceRegistry
@@ -50,7 +52,11 @@ export type RecoveryCandidate = PendingRecovery & {
   signer: string
 }
 
-export function createRecoveryBindingState(identity: OwnIdentity, host?: RecoveryBinding) {
+export function createRecoveryBindingState(
+  identity: OwnIdentity,
+  host?: RecoveryBinding,
+  now: Now = createRuntime().now,
+) {
   let binding: ControllerBinding | undefined
   let asked = false
   let prepared = false
@@ -147,6 +153,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
                 group: pending,
                 registry: source.registry,
                 signer: reply.signer,
+                now: now() / 1000,
               }))
             )
               throw new Error('Ineligible recovery attestation signer')
@@ -202,7 +209,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
 }
 
 export function createVerdictJudge(params: VerdictJudgeParams) {
-  const { group, sourceTree, known, requestID } = params
+  const { group, sourceTree, known, requestID, now = createRuntime().now } = params
   let tuple: BoundRecoveryCommit | undefined
   return {
     async confirmationKey({ position, commitDigest }: PendingRecoveryConfirmationKeyParams) {
@@ -230,7 +237,12 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
       )
         return 'advisory'
       if (group.anchor.controller != null)
-        return (await recoverySignerEligible({ group, registry: known, signer }))
+        return (await recoverySignerEligible({
+          group,
+          registry: known,
+          signer,
+          now: now() / 1000,
+        }))
           ? 'authoritative'
           : 'advisory'
       if (verdict.verdict === 'confirmed') return 'authoritative'

@@ -12,6 +12,7 @@ import type {
   MailboxHub,
 } from '@kumiai/hub-tunnel'
 import { getReporter } from '@sozai/log'
+import { createRuntime, type Now } from '@sozai/runtime'
 
 import { asDeliveryPosition, type DeliveryPosition } from './cursor.js'
 import { PeerDisposedError } from './errors.js'
@@ -79,6 +80,7 @@ const warnReceiveEnded = (ended: ReceiveLaneEnded): void => {
 }
 
 export type HubMuxParams = {
+  monotonicNow?: Now
   /** The real hub. It must serve a log: the commit lane reads one. */
   hub: LogHub
   /** Authenticated DID used to drain `hub.receive` and stamp bus publishes. */
@@ -308,6 +310,7 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  */
 export function createHubMux(params: HubMuxParams): HubMux {
   const { hub, localDID } = params
+  const monotonicNow = params.monotonicNow ?? createRuntime().monotonicNow
   const onSubscribeFailed = params.onSubscribeFailed ?? warnSubscribeFailed
   const onReceiveEnded = params.onReceiveEnded ?? warnReceiveEnded
   const retryDelaysMs = params.subscribeRetryDelaysMs ?? DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS
@@ -515,7 +518,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     }
     set.add(listener)
     retain(topicID, options)
-    sweepPending(Date.now())
+    sweepPending(monotonicNow())
     const handoffs: Array<{ sequenceID: string; entry: PendingAck; message: StoredMessage }> = []
     for (const [sequenceID, entry] of pending) {
       const message = entry.unmatched
@@ -633,7 +636,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
         return
       }
       const message = result.value
-      const now = Date.now()
+      const now = monotonicNow()
       sweepPending(now)
 
       // Snapshotted BEFORE fan-out: a listener that unsubscribes mid-delivery must not be counted

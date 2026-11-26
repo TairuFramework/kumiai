@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, test } from 'vitest'
 
 import { createHubMux } from '../src/hub-mux.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -74,14 +74,14 @@ describe('the mux refcounts acks across its holders', () => {
   })
 
   test('a listener registering at the TTL cutoff does not claim an unmatched frame', async () => {
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000)
+    let clock = 1000
     const hub = new DurableFakeHub()
-    const mux = createHubMux({ hub, localDID: 'bob', ackTTLMs: 60_000 })
+    const mux = createHubMux({ hub, localDID: 'bob', ackTTLMs: 60_000, monotonicNow: () => clock })
     try {
       mux.retainTopic('topic:early')
       await hub.publish({ senderDID: 'alice', topicID: 'topic:early', payload: payload() })
       await new Promise((resolve) => setTimeout(resolve, 0))
-      clock.mockReturnValue(61_000)
+      clock = 61_000
       let intermediateEpochDeliveries = 0
       mux.onInbound('topic:early', (_message, ack) => {
         intermediateEpochDeliveries += 1
@@ -94,7 +94,6 @@ describe('the mux refcounts acks across its holders', () => {
       expect(intermediateEpochDeliveries).toBe(1)
       expect(hub.ackedCount('bob')).toBe(1)
     } finally {
-      clock.mockRestore()
       await mux.dispose()
     }
   })
