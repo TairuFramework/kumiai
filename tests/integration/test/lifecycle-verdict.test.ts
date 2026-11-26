@@ -47,6 +47,7 @@ async function setup(
   const identity = fixture.agent(41)
   let group = (
     await createGroup({
+      now: Date.now,
       identity,
       groupID: 'lifecycle-verdict',
       ...(options.standard
@@ -59,6 +60,7 @@ async function setup(
   ).group
   const bob = fixture.agent(61)
   const bundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: bob,
     controller: await fixture.timedBinding({ identity: bob, iat: 100, exp: 200, ...options }),
   })
@@ -68,7 +70,12 @@ async function setup(
     recipientDID: bob.id,
     ...(options.standard ? { permission: 'member' } : {}),
   })
-  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   group = added.newGroup
   const responderGroup = (
     await processWelcome({
@@ -112,7 +119,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
       group: s.group(),
       registry: known,
       signer: s.identity.id,
-      now: 500,
+      now: () => 500000,
     }),
   ).toBe(true)
   expect(
@@ -120,7 +127,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
       group: s.group(),
       registry: known,
       signer: s.identity.id,
-      now: 500.001,
+      now: () => 500001,
     }),
   ).toBe(false)
   expect(
@@ -128,7 +135,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
       group: s.group(),
       registry: known,
       signer: fixture.agent(81).id,
-      now: 150,
+      now: () => 150000,
     }),
   ).toBe(false)
   const projection = s.group().registry.controllers.get(fixture.controllerID)
@@ -139,7 +146,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
       group: s.group(),
       registry: known,
       signer: s.identity.id,
-      now: 150,
+      now: () => 150000,
     }),
   ).toBe(false)
   known.controllers.set(fixture.controllerID, { ...projection, genFloor: 0, timeFloor: 201 })
@@ -148,7 +155,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
       group: s.group(),
       registry: known,
       signer: s.identity.id,
-      now: 150,
+      now: () => 150000,
     }),
   ).toBe(false)
   known.devices.set(s.identity.id, {
@@ -161,7 +168,7 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
       group: s.group(),
       registry: known,
       signer: s.identity.id,
-      now: 150,
+      now: () => 150000,
     }),
   ).toBe(false)
 })
@@ -259,6 +266,7 @@ test('candidate registries retain revocations and stale refusals are advisory', 
     }),
   ).resolves.not.toThrow()
   const judge = createVerdictJudge({
+    now: Date.now,
     group: current.group,
     sourceTree: current.sourceTree,
     known,
@@ -273,6 +281,7 @@ test('candidate registries retain revocations and stale refusals are advisory', 
     commitDigest: 'digest',
   }
   const control = createVerdictJudge({
+    now: Date.now,
     group: current.group,
     sourceTree: current.sourceTree,
     known: current.knownRegistry,
@@ -280,10 +289,16 @@ test('candidate registries retain revocations and stale refusals are advisory', 
   })
   const controlKey = await control.confirmationKey({ position: 'position', commitDigest: 'digest' })
   expect(
-    await recoverySignerEligible({ group: current.group, registry: known, signer: s.bob.id }),
+    await recoverySignerEligible({
+      now: Date.now,
+      group: current.group,
+      registry: known,
+      signer: s.bob.id,
+    }),
   ).toBe(false)
   expect(
     await recoverySignerEligible({
+      now: Date.now,
       group: current.group,
       registry: current.knownRegistry,
       signer: s.bob.id,
@@ -347,14 +362,19 @@ test('a revoked trusted issuer makes its child advisory and unknown revocation r
     controllers: new Map(),
   }
   expect(
-    await recoverySignerEligible({ group: s.group(), registry: known, signer: s.bob.id, now: 150 }),
+    await recoverySignerEligible({
+      group: s.group(),
+      registry: known,
+      signer: s.bob.id,
+      now: () => 150000,
+    }),
   ).toBe(false)
   expect(
     await recoverySignerEligible({
       group: s.group(),
       registry: registrySeed(),
       signer: s.bob.id,
-      now: 500,
+      now: () => 500000,
     }),
   ).toBe(true)
   expect(
@@ -362,7 +382,7 @@ test('a revoked trusted issuer makes its child advisory and unknown revocation r
       group: s.group(),
       registry: registrySeed(),
       signer: s.bob.id,
-      now: 500.001,
+      now: () => 500001,
     }),
   ).toBe(false)
 })

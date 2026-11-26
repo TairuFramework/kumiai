@@ -53,6 +53,7 @@ describe('directed RPC over real MLS, end to end', () => {
       bodies,
     })
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,
@@ -121,6 +122,7 @@ describe('directed RPC over real MLS, end to end', () => {
       bodies,
     })
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,
@@ -202,6 +204,7 @@ describe('a member that reconnects while its old connection is still up', () => 
       bodies,
     })
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceHandle,
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,

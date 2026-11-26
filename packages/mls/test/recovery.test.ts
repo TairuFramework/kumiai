@@ -67,8 +67,13 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: invitee })
-  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: invitee })
+  const commit = await commitInvite({
+    now: Date.now,
+    group: admin,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   for (const other of others) {
     await other.processMessage({ message: commit.commitMessage })
   }
@@ -91,6 +96,7 @@ async function threeMemberGroup(groupID: string) {
   const carol = randomIdentity()
 
   const { group: created } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -191,6 +197,7 @@ describe('sealed GroupInfo recovery', () => {
     // And it feeds the external join with no adaptation: the commit it produces is
     // accepted by the group it was sealed from.
     const { commitMessage, group: bobRejoined } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobGroup.credential,
@@ -382,6 +389,7 @@ describe('sealed GroupInfo recovery', () => {
     // signed — it just names another group.
     const mallory = randomIdentity()
     const { group: otherGroup } = await createGroup({
+      now: Date.now,
       identity: mallory,
       groupID: 'recovery-group-b',
     })
@@ -408,6 +416,7 @@ describe('sealed GroupInfo recovery', () => {
     // group id — the signature verifies; the tree is what refuses it.
     const outsider = randomIdentity()
     const { group: outsiderGroup } = await createGroup({
+      now: Date.now,
       identity: outsider,
       groupID: 'recovery-roster',
     })
@@ -502,6 +511,7 @@ describe('sealed GroupInfo recovery', () => {
     // roster check is never reached.
     const mallory = randomIdentity()
     const { group: malloryGroup } = await createGroup({
+      now: Date.now,
       identity: mallory,
       groupID: 'recovery-signature',
     })
@@ -581,6 +591,7 @@ describe('sealed GroupInfo recovery', () => {
     const dave = randomIdentity()
 
     const { group: created } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'recovery-stranded',
       resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -597,8 +608,9 @@ describe('sealed GroupInfo recovery', () => {
       permission: 'member',
     })
     fixture.publish(invite)
-    const daveBundle = await createKeyPackageBundle({ identity: dave })
+    const daveBundle = await createKeyPackageBundle({ now: Date.now, identity: dave })
     const accepted = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: daveBundle.publicPackage,
       invite,
@@ -649,6 +661,7 @@ describe('sealed GroupInfo recovery', () => {
     expect(inspectGroupInfo(groupInfo).epoch).toBe(bobGroup.epoch)
 
     const { commitMessage, group: aliceRejoined } = await joinGroupExternal({
+      now: Date.now,
       identity: alice,
       groupInfo,
       credential: aliceGroup.credential,

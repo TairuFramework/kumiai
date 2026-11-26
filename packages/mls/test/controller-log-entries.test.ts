@@ -126,6 +126,7 @@ async function fixture({ members = 1, creatorMember = false } = {}) {
     : await timedBinding({ identity, iat: 100, exp: 900 })
   const tokens = new Map<string, string>()
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'controller-logs',
     controller: binding,
@@ -233,6 +234,7 @@ test('createGroup with a creator log that already denies an edge device seeds th
     ],
   }
   const { group } = await createGroup({
+    now: Date.now,
     identity: f.identity,
     groupID: 'seed-denial',
     controller: f.binding,
@@ -245,7 +247,12 @@ test('createGroup with a creator log that already denies an edge device seeds th
     peer,
     await timedBinding({ identity: peer, iat: 100, exp: 900 }),
   )
-  const result = await api.commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const result = await api.commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: joined } = await api.processWelcome({
     identity: peer,
     invite,
@@ -260,6 +267,7 @@ test('createGroup with a creator log that already denies an edge device seeds th
   const next = await api.createInvite({ group: joined, identity: peer, recipientDID: denied.id })
   await expect(
     api.commitInvite({
+      now: Date.now,
       group: joined,
       keyPackage: deniedBundle.publicPackage,
       invite: next.invite,
@@ -272,6 +280,7 @@ test('lifecycle createGroup without controllerLog is refused', async () => {
   const identity = agent(41)
   await expect(
     createGroup({
+      now: Date.now,
       identity,
       groupID: 'missing-log',
       controller: await timedBinding({ identity, iat: 100, exp: 900 }),
@@ -289,7 +298,12 @@ test('renewLeaf with a new grant past the recorded lease succeeds when the bundl
     identity: new TextEncoder().encode(JSON.stringify({ id: f.identity.id, controller: binding })),
   }
   await expect(validateEntry(f.group, { ...leaf, credential })).rejects.toThrow()
-  const result = await api.renewLeaf({ group: f.group, binding, controllerLog: await renewed(f) })
+  const result = await api.renewLeaf({
+    now: Date.now,
+    group: f.group,
+    binding,
+    controllerLog: await renewed(f),
+  })
   const log = recordedLogOf({ registry: result.newGroup.registry, controller: f.did })
   if (log == null) throw new Error('Missing recorded log')
   expect((await head(f.did, log)).members.get(f.member.add)?.lease).toBe(2000)
@@ -299,6 +313,7 @@ test('commitWithEntries validates an Add against the candidate registry', async 
   const f = await fixture()
   const empty = { chain: f.log.chain, events: [] }
   const { group } = await createGroup({
+    now: Date.now,
     identity: f.identity,
     groupID: 'add-candidate',
     controller: f.binding,
@@ -312,7 +327,12 @@ test('commitWithEntries validates an Add against the candidate registry', async 
     recipientDID: bob.id,
     controllerLog: f.log,
   })
-  const result = await api.commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const result = await api.commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   expect(result.newGroup.findMemberLeafIndex(bob.id)).toBeDefined()
   expect(
     recordedLogOf({ registry: result.newGroup.registry, controller: f.did })?.events,
@@ -330,7 +350,12 @@ test("member processes an invite commit whose log entry carries the issuing memb
     recipientDID: bob.id,
     controllerLog: await renewed(f),
   })
-  const result = await api.commitInvite({ group: author, keyPackage: bundle.publicPackage, invite })
+  const result = await api.commitInvite({
+    now: Date.now,
+    group: author,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   f.publish(result.newGroup.ledgerTokens)
   await joined.processMessage({ message: result.commitMessage })
   expect(joined.findMemberLeafIndex(bob.id)).toBeDefined()
@@ -363,7 +388,7 @@ test('author refuses to build a commit its receivers would reject', async () => 
   })
   const previous = f.group.state
   await expect(
-    api.commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }),
+    api.commitInvite({ now: Date.now, group: f.group, keyPackage: bundle.publicPackage, invite }),
   ).rejects.toThrow()
   expect(f.group.state).toBe(previous)
 })
@@ -494,6 +519,7 @@ test('renewLeaf with controllerLog carries the renewal the new grant needs', asy
   const f = await fixture()
   const { author, joined } = await receiver(f)
   const result = await api.renewLeaf({
+    now: Date.now,
     group: author,
     binding: await grant(f, f.identity, 1500),
     controllerLog: await renewed(f),
@@ -785,10 +811,16 @@ test.each(['completed', 'failed'] as const)(
       const failure = new Error('Commit build failed')
       vi.spyOn(lifecycle, 'prepareLifecycleGate').mockRejectedValueOnce(failure)
       await expect(
-        api.commitInvite({ group: receiving.author, keyPackage: bundle.publicPackage, invite }),
+        api.commitInvite({
+          now: Date.now,
+          group: receiving.author,
+          keyPackage: bundle.publicPackage,
+          invite,
+        }),
       ).rejects.toBe(failure)
     } else {
       const completed = await api.commitInvite({
+        now: Date.now,
         group: receiving.author,
         keyPackage: bundle.publicPackage,
         invite,
@@ -799,6 +831,7 @@ test.each(['completed', 'failed'] as const)(
     if (firstAttempt === 'failed') expect(invite).toEqual(originalInvite)
     vi.mocked(Date.now).mockReturnValue(180000)
     const result = await api.commitInvite({
+      now: Date.now,
       group: receiving.author,
       keyPackage: bundle.publicPackage,
       invite,
@@ -826,6 +859,7 @@ test.each(['completed', 'failed'] as const)(
       }),
     )
     const renewed = await api.renewLeaf({
+      now: Date.now,
       group: receiving.author,
       binding: await timedBinding({ identity: f.identity, iat: 175, exp: 900 }),
     })
@@ -833,10 +867,16 @@ test.each(['completed', 'failed'] as const)(
     const failure = new Error('Retry build failed')
     vi.spyOn(lifecycle, 'prepareLifecycleGate').mockRejectedValueOnce(failure)
     await expect(
-      api.commitInvite({ group: renewed.newGroup, keyPackage: bundle.publicPackage, invite }),
+      api.commitInvite({
+        now: Date.now,
+        group: renewed.newGroup,
+        keyPackage: bundle.publicPackage,
+        invite,
+      }),
     ).rejects.toBe(failure)
     expect(invite).toEqual(deliveredInvite)
     const withoutClock = await api.commitInvite({
+      now: Date.now,
       group: renewed.newGroup,
       keyPackage: bundle.publicPackage,
       invite,
@@ -925,6 +965,7 @@ test.each(['completed', 'failed'] as const)(
     expect(result.newGroup.findMemberLeafIndex(peer.id)).toBeUndefined()
     expect(result.newGroup.registry.controllers.get(f.did)?.timeFloor).toBe(150)
     const renewed = await api.renewLeaf({
+      now: Date.now,
       group: members.author,
       binding: await timedBinding({ identity: f.identity, iat: 175, exp: 900 }),
     })

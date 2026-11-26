@@ -77,7 +77,12 @@ async function twoMemberGroup(groupID: string) {
       return token
     })
 
-  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
+  const { group: created } = await createGroup({
+    now: Date.now,
+    identity: alice,
+    groupID,
+    resolveLedgerEntries,
+  })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -85,8 +90,13 @@ async function twoMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bobBundle = await createKeyPackageBundle({ identity: bob })
-  const addBob = await commitInvite({ group: created, keyPackage: bobBundle.publicPackage, invite })
+  const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+  const addBob = await commitInvite({
+    now: Date.now,
+    group: created,
+    keyPackage: bobBundle.publicPackage,
+    invite,
+  })
   const { group: bobGroup } = await processWelcome({
     identity: bob,
     invite,
@@ -118,8 +128,9 @@ describe('leaf HPKE key rotation on commit', () => {
       permission: 'member',
     })
     publish(invite)
-    const carolBundle = await createKeyPackageBundle({ identity: carol })
+    const carolBundle = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const commit = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolBundle.publicPackage,
       invite,
@@ -173,8 +184,9 @@ describe('leaf HPKE key rotation on commit', () => {
       permission: 'member',
     })
     publish(invite)
-    const carolBundle = await createKeyPackageBundle({ identity: carol })
+    const carolBundle = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const commit = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolBundle.publicPackage,
       invite,

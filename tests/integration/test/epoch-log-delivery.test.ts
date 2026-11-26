@@ -71,6 +71,7 @@ async function setup(
   const group = options.lifecycle
     ? (
         await createGroup({
+          now: Date.now,
           identity: aliceID,
           groupID: 'delivery-integration',
           controllerLog: { chain: [lifecycle.inception], events: [] },
@@ -82,6 +83,7 @@ async function setup(
     ? {
         invite: (await createInvite({ group, identity: aliceID, recipientDID: bobID.id })).invite,
         bundle: await createKeyPackageBundle({
+          now: Date.now,
           identity: bobID,
           controller: await lifecycle.timedBinding({ identity: bobID, iat: 100, exp: 200 }),
         }),
@@ -89,6 +91,7 @@ async function setup(
     : await mintInvite({ admin: group, adminIdentity: aliceID, invitee: bobID, bodies })
   bodies.publish(material.invite)
   const added = await commitInvite({
+    now: Date.now,
     group,
     keyPackage: material.bundle.publicPackage,
     invite: material.invite,

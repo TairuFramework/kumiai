@@ -106,6 +106,7 @@ describe('ledger head chain', () => {
     const head = computeHead({ groupID: 'scoped', entryIDs: ['e1', 'e2'] })
 
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'scoped',
       extensions: [buildLedgerHeadExtension(head)],
@@ -125,7 +126,7 @@ describe('ledger head chain', () => {
 
   test('createGroup auto-seeds the ledger head at genesis', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'plain' })
+    const { group } = await createGroup({ now: Date.now, identity: alice, groupID: 'plain' })
     const read = readLedgerHead(group)
     expect(read?.head).toEqual(genesisHead('plain'))
     expect(readLedgerHeadExtension(group)).not.toBeNull()
@@ -138,6 +139,7 @@ describe('ledger head chain', () => {
       extensionData: new Uint8Array([0xff, 0xff]),
     })
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'corrupt',
       extensions: [corrupt],

@@ -20,6 +20,7 @@ async function createGroupMessage(): Promise<string> {
 
   // Alice creates a group
   const { group: aliceGroup } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID: 'e2e-test',
     ...options,
@@ -34,10 +35,11 @@ async function createGroupMessage(): Promise<string> {
   })
 
   // Bob generates a key package
-  const bobKP = await createKeyPackageBundle({ identity: bob, ...options })
+  const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob, ...options })
 
   // Alice commits the invite
   const { welcomeMessage, newGroup } = await commitInvite({
+    now: Date.now,
     group: aliceGroup,
     keyPackage: bobKP.publicPackage,
     invite,

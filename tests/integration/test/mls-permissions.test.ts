@@ -118,8 +118,12 @@ async function inviteAndJoin(params: {
     recipientDID: params.recipient.id,
     permission: params.permission,
   })
-  const keyPackageBundle = await createKeyPackageBundle({ identity: params.recipient })
+  const keyPackageBundle = await createKeyPackageBundle({
+    now: Date.now,
+    identity: params.recipient,
+  })
   const { commitMessage, welcomeMessage, newGroup } = await commitInvite({
+    now: Date.now,
     group: params.inviterGroup,
     keyPackage: keyPackageBundle.publicPackage,
     invite,
@@ -143,7 +147,7 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     const groupID = `remove-${Math.random().toString(36).slice(2)}`
 
     const inviteTokens = new Map<string, string>()
-    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
+    const { group: aliceGroup0 } = await createGroup({ now: Date.now, identity: alice, groupID })
     const { newGroup: aliceWithBob, recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -161,8 +165,9 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     for (const token of carolInvite.ledgerEntries) {
       inviteTokens.set(ledgerEntryDigest(token), token)
     }
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: aliceWithBob,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,
@@ -206,7 +211,7 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     const bob = randomIdentity()
     const groupID = `remove-guard-${Math.random().toString(36).slice(2)}`
 
-    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
+    const { group: aliceGroup0 } = await createGroup({ now: Date.now, identity: alice, groupID })
     const { recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -236,7 +241,7 @@ describe('a promotion travels with the commit that relies on it', () => {
     const groupID = `promote-${Math.random().toString(36).slice(2)}`
     const promotionTokens = new Map<string, string>()
 
-    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
+    const { group: aliceGroup0 } = await createGroup({ now: Date.now, identity: alice, groupID })
     const { newGroup: aliceGroup, recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -284,8 +289,9 @@ describe('a promotion travels with the commit that relies on it', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: bobGroup,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,
@@ -311,7 +317,7 @@ describe('a missing ledger entry blocks a commit until it is resolved out of ban
     const groupID = `missing-entry-${Math.random().toString(36).slice(2)}`
     const promotionTokens = new Map<string, string>()
 
-    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
+    const { group: aliceGroup0 } = await createGroup({ now: Date.now, identity: alice, groupID })
     const { newGroup: aliceGroup, recipientGroup: bobGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -371,7 +377,7 @@ describe('a roster member may resync; a stranger may not', () => {
     const bob = randomIdentity()
     const groupID = `resync-${Math.random().toString(36).slice(2)}`
 
-    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
+    const { group: aliceGroup0 } = await createGroup({ now: Date.now, identity: alice, groupID })
     const { newGroup: aliceGroup, recipientGroup: bobGroupInitial } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -388,6 +394,7 @@ describe('a roster member may resync; a stranger may not', () => {
 
     const { groupInfo } = await exportGroupInfo({ group: aliceGroup })
     const { commitMessage } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobCredential,
@@ -415,7 +422,7 @@ describe('a roster member may resync; a stranger may not', () => {
     const mallory = randomIdentity()
     const groupID = `resync-stranger-${Math.random().toString(36).slice(2)}`
 
-    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID })
+    const { group: aliceGroup0 } = await createGroup({ now: Date.now, identity: alice, groupID })
     const { newGroup: aliceGroup } = await inviteAndJoin({
       inviterGroup: aliceGroup0,
       inviter: alice,
@@ -436,6 +443,7 @@ describe('a roster member may resync; a stranger may not', () => {
     // bytes exist, so there is nothing for Mallory to ship through the hub.
     await expect(
       joinGroupExternal({
+        now: Date.now,
         identity: mallory,
         groupInfo,
         credential: malloryCredential,

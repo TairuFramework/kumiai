@@ -42,7 +42,8 @@
     "@kumiai/hub-protocol": "workspace:^",
     "@sozai/codec": "catalog:",
     "@sozai/event": "catalog:",
-    "@sozai/log": "catalog:"
+    "@sozai/log": "catalog:",
+    "@sozai/runtime": "catalog:"
   },
   "devDependencies": {
     "@enkaku/client": "catalog:",

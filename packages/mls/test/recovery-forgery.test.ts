@@ -105,8 +105,13 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: invitee })
-  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: invitee })
+  const commit = await commitInvite({
+    now: Date.now,
+    group: admin,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   for (const other of others) {
     await other.processMessage({ message: commit.commitMessage })
   }
@@ -129,6 +134,7 @@ async function threeMemberGroup(groupID: string) {
   const carol = randomIdentity()
 
   const { group: created } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -281,7 +287,7 @@ describe('a forged GroupInfo reply is refused', () => {
 
     // Mallory fabricates a group under the same id, with its OWN anchor, splicing bob's
     // published key package, and signs the attestation with its own DID key.
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const state = await forgeGroupState({
       creator: mallory,
       groupID: bobGroup.groupID,
@@ -323,7 +329,7 @@ describe('a forged GroupInfo reply is refused', () => {
       identity: bob,
       requestID: 'heal-1',
     })
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const state = await forgeGroupState({
       creator: carol,
       groupID: bobGroup.groupID,
@@ -379,7 +385,7 @@ describe('a forged GroupInfo reply is refused', () => {
       extensionType: GROUP_ANCHOR_EXTENSION_TYPE,
       extensionData: (realAnchor as GroupContextExtension).extensionData as Uint8Array,
     })
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const state = await forgeGroupState({
       creator: carol,
       groupID: bobGroup.groupID,
@@ -418,6 +424,7 @@ describe('a forged GroupInfo reply is refused', () => {
     const dave = randomIdentity()
 
     const { group: created } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'forgery-availability',
       resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -447,6 +454,7 @@ describe('a forged GroupInfo reply is refused', () => {
       ephemeralPrivateKey,
     })
     const { commitMessage, group: bobRejoined } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobGroup.credential,

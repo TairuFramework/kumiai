@@ -68,6 +68,7 @@ async function resetRemoved() {
   const fixture = await lowLevelWelcome(setup.group, target, old)
   const log = [inception, await createReset({ seed: controllerSeed, profile: 0, gen: 1 })]
   const renewed = await renewLeaf({
+    now: Date.now,
     group: fixture.author,
     binding: await timedBinding({ identity: setup.identity, iat: 150, exp: 250, prefix: log }),
   })
@@ -92,7 +93,12 @@ test('reset keeps reset-only readmission', async () => {
   const binding = await timedBinding({ identity: target, iat: 150, exp: 250, prefix: log })
   const bundle = await rawBundle(group, target, binding)
   const { invite } = await createInvite({ group, identity, recipientDID: target.id })
-  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const receiver = await deriveGroup(group, structuredClone(group.state))
   await receiver.processMessage({ message: added.commitMessage })
   const { group: joined } = await processWelcome({
@@ -292,6 +298,7 @@ test('cascadeRevokedDeviceStillRefused', async () => {
 
 async function trustedGrant(identity: ReturnType<typeof agent>, prefix: Array<SignedEvent>) {
   return mintTrustedGrant({
+    now: Date.now,
     signer: await createControllerIdentity({
       seed: controllerSeed,
       profile: 0,
@@ -339,7 +346,12 @@ test('chained post-reset holder evidence permits re-entry and authentication agr
   }
   const bundle = await rawBundle(group, target, fresh)
   const { invite } = await createInvite({ group, identity, recipientDID: target.id })
-  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: joined } = await processWelcome({
     identity: target,
     invite,
@@ -423,6 +435,7 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       recipientDID: observer.id,
     })
     const observerAdd = await commitInvite({
+      now: Date.now,
       group,
       keyPackage: observerBundle.publicPackage,
       invite: observerInvite,
@@ -441,6 +454,7 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       recipientDID: target.id,
     })
     const added = await commitInvite({
+      now: Date.now,
       group: observerAdd.newGroup,
       keyPackage: bundle.publicPackage,
       invite,
@@ -456,6 +470,7 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
     if (removal === 'ordinary Remove') {
       vi.spyOn(Date, 'now').mockReturnValue(210_000)
       const renewal = await renewLeaf({
+        now: Date.now,
         group: author,
         binding: await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
       })
@@ -491,6 +506,7 @@ test.each(['ordinary Remove', 'self-removal'] as const)(
       recipientDID: later.id,
     })
     const laterAdd = await commitInvite({
+      now: Date.now,
       group: author,
       keyPackage: laterBundle.publicPackage,
       invite: laterInvite,
@@ -521,6 +537,7 @@ test('ordinary Add refuses expired post-reset evidence', async () => {
   const { group, identity, target, log } = await resetRemoved()
   vi.spyOn(Date, 'now').mockReturnValue(210_000)
   const renewed = await renewLeaf({
+    now: Date.now,
     group,
     binding: await timedBinding({ identity, iat: 210, exp: 310, prefix: log }),
   })

@@ -75,6 +75,7 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
 
     // Creator bakes the anchor into the GroupContext.
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'anchored-group',
       extensions: [anchorExtension(alice.id)],
@@ -84,6 +85,7 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
 
     // Invitee generates a KeyPackage advertising the anchor capability.
     const bobBundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: bob,
       capabilities: memberCapabilities(),
     })
@@ -97,6 +99,7 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
 
     // This previously threw: "Added leaf node that doesn't support extension in GroupContext".
     const { welcomeMessage, commitMessage } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite,
@@ -116,8 +119,12 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
   test('group without custom extensions is unaffected', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'plain-group' })
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'plain-group',
+    })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -125,6 +132,7 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
       permission: 'member',
     })
     const { welcomeMessage } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite,
@@ -163,12 +171,14 @@ describe('Gap 2 — commit policy hook', () => {
 
     // Alice creates the anchored group with the immutability policy seeded.
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'g2-group',
       extensions: [anchorExtension(alice.id)],
       commitPolicy: rejectAnchorMutation,
     })
     const bobBundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: bob,
       capabilities: memberCapabilities(),
     })
@@ -179,6 +189,7 @@ describe('Gap 2 — commit policy hook', () => {
       permission: 'member',
     })
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite,
@@ -220,11 +231,12 @@ describe('Gap 2 — commit policy hook', () => {
     const carol = randomIdentity()
     const ledger = inviteLedger()
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'g2-plain',
       commitPolicy: rejectAnchorMutation,
     })
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -232,6 +244,7 @@ describe('Gap 2 — commit policy hook', () => {
       permission: 'member',
     })
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite: bobInvite,
@@ -248,7 +261,7 @@ describe('Gap 2 — commit policy hook', () => {
     })
 
     // Alice adds Carol; Bob applies the add commit cleanly under the policy.
-    const carolBundle = await createKeyPackageBundle({ identity: carol })
+    const carolBundle = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { invite: carolInvite } = await createInvite({
       group: aliceAfterBob,
       identity: alice,
@@ -257,6 +270,7 @@ describe('Gap 2 — commit policy hook', () => {
     })
     ledger.publish(carolInvite)
     const { commitMessage } = await commitInvite({
+      now: Date.now,
       group: aliceAfterBob,
       keyPackage: carolBundle.publicPackage,
       invite: carolInvite,
@@ -275,8 +289,12 @@ describe('Gap 2 — commit policy hook', () => {
     const rejectAll: IncomingMessageCallback = () => 'reject'
 
     const ledger = inviteLedger()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g2-override' })
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'g2-override',
+    })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -284,6 +302,7 @@ describe('Gap 2 — commit policy hook', () => {
       permission: 'member',
     })
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite: bobInvite,
@@ -298,7 +317,7 @@ describe('Gap 2 — commit policy hook', () => {
     const epochBefore = bobGroup.epoch
 
     // Alice adds Carol; Bob's per-call rejectAll overrides his accept default.
-    const carolBundle = await createKeyPackageBundle({ identity: carol })
+    const carolBundle = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { invite: carolInvite } = await createInvite({
       group: aliceAfterBob,
       identity: alice,
@@ -307,6 +326,7 @@ describe('Gap 2 — commit policy hook', () => {
     })
     ledger.publish(carolInvite)
     const { commitMessage } = await commitInvite({
+      now: Date.now,
       group: aliceAfterBob,
       keyPackage: carolBundle.publicPackage,
       invite: carolInvite,
@@ -322,13 +342,14 @@ describe('Gap 2 — commit policy hook', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'g2-derive',
       commitPolicy: rejectAnchorMutation,
     })
     expect(aliceGroup.commitPolicy).toBe(rejectAnchorMutation)
 
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -336,6 +357,7 @@ describe('Gap 2 — commit policy hook', () => {
       permission: 'member',
     })
     const { newGroup: aliceAfterBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite,

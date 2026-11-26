@@ -30,7 +30,12 @@ async function fixture(groupID: string) {
   const publish = (invite: Invite) => {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
-  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
+  const { group: created } = await createGroup({
+    now: Date.now,
+    identity: alice,
+    groupID,
+    resolveLedgerEntries,
+  })
   const { invite } = await createInvite({
     group: created,
     identity: alice,
@@ -38,8 +43,13 @@ async function fixture(groupID: string) {
     permission: 'member',
   })
   publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: bob })
-  const added = await commitInvite({ group: created, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+  const added = await commitInvite({
+    now: Date.now,
+    group: created,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: receiver } = await processWelcome({
     identity: bob,
     invite,

@@ -188,6 +188,7 @@ test('an unrelated settlement cannot revive a lapsed signer', async () => {
     timeFloor: 1200,
   })
   const { group } = await mls.createGroup({
+    now: Date.now,
     identity: signer.identity,
     groupID: 'lapsed-recovery',
     controller: {
@@ -199,13 +200,23 @@ test('an unrelated settlement cannot revive a lapsed signer', async () => {
     controllerLog: f.log,
   })
   expect(
-    await mls.recoverySignerEligible({ group, registry: candidate, signer: signer.identity.id }),
+    await mls.recoverySignerEligible({
+      now: Date.now,
+      group,
+      registry: candidate,
+      signer: signer.identity.id,
+    }),
   ).toBe(true)
   await expect(
     async () => await mls.assertRetainsKnownEffects({ controller: f.did, known, candidate }),
   ).rejects.toThrow(new mls.RecoveryKnowledgeError('floor'))
   expect(
-    await mls.recoverySignerEligible({ group, registry: known, signer: signer.identity.id }),
+    await mls.recoverySignerEligible({
+      now: Date.now,
+      group,
+      registry: known,
+      signer: signer.identity.id,
+    }),
   ).toBe(false)
 })
 
@@ -427,6 +438,7 @@ async function recoveryGroup(f: Awaited<ReturnType<typeof buildEpoch>>, log = f.
   if (signer == null) throw new Error('Missing signer')
   let known = (
     await mls.createGroup({
+      now: Date.now,
       identity,
       groupID: 'recovery-knowledge',
       controller: await fixture.timedBinding({ identity, iat: 100, exp: 2000 }),
@@ -434,6 +446,7 @@ async function recoveryGroup(f: Awaited<ReturnType<typeof buildEpoch>>, log = f.
     })
   ).group
   const bundle = await mls.createKeyPackageBundle({
+    now: Date.now,
     identity: signer.identity,
     controller: { id: f.did, prefix: log.chain, member: { add: signer.add, g: 0 }, iat: 100 },
     controllerLog: log,
@@ -443,7 +456,12 @@ async function recoveryGroup(f: Awaited<ReturnType<typeof buildEpoch>>, log = f.
     identity,
     recipientDID: signer.identity.id,
   })
-  const added = await mls.commitInvite({ group: known, keyPackage: bundle.publicPackage, invite })
+  const added = await mls.commitInvite({
+    now: Date.now,
+    group: known,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   known = added.newGroup
   let source = (
     await mls.processWelcome({
@@ -558,6 +576,7 @@ test('recovery cannot roll back a published settlement to revive a lapsed signer
   expect(await lease(r.source().registry)).toBe(1000)
   expect(
     await mls.recoverySignerEligible({
+      now: Date.now,
       group: r.group(),
       registry: r.group().registry,
       signer: r.signer.identity.id,
@@ -565,6 +584,7 @@ test('recovery cannot roll back a published settlement to revive a lapsed signer
   ).toBe(false)
   expect(
     await mls.recoverySignerEligible({
+      now: Date.now,
       group: r.group(),
       registry: r.source().registry,
       signer: r.signer.identity.id,
@@ -583,6 +603,7 @@ test('recovery cannot roll back a published settlement to revive a lapsed signer
   expect(retention.mock.settledResults[0]?.value).toHaveProperty('reason', 'forked')
   expect(
     await mls.recoverySignerEligible({
+      now: Date.now,
       group: r.group(),
       registry: r.group().registry,
       signer: r.signer.identity.id,

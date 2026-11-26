@@ -20,7 +20,7 @@ import type {
   PendingRecovery,
   PendingRecoveryConfirmationKeyParams,
 } from '@kumiai/rpc'
-import { createRuntime, type Now } from '@sozai/runtime'
+import type { Now } from '@sozai/runtime'
 
 export type RecoveryBindingRequest = {
   groupID: string
@@ -33,7 +33,7 @@ export type RecoveryBinding = (request: RecoveryBindingRequest) => Promise<Contr
 export type RecoveryReply = { groupInfo: Uint8Array; ledger: Array<string>; signer: string }
 
 export type VerdictJudgeParams = {
-  now?: Now
+  now: Now
   group: GroupHandle
   sourceTree: ClientState['ratchetTree']
   known: DeviceRegistry
@@ -54,8 +54,8 @@ export type RecoveryCandidate = PendingRecovery & {
 
 export function createRecoveryBindingState(
   identity: OwnIdentity,
-  host?: RecoveryBinding,
-  now: Now = createRuntime().now,
+  host: RecoveryBinding | undefined,
+  now: Now,
 ) {
   let binding: ControllerBinding | undefined
   let asked = false
@@ -83,7 +83,7 @@ export function createRecoveryBindingState(
   async function usable(group: GroupHandle, candidate: ControllerBinding): Promise<boolean> {
     if (unusable.has(bindingID(candidate))) return false
     try {
-      await assertRecoveryBinding({ group, identity, controller: candidate })
+      await assertRecoveryBinding({ now, group, identity, controller: candidate })
       return true
     } catch {
       return false
@@ -135,6 +135,7 @@ export function createRecoveryBindingState(
       const build = (controller?: ControllerBinding) => {
         signerEligible = group.anchor.controller == null
         return joinGroupExternal({
+          now,
           identity,
           groupInfo: reply.groupInfo,
           credential: group.credential,
@@ -153,7 +154,7 @@ export function createRecoveryBindingState(
                 group: pending,
                 registry: source.registry,
                 signer: reply.signer,
-                now: now() / 1000,
+                now,
               }))
             )
               throw new Error('Ineligible recovery attestation signer')
@@ -209,7 +210,7 @@ export function createRecoveryBindingState(
 }
 
 export function createVerdictJudge(params: VerdictJudgeParams) {
-  const { group, sourceTree, known, requestID, now = createRuntime().now } = params
+  const { group, sourceTree, known, requestID, now } = params
   let tuple: BoundRecoveryCommit | undefined
   return {
     async confirmationKey({ position, commitDigest }: PendingRecoveryConfirmationKeyParams) {
@@ -241,7 +242,7 @@ export function createVerdictJudge(params: VerdictJudgeParams) {
           group,
           registry: known,
           signer,
-          now: now() / 1000,
+          now,
         }))
           ? 'authoritative'
           : 'advisory'

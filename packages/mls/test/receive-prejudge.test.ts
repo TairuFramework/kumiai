@@ -26,7 +26,12 @@ async function threeMemberGroup(groupID: string) {
   const publish = (invite: Invite) => {
     for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   }
-  const { group: created } = await createGroup({ identity: alice, groupID, resolveLedgerEntries })
+  const { group: created } = await createGroup({
+    now: Date.now,
+    identity: alice,
+    groupID,
+    resolveLedgerEntries,
+  })
   const { invite: bobInvite } = await createInvite({
     group: created,
     identity: alice,
@@ -34,8 +39,9 @@ async function threeMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(bobInvite)
-  const bobBundle = await createKeyPackageBundle({ identity: bob })
+  const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
   const added = await commitInvite({
+    now: Date.now,
     group: created,
     keyPackage: bobBundle.publicPackage,
     invite: bobInvite,
@@ -55,8 +61,9 @@ async function threeMemberGroup(groupID: string) {
     permission: 'member',
   })
   publish(carolInvite)
-  const carolBundle = await createKeyPackageBundle({ identity: carol })
+  const carolBundle = await createKeyPackageBundle({ now: Date.now, identity: carol })
   const next = await commitInvite({
+    now: Date.now,
     group: added.newGroup,
     keyPackage: carolBundle.publicPackage,
     invite: carolInvite,

@@ -11,15 +11,24 @@ describe('welcomeKeyPackageRefs', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group } = await createGroup({ identity: alice, groupID: 'group:welcome-refs' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'group:welcome-refs',
+    })
     const { invite } = await createInvite({
       group,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bundle = await createKeyPackageBundle({ identity: bob })
-    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
+    const added = await commitInvite({
+      now: Date.now,
+      group,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const expected = [await keyPackageRef({ keyPackage: bundle.publicPackage })]
 
     expect(welcomeKeyPackageRefs(added.welcomeMessage)).toEqual(expected)

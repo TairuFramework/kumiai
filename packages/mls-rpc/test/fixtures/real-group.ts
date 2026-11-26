@@ -91,6 +91,7 @@ export async function createRealBoundRecovery(
   let offered = cached
   let source = (
     await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'bound-conformance',
       controller: creatorBinding,
@@ -99,12 +100,14 @@ export async function createRealBoundRecovery(
   ).group
   if (options.replaceStaleLeaf) {
     const staleBundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: bob,
       controller: await fixture.timedBinding({ identity: bob, iat: now - 10, exp: now + 1000 }),
     })
     const stale = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
     source = (
       await commitInvite({
+        now: Date.now,
         group: source,
         keyPackage: staleBundle.publicPackage,
         invite: stale.invite,
@@ -112,12 +115,18 @@ export async function createRealBoundRecovery(
     ).newGroup
   }
   const bundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: bob,
     controller: cached,
     controllerLog: management.log,
   })
   const { invite } = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
-  const added = await commitInvite({ group: source, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group: source,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   source = added.newGroup
   const slot = createLedgerEntrySlot()
   const group = (
@@ -165,7 +174,7 @@ export async function createRealBoundRecovery(
       const current = await access.read((handle) => handle)
       await guardedReplace({
         access,
-        next: (await renewLeaf({ group: current, binding: cached })).newGroup,
+        next: (await renewLeaf({ now: Date.now, group: current, binding: cached })).newGroup,
       })
     },
     replaceBinding: async () => {
@@ -176,6 +185,7 @@ export async function createRealBoundRecovery(
         // Preserve a root-bound peer leaf so recovery reaches candidate validation after removal.
         const current = await access.read((handle) => handle)
         const renewed = await renewLeaf({
+          now: Date.now,
           group: current,
           binding: await fixture.timedBinding({
             identity: bob,
@@ -268,6 +278,7 @@ export async function createRealGroup(size: number, groupID: string): Promise<Re
   const committerIdentity = randomIdentity()
   const committerSlot = makeSlot()
   const { group } = await createGroup({
+    now: Date.now,
     identity: committerIdentity,
     groupID,
     resolveLedgerEntries: committerSlot.resolve,
@@ -289,8 +300,9 @@ export async function createRealGroup(size: number, groupID: string): Promise<Re
       permission: 'member',
     })
     for (const token of invite.ledgerEntries) bodies.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle({ identity })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity })
     const added = await commitInvite({
+      now: Date.now,
       group: committer.handle,
       keyPackage: bundle.publicPackage,
       invite,
@@ -339,8 +351,9 @@ export async function buildRealCommit(
     permission: 'member',
   })
   for (const token of invite.ledgerEntries) group.bodies.set(ledgerEntryDigest(token), token)
-  const bundle = await createKeyPackageBundle({ identity: newcomer })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: newcomer })
   const added = await commitInvite({
+    now: Date.now,
     group: group.committer.handle,
     keyPackage: bundle.publicPackage,
     invite,
@@ -364,6 +377,7 @@ export async function buildRealExternalCommit(
   if (member == null) throw new Error(`no member at index ${params.rejoining}`)
   const { groupInfo } = await exportGroupInfo({ group: group.committer.handle })
   const { commitMessage } = await joinGroupExternal({
+    now: Date.now,
     identity: member.identity,
     groupInfo,
     credential: member.handle.credential,

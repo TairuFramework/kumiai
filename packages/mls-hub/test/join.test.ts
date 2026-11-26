@@ -59,6 +59,7 @@ async function inviteWith(recipientDID: string, keyPackage: string): Promise<Inv
     })
 
   const { group } = await createGroup({
+    now: Date.now,
     identity: inviter,
     groupID: `group:join-test-${recipientDID}`,
     resolveLedgerEntries,
@@ -71,7 +72,7 @@ async function inviteWith(recipientDID: string, keyPackage: string): Promise<Inv
   })
   for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
 
-  const added = await commitInvite({ group, keyPackage: publicPackage, invite })
+  const added = await commitInvite({ now: Date.now, group, keyPackage: publicPackage, invite })
   return {
     welcome: added.welcomeMessage,
     invite,
@@ -102,7 +103,7 @@ async function inviteFromLastResortSlot(): Promise<InviteAndCommit> {
 /** An invite for someone else entirely, so none of `hub.identity`'s retained bundles match it. */
 async function inviteAStranger(): Promise<InviteAndCommit> {
   const stranger = randomIdentity()
-  const bundle = await createKeyPackageBundle({ identity: stranger })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: stranger })
   return await inviteWith(stranger.id, encodeKeyPackage(bundle.publicPackage))
 }
 
@@ -110,6 +111,7 @@ describe('processWelcomeFromSources', () => {
   test('joins with the ordinary bundle the Welcome names, and releases it', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -137,6 +139,7 @@ describe('processWelcomeFromSources', () => {
   test('retains a last-resort bundle after its Welcome', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -159,6 +162,7 @@ describe('processWelcomeFromSources', () => {
 
   test('throws naming the refs sought when nothing matches', async () => {
     const pool = createKeyPackagePool({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store: createMemoryKeyPackagePoolStore(),
@@ -195,6 +199,7 @@ describe('processWelcomeFromSources', () => {
       }),
     }
     const pool = createKeyPackagePool({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -228,6 +233,7 @@ describe('processWelcomeFromSources', () => {
       }),
     }
     const pool = createKeyPackagePool({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -253,6 +259,7 @@ describe('processWelcomeFromSources', () => {
   test('scans past a source that does not match before checking one that does', async () => {
     const poolStore = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store: poolStore,
@@ -262,6 +269,7 @@ describe('processWelcomeFromSources', () => {
     await pool.ensureStocked().value
     const lastResortStore = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store: lastResortStore,
@@ -306,6 +314,7 @@ describe('processWelcomeFromSources', () => {
       },
     })
     const pool = createKeyPackagePool({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store: poolStore,
@@ -314,6 +323,7 @@ describe('processWelcomeFromSources', () => {
     })
     const lastResortStore = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store: lastResortStore,
@@ -350,6 +360,7 @@ describe('processWelcomeFromSources', () => {
       },
     })
     const pool = createKeyPackagePool({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store: poolStore,

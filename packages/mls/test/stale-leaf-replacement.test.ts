@@ -129,7 +129,12 @@ test('admitting a fresh key package replaces the stale leaf of the same DID', as
     bob,
     await timedBinding({ identity: bob, iat: 120, exp: 200 }),
   )
-  const result = await commitInvite({ group: author, keyPackage: bundle.publicPackage, invite })
+  const result = await commitInvite({
+    now: Date.now,
+    group: author,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
 
   for (const group of [result.newGroup]) {
     expect(leavesOf(group, bob.id)).toHaveLength(1)
@@ -179,6 +184,7 @@ test('the delivered input invite includes the stale replacement preservation clo
   )
   const before = [...f.invite.ledgerEntries]
   const result = await commitInvite({
+    now: Date.now,
     group: f.author,
     keyPackage: bundle.publicPackage,
     invite: f.invite,
@@ -226,7 +232,12 @@ test("a replacement brings a fresh admission; the re-added member's own path onl
     bob,
     await timedBinding({ identity: bob, iat: 120, exp: 200 }),
   )
-  const result = await commitInvite({ group: author, keyPackage: bundle.publicPackage, invite })
+  const result = await commitInvite({
+    now: Date.now,
+    group: author,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   await carolGroup.processMessage({ message: result.commitMessage })
 
   // The DID set did not move; the fresh KeyPackage leaf is what says a leaf was Added.
@@ -298,7 +309,7 @@ test.each([
   const bundle = await build(author, bob)
   const authorSnapshot = structuredClone(author.state)
   await expect(
-    commitInvite({ group: author, keyPackage: bundle.publicPackage, invite }),
+    commitInvite({ now: Date.now, group: author, keyPackage: bundle.publicPackage, invite }),
   ).rejects.toMatchObject({
     name: 'LeafBindingError',
     reason,
@@ -327,7 +338,7 @@ test("a key package under the live leaf's own binding cannot evict that leaf", a
   const bundle = await rawBundle(author, bob, bobBinding)
   const authorSnapshot = structuredClone(author.state)
   await expect(
-    commitInvite({ group: author, keyPackage: bundle.publicPackage, invite }),
+    commitInvite({ now: Date.now, group: author, keyPackage: bundle.publicPackage, invite }),
   ).rejects.toMatchObject({
     name: 'LeafBindingError',
     reason: 'renewal-order',
@@ -365,6 +376,7 @@ test('a group without a lifecycle controller still refuses re-adding a present D
       return token
     })
   const { group: created } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID: 'stale-leaf-standard',
     resolveLedgerEntries,
@@ -377,8 +389,9 @@ test('a group without a lifecycle controller still refuses re-adding a present D
   })
   for (const token of first.invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
   const added = await commitInvite({
+    now: Date.now,
     group: created,
-    keyPackage: (await createKeyPackageBundle({ identity: bob })).publicPackage,
+    keyPackage: (await createKeyPackageBundle({ now: Date.now, identity: bob })).publicPackage,
     invite: first.invite,
   })
   const group = added.newGroup
@@ -393,8 +406,9 @@ test('a group without a lifecycle controller still refuses re-adding a present D
   const snapshot = structuredClone(group.state)
   await expect(
     commitInvite({
+      now: Date.now,
       group,
-      keyPackage: (await createKeyPackageBundle({ identity: bob })).publicPackage,
+      keyPackage: (await createKeyPackageBundle({ now: Date.now, identity: bob })).publicPackage,
       invite: second.invite,
     }),
   ).rejects.toThrow('Commit cannot contain an Add proposal for someone already in the group')
@@ -416,7 +430,7 @@ test('two leaves for the admitted DID are refused as ambiguous', async () => {
     await timedBinding({ identity: bob, iat: 120, exp: 200 }),
   )
   await expect(
-    commitInvite({ group: duplicated, keyPackage: bundle.publicPackage, invite }),
+    commitInvite({ now: Date.now, group: duplicated, keyPackage: bundle.publicPackage, invite }),
   ).rejects.toMatchObject({
     name: 'DuplicateMemberLeafError',
   })
@@ -478,6 +492,7 @@ test('membership key package replaces a stale leaf only when newer', async () =>
   for (const iat of [90, 100, 120]) {
     const bundle = await rawBundle(f.author, f.bob, { ...f.binding, iat })
     const result = commitInvite({
+      now: Date.now,
       group: f.author,
       keyPackage: bundle.publicPackage,
       invite: f.invite,

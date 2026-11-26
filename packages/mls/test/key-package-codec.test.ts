@@ -24,7 +24,7 @@ function fromEncoded(encoded: string): Uint8Array {
 }
 
 async function samplePackage() {
-  const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
   return bundle.publicPackage
 }
 
@@ -99,12 +99,13 @@ describe('a decoded key package against real MLS', () => {
         return token
       })
 
-    const bundle = await createKeyPackageBundle({ identity: bob })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const decoded = decodeKeyPackage(encodeKeyPackage(bundle.publicPackage))
     expect(decoded).not.toBeNull()
     if (decoded == null) return
 
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'group:codec',
       resolveLedgerEntries,
@@ -118,7 +119,7 @@ describe('a decoded key package against real MLS', () => {
     publish(invite)
 
     // The decoded package, not `bundle.publicPackage`. That substitution is the whole test.
-    const added = await commitInvite({ group, keyPackage: decoded, invite })
+    const added = await commitInvite({ now: Date.now, group, keyPackage: decoded, invite })
     const { group: joined } = await processWelcome({
       identity: bob,
       invite,
@@ -134,13 +135,13 @@ describe('a decoded key package against real MLS', () => {
 
 describe('encodePrivateKeyPackage / decodePrivateKeyPackage', () => {
   test('a round trip reproduces the private key package structurally', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const decoded = decodePrivateKeyPackage(encodePrivateKeyPackage(bundle.privatePackage))
     expect(decoded).toEqual(bundle.privatePackage)
   })
 
   test('encoding is deterministic for the same private package', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     expect(encodePrivateKeyPackage(bundle.privatePackage)).toBe(
       encodePrivateKeyPackage(bundle.privatePackage),
     )
@@ -148,7 +149,7 @@ describe('encodePrivateKeyPackage / decodePrivateKeyPackage', () => {
 
   /** Same reasoning as the public codec: ts-mls's `decode()` discards the consumed length. */
   test('trailing bytes after a valid encoding are rejected', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const bytes = new Uint8Array([
       ...fromEncoded(encodePrivateKeyPackage(bundle.privatePackage)),
       0x00,
@@ -158,7 +159,7 @@ describe('encodePrivateKeyPackage / decodePrivateKeyPackage', () => {
 
   /** Canonicality is a STRING property: a store compares strings, and `fromB64` trims whitespace. */
   test('a whitespace-padded encoding is rejected', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     expect(
       decodePrivateKeyPackage(`${encodePrivateKeyPackage(bundle.privatePackage)}\n`),
     ).toBeNull()
@@ -173,7 +174,7 @@ describe('encodePrivateKeyPackage / decodePrivateKeyPackage', () => {
   })
 
   test('truncated TLS bytes are rejected', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const bytes = fromEncoded(encodePrivateKeyPackage(bundle.privatePackage))
     expect(decodePrivateKeyPackage(toB64(bytes.subarray(0, bytes.length - 1)))).toBeNull()
   })
@@ -181,8 +182,8 @@ describe('encodePrivateKeyPackage / decodePrivateKeyPackage', () => {
 
 describe('keyPackageRef', () => {
   test('is stable for the same package and differs between packages', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
-    const other = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
+    const other = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
 
     const ref = await keyPackageRef({ keyPackage: bundle.publicPackage })
     expect(await keyPackageRef({ keyPackage: bundle.publicPackage })).toBe(ref)
@@ -191,7 +192,7 @@ describe('keyPackageRef', () => {
 
   /** The ref must depend on the package's bytes, not on object identity or insertion order. */
   test('survives a codec round trip', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const decoded = decodeKeyPackage(encodeKeyPackage(bundle.publicPackage))
     expect(decoded).not.toBeNull()
     if (decoded == null) return
@@ -201,7 +202,7 @@ describe('keyPackageRef', () => {
   })
 
   test('is base64 of a 32-byte hash for the default ciphersuite', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const ref = await keyPackageRef({ keyPackage: bundle.publicPackage })
     expect(fromEncoded(ref)).toHaveLength(32)
   })

@@ -9,8 +9,8 @@ import {
   keyPackageRef,
 } from '@kumiai/mls'
 import { AsyncResult, Result } from '@sozai/result'
+import type { Now } from '@sozai/runtime'
 
-import type { Now } from './clock.js'
 import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
 import { assertKind, toBundles } from './records.js'
@@ -21,7 +21,7 @@ const DEFAULT_LOW_WATER = 10
 const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 
 export type KeyPackagePoolParams = {
-  now?: Now
+  now: Now
   /** The identity packages are minted for; also the store's owner key. */
   identity: OwnIdentity
   client: Pick<HubClient, 'uploadKeyPackages' | 'keyPackageStatus'>
@@ -71,7 +71,7 @@ export type KeyPackagePool = {
 export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePool {
   const {
     identity,
-    now = () => Date.now(),
+    now,
     client,
     store,
     options,
@@ -113,7 +113,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     const bundle = await createKeyPackageBundle({
       identity,
       ...options,
-      nowSeconds: Math.floor(now() / 1000),
+      now,
     })
     const record: KeyPackageRecord = {
       kind: 'ordinary',

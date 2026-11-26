@@ -87,7 +87,11 @@ function roleToken(invite: Invite): string {
 describe('GroupHandle lifecycle', () => {
   test('creates a group with single member', async () => {
     const alice = randomIdentity()
-    const { group, credential } = await createGroup({ identity: alice, groupID: 'test-group-1' })
+    const { group, credential } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'test-group-1',
+    })
 
     expect(group.groupID).toBe('test-group-1')
     expect(group.epoch).toBe(0n)
@@ -100,7 +104,11 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'invite-group' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'invite-group',
+    })
 
     const { invite } = await createInvite({
       group: aliceGroup,
@@ -111,8 +119,9 @@ describe('GroupHandle lifecycle', () => {
     expect(invite.groupID).toBe('invite-group')
     expect(invite.inviterID).toBe(alice.id)
 
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,
@@ -139,15 +148,20 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'msg-group' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'msg-group',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,
@@ -177,15 +191,20 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'remove-group' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'remove-group',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,
@@ -215,15 +234,20 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const aliceDevice2 = randomIdentity()
 
-    const { group } = await createGroup({ identity: alice, groupID: 'alice-devices' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'alice-devices',
+    })
     const { invite } = await createInvite({
       group,
       identity: alice,
       recipientDID: aliceDevice2.id,
       permission: 'admin',
     })
-    const device2KeyBundle = await createKeyPackageBundle({ identity: aliceDevice2 })
+    const device2KeyBundle = await createKeyPackageBundle({ now: Date.now, identity: aliceDevice2 })
     const { welcomeMessage, newGroup: updatedGroup } = await commitInvite({
+      now: Date.now,
       group,
       keyPackage: device2KeyBundle.publicPackage,
       invite,
@@ -247,7 +271,11 @@ describe('GroupHandle lifecycle', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: '3-member' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: '3-member',
+    })
 
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
@@ -255,8 +283,9 @@ describe('GroupHandle lifecycle', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage: bobWelcome, newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -275,8 +304,9 @@ describe('GroupHandle lifecycle', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const { welcomeMessage: charlieWelcome, newGroup: groupWith3 } = await commitInvite({
+      now: Date.now,
       group: groupWithBob,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -304,15 +334,20 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'epoch-test' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'epoch-test',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: epoch1Group } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -337,8 +372,9 @@ describe('GroupHandle lifecycle', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const { newGroup: epoch2Group } = await commitInvite({
+      now: Date.now,
       group: epoch1Group,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -355,15 +391,20 @@ describe('GroupHandle lifecycle', () => {
     const charlie = randomIdentity()
 
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wire-add' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'wire-add',
+    })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -400,8 +441,9 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const addCharlie = await commitInvite({
+      now: Date.now,
       group: addBob.newGroup,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -420,15 +462,20 @@ describe('GroupHandle lifecycle', () => {
 
     // alice + bob + charlie group, with bob joined so he can receive the remove commit.
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wire-remove' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'wire-remove',
+    })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -449,8 +496,9 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const addCharlie = await commitInvite({
+      now: Date.now,
       group: addBob.newGroup,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -485,15 +533,20 @@ describe('GroupHandle lifecycle', () => {
     const bob = randomIdentity()
     const mallory = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'nonadmin-invite' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'nonadmin-invite',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -536,15 +589,20 @@ describe('GroupHandle lifecycle', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'peek-epoch' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'peek-epoch',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -579,15 +637,20 @@ describe('GroupHandle lifecycle', () => {
     const charlie = randomIdentity()
 
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wire-stale' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'wire-stale',
+    })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const addBob = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -609,8 +672,9 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const addCharlie = await commitInvite({
+      now: Date.now,
       group: addBob.newGroup,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -632,15 +696,20 @@ describe('ratchet tree extension', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'ext-join' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'ext-join',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: updatedAlice } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -668,7 +737,7 @@ describe('ratchet tree extension', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: g1 } = await createGroup({ identity: alice, groupID: 'ext-3m' })
+    const { group: g1 } = await createGroup({ now: Date.now, identity: alice, groupID: 'ext-3m' })
 
     const { invite: bobInvite } = await createInvite({
       group: g1,
@@ -676,8 +745,9 @@ describe('ratchet tree extension', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage: bobWelcome, newGroup: g2 } = await commitInvite({
+      now: Date.now,
       group: g1,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -695,8 +765,9 @@ describe('ratchet tree extension', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const { welcomeMessage: charlieWelcome, newGroup: g3 } = await commitInvite({
+      now: Date.now,
       group: g2,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -730,15 +801,20 @@ describe('JSON serialization null safety', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'null-2m' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'null-2m',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: updatedAlice } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -765,7 +841,11 @@ describe('JSON serialization null safety', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'null-3m' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'null-3m',
+    })
 
     // Add Bob normally
     const { invite: bobInvite } = await createInvite({
@@ -774,8 +854,9 @@ describe('JSON serialization null safety', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage: bobWelcome, newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -795,8 +876,9 @@ describe('JSON serialization null safety', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const { welcomeMessage: charlieWelcome, newGroup: groupWith3 } = await commitInvite({
+      now: Date.now,
       group: groupWithBob,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -827,7 +909,11 @@ describe('JSON serialization null safety', () => {
     const charlie = randomIdentity()
     const dave = randomIdentity()
 
-    const { group: g1 } = await createGroup({ identity: alice, groupID: 'null-remove' })
+    const { group: g1 } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'null-remove',
+    })
 
     // Add Bob
     const { invite: bobInvite } = await createInvite({
@@ -836,8 +922,9 @@ describe('JSON serialization null safety', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage: bobWelcome, newGroup: g2 } = await commitInvite({
+      now: Date.now,
       group: g1,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -857,8 +944,9 @@ describe('JSON serialization null safety', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const { newGroup: g3 } = await commitInvite({
+      now: Date.now,
       group: g2,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -875,8 +963,9 @@ describe('JSON serialization null safety', () => {
       recipientDID: dave.id,
       permission: 'member',
     })
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
     const { welcomeMessage: daveWelcome, newGroup: g5 } = await commitInvite({
+      now: Date.now,
       group: g4,
       keyPackage: daveKP.publicPackage,
       invite: daveInvite,
@@ -904,15 +993,20 @@ describe('JSON serialization null safety', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'null-find' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'null-find',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: updatedAlice } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -940,7 +1034,11 @@ describe('GroupHandle.listMembers', () => {
     const bob = randomIdentity()
     const charlie = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'list-members' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'list-members',
+    })
 
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
@@ -948,8 +1046,9 @@ describe('GroupHandle.listMembers', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -961,8 +1060,9 @@ describe('GroupHandle.listMembers', () => {
       recipientDID: charlie.id,
       permission: 'member',
     })
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const { newGroup: groupWith3 } = await commitInvite({
+      now: Date.now,
       group: groupWithBob,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -987,15 +1087,20 @@ describe('GroupHandle.listMembers', () => {
 
     // Alice creates, adds Bob. Bob joins via Welcome.
     const tokens = new Map<string, string>()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'diff-group' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'diff-group',
+    })
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage: bobWelcome, newGroup: aliceWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -1019,8 +1124,9 @@ describe('GroupHandle.listMembers', () => {
       permission: 'member',
     })
     publishInvite(tokens, charlieInvite)
-    const charlieKP = await createKeyPackageBundle({ identity: charlie })
+    const charlieKP = await createKeyPackageBundle({ now: Date.now, identity: charlie })
     const { commitMessage: addCommit, newGroup: aliceWith3 } = await commitInvite({
+      now: Date.now,
       group: aliceWithBob,
       keyPackage: charlieKP.publicPackage,
       invite: charlieInvite,
@@ -1052,15 +1158,20 @@ describe('GroupHandle.listMembers', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'garbage-leaf' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'garbage-leaf',
+    })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { newGroup: groupWithBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite,
@@ -1096,9 +1207,13 @@ describe('peer4 MLS group end-to-end', () => {
   it('two peer4 members exchange application messages', async () => {
     const alice = await makePeer4()
     const bob = await makePeer4()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g-peer4-1' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'g-peer4-1',
+    })
 
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -1106,6 +1221,7 @@ describe('peer4 MLS group end-to-end', () => {
       permission: 'member',
     })
     const commit = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite,
@@ -1130,8 +1246,12 @@ describe('peer4 MLS group end-to-end', () => {
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],
       didMethod: 'key',
     })
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g-mixed-1' })
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'g-mixed-1',
+    })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -1139,6 +1259,7 @@ describe('peer4 MLS group end-to-end', () => {
       permission: 'member',
     })
     const commit = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite,
@@ -1157,7 +1278,11 @@ describe('peer4 MLS group end-to-end', () => {
 
   it('binds an MLS leaf for a peer4 identity with multiple sig keys', async () => {
     const alice = await makePeer4(2)
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'g-multisig-1' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'g-multisig-1',
+    })
     // group creation succeeds → auth service bound the primary sig key successfully.
     expect(aliceGroup.memberCount).toBe(1)
     expect(aliceGroup.findMemberLeafIndex(alice.id)).toBe(0)
@@ -1166,8 +1291,12 @@ describe('peer4 MLS group end-to-end', () => {
   it('removes a peer4 member and rejects subsequent traffic from them', async () => {
     const alice = await makePeer4()
     const bob = await makePeer4()
-    const { group: aliceGroup0 } = await createGroup({ identity: alice, groupID: 'g-remove-1' })
-    const bobBundle = await createKeyPackageBundle({ identity: bob })
+    const { group: aliceGroup0 } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'g-remove-1',
+    })
+    const bobBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { invite } = await createInvite({
       group: aliceGroup0,
       identity: alice,
@@ -1175,6 +1304,7 @@ describe('peer4 MLS group end-to-end', () => {
       permission: 'member',
     })
     const addCommit = await commitInvite({
+      now: Date.now,
       group: aliceGroup0,
       keyPackage: bobBundle.publicPackage,
       invite,
@@ -1205,7 +1335,7 @@ function creatorLeafExtensions(state: { ratchetTree: ReadonlyArray<unknown> }): 
 describe('GroupHandle control state', () => {
   test('createGroup seeds the roster, anchor, and ledger head from the genesis anchor', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'seeded' })
+    const { group } = await createGroup({ now: Date.now, identity: alice, groupID: 'seeded' })
 
     expect([...group.roster.roles.entries()]).toEqual([[normalizeDID(alice.id), 'admin']])
     expect(group.anchor.creatorDID).toBe(alice.id)
@@ -1220,7 +1350,7 @@ describe('GroupHandle control state', () => {
   test('applyLedgerEntries promotes a member and appends a repeated token', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'promote' })
+    const { group } = await createGroup({ now: Date.now, identity: alice, groupID: 'promote' })
 
     const token = await signLedgerEntry({
       identity: alice,
@@ -1248,7 +1378,7 @@ describe('GroupHandle control state', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const charlie = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'defensive' })
+    const { group } = await createGroup({ now: Date.now, identity: alice, groupID: 'defensive' })
 
     // Signed for a different group — a replayed grant, dropped on the groupID guard.
     const crossGroup = await signLedgerEntry({
@@ -1280,7 +1410,11 @@ describe('GroupHandle control state', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'derived-ledger' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'derived-ledger',
+    })
 
     const promoteBob = await signLedgerEntry({
       identity: alice,
@@ -1303,8 +1437,9 @@ describe('GroupHandle control state', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { newGroup } = await commitInvite({
+      now: Date.now,
       group: alicePromoted,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -1317,7 +1452,11 @@ describe('GroupHandle control state', () => {
 
   test('restoreGroup over an anchorless state fails closed', async () => {
     const alice = randomIdentity()
-    const { group, credential } = await createGroup({ identity: alice, groupID: 'strip-anchor' })
+    const { group, credential } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'strip-anchor',
+    })
 
     // Hand-strip the anchor extension from the restored state. Without a seed the
     // roster cannot be established, so construction must throw rather than install
@@ -1338,7 +1477,11 @@ describe('GroupHandle control state', () => {
   test('restoreGroup rehydrates the roster from persisted ledger entries', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group, credential } = await createGroup({ identity: alice, groupID: 'rehydrate' })
+    const { group, credential } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'rehydrate',
+    })
 
     const token = await signLedgerEntry({
       identity: alice,
@@ -1372,6 +1515,7 @@ async function twoMemberGroup(opts?: { aliceOptions?: GroupOptions; bobOptions?:
   const bob = randomIdentity()
   const groupID = `enforce-${Math.random().toString(36).slice(2)}`
   const { group: aliceGroup0 } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID,
     ...opts?.aliceOptions,
@@ -1382,8 +1526,9 @@ async function twoMemberGroup(opts?: { aliceOptions?: GroupOptions; bobOptions?:
     recipientDID: bob.id,
     permission: 'member',
   })
-  const bobKP = await createKeyPackageBundle({ identity: bob })
+  const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
   const { welcomeMessage, newGroup: aliceGroup } = await commitInvite({
+    now: Date.now,
     group: aliceGroup0,
     keyPackage: bobKP.publicPackage,
     invite,
@@ -1507,7 +1652,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     // Bob (member) commits an Add of Carol. commitInvite refuses to build it for a
     // non-admin, so the raw commit stands in for a client that skipped that guard —
     // the receiving side must reject it on its own.
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const bobCommit = await addCommitBytes(bobGroup, carolKP.publicPackage)
 
     const epochBefore = aliceGroup.epoch
@@ -1535,8 +1680,9 @@ describe('GroupHandle commit enforcement (default-on)', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -1550,7 +1696,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
   test("rejects an admin's Add of a DID the roster never granted a role to, on receipt", async () => {
     const { aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
 
     // Alice is admin here, so this clears the admin gate the two `CommitRejectedError` tests
     // above (and below) stop at. Dave never appears in any roster entry, so this exercises the
@@ -1809,8 +1955,9 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -1831,7 +1978,7 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
     })
     const carol = randomIdentity()
 
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const bobCommit = await addCommitBytes(bobGroup, carolKP.publicPackage)
 
     await aliceGroup.processMessage({ message: bobCommit })
@@ -1922,7 +2069,7 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
 
     const carol = randomIdentity()
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const bobAddCommit = await addCommitBytes(
       bobGroup,
       carolKP.publicPackage,
@@ -1969,8 +2116,9 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
       ledgerEntries: [...invite.ledgerEntries.slice(0, -1), promoteBob, roleToken(invite)],
     }
     publishInvite(tokens, withPromotion)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolKP.publicPackage,
       invite: withPromotion,
@@ -2013,8 +2161,9 @@ describe('an invite seeds the roster', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -2039,8 +2188,9 @@ describe('an invite seeds the roster', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -2075,7 +2225,11 @@ describe('an invite seeds the roster', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'wrong-invitee' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'wrong-invitee',
+    })
 
     // The Add is Bob's, but the invite handed to him names Carol.
     const { invite: carolInvite } = await createInvite({
@@ -2084,12 +2238,17 @@ describe('an invite seeds the roster', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
 
     // The refusal is the inviter's now: the leaf that would join is not the identity the
     // invite grants a role to, so the commit is never built.
     await expect(
-      commitInvite({ group: aliceGroup, keyPackage: bobKP.publicPackage, invite: carolInvite }),
+      commitInvite({
+        now: Date.now,
+        group: aliceGroup,
+        keyPackage: bobKP.publicPackage,
+        invite: carolInvite,
+      }),
     ).rejects.toThrow(InviteRecipientMismatchError)
   })
 
@@ -2098,6 +2257,7 @@ describe('an invite seeds the roster', () => {
     const bob = randomIdentity()
     const carol = randomIdentity()
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'wrong-invite-at-joiner',
     })
@@ -2109,8 +2269,9 @@ describe('an invite seeds the roster', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -2149,6 +2310,7 @@ describe('an invite carries the group ledger', () => {
     const bob = randomIdentity()
     const carol = randomIdentity()
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'ledger-before-join',
     })
@@ -2173,8 +2335,9 @@ describe('an invite carries the group ledger', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: alicePromoted,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -2225,8 +2388,9 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publishInvite(tokens, carolInvite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: promotion.newGroup,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,
@@ -2249,8 +2413,9 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publishInvite(tokens, daveInvite)
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
     const addDave = await commitInvite({
+      now: Date.now,
       group: bobGroup,
       keyPackage: daveKP.publicPackage,
       invite: daveInvite,
@@ -2289,8 +2454,9 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: promotion.newGroup,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -2318,7 +2484,11 @@ describe('an invite carries the group ledger', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'token-roundtrip' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'token-roundtrip',
+    })
 
     const promoteBob = await signLedgerEntry({
       identity: alice,
@@ -2339,8 +2509,9 @@ describe('an invite carries the group ledger', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { newGroup } = await commitInvite({
+      now: Date.now,
       group: alicePromoted,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -2390,9 +2561,14 @@ describe('an invite carries the group ledger', () => {
     // Alice is an honest admin, but the entries she would enact are not hers to vouch
     // for: she folds them as her receivers would and refuses to author a commit they
     // would reject. An entry the fold drops must never reach the head chain.
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
     await expect(
-      commitInvite({ group: aliceGroup, keyPackage: daveKP.publicPackage, invite: tampered }),
+      commitInvite({
+        now: Date.now,
+        group: aliceGroup,
+        keyPackage: daveKP.publicPackage,
+        invite: tampered,
+      }),
     ).rejects.toThrow(/cannot enact ledger entry/)
     expect(aliceGroup.roster.roles.get(normalizeDID(carol.id))).toBeUndefined()
   })
@@ -2401,7 +2577,11 @@ describe('an invite carries the group ledger', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'ordered-ledger' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'ordered-ledger',
+    })
 
     const promoteBob = await signLedgerEntry({
       identity: alice,
@@ -2436,8 +2616,9 @@ describe('an invite carries the group ledger', () => {
     // Order survives the wire, so the joiner folds the pair the same way round.
     expect(invite.ledgerEntries.slice(0, 2)).toEqual([promoteBob, demoteBob])
 
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { welcomeMessage, newGroup } = await commitInvite({
+      now: Date.now,
       group: aliceRotated,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -2468,6 +2649,7 @@ describe('an invite carries the group ledger', () => {
     }
 
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'rotation-group',
       ...options,
@@ -2494,8 +2676,9 @@ describe('an invite carries the group ledger', () => {
       permission: 'admin',
     })
     publish(bobInvite.ledgerEntries)
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const addBob = await commitInvite({
+      now: Date.now,
       group: alicePromoted,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -2535,8 +2718,9 @@ describe('an invite carries the group ledger', () => {
       permission: 'member',
     })
     publish(carolInvite.ledgerEntries)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: demotion.newGroup,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,
@@ -2568,8 +2752,9 @@ async function threeMemberGroup() {
     permission: 'member',
   })
   publishInvite(tokens, invite)
-  const carolKP = await createKeyPackageBundle({ identity: carol })
+  const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
   const addCarol = await commitInvite({
+    now: Date.now,
     group: aliceGroup,
     keyPackage: carolKP.publicPackage,
     invite,
@@ -2626,8 +2811,9 @@ describe("a non-creator admin's invite authority follows the roster", () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const addCarol = await commitInvite({
+      now: Date.now,
       group: bobGroup,
       keyPackage: carolKP.publicPackage,
       invite,
@@ -2754,8 +2940,9 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
       permission: 'member',
     })
     publishInvite(tokens, invite)
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
     const addDave = await commitInvite({
+      now: Date.now,
       group: promotion.newGroup,
       keyPackage: daveKP.publicPackage,
       invite,
@@ -2830,8 +3017,9 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
       recipientDID: dave.id,
       permission: 'member',
     })
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
     const addDave = await commitInvite({
+      now: Date.now,
       group: afterPromotion,
       keyPackage: daveKP.publicPackage,
       invite,
@@ -2879,8 +3067,9 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
       recipientDID: dave.id,
       permission: 'member',
     })
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
     const addDave = await commitInvite({
+      now: Date.now,
       group: afterPromotion,
       keyPackage: daveKP.publicPackage,
       invite,
@@ -3035,7 +3224,7 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
 async function demotedThroughRepeat(groupID: string) {
   const alice = randomIdentity()
   const bob = randomIdentity()
-  const { group, credential } = await createGroup({ identity: alice, groupID })
+  const { group, credential } = await createGroup({ now: Date.now, identity: alice, groupID })
   const role = async (value: 'admin' | 'member') =>
     await signLedgerEntry({
       identity: alice,
@@ -3058,7 +3247,7 @@ describe('the ledger is an ordered log, not a set of claims', () => {
   test('an admin can be demoted back to a role they previously held', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'redemotion' })
+    const { group } = await createGroup({ now: Date.now, identity: alice, groupID: 'redemotion' })
 
     const grantMember = await signLedgerEntry({
       identity: alice,
@@ -3282,8 +3471,13 @@ describe('the ledger is an ordered log, not a set of claims', () => {
     })
     expect(invite.ledgerEntries.slice(0, 3)).toEqual(group.ledgerTokens)
 
-    const carolKP = await createKeyPackageBundle({ identity: carol })
-    const addCarol = await commitInvite({ group, keyPackage: carolKP.publicPackage, invite })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
+    const addCarol = await commitInvite({
+      now: Date.now,
+      group,
+      keyPackage: carolKP.publicPackage,
+      invite,
+    })
     // The joiner recomputes the head over the invite's list; a repeat that did not
     // reproduce it would throw LedgerIncompleteError here.
     const { group: carolGroup } = await processWelcome({
@@ -3320,7 +3514,7 @@ describe('GroupHandle external-join commit enforcement', () => {
     // external_init that adds her own leaf, with no self-remove (she has no stale
     // leaf). This is the RFC join-via-external-commit flow a stranger would use.
     const { groupInfo } = await exportGroupInfo({ group: aliceGroup })
-    const malloryKP = await createKeyPackageBundle({ identity: mallory })
+    const malloryKP = await createKeyPackageBundle({ now: Date.now, identity: mallory })
     const { publicMessage } = await mlsJoinGroupExternal({
       context: aliceGroup.context,
       groupInfo: decodeGroupInfo(groupInfo),
@@ -3354,6 +3548,7 @@ describe('GroupHandle external-join commit enforcement', () => {
     const carol = randomIdentity()
 
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'resync-accept-group',
     })
@@ -3363,8 +3558,9 @@ describe('GroupHandle external-join commit enforcement', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKP = await createKeyPackageBundle({ identity: bob })
+    const bobKP = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKP.publicPackage,
       invite: bobInvite,
@@ -3384,8 +3580,9 @@ describe('GroupHandle external-join commit enforcement', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
-    const carolKP = await createKeyPackageBundle({ identity: carol })
+    const carolKP = await createKeyPackageBundle({ now: Date.now, identity: carol })
     const { newGroup: aliceAfterCarol } = await commitInvite({
+      now: Date.now,
       group: aliceAfterBob,
       keyPackage: carolKP.publicPackage,
       invite: carolInvite,
@@ -3400,6 +3597,7 @@ describe('GroupHandle external-join commit enforcement', () => {
     // Bob external-rejoins and Alice processes the commit: accepted, Bob still present.
     const { groupInfo } = await exportGroupInfo({ group: aliceAdvanced })
     const { commitMessage, group: bobRejoined } = await joinGroupExternal({
+      now: Date.now,
       identity: bob,
       groupInfo,
       credential: bobCred,
@@ -3528,7 +3726,7 @@ describe('standalone proposals are judged by the same commit policy', () => {
   it("rejects a non-admin member's standalone add on receipt and never stores it", async () => {
     const { bobGroup, aliceGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
     const bobAdd = await createProposal({
       context: bobGroup.context,
       state: bobGroup.state,
@@ -3580,7 +3778,7 @@ describe('the committer excludes pending proposals when authoring a commit', () 
   it("drops a non-admin's pending proposal from an admin's eviction commit", async () => {
     const { bob, bobGroup, aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
 
     // A non-admin proposal that — on a peer without receipt enforcement, or one that
     // stored it before this fix — sits in the honest committer's pending set. Seed it
@@ -3616,7 +3814,7 @@ describe('the committer excludes pending proposals when authoring a commit', () 
   it("excludes an admin's pending proposal from an unrelated commit", async () => {
     const { alice, bob, aliceGroup, carolGroup, tokens } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
 
     // Dave's grant lands FIRST, in its own commit. The receive-side add rule binds an Add to
     // the roster the commit produces, so an Add absorbed by an unrelated commit — which enacts
@@ -3667,7 +3865,7 @@ describe('the committer excludes pending proposals when authoring a commit', () 
   it("drops an admin's pending add of a DID the roster never granted", async () => {
     const { bob, aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
-    const daveKP = await createKeyPackageBundle({ identity: dave })
+    const daveKP = await createKeyPackageBundle({ now: Date.now, identity: dave })
 
     // No grant for Dave anywhere. Before the receive-side add rule this add rode the eviction
     // commit and Dave joined a group whose roster named him nothing; now the committer's own
@@ -3706,6 +3904,7 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   const controller = parseMLSCredentialIdentity(leaf.identity).controller
   if (controller == null) throw new Error('fixture has no controller binding')
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'lifecycle-genesis',
     controller,
@@ -3720,6 +3919,7 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   expect([...group.roster.roles]).toEqual([[leaf.controllerID, 'admin']])
   expect(group.listMembers()[0]?.controller).toBe(leaf.controllerID)
   const { group: maximum } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'maximum-genesis',
     controller,
@@ -3731,7 +3931,11 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
     leafLifetime: 604_800,
     trustedGrantLifetime: 31_536_000,
   })
-  const { group: standard } = await createGroup({ identity, groupID: 'standard-genesis' })
+  const { group: standard } = await createGroup({
+    now: Date.now,
+    identity,
+    groupID: 'standard-genesis',
+  })
   expect([...standard.roster.roles]).toEqual([[identity.id, 'admin']])
   expect(readGroupAnchor(standard)?.controller).toBeUndefined()
   for (const [field, maximum] of [
@@ -3741,6 +3945,7 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
     for (const value of [0, maximum + 1, Number.POSITIVE_INFINITY, Number.NaN, 1.5]) {
       await expect(
         createGroup({
+          now: Date.now,
           identity,
           groupID: 'invalid-genesis',
           controller,
@@ -3752,6 +3957,7 @@ test('lifecycleGenesisPinsControllerAndCeilings', async () => {
   }
   await expect(
     createGroup({
+      now: Date.now,
       identity,
       groupID: 'short-genesis',
       controller,
@@ -3771,6 +3977,7 @@ test('lifecycle authentication uses anchored lifetimes after creation and restor
   const controller = parseMLSCredentialIdentity(leaf.identity).controller
   if (controller == null) throw new Error('fixture has no controller binding')
   const created = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'anchored-auth',
     controller,

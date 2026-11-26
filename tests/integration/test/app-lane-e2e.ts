@@ -332,6 +332,7 @@ export async function createFoundingGroup(
   entrySlot: LedgerEntrySlot,
 ): Promise<GroupHandle> {
   const { group } = await createGroup({
+    now: Date.now,
     identity: creator,
     groupID,
     resolveLedgerEntries: entrySlot.resolve,
@@ -357,7 +358,7 @@ export async function mintInvite(params: {
     permission: 'member',
   })
   params.bodies.publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: params.invitee })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: params.invitee })
   return { invite, bundle }
 }
 
@@ -373,6 +374,7 @@ export function buildInviteCommit(
 ): () => Promise<PendingCommit> {
   return async () => {
     const committed = await commitInvite({
+      now: Date.now,
       group: member.handle(),
       keyPackage: material.bundle.publicPackage,
       invite: material.invite,

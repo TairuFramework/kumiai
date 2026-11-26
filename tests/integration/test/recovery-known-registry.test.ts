@@ -44,6 +44,7 @@ async function setup(
   const identity = fixture.agent(41)
   let group = (
     await createGroup({
+      now: Date.now,
       identity,
       groupID: 'lifecycle-verdict',
       ...(options.standard
@@ -56,6 +57,7 @@ async function setup(
   ).group
   const bob = fixture.agent(61)
   const bundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: bob,
     controller: await fixture.timedBinding({ identity: bob, iat: 100, exp: 200, ...options }),
   })
@@ -65,7 +67,12 @@ async function setup(
     recipientDID: bob.id,
     ...(options.standard ? { permission: 'member' } : {}),
   })
-  const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   group = added.newGroup
   const responderGroup = (
     await processWelcome({
@@ -112,6 +119,7 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
   const s = await setup()
   const mallory = fixture.agent(81)
   const bundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: mallory,
     controller: await fixture.timedBinding({ identity: mallory, iat: 100, exp: 200 }),
   })
@@ -120,7 +128,12 @@ test('the adapter refuses a reply whose ledger omits an own-ledger revocation', 
     identity: s.identity,
     recipientDID: mallory.id,
   })
-  const added = await commitInvite({ group: s.group(), keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group: s.group(),
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const malloryGroup = (
     await processWelcome({
       identity: mallory,

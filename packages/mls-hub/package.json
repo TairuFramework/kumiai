@@ -40,7 +40,8 @@
     "@kumiai/hub-client": "workspace:^",
     "@kumiai/hub-protocol": "workspace:^",
     "@kumiai/mls": "workspace:^",
-    "@sozai/result": "catalog:"
+    "@sozai/result": "catalog:",
+    "@sozai/runtime": "catalog:"
   },
   "devDependencies": {
     "@enkaku/client": "catalog:",

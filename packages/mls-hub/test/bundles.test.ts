@@ -47,6 +47,7 @@ describe('bundles', () => {
   test('returns the retained bundles newest first', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -88,6 +89,7 @@ describe('bundles', () => {
   test('a notAfter tie breaks on ref, agreeing with which record holds the slot', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -100,7 +102,10 @@ describe('bundles', () => {
 
     // A second, genuinely distinct last-resort bundle, forced to share `first`'s `notAfter` exactly
     // so the ref tie-break — not the notAfter ordering — is what decides.
-    const secondBundle = await createLastResortKeyPackageBundle({ identity: hub.identity })
+    const secondBundle = await createLastResortKeyPackageBundle({
+      now: Date.now,
+      identity: hub.identity,
+    })
     const secondRecord: LastResortRecord = {
       kind: 'last-resort',
       ref: await keyPackageRef({ keyPackage: secondBundle.publicPackage }),
@@ -134,6 +139,7 @@ describe('bundles', () => {
   test('throws on a record whose private package will not decode', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -154,6 +160,7 @@ describe('bundles', () => {
   test('throws on a record whose public package will not decode', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -173,6 +180,7 @@ describe('bundles', () => {
 
   test('an owner with no records returns an empty array', async () => {
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store: createMemoryLastResortStore(),
@@ -191,6 +199,7 @@ describe('a provisioned bundle against real MLS', () => {
   test('joins a group using only what the store gave back', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -204,6 +213,7 @@ describe('a provisioned bundle against real MLS', () => {
     const alice = randomIdentity()
     const ledger = createLedger()
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'group:provisioned',
       resolveLedgerEntries: ledger.resolveLedgerEntries,
@@ -216,7 +226,12 @@ describe('a provisioned bundle against real MLS', () => {
     })
     ledger.publish(invite)
 
-    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+    const added = await commitInvite({
+      now: Date.now,
+      group,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const { group: joined } = await processWelcome({
       identity: hub.identity,
       invite,
@@ -237,6 +252,7 @@ describe('a provisioned bundle against real MLS', () => {
   test('the same provisioned bundle joins two different groups', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      now: Date.now,
       identity: hub.identity,
       client: hub.client,
       store,
@@ -250,6 +266,7 @@ describe('a provisioned bundle against real MLS', () => {
     const ledger = createLedger()
     const join = async (inviter: ReturnType<typeof randomIdentity>, groupID: string) => {
       const { group } = await createGroup({
+        now: Date.now,
         identity: inviter,
         groupID,
         resolveLedgerEntries: ledger.resolveLedgerEntries,
@@ -261,7 +278,12 @@ describe('a provisioned bundle against real MLS', () => {
         permission: 'member',
       })
       ledger.publish(invite)
-      const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+      const added = await commitInvite({
+        now: Date.now,
+        group,
+        keyPackage: bundle.publicPackage,
+        invite,
+      })
       const { group: joined } = await processWelcome({
         identity: hub.identity,
         invite,

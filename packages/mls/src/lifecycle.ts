@@ -1,5 +1,6 @@
 import { decodeKey } from '@kokuin/controller'
 import { type CryptoOptions, normalizeDID, type OwnIdentity } from '@kokuin/token'
+import type { Now } from '@sozai/runtime'
 import {
   type ClientState,
   defaultCredentialTypes,
@@ -939,6 +940,8 @@ export async function assertSenderNotLapsed(params: AssertSenderNotLapsedParams)
 }
 
 export type AssertRecoveryBindingParams = YieldOptions & {
+  /** Clock for the author-time check of the replacement binding, read once. */
+  now: Now
   group: GroupHandle
   identity: OwnIdentity
   controller: ControllerBinding
@@ -947,7 +950,10 @@ export type AssertRecoveryBindingParams = YieldOptions & {
 /** @internal Check a replacement against the complete external admission predicates. */
 export async function assertRecoveryBinding(params: AssertRecoveryBindingParams): Promise<void> {
   const { group, identity: ownIdentity, controller } = params
-  assertBindingAuthorTime(controller)
+  assertBindingAuthorTime({
+    controller: controller,
+    nowSeconds: Math.floor(params.now() / 1000),
+  })
   const index = group.findMemberLeafIndex(normalizeDID(ownIdentity.id))
   const old = index == null ? undefined : leafAt(group.state.ratchetTree, index)
   if (old == null || index == null) throw new LeafBindingError('identity-change')

@@ -21,8 +21,8 @@ import {
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 import { getLogger, getReporter } from '@sozai/log'
+import type { Now } from '@sozai/runtime'
 
-import type { Now } from './clock.js'
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
 import type { WakeDispatcher } from './wake.js'

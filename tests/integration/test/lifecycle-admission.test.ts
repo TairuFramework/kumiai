@@ -30,7 +30,7 @@ import { createGapHub } from './gap-hub.js'
 
 test('real MLS publishes paired snapshots only after an awaited adoption callback', async () => {
   const identity = randomIdentity()
-  const created = await createGroup({ identity, groupID: 'admission-integration' })
+  const created = await createGroup({ now: Date.now, identity, groupID: 'admission-integration' })
   let handle: GroupHandle = created.group
   const epochBefore = Number(handle.epoch)
   const access = simpleHandleAccess({
@@ -71,7 +71,9 @@ test('accepted adoption entries seal at the matching admission epoch once the de
   const putEntered = new Promise<void>((resolve) => {
     enteredPut = resolve
   })
-  let handle = (await createGroup({ identity, groupID: 'admission-dispatch-integration' })).group
+  let handle = (
+    await createGroup({ now: Date.now, identity, groupID: 'admission-dispatch-integration' })
+  ).group
   const epochBefore = Number(handle.epoch)
   const access = simpleHandleAccess({
     handle: () => handle,

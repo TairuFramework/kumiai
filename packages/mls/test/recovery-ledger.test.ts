@@ -63,8 +63,13 @@ async function inviteMember(
     permission: 'member',
   })
   fixture.publish(invite)
-  const bundle = await createKeyPackageBundle({ identity: invitee })
-  const commit = await commitInvite({ group: admin, keyPackage: bundle.publicPackage, invite })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: invitee })
+  const commit = await commitInvite({
+    now: Date.now,
+    group: admin,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   for (const other of others) {
     await other.processMessage({ message: commit.commitMessage })
   }
@@ -86,6 +91,7 @@ async function threeMemberGroup(groupID: string) {
   const carol = randomIdentity()
 
   const { group: created } = await createGroup({
+    now: Date.now,
     identity: alice,
     groupID,
     resolveLedgerEntries: fixture.resolveLedgerEntries,
@@ -327,6 +333,7 @@ describe('sealed ledger gather', () => {
     // group's whole authority state to any stranger, encrypted neatly to the stranger's key.
     const outsider = randomIdentity()
     const { group: outsiderGroup } = await createGroup({
+      now: Date.now,
       identity: outsider,
       groupID: 'ledger-roster',
     })
@@ -373,6 +380,7 @@ describe('sealed ledger gather', () => {
       reason: 'unverified',
     })
     const { group: elsewhere } = await createGroup({
+      now: Date.now,
       identity: outsider,
       groupID: 'ledger-roster-other',
     })
@@ -428,7 +436,11 @@ describe('sealed ledger gather', () => {
     // A freshly created group holds no role entries — its ledger is empty — and its creator is
     // the member who both requests and answers here.
     const alice = randomIdentity()
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'ledger-empty' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'ledger-empty',
+    })
     expect(await aliceGroup.getLedger()).toEqual([])
 
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({

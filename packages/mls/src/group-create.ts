@@ -1,5 +1,6 @@
 import { pruneLog } from '@kokuin/controller'
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
+import type { Now } from '@sozai/runtime'
 import { type ClientState, generateKeyPackageWithKey, createGroup as mlsCreateGroup } from 'ts-mls'
 
 import {
@@ -29,6 +30,8 @@ export type CreateGroupResult = {
 export type CreateGroupParams = {
   identity: OwnIdentity
   groupID: string
+  /** Clock for the author-time check of the creator's binding, read once. */
+  now: Now
 } & GroupOptions &
   YieldOptions
 
@@ -36,9 +39,13 @@ export type CreateGroupParams = {
 export async function createGroup({
   identity,
   groupID,
+  now,
   ...options
 }: CreateGroupParams): Promise<CreateGroupResult> {
-  assertBindingAuthorTime(options?.controller)
+  assertBindingAuthorTime({
+    controller: options?.controller,
+    nowSeconds: Math.floor(now() / 1000),
+  })
 
   // A binding enriches a supplied anchor before genesis; standard anchor bytes stay untouched.
   // Existing lifecycle fields must agree with the authored policy before the tree is validated.

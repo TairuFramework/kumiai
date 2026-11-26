@@ -72,6 +72,7 @@ async function setup(
   const bob = fixture.agent(61)
   let aliceGroup = (
     await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'lifecycle-recovery',
       controllerLog: { chain: [fixture.inception], events: [] },
@@ -83,13 +84,18 @@ async function setup(
     })
   ).group
   const cached = await fixture.timedBinding({ identity: bob, iat: options.bobIat ?? 100, exp: 200 })
-  const bundle = await createKeyPackageBundle({ identity: bob, controller: cached })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob, controller: cached })
   const { invite } = await createInvite({
     group: aliceGroup,
     identity: alice,
     recipientDID: bob.id,
   })
-  const added = await commitInvite({ group: aliceGroup, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group: aliceGroup,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   aliceGroup = added.newGroup
   const slot = createLedgerEntrySlot()
   let bobGroup = (
@@ -192,6 +198,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   s.installAlice(revoke.result.newGroup)
   const prefix = await fixture.resetPrefix()
   const replacement = await joinGroupExternal({
+    now: Date.now,
     identity: s.bob,
     groupInfo: (await exportGroupInfo({ group: s.aliceGroup() })).groupInfo,
     credential: s.bobGroup().credential,
@@ -203,6 +210,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   s.installAlice(
     (
       await renewLeaf({
+        now: Date.now,
         group: s.aliceGroup(),
         binding: await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
       })
@@ -219,6 +227,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   s.installAlice(
     (
       await renewLeaf({
+        now: Date.now,
         group: s.aliceGroup(),
         binding: await fixture.timedBinding({ identity: s.alice, iat: 180, exp: 280, prefix }),
       })
@@ -229,6 +238,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   s.installAlice(
     (
       await renewLeaf({
+        now: Date.now,
         group: s.aliceGroup(),
         binding: await fixture.timedBinding({
           identity: s.alice,

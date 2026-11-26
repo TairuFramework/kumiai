@@ -2,6 +2,7 @@ import { Transport, type TransportType } from '@enkaku/transport'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import { AbortInterruption, TimeoutInterruption } from '@sozai/async'
 import type { EventEmitter } from '@sozai/event'
+import type { Now } from '@sozai/runtime'
 
 import {
   BackpressureError,
@@ -11,8 +12,6 @@ import {
 } from './errors.js'
 import type { ObservabilityEventListener } from './events.js'
 import { decodeFrame, encodeFrame, type HubFrame } from './frame.js'
-
-export type Now = () => number
 
 export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
   return?: () => void

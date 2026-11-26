@@ -236,6 +236,7 @@ describe('deny seam', () => {
     const targetBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
     const { newGroup: added, commitMessage: addCommit } = await addDevice({
+      now: Date.now,
       group: deviceGroup,
       identity: deviceIdentity,
 
@@ -315,6 +316,7 @@ describe('receive-path acceptance (the symmetric device carve-out)', () => {
     const targetKeyPackageBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
     const { commitMessage, newGroup } = await addDevice({
+      now: Date.now,
       group: deviceGroup,
       identity: deviceIdentity,
       keyPackage: targetKeyPackageBundle.publicPackage,

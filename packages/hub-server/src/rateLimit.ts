@@ -1,4 +1,4 @@
-import type { Now } from './clock.js'
+import type { Now } from '@sozai/runtime'
 
 export type RateLimitConfig = {
   /** Sustained refill rate in tokens per second. */

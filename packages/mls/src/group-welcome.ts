@@ -1,4 +1,5 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
+import type { Now } from '@sozai/runtime'
 import {
   type ClientState,
   type Credential,
@@ -224,6 +225,8 @@ export type JoinGroupExternalParamsBeforeBindingParams = {
 }
 
 export type JoinGroupExternalParams = YieldOptions & {
+  /** Clock for the author-time check of the replacement binding, read once. */
+  now: Now
   identity: OwnIdentity
   /** Framed MLSMessage(GroupInfo) bytes from exportGroupInfo. */
   groupInfo: Uint8Array
@@ -427,7 +430,10 @@ export async function joinGroupExternal(
   await params.beforeBinding?.({ pending: group, source: before })
   if (anchor.controller != null && controller == null)
     throw new LeafBindingError('floating-refused')
-  assertBindingAuthorTime(controller)
+  assertBindingAuthorTime({
+    controller: controller,
+    nowSeconds: Math.floor(params.now() / 1000),
+  })
   const gate = await prepareLifecycleGate({
     yield: params.yield,
     group: before,

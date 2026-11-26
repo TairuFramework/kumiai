@@ -35,6 +35,7 @@ async function fixture(events = 33, creatorMember = false) {
     : await timedBinding({ identity, iat: 100, exp: 900 })
   const tokens = new Map<string, string>()
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'epoch-cap',
     controller: binding,
@@ -155,7 +156,7 @@ test('GroupHandle.settleAdvisory reads the recorded log and defaults to ok witho
   const result = await api.publishControllerLog({ group: f.group, log: await settled(f) })
   if (result == null) throw new Error('Missing settlement')
   expect(await result.newGroup.settleAdvisory()).toBe('ok')
-  const { group } = await createGroup({ identity: agent(62), groupID: 'standard' })
+  const { group } = await createGroup({ now: Date.now, identity: agent(62), groupID: 'standard' })
   expect(await group.settleAdvisory()).toBe('ok')
 })
 
@@ -218,7 +219,7 @@ test.each(['direct mbr capability', 'member-rooted parent', 'membership binding'
       recipientDID: identity.id,
     })
     await expect(
-      api.commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }),
+      api.commitInvite({ now: Date.now, group: f.group, keyPackage: bundle.publicPackage, invite }),
     ).rejects.toMatchObject({
       reason: 'epoch-cap',
     })
@@ -239,6 +240,7 @@ test('root-issued Add accepted at 33 events', async () => {
     recipientDID: identity.id,
   })
   const result = await api.commitInvite({
+    now: Date.now,
     group: f.group,
     keyPackage: bundle.publicPackage,
     invite,
@@ -263,7 +265,7 @@ test('admission cap reads the candidate registry when a log entry crosses 32 eve
     controllerLog: await renewed(f),
   })
   await expect(
-    api.commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }),
+    api.commitInvite({ now: Date.now, group: f.group, keyPackage: bundle.publicPackage, invite }),
   ).rejects.toMatchObject({
     reason: 'epoch-cap',
   })
@@ -282,7 +284,12 @@ test('unchanged member-rooted committer still commits at 33 events', async () =>
     identity: f.identity,
     recipientDID: identity.id,
   })
-  const added = await api.commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite })
+  const added = await api.commitInvite({
+    now: Date.now,
+    group: f.group,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   const { group: joined } = await api.processWelcome({
     identity,
     invite,
@@ -317,6 +324,7 @@ test('Welcome with member-rooted tree leaves joins at 33 events', async () => {
     recipientDID: identity.id,
   })
   const added = await api.commitInvite({
+    now: Date.now,
     group: grown.newGroup,
     keyPackage: bundle.publicPackage,
     invite,
@@ -367,7 +375,7 @@ test('after a root settlement the refused Add is accepted', async () => {
     recipientDID: identity.id,
   })
   await expect(
-    api.commitInvite({ group: f.group, keyPackage: bundle.publicPackage, invite }),
+    api.commitInvite({ now: Date.now, group: f.group, keyPackage: bundle.publicPackage, invite }),
   ).rejects.toMatchObject({
     reason: 'epoch-cap',
   })
@@ -378,6 +386,7 @@ test('after a root settlement the refused Add is accepted', async () => {
     controllerLog: await settled(f),
   })
   const accepted = await api.commitInvite({
+    now: Date.now,
     group: f.group,
     keyPackage: bundle.publicPackage,
     invite: repaired.invite,

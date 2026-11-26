@@ -3,12 +3,12 @@ import { tryDecodeKey } from '@kokuin/controller'
 import {
   isSignedToken,
   normalizeDID,
-  now,
   type SignedToken,
   type SigningIdentity,
   stringifyToken,
 } from '@kokuin/token'
 import { b64uToJSON } from '@sozai/codec'
+import type { Now } from '@sozai/runtime'
 
 import { LeafBindingError } from './errors.js'
 
@@ -116,7 +116,7 @@ export function assertControllerGrant(payload: CapabilityPayload, controllerID: 
 }
 
 export type MintLeafCapabilityParams = {
-  nowSeconds?: number
+  now: Now
   signer: SigningIdentity
   controllerID: string
   audience: string
@@ -132,7 +132,7 @@ function issuingPayload(params: MintTrustedGrantParams, maximum: number) {
   if (!params.controllerID.startsWith('did:kokuin:')) {
     throw new LeafBindingError('controller-mismatch')
   }
-  const { nowSeconds: iat = now() } = params
+  const iat = Math.floor(params.now() / 1000)
   assertCapabilityLifetime({ iat, exp: params.exp }, maximum)
   const cnf = audienceConfirmation({ alg: 'EdDSA', publicKey: params.leafKey })
   capabilityKey({

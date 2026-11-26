@@ -68,7 +68,8 @@ test('horizon history and a 64 KiB consumer entry fit the real hub with the fina
 test('a final frame one byte above the hub cap is rejected before journalling or publication', async () => {
   const hub = createWireHub()
   const identity = randomIdentity()
-  let group = (await createGroup({ identity, groupID: 'frame-cap-side-effects' })).group
+  let group = (await createGroup({ now: Date.now, identity, groupID: 'frame-cap-side-effects' }))
+    .group
   const access = simpleHandleAccess({
     handle: () => group,
     adopt: (next) => {

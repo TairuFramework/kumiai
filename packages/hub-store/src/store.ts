@@ -32,10 +32,9 @@ import {
   SubscriptionQuotaExceededError,
 } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
+import type { Now } from '@sozai/runtime'
 
 import type { HubTables } from './tables.js'
-
-export type Now = () => number
 
 export type HubStoreOptions = {
   now?: Now

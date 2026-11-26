@@ -23,7 +23,7 @@ async function peer4Identity() {
 describe('GroupMember.longForm', () => {
   it('reports the leaf long form for a did:peer:4 member', async () => {
     const identity = await peer4Identity()
-    const { group } = await createGroup({ identity, groupID: 'long-form-peer4' })
+    const { group } = await createGroup({ now: Date.now, identity, groupID: 'long-form-peer4' })
 
     const member = group.listMembers()[0]
     expect(member?.id).toBe(identity.id)
@@ -36,7 +36,7 @@ describe('GroupMember.longForm', () => {
 
   it('reports `id` as the long form for a did:key member, where the two are the same string', async () => {
     const identity = randomIdentity()
-    const { group } = await createGroup({ identity, groupID: 'long-form-didkey' })
+    const { group } = await createGroup({ now: Date.now, identity, groupID: 'long-form-didkey' })
 
     const member = group.listMembers()[0]
     expect(member?.id).toBe(identity.id)
@@ -47,7 +47,11 @@ describe('GroupMember.longForm', () => {
     const alice = await peer4Identity()
     const bob = await peer4Identity()
 
-    const { group: aliceGroup } = await createGroup({ identity: alice, groupID: 'long-form-peer' })
+    const { group: aliceGroup } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'long-form-peer',
+    })
 
     const { invite } = await createInvite({
       group: aliceGroup,
@@ -55,8 +59,9 @@ describe('GroupMember.longForm', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const bobKeyBundle = await createKeyPackageBundle({ identity: bob })
+    const bobKeyBundle = await createKeyPackageBundle({ now: Date.now, identity: bob })
     const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobKeyBundle.publicPackage,
       invite,
@@ -84,14 +89,14 @@ describe('GroupMember.longForm', () => {
 describe('GroupHandle.findMemberLongForm', () => {
   it('resolves a did:peer:4 member given their short form', async () => {
     const identity = await peer4Identity()
-    const { group } = await createGroup({ identity, groupID: 'lookup-short' })
+    const { group } = await createGroup({ now: Date.now, identity, groupID: 'lookup-short' })
 
     expect(group.findMemberLongForm(identity.id)).toBe(identity.longForm)
   })
 
   it('resolves the same member given their long form', async () => {
     const identity = await peer4Identity()
-    const { group } = await createGroup({ identity, groupID: 'lookup-long' })
+    const { group } = await createGroup({ now: Date.now, identity, groupID: 'lookup-long' })
 
     // normalizeDID truncates a peer:4 long form to its short form, so a caller holding either
     // form finds the member. A consumer that has just read `longForm` off one member and wants
@@ -101,7 +106,7 @@ describe('GroupHandle.findMemberLongForm', () => {
 
   it('resolves a did:key member to their id', async () => {
     const identity = randomIdentity()
-    const { group } = await createGroup({ identity, groupID: 'lookup-didkey' })
+    const { group } = await createGroup({ now: Date.now, identity, groupID: 'lookup-didkey' })
 
     expect(group.findMemberLongForm(identity.id)).toBe(identity.id)
   })
@@ -109,7 +114,7 @@ describe('GroupHandle.findMemberLongForm', () => {
   it('returns undefined for a DID that is not a member', async () => {
     const identity = await peer4Identity()
     const stranger = await peer4Identity()
-    const { group } = await createGroup({ identity, groupID: 'lookup-stranger' })
+    const { group } = await createGroup({ now: Date.now, identity, groupID: 'lookup-stranger' })
 
     // undefined means "no such member", and only that. It never means "this member has no
     // long form" — every member has one.

@@ -64,6 +64,7 @@ async function chainedRecovery() {
   }
   let source = (
     await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'recovery-holder-evidence',
       controller: await fixture.bindingFor(alice),
@@ -72,9 +73,14 @@ async function chainedRecovery() {
       trustedGrantLifetime: 31_536_000,
     })
   ).group
-  const bundle = await createKeyPackageBundle({ identity: bob, controller: binding })
+  const bundle = await createKeyPackageBundle({ now: Date.now, identity: bob, controller: binding })
   const { invite } = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
-  const added = await commitInvite({ group: source, keyPackage: bundle.publicPackage, invite })
+  const added = await commitInvite({
+    now: Date.now,
+    group: source,
+    keyPackage: bundle.publicPackage,
+    invite,
+  })
   source = added.newGroup
   let member = (
     await processWelcome({
@@ -86,6 +92,7 @@ async function chainedRecovery() {
   ).group
   const newcomer = fixture.agent(81)
   const nextBundle = await createKeyPackageBundle({
+    now: Date.now,
     identity: newcomer,
     controller: await fixture.bindingFor(newcomer),
   })
@@ -96,6 +103,7 @@ async function chainedRecovery() {
   })
   source = (
     await commitInvite({
+      now: Date.now,
       group: source,
       keyPackage: nextBundle.publicPackage,
       invite: nextInvite.invite,
@@ -270,6 +278,7 @@ test('recovery binding state carries a membership binding', async () => {
   const identity = fixture.agent(41)
   const capability = await fixture.bindingFor(identity)
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'membership-binding-state',
     controller: capability,
@@ -297,9 +306,14 @@ test('recovery binding state carries a membership binding', async () => {
     sourceRegistry: group.registry,
   })
   try {
-    const state = createRecoveryBindingState(identity, host)
+    const state = createRecoveryBindingState(identity, host, Date.now)
     await expect(state.prepare(group)).resolves.toBe('ready')
-    expect(validation).toHaveBeenLastCalledWith({ group, identity, controller: binding })
+    expect(validation).toHaveBeenLastCalledWith({
+      now: Date.now,
+      group,
+      identity,
+      controller: binding,
+    })
     const pending = await state.join(group, {
       groupInfo: new Uint8Array(),
       ledger: [],

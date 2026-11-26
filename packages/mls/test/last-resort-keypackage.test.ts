@@ -18,7 +18,7 @@ import type { Invite } from '../src/types.js'
 describe('createLastResortKeyPackageBundle', () => {
   test('stamps the last_resort extension, carrying no data', async () => {
     const identity = randomIdentity()
-    const bundle = await createLastResortKeyPackageBundle({ identity })
+    const bundle = await createLastResortKeyPackageBundle({ now: Date.now, identity })
 
     const extension = bundle.publicPackage.extensions.find(
       (ext) => ext.extensionType === LAST_RESORT_EXTENSION_TYPE,
@@ -29,7 +29,7 @@ describe('createLastResortKeyPackageBundle', () => {
   })
 
   test('an ordinary bundle carries no last_resort extension', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     expect(
       bundle.publicPackage.extensions.some(
         (ext) => ext.extensionType === LAST_RESORT_EXTENSION_TYPE,
@@ -47,7 +47,7 @@ describe('createLastResortKeyPackageBundle', () => {
     const identity = randomIdentity()
     const seen = new Set<number>()
     for (let i = 0; i < 30; i++) {
-      const bundle = await createLastResortKeyPackageBundle({ identity })
+      const bundle = await createLastResortKeyPackageBundle({ now: Date.now, identity })
       for (const ext of bundle.publicPackage.extensions) {
         if (ext.extensionType !== LAST_RESORT_EXTENSION_TYPE) seen.add(ext.extensionType)
       }
@@ -77,6 +77,7 @@ describe('createLastResortKeyPackageBundle', () => {
       })
 
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'group:last-resort',
       resolveLedgerEntries,
@@ -89,8 +90,13 @@ describe('createLastResortKeyPackageBundle', () => {
     })
     publish(invite)
 
-    const bundle = await createLastResortKeyPackageBundle({ identity: bob })
-    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+    const bundle = await createLastResortKeyPackageBundle({ now: Date.now, identity: bob })
+    const added = await commitInvite({
+      now: Date.now,
+      group,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     const { group: joined } = await processWelcome({
       identity: bob,
       invite,
@@ -125,9 +131,10 @@ describe('createLastResortKeyPackageBundle', () => {
         return token
       })
 
-    const bundle = await createLastResortKeyPackageBundle({ identity: bob })
+    const bundle = await createLastResortKeyPackageBundle({ now: Date.now, identity: bob })
 
     const { group: groupA } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'group:last-resort-a',
       resolveLedgerEntries,
@@ -140,6 +147,7 @@ describe('createLastResortKeyPackageBundle', () => {
     })
     publish(inviteA)
     const addedA = await commitInvite({
+      now: Date.now,
       group: groupA,
       keyPackage: bundle.publicPackage,
       invite: inviteA,
@@ -154,6 +162,7 @@ describe('createLastResortKeyPackageBundle', () => {
     })
 
     const { group: groupB } = await createGroup({
+      now: Date.now,
       identity: carol,
       groupID: 'group:last-resort-b',
       resolveLedgerEntries,
@@ -166,6 +175,7 @@ describe('createLastResortKeyPackageBundle', () => {
     })
     publish(inviteB)
     const addedB = await commitInvite({
+      now: Date.now,
       group: groupB,
       keyPackage: bundle.publicPackage,
       invite: inviteB,
@@ -194,7 +204,10 @@ describe('last-resort key package lifetime', () => {
    * keeps serving it and every Add fails at the inviter.
    */
   test('carries an explicit ~90-day lifetime, not ts-mls default ~15-day one', async () => {
-    const bundle = await createLastResortKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createLastResortKeyPackageBundle({
+      now: Date.now,
+      identity: randomIdentity(),
+    })
     const { notBefore, notAfter } = bundle.publicPackage.leafNode.lifetime
     const days = Number(notAfter - notBefore) / 86400
     // 90 days forward, plus the one day of back-dating that absorbs clock skew between peers.
@@ -202,7 +215,7 @@ describe('last-resort key package lifetime', () => {
   })
 
   test('an ordinary bundle carries the pinned ordinary lifetime', async () => {
-    const bundle = await createKeyPackageBundle({ identity: randomIdentity() })
+    const bundle = await createKeyPackageBundle({ now: Date.now, identity: randomIdentity() })
     const { notBefore, notAfter } = bundle.publicPackage.leafNode.lifetime
     const days = Number(notAfter - notBefore) / 86400
     // ORDINARY_KEY_PACKAGE_LIFETIME_DAYS forward, plus the one day of back-dating for clock skew.
@@ -225,8 +238,9 @@ describe('last-resort key package lifetime', () => {
         return token
       })
 
-    const bundle = await createLastResortKeyPackageBundle({ identity: bob })
+    const bundle = await createLastResortKeyPackageBundle({ now: Date.now, identity: bob })
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'group:lifetime',
       resolveLedgerEntries,
@@ -242,7 +256,12 @@ describe('last-resort key package lifetime', () => {
     vi.useFakeTimers()
     vi.setSystemTime(Date.now() + 60 * 86400 * 1000)
 
-    const added = await commitInvite({ group, keyPackage: bundle.publicPackage, invite })
+    const added = await commitInvite({
+      now: Date.now,
+      group,
+      keyPackage: bundle.publicPackage,
+      invite,
+    })
     expect(added.welcomeMessage).toBeDefined()
   })
 })

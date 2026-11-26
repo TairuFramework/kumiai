@@ -432,7 +432,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           group: rejoined.group,
           registry: rejoined.knownRegistry,
           signer: reply.signer,
-          now: runtime.now() / 1000,
+          now: runtime.now,
         }))
       )
         return null

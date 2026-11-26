@@ -178,6 +178,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       id: controllerID,
       prefix,
       capability: await mintLeafCapability({
+        now: Date.now,
         signer: authority,
         controllerID,
         audience: identity.id,
@@ -187,6 +188,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     }
   }
   const parent = await mintTrustedGrant({
+    now: Date.now,
     signer,
     controllerID,
     audience: bob.id,
@@ -194,6 +196,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
     exp: now() + 7200,
   })
   const child = await mintLeafCapability({
+    now: Date.now,
     signer: bob,
     controllerID,
     audience: alice.id,
@@ -246,6 +249,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       })
     }
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID,
       controller: await binding(alice, prefix),
@@ -253,6 +257,7 @@ export async function frameMeasurements(options?: FrameMeasurementsOptions) {
       commitPolicy: () => 'accept',
     })
     const bundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: bob,
       controller: await binding(bob, prefix),
     })

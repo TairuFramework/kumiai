@@ -87,6 +87,7 @@ export async function joinBoundDevice(): Promise<{
   const tokens = new Map<string, string>()
   const creator = randomIdentity()
   const { group: creatorGroup } = await createGroup({
+    now: Date.now,
     identity: creator,
     groupID: GROUP,
     resolveLedgerEntries: mapResolver(tokens),
@@ -109,6 +110,7 @@ export async function joinBoundDevice(): Promise<{
   const keyPackageBundle = await buildBoundKeyPackageBundle(leaf, deviceSeed)
 
   const { welcomeMessage, newGroup: updatedCreatorGroup } = await commitInvite({
+    now: Date.now,
     group: creatorGroup,
     keyPackage: keyPackageBundle.publicPackage,
     invite,
@@ -188,6 +190,7 @@ export async function twoDeviceProfileGroup(): Promise<{
   const targetKeyPackageBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
   const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice({
+    now: Date.now,
     group: deviceGroup,
     identity: deviceIdentity,
 

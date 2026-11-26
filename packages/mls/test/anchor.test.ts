@@ -39,6 +39,7 @@ describe('group anchor', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1, app }
 
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'anchored',
       extensions: [buildGroupAnchorExtension(anchor)],
@@ -57,6 +58,7 @@ describe('group anchor', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 2 }
 
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'no-app',
       extensions: [buildGroupAnchorExtension(anchor)],
@@ -79,6 +81,7 @@ describe('group anchor', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 2, app }
 
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'future-anchor',
       extensions: [buildGroupAnchorExtension(anchor)],
@@ -93,7 +96,7 @@ describe('group anchor', () => {
 
   test('createGroup without extensions auto-anchors with the default creator anchor', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'plain' })
+    const { group } = await createGroup({ now: Date.now, identity: alice, groupID: 'plain' })
     const read = readGroupAnchor(group)
     expect(read?.creatorDID).toBe(alice.id)
     expect(read?.version).toBe(1)
@@ -113,6 +116,7 @@ describe('group anchor', () => {
     })
     await expect(
       createGroup({
+        now: Date.now,
         identity: alice,
         groupID: 'corrupt',
         extensions: [corrupt],
@@ -128,6 +132,7 @@ describe('group anchor', () => {
 
     await expect(
       createGroup({
+        now: Date.now,
         identity: alice,
         groupID: 'wrong-creator',
         extensions: [buildGroupAnchorExtension(anchor)],
@@ -224,6 +229,7 @@ describe('group anchor', () => {
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1, app }
 
     const { group: aliceGroup } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'anchored-shared',
       extensions: [buildGroupAnchorExtension(anchor)],
@@ -232,6 +238,7 @@ describe('group anchor', () => {
 
     // Invitee's key package must advertise the same control extension types.
     const bobBundle = await createKeyPackageBundle({
+      now: Date.now,
       identity: bob,
       capabilities: controlCapabilities(),
     })
@@ -244,6 +251,7 @@ describe('group anchor', () => {
     })
 
     const { welcomeMessage, commitMessage } = await commitInvite({
+      now: Date.now,
       group: aliceGroup,
       keyPackage: bobBundle.publicPackage,
       invite,
@@ -267,6 +275,7 @@ describe('group anchor', () => {
     const alice = randomIdentity()
     const anchor: GroupAnchor = { creatorDID: alice.id, version: 1, app: { recoverySecret: 's' } }
     const { group } = await createGroup({
+      now: Date.now,
       identity: alice,
       groupID: 'verbatim',
       extensions: [buildGroupAnchorExtension(anchor)],
@@ -345,6 +354,7 @@ test('a binding enriches an app-bearing supplied anchor with explicit lifecycle 
   const app = { recoverySecret: 'c2VjcmV0', nested: { label: 'agents' } }
   const supplied = buildCurrentGroupAnchorExtension({ creatorDID: identity.id, app })
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'supplied-lifecycle',
     controller,
@@ -366,6 +376,7 @@ test('enrichment preserves a supplied version and app while materialising missin
   const { identity, controller } = await suppliedAnchorFixture()
   const app = { recoverySecret: 'future-seed' }
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'supplied-partial-lifecycle',
     controller,
@@ -401,6 +412,7 @@ test.each([
   const { identity, controller } = await suppliedAnchorFixture()
   await expect(
     createGroup({
+      now: Date.now,
       identity,
       groupID: 'supplied-default-conflict',
       controller,
@@ -416,6 +428,7 @@ test.each([{ leafLifetime: 86_400 }, { trustedGrantLifetime: 2_592_000 }])(
     const { identity, controller } = await suppliedAnchorFixture()
     await expect(
       createGroup({
+        now: Date.now,
         identity,
         groupID: 'supplied-option-conflict',
         controller,
@@ -439,6 +452,7 @@ test('a supplied controller refuses creation without a binding', async () => {
   const { identity, controller } = await suppliedAnchorFixture()
   await expect(
     createGroup({
+      now: Date.now,
       identity,
       groupID: 'supplied-floating-creator',
       extensions: [
@@ -462,6 +476,7 @@ test('a supplied standard anchor keeps its exact bytes without a binding', async
     ),
   )
   const { group } = await createGroup({
+    now: Date.now,
     identity,
     groupID: 'supplied-standard-bytes',
     extensions: [

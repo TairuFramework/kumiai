@@ -27,6 +27,7 @@ describe('the two storage ports are not interchangeable', () => {
     const lastResort: LastResortStore = createMemoryLastResortStore()
     const wire = (): void => {
       createKeyPackagePool({
+        now: Date.now,
         identity,
         client: {} as never,
         // @ts-expect-error a LastResortStore is not a KeyPackagePoolStore: the records differ in kind
@@ -40,6 +41,7 @@ describe('the two storage ports are not interchangeable', () => {
     const pool: KeyPackagePoolStore = createMemoryKeyPackagePoolStore()
     const wire = (): void => {
       createLastResortProvisioner({
+        now: Date.now,
         identity,
         client: {} as never,
         // @ts-expect-error a KeyPackagePoolStore is not a LastResortStore: the records differ in kind
@@ -64,7 +66,7 @@ describe('a foreign record is refused at the store boundary', () => {
    * out by `toBundles`' decode check instead, and the test would pass without the guard existing.
    */
   async function foreignRecord(kind: string, ref: string) {
-    const bundle = await createLastResortKeyPackageBundle({ identity })
+    const bundle = await createLastResortKeyPackageBundle({ now: Date.now, identity })
     return {
       kind,
       ref,
@@ -88,7 +90,7 @@ describe('a foreign record is refused at the store boundary', () => {
       ownerDID: identity.id,
       record: await foreignRecord('ordinary', 'from-the-pool'),
     })
-    const provisioner = createLastResortProvisioner({ identity, client, store })
+    const provisioner = createLastResortProvisioner({ now: Date.now, identity, client, store })
 
     await expect(provisioner.ensureProvisioned()).rejects.toThrow(
       /from-the-pool.*last-resort.*ordinary/,
@@ -101,7 +103,7 @@ describe('a foreign record is refused at the store boundary', () => {
       ownerDID: identity.id,
       record: await foreignRecord('last-resort', 'from-the-slot'),
     })
-    const pool = createKeyPackagePool({ identity, client, store })
+    const pool = createKeyPackagePool({ now: Date.now, identity, client, store })
 
     await expect(pool.ensureStocked()).rejects.toThrow(/from-the-slot.*ordinary.*last-resort/)
   })
@@ -112,7 +114,7 @@ describe('a foreign record is refused at the store boundary', () => {
       ownerDID: identity.id,
       record: await foreignRecord('last-resort', 'from-the-slot'),
     })
-    const pool = createKeyPackagePool({ identity, client, store })
+    const pool = createKeyPackagePool({ now: Date.now, identity, client, store })
 
     await expect(pool.bundles()).rejects.toThrow(/from-the-slot.*ordinary.*last-resort/)
   })

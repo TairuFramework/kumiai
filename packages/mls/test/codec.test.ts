@@ -83,7 +83,11 @@ function proposals(state: ClientState): ClientState {
 describe('encodeClientState / decodeClientState', () => {
   test('v2 round trip preserves state without a reservation', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'codec-round-trip' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'codec-round-trip',
+    })
 
     const encoded = encodeClientState(group.state)
     const decoded = decodeClientState(encoded)
@@ -100,6 +104,7 @@ describe('encodeClientState / decodeClientState', () => {
     'v2 round trip preserves reservation evidence (consumed: %s)',
     async (consumed) => {
       const { group } = await createGroup({
+        now: Date.now,
         identity: randomIdentity(),
         groupID: 'codec-reservation-round-trip',
       })
@@ -120,6 +125,7 @@ describe('encodeClientState / decodeClientState', () => {
 
   test.each([1, 3])('refuses a v%s blob before decoding its body', async (version) => {
     const { group } = await createGroup({
+      now: Date.now,
       identity: randomIdentity(),
       groupID: 'codec-unsupported',
     })
@@ -137,6 +143,7 @@ describe('encodeClientState / decodeClientState', () => {
     'rejects an invalid reservation epoch %s with a typed error',
     async (epoch) => {
       const { group } = await createGroup({
+        now: Date.now,
         identity: randomIdentity(),
         groupID: 'codec-invalid-epoch',
       })
@@ -154,6 +161,7 @@ describe('encodeClientState / decodeClientState', () => {
     'rejects an invalid reservation generation %s with a typed error',
     async (generation) => {
       const { group } = await createGroup({
+        now: Date.now,
         identity: randomIdentity(),
         groupID: 'codec-invalid-generation',
       })
@@ -172,6 +180,7 @@ describe('encodeClientState / decodeClientState', () => {
     { epoch: (1n << 64n) - 1n, generation: 2 ** 32 - 1, consumed: true },
   ])('preserves reservation boundaries $epoch / $generation', async (reservation) => {
     const { group } = await createGroup({
+      now: Date.now,
       identity: randomIdentity(),
       groupID: 'codec-reservation-boundaries',
     })
@@ -181,7 +190,11 @@ describe('encodeClientState / decodeClientState', () => {
   })
 
   test('preserves exact leaf-zero senders with sorted UTF-8 refs', async () => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-proposals' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'codec-proposals',
+    })
     const state = proposals(group.state)
     const encoded = encodeClientState(state)
     expect(encoded).toEqual(frame(state, ['YQ==', 'eg==']))
@@ -189,7 +202,11 @@ describe('encodeClientState / decodeClientState', () => {
   })
 
   test('a proposal created by leaf zero retains its sender after restore', async () => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-leaf-zero' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'codec-leaf-zero',
+    })
     expect(group.state.privatePath.leafIndex).toBe(0)
     const { newState } = await createProposal({
       context: group.context,
@@ -207,7 +224,11 @@ describe('encodeClientState / decodeClientState', () => {
   test.each([false, true])(
     'decoded secrets do not alias stored bytes (Buffer: %s)',
     async (buffer) => {
-      const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-no-alias' })
+      const { group } = await createGroup({
+        now: Date.now,
+        identity: randomIdentity(),
+        groupID: 'codec-no-alias',
+      })
       const bytes = encodeClientState(group.state)
       const encoded = buffer ? Buffer.concat([Buffer.alloc(7), bytes]).subarray(7) : bytes
       const copy = new Uint8Array(encoded)
@@ -223,14 +244,22 @@ describe('encodeClientState / decodeClientState', () => {
   )
 
   test.each([2, 255])('bad flags %s return undefined', async (flags) => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-flags' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'codec-flags',
+    })
     const encoded = frame(group.state)
     encoded[1] = flags
     expect(decodeClientState(encoded)).toBeUndefined()
   })
 
   test.each([2, 255])('bad consumed byte %s returns undefined', async (consumed) => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-consumed' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'codec-consumed',
+    })
     const encoded = encodeClientState({
       ...group.state,
       handshakeReservation: { epoch: 0n, generation: 1, consumed: false },
@@ -248,7 +277,11 @@ describe('encodeClientState / decodeClientState', () => {
     { label: 'invalid UTF-8', refs: [new Uint8Array([0xff])] },
     { label: 'BOM-prefixed unknown', refs: ['\uFEFFYQ=='] },
   ])('$label ref returns undefined', async ({ refs }) => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-bad-ref' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'codec-bad-ref',
+    })
     expect(decodeClientState(frame(proposals(group.state), refs))).toBeUndefined()
   })
 
@@ -256,6 +289,7 @@ describe('encodeClientState / decodeClientState', () => {
     'every truncated prefix returns undefined (reservation: %s)',
     async (reserved) => {
       const { group } = await createGroup({
+        now: Date.now,
         identity: randomIdentity(),
         groupID: 'codec-truncated',
       })
@@ -270,7 +304,11 @@ describe('encodeClientState / decodeClientState', () => {
   )
 
   test('rejects trailing bytes outside and inside the body', async () => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-trailing' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'codec-trailing',
+    })
     const encoded = frame(group.state)
     expect(decodeClientState(new Uint8Array([...encoded, 0]))).toBeUndefined()
     const view = new DataView(encoded.buffer)
@@ -282,6 +320,7 @@ describe('encodeClientState / decodeClientState', () => {
 
   test('rejects a non-canonical optional tag in the body', async () => {
     const { group } = await createGroup({
+      now: Date.now,
       identity: randomIdentity(),
       groupID: 'codec-optional-tag',
     })
@@ -297,6 +336,7 @@ describe('encodeClientState / decodeClientState', () => {
 
   test('rejects an inner vector truncated before an absent sender tag', async () => {
     const { group } = await createGroup({
+      now: Date.now,
       identity: randomIdentity(),
       groupID: 'codec-inner-truncation',
     })
@@ -334,7 +374,11 @@ describe('encodeClientState / decodeClientState', () => {
   })
 
   test('oversized body length, ref count and ref length return undefined', async () => {
-    const { group } = await createGroup({ identity: randomIdentity(), groupID: 'codec-lengths' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: randomIdentity(),
+      groupID: 'codec-lengths',
+    })
     for (const target of ['body', 'count', 'ref']) {
       const encoded = frame(proposals(group.state), ['YQ=='])
       const view = new DataView(encoded.buffer)
@@ -359,7 +403,11 @@ describe('encodeClientState / decodeClientState', () => {
 
   test('refuses a blob whose version byte is unsupported, even though the rest decodes fine', async () => {
     const alice = randomIdentity()
-    const { group } = await createGroup({ identity: alice, groupID: 'codec-unknown-version' })
+    const { group } = await createGroup({
+      now: Date.now,
+      identity: alice,
+      groupID: 'codec-unknown-version',
+    })
 
     const encoded = encodeClientState(group.state)
     expect(encoded[0]).toBe(2)
