@@ -247,6 +247,14 @@ test('Add refuses floating and malformed bindings and expired author capability'
   ).rejects.toThrow(/authoring time/)
 })
 
+test('Add of a leaf lapsed at tree time rejects as lapsed before the author-time check', async () => {
+  const { group, bob, invite } = await admission()
+  const lapsed = await rawAdd(group, bob, await timedBinding({ identity: bob, iat: 90, exp: 99 }))
+  await expect(
+    commitInvite({ now: Date.now, group, keyPackage: lapsed.bundle.publicPackage, invite }),
+  ).rejects.toMatchObject({ name: 'LeafLapsedError', reason: 'lapsed' })
+})
+
 test('Welcome admits a live leaf while preserving a lapsed existing leaf', async () => {
   const { group, bob, invite } = await admission()
   const added = await rawAdd(group, bob, await timedBinding({ identity: bob, iat: 201, exp: 300 }))
@@ -542,6 +550,7 @@ test('Welcome may join a shrinking Remove and Add above the horizon', async () =
   const removed = group.findMemberLeafIndex(target.id)
   if (removed == null) throw new Error('Missing target')
   const result = await commitWithEntries({
+    now: Date.now,
     group,
     extraProposals: [
       { proposalType: defaultProposalTypes.remove, remove: { removed } },

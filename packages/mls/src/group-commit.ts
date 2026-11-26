@@ -235,6 +235,12 @@ export type CommitWithEntriesParams = YieldOptions & {
   requireAdmin?: boolean
   /** State to commit from instead of the live one, e.g. a tree with a renewed own leaf. */
   commitState?: ClientState
+  /**
+   * Clock for the author-time check of each added leaf's binding. Required when
+   * `extraProposals` carry an Add; the check runs after the fold and gate, so a leaf
+   * lapsed at tree time rejects as lapsed first.
+   */
+  now?: Now
 }
 
 /**
@@ -429,6 +435,16 @@ export async function commitWithEntries(
   for (const proposal of proposals) {
     if (proposal.proposalType === defaultProposalTypes.add) {
       const leaf = proposal.add.keyPackage.leafNode
+      if (
+        isDefaultCredential(leaf.credential) &&
+        leaf.credential.credentialType === defaultCredentialTypes.basic
+      ) {
+        if (params.now == null) throw new Error('commitWithEntries: an Add needs a clock')
+        assertBindingAuthorTime({
+          controller: parseMLSCredentialIdentity(leaf.credential.identity).controller,
+          nowSeconds: Math.floor(params.now() / 1000),
+        })
+      }
       await validateEntry(group, leaf, undefined, {
         registry: fold.registry,
         stage: 'full',
@@ -685,10 +701,6 @@ export async function commitInvite({
       proposalType: defaultProposalTypes.add,
       add: { keyPackage },
     }
-    assertBindingAuthorTime({
-      controller: parseMLSCredentialIdentity(credential.identity).controller,
-      nowSeconds: Math.floor(now() / 1000),
-    })
     // A lifecycle group re-admitting a device replaces the leaf it still holds for that DID.
     const stale =
       group.anchor.controller == null
@@ -696,6 +708,7 @@ export async function commitInvite({
         : staleLeafIndex(group.state.ratchetTree, keyPackage.leafNode)
     const result = await commitWithEntries({
       yield: options.yield,
+      now,
       group,
       extraProposals:
         stale == null
