@@ -591,6 +591,10 @@
   dir: packages/mls
   intents:
     - mls-required-now-clock
+"@kumiai/mls@0.13.5":
+  dir: packages/mls
+  intents:
+    - mls-add-author-time-order
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
