@@ -256,6 +256,10 @@
   dir: packages/hub-server
   intents:
     - subscription-generation
+"@kumiai/hub-server@0.13.3":
+  dir: packages/hub-server
+  intents:
+    - runtime-clock
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -304,6 +308,10 @@
   dir: packages/hub-store
   intents:
     - subscription-generation
+"@kumiai/hub-store@0.13.3":
+  dir: packages/hub-store
+  intents:
+    - runtime-clock
 "@kumiai/hub-tunnel@0.10.0":
   dir: packages/hub-tunnel
   intents:
@@ -341,6 +349,10 @@
   intents:
     - kokuin-0-7
     - params-object
+"@kumiai/hub-tunnel@0.13.1":
+  dir: packages/hub-tunnel
+  intents:
+    - runtime-clock
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -407,6 +419,10 @@
   intents:
     - kokuin-0-7
     - params-object
+"@kumiai/mls-hub@0.13.1":
+  dir: packages/mls-hub
+  intents:
+    - runtime-clock
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
@@ -461,6 +477,10 @@
   dir: packages/mls-rpc
   intents:
     - mls-per-call-yield
+"@kumiai/mls-rpc@0.13.2":
+  dir: packages/mls-rpc
+  intents:
+    - runtime-clock
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -542,6 +562,11 @@
   dir: packages/mls
   intents:
     - mls-per-call-yield
+"@kumiai/mls@0.13.3":
+  dir: packages/mls
+  intents:
+    - mls-injected-entropy
+    - runtime-clock
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -668,6 +693,10 @@
   dir: packages/rpc
   intents:
     - directed-frame-direction
+"@kumiai/rpc@0.13.2":
+  dir: packages/rpc
+  intents:
+    - runtime-clock
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

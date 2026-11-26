@@ -1,5 +1,15 @@
 # @kumiai/mls
 
+## 0.13.3
+
+### Patch Changes
+
+- `createNobleCryptoProvider`'s `randomBytes` option now supplies every secret key, not only `rng.randomBytes`.
+  Ed25519 signature keygen, HPKE `generateKeyPair` and the HPKE seal ephemeral key draw 32 bytes from it.
+  Before, these three called noble's own `randomSecretKey()` and ignored the injected source.
+
+- Read MLS and hub wall timestamps and local deadlines from injected clocks.
+
 ## 0.13.2
 
 ### Patch Changes

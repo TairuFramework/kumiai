@@ -17,18 +17,18 @@ catalog:
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^5.1.1
-  '@enkaku/client': ^0.23.5
+  '@enkaku/client': ^0.23.7
   '@enkaku/http-fetch': ^0.23.3
   '@enkaku/http-serve': ^0.23.3
-  '@enkaku/protocol': ^0.23.3
-  '@enkaku/server': ^0.23.3
+  '@enkaku/protocol': ^0.23.4
+  '@enkaku/server': ^0.23.4
   '@enkaku/transport': ^0.23.3
   '@kokuin/capability': ^0.7.2
   '@kokuin/controller': ^0.7.1
   '@kokuin/crypto': ^0.7.1
   '@kokuin/crypto-napi': ^0.7.4
   '@kokuin/token': ^0.7.1
-  '@sozai/async': ^0.4.3
+  '@sozai/async': ^0.4.4
   '@sozai/codec': ^0.4.4
   '@sozai/event': ^0.1.6
   '@sozai/http-server': ^0.2.2
