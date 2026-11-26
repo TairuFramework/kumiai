@@ -92,7 +92,7 @@ export function createLedgerEntrySlot(): LedgerEntrySlot {
 }
 
 export type GroupMLSParams = {
-  runtime?: Partial<Runtime>
+  runtime?: Runtime
   access: HandleAccess
   /** This member's signing identity: recovery requests and attestations are signed with it. */
   identity: OwnIdentity

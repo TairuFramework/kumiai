@@ -67,7 +67,7 @@ export type TestPeer = {
 }
 
 export type MakeMLSPeerOptions = {
-  runtime?: Partial<Runtime>
+  runtime?: Runtime
   appOutbox?: AppOutbox
   appOutboxLimit?: number
   onAppOutboxCleared?: (notice: AppOutboxCleared) => void | Promise<void>

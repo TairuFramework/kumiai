@@ -1,4 +1,5 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
+import { createRuntime } from '@sozai/runtime'
 import { expect, test } from 'vitest'
 
 import { APP_TOPIC_LABEL, inboxTopic, protocolTopic } from '../src/topic.js'
@@ -57,7 +58,7 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
     const members = ['alice', 'bob', 'carol']
     let clock = 0
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
-      runtime: { monotonicNow: () => clock },
+      runtime: createRuntime({ monotonicNow: () => clock }),
       members,
       anchorStore: store,
       handlers: { 'chat/changed': (event: { data: unknown }) => void deliveries.push(event.data) },
